@@ -19,9 +19,19 @@ const recorder = path.join(dir, "recorder.mjs");
 fs.writeFileSync(label, JSON.stringify({ subject:"agent/eval.worker",desired:{display_name:"Quartz"} }));
 fs.writeFileSync(recorder, `#!${process.execPath}
 import fs from "node:fs";
-process.stdout.write(JSON.stringify({type:"hello",protocol:2,sessionContext:""})+"\\n");
+process.stdout.write(JSON.stringify({type:"hello",protocol:Number(process.env.ST_SMOKE_PROTOCOL??2),sessionContext:""})+"\\n");
 process.stdout.write(JSON.stringify({type:"seat",seat:JSON.parse(fs.readFileSync(${JSON.stringify(label)},"utf8"))})+"\\n");
-process.stdin.on("data",chunk=>fs.appendFileSync(${JSON.stringify(frames)},chunk));
+let pending="";
+process.stdin.on("data",chunk=>{
+  fs.appendFileSync(${JSON.stringify(frames)},chunk);
+  pending+=chunk;
+  let index;
+  while((index=pending.indexOf("\\n"))>=0){
+    const frame=JSON.parse(pending.slice(0,index));pending=pending.slice(index+1);
+    if(process.env.ST_SMOKE_READY_MAIL && frame.type==="delivery_ready")
+      process.stdout.write(JSON.stringify({type:"message",content:"ACTIVE FROM START",meta:{messageId:"message/active-start"}})+"\\n");
+  }
+});
 process.stdin.on("end",()=>process.exit(0));
 let offset=0;
 setInterval(()=>{let text="";try{text=fs.readFileSync(${JSON.stringify(outgoing)},"utf8");}catch{}
@@ -130,6 +140,40 @@ if (driver === "omp") {
 assert.ok(!fs.existsSync(path.join(dir,"resources/inbox")));
 assert.ok(!fs.existsSync(path.join(dir,"resources/archive")));
 await events.get("session_shutdown")(driver==="pi"?{reason:"quit"}:{},ctx);
+if (driver === "omp") {
+  // The channel only forwards pending mail after the extension's readiness proof.
+  // Both a cold start with an initial turn and a fresh channel attached mid-turn
+  // must produce it without manufacturing an idle observation.
+  for (const lifecycle of ["session_start", "session_switch", "unsupported"]) {
+    fs.rmSync(frames, { force: true });
+    fs.rmSync(outgoing, { force: true });
+    delete globalThis.__stOmpChannel;
+    process.env.ST_SMOKE_READY_MAIL = "1";
+    process.env.ST_SMOKE_PROTOCOL = lifecycle === "unsupported" ? "999" : "2";
+    const activeEvents = new Map();
+    const activeHandoffs = [];
+    extension({ ...api, on: (name, handler) => activeEvents.set(name, handler),
+      sendUserMessage: async (content, options) => activeHandoffs.push({ content, options }) });
+    const activeCtx = { ...ctx, isIdle: () => false };
+    await activeEvents.get(lifecycle === "unsupported" ? "session_start" : lifecycle)({}, activeCtx);
+    if (lifecycle === "unsupported") {
+      assert.equal(read().some((frame) => frame.type === "delivery_ready"), false,
+        "an incompatible hello cannot open the delivery gate");
+      assert.deepEqual(activeHandoffs, []);
+    } else {
+      await until(() => activeHandoffs.length === 1);
+      const proof = read();
+      assert.ok(proof.findIndex((frame) => frame.type === "ready") <
+        proof.findIndex((frame) => frame.type === "delivery_ready"),
+        "native session binding precedes handoff readiness");
+      assert.equal(proof.some((frame) => frame.type === "state" && frame.state === "idle"), false);
+      assert.deepEqual(activeHandoffs, [{ content: "ACTIVE FROM START", options: { deliverAs: "steer" } }]);
+    }
+    await activeEvents.get("session_shutdown")({}, activeCtx);
+  }
+  delete process.env.ST_SMOKE_READY_MAIL;
+  delete process.env.ST_SMOKE_PROTOCOL;
+}
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 if (driver === "omp") {
   const realTimeout = globalThis.setTimeout;

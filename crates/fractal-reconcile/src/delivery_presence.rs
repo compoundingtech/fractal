@@ -880,6 +880,8 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
     {
         beat = Some(captured(monitor));
     }
+    let non_ready = beat.as_ref().is_some_and(|(at, report)|
+        at.elapsed() <= POLL_STALE_AFTER && report.ready == Some(false));
     let assessment = assess_beat(
         uptime(presence),
         presence.image.as_deref(),
@@ -926,6 +928,13 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
     }
     if let Some(since) = state_since(presence, recipient, incarnation.unwrap_or_default(), assessment.state) {
         assessment.since_unix_ms = Some(since);
+        if assessment.state == "stale" && non_ready {
+            let reason = assessment.reason.take().unwrap_or_default();
+            assessment.reason = Some(format!(
+                "{reason}; channel non-ready for {}s",
+                unix_ms().saturating_sub(since) / 1000
+            ));
+        }
     }
     assessment
 }
@@ -1035,7 +1044,7 @@ fn assess_beat(
     }
     if report.ready == Some(false) {
         return stale(report.reason.clone().unwrap_or_else(|| {
-            "the channel is polling but has not received the provider's initial idle proof".into()
+            "the channel is polling but has not received the provider's handoff readiness proof".into()
         }));
     }
     let unprotected = driver == "claude"
@@ -1394,6 +1403,20 @@ mod tests {
             "omp",
         );
         assert_eq!(ready.state, "current");
+    }
+
+    #[test]
+    fn non_ready_reason_includes_duration_without_restarting_the_state_clock() {
+        let seat = "agent/example/non-ready-duration";
+        let fence = crate::mailbox::Fence::new(seat, "current", "delivery");
+        record_fenced(&fence, &json!({"transport":"omp-channel", "ready":false,
+            "reason":"waiting for handoff readiness"}).to_string());
+        let first = assess_current(seat, "omp", Some("current"));
+        assert_eq!(first.state, "stale");
+        assert!(first.reason.as_deref().unwrap().contains("channel non-ready for 0s"));
+        let second = assess_current(seat, "omp", Some("current"));
+        assert_eq!(first.since_unix_ms, second.since_unix_ms);
+        assert!(second.reason.as_deref().unwrap().starts_with("waiting for handoff readiness;"));
     }
 
     #[test]

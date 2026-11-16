@@ -768,9 +768,14 @@ export default function (pi: ExtensionAPI) {
             state.restoringAsk.ready = true;
             retryPendingAsk();
           }
+          if (!state.restoringAsk) {
+            // Hello validated the protocol and ready bound the native session. The handoff
+            // handler can now choose send versus steer using ctx.isIdle(), even if this
+            // provider has worked continuously since launch. Restored asks retain their fence.
+            send({ type: "delivery_ready" });
+          }
           // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-          // Every fresh channel needs the provider's idle proof, including reconnects
-          // during an idle session where no further turn boundary will arrive.
+          // Continue observing actual idle independently of handoff readiness.
           watchSettle(ctx);
           // The fence proves only the first session restored by this cold launch. A later explicit
           // in-process session switch becomes the current binding and must not inherit the old ID.
