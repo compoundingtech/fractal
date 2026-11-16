@@ -14,8 +14,8 @@ const fixture = async t => {
   browser.isConnected = () => true
   return { profile, browser, path: `${profile}/DevToolsActivePort` }
 }
-const contents = '45678\n/devtools/browser/1234-abcd'
-const endpoint = 'ws://127.0.0.1:45678/devtools/browser/1234-abcd'
+const contents = '45678\n/devtools/browser/12345678-abcd-4123-8123-123456789abc'
+const endpoint = 'ws://127.0.0.1:45678/devtools/browser/12345678-abcd-4123-8123-123456789abc'
 
 test('waits for delayed atomic publication where the old immediate read fails', async t => {
   const { profile, browser, path } = await fixture(t)
@@ -36,7 +36,7 @@ test('accepts an endpoint already published before observation starts', async t 
 
 test('partial publication is not readiness; subsequent complete content is observed', async t => {
   const { profile, browser, path } = await fixture(t)
-  await writeFile(path, '45678\n')
+  await writeFile(path, '45678\n/devtools/browser/12345678-abcd')
   let settled = false
   const ready = waitForDevtoolsEndpoint(profile, browser).then(value => { settled = true; return value })
   await new Promise(setImmediate)
@@ -75,7 +75,6 @@ test('permanent read errors are surfaced rather than treated as startup progress
   await assert.rejects(waitForDevtoolsEndpoint(profile, browser), { code: 'EISDIR' })
   assert.equal(browser.listenerCount('disconnected'), 0)
 })
-
 
 test('missing publication fails at the startup bound', async t => {
   const { profile, browser } = await fixture(t)

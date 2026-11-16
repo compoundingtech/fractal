@@ -33,7 +33,7 @@ export const waitForDevtoolsEndpoint = (profile, browser, timeoutMs = 10_000) =>
           if (error.code !== 'ENOENT') throw error
         }
         if (finished) return
-        const match = /^(\d+)\n(\/devtools\/browser\/[A-Za-z0-9-]+)\s*$/.exec(contents ?? '')
+        const match = /^(\d+)\n(\/devtools\/browser\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/.exec(contents ?? '')
         if (match && Number(match[1]) > 0 && Number(match[1]) <= 65535) {
           finish(undefined, `ws://127.0.0.1:${match[1]}${match[2]}`)
         }
