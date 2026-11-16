@@ -42,7 +42,7 @@ fn a_laned_seat_starts_only_when_its_lane_fits_and_seats_wait_for_room_in_order(
     // 54G for lanes, less the 24G lane that runs and 2G outside lanes: 28G free.
     assert!(!admit("big"));
     assert_eq!(reason("big")["reason"],
-        "lane 8 cores/30.0G does not fit: 28.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G)");
+        "lane 8 cores/30.0G does not fit: 28.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, host outside lanes 2.0G)");
     assert_eq!(reason("big")["queuePosition"], 1);
     // A smaller lane that fits does not pass the seat first in line.
     assert!(!admit("small"));
@@ -185,7 +185,7 @@ fn a_start_that_would_take_the_room_kept_for_a_burst_waits_and_a_burst_may_use_i
     // needs 16G. The fifth seat's 8G would leave a burst no room, so it waits.
     assert!(!reconciler.admit_seat_start(&elm, elm.member.as_ref().unwrap(), None).unwrap());
     assert_eq!(status.subject("agent/node.elm", u64::MAX).unwrap()["reason"],
-        "lane 4 cores/8.0G does not fit: 4.0G free of the 54.0G this host gives lanes (other lanes hold 32.0G, seats outside lanes 2.0G, kept for a burst 16.0G)");
+        "lane 4 cores/8.0G does not fit: 4.0G free of the 54.0G this host gives lanes (other lanes hold 32.0G, host outside lanes 2.0G, kept for a burst 16.0G)");
     assert_eq!(status.snapshot(0)["laneBurstReserve"], json!({"subject": "agent/node.elm", "full": 16 * G, "kept": 16 * G}));
     // A burst may use it: the run's 24G is granted.
     let now = u64::try_from(now_ms() / 1000).unwrap();
@@ -195,7 +195,7 @@ fn a_start_that_would_take_the_room_kept_for_a_burst_waits_and_a_burst_may_use_i
     // While it holds its raise, the reserve keeps nothing more, and the start still waits.
     assert!(!reconciler.admit_seat_start(&elm, elm.member.as_ref().unwrap(), None).unwrap());
     assert_eq!(status.subject("agent/node.elm", u64::MAX).unwrap()["reason"],
-        "lane 4 cores/8.0G does not fit: 4.0G free of the 54.0G this host gives lanes (other lanes hold 48.0G, seats outside lanes 2.0G, kept for a burst 0.0G)");
+        "lane 4 cores/8.0G does not fit: 4.0G free of the 54.0G this host gives lanes (other lanes hold 48.0G, host outside lanes 2.0G, kept for a burst 0.0G)");
     // With a seat stopped there is room beside the reserve once the burst is given back.
     assert!(status.burst_release("agent/node.alder"));
     reconciler.reconcile_lane_bursts().unwrap();
