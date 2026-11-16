@@ -13,6 +13,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
+import shutil
 import socket
 import subprocess
 import threading
@@ -149,9 +151,23 @@ def main():
     root = args.root.absolute()
     if len(os.fsencode(root / "old.sock")) >= 104:
         parser.error("--root must be short enough for Unix-domain socket paths")
+    pty_binary = shutil.which("pty")
+    if pty_binary is None:
+        parser.error("the real pty executable must be available on PATH")
+    pty_binary = Path(pty_binary).resolve(strict=True)
     root.mkdir(parents=True, exist_ok=False)
     for directory in ["home", "state", "store", "pty", "config", "data", "runtime"]:
         (root / directory).mkdir(mode=0o700)
+    (root / "bin").mkdir()
+    (root / "bin/pty").symlink_to(pty_binary)
+    # The daemon resolves tools from the account's login shell, not the
+    # launching process PATH. Match the isolated real-PTY fleet fixtures.
+    fixture_bin = shlex.quote(str(root / "bin"))
+    for profile in [".profile", ".bash_profile", ".zprofile", ".zshrc"]:
+        (root / "home" / profile).write_text(f"export PATH={fixture_bin}:$PATH\n")
+    (root / "config/fish").mkdir()
+    (root / "config/fish/config.fish").write_text(
+        f"set -gx PATH {fixture_bin} $PATH\n")
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("ST_", "ST3_", "FRACTAL_", "AUTHORITY_"))}
     # Preserve process-tree supervision while excluding live agent credentials,
