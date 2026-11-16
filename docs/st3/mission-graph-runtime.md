@@ -1172,9 +1172,7 @@ complete it. The response resumes the same origin attempt with a new readiness e
 seat's ready-work wake tells the requester. Without `--step`, the ask creates an independent
 person-ask run owned by the agent, even while it holds claimed work. `--new-run NAME` optionally
 names that run. Independent asks consume no agent capacity, never release unrelated claims,
-and send the requester one message from `daemon/runtime` with the answer. They survive idle
-turns, re-declarations and the end of the agent's owning work while the agent remains declared.
-Only an answer, deadline resolution, withdrawal, or removal of the agent ends them.
+and send the requester one message from `daemon/runtime` with the answer.
 A requester withdraws with `fractal work cancel-ask STEP --as AGENT --summary TEXT`.
 For an ask attached to a native Data-DSL step, withdrawal fails the waiting step with
 `ask cancelled by ACTOR`; ordinary retry, run failure and `finally` handling apply.
