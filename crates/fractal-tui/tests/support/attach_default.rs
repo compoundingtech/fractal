@@ -34,7 +34,7 @@ fn ask(agent: &str) -> Attention {
         deadline: None,
         requested_at: None,
         snoozed_until: None,
-        snoozed_indefinitely: None,
+        snoozed_indefinitely: false,
         episode: None,
         id: "ask/probe".into(),
         tier: Tier::Stopped,
