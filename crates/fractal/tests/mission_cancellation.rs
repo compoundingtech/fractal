@@ -304,6 +304,8 @@ subscription "reviews" { observer "observer/repo"; on "pull_requests"; delivery 
             "subscription/reviews",
             "resource/repo/pull-request/8",
             &second_snapshot,
+            None,
+            None,
         )
         .unwrap();
     append(

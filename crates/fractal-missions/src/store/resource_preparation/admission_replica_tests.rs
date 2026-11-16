@@ -1,0 +1,152 @@
+use super::*;
+
+fn replicate_admission(source: &Store, target: &Store) {
+    for _ in 0..64 {
+        let exchange = exchange_from(source, &target.replication_inventory().unwrap());
+        if exchange.envelopes.is_empty() {
+            break;
+        }
+        receive_and_project(target, &exchange.peer, &exchange);
+    }
+    assert_eq!(
+        target.replication_inventory().unwrap().digest,
+        source.replication_inventory().unwrap().digest,
+        "the admission replica caught up",
+    );
+    // A subsequent observation models a later state, not a concurrent write.
+    // Arrival order does not advance the other origin's canonical write clock.
+    let accepted: String = source.readers.get().query_row(
+        "SELECT accepted_at_unix_ms FROM claims
+         ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+        [], |row| row.get(0),
+    ).unwrap();
+    target.set_write_clock_at(accepted.parse::<u128>().unwrap() + 1).unwrap();
+}
+
+#[test]
+fn relevant_admission_discovers_a_return_after_a_replicated_change_despite_a_stale_mirror() {
+    for (field, changed) in [
+        ("body_digest", json!("body-b")),
+        ("base_branch", json!("release")),
+        ("base_sha", json!("base-b")),
+        ("checks", json!([{"name": "build", "conclusion": "failure"}])),
+        ("body_digest", Value::Null),
+        ("base_branch", Value::Null),
+        ("base_sha", Value::Null),
+        ("checks", Value::Null),
+    ] {
+        let local = Store::open_memory("local").unwrap();
+        let remote = Store::open_memory("remote").unwrap();
+        // Canonical graph order starts with accepted time, not replication arrival.
+        // Pin each writer beyond the previous replica's accepted claims below.
+        local.set_write_clock_at(now_ms()).unwrap();
+        let subscriptions = publish_admission_watch(&local, &[
+            ("relevant", r#"admission "relevant-changes""#), ("default", ""),
+        ]);
+        observe_admission_pulls(&local, &subscriptions, json!([]));
+        let original = admission_pull();
+        observe_admission_pulls(&local, &subscriptions, json!([original.clone()]));
+        let mirror = crate::model::MirroredPrior {
+            compact: true,
+            items: HashMap::from([(
+                "resource/admission-repo/pull-request/4".into(),
+                Value::Object(item_facts("resource/admission-repo", "pull_requests", 4, None, &original)),
+            )]),
+        };
+        replicate_admission(&local, &remote);
+        let revision = local.selected_desired_revision("observer/admission-repo").unwrap().unwrap();
+        let next_check = now_ms() + 120_000;
+        let observe = |store: &Store, pull: &Value, next_check| {
+            store.record_resource_observation_attempt(
+                "observer/admission-repo", &revision, None, "resource/admission-repo", None,
+                &json!({"repository_id": 17, "pull_requests": [pull]}),
+                next_check, &subscriptions, None, None, Some(&mirror),
+            ).unwrap();
+        };
+        let mut changed_pull = original.clone();
+        changed_pull[field] = changed;
+        observe(&remote, &changed_pull, next_check);
+        assert_eq!(admission_requests(&remote, "relevant").len(), 2, "{field}");
+        replicate_admission(&remote, &local);
+        let graph = fractal_store::store::resources::preparation_observation(
+            &local.readers.get(), "resource/admission-repo/pull-request/4",
+        ).unwrap().actual.unwrap();
+        assert_eq!(
+            graph["facts"][field], changed_pull[field],
+            "{field}: the replicated change is the latest native graph snapshot",
+        );
+        // Replication updates the graph, not this poller's private mirror, which still holds A.
+        assert_eq!(mirror.items["resource/admission-repo/pull-request/4"][field], original[field]);
+        let facts = json!({"repository_id": 17, "pull_requests": [original.clone()]});
+        let prepared = resource_preparation::read_inputs(&local.readers.get(), resource_preparation::Observation {
+            observer: "observer/admission-repo", desired_revision: &revision, attempt: None,
+            resource: "resource/admission-repo", facts: &facts, subscriptions: &subscriptions,
+            mirrored: Some(&mirror),
+        }).unwrap();
+        assert_eq!(prepared.active_subscriptions, subscriptions, "{field}: durable policy remains active");
+        assert_eq!(
+            prepared.recorded_items["resource/admission-repo/pull-request/4"].as_ref().unwrap().0[field],
+            changed_pull[field],
+            "{field}: the replicated graph overrides the private mirror",
+        );
+        assert!(!prepared.discovered.is_empty(), "{field}: the return is discovered");
+        observe(&local, &original, next_check + 1);
+        observe(&local, &original, next_check + 2);
+        let requests = admission_requests(&local, "relevant");
+        assert_eq!(requests.len(), 3, "{field}: A -> replicated B -> A, then a duplicate poll");
+        let keys = requests.iter().map(|request| {
+            request.body["fields"]["delivery_key"].as_str().unwrap()
+        }).collect::<BTreeSet<_>>();
+        assert_eq!(keys.len(), 3, "{field}: each transition has its own admission");
+        let identities = requests.iter().map(|request| {
+            request.body["fields"]["change_identity"].as_str().unwrap()
+        }).collect::<BTreeSet<_>>();
+        assert_eq!(identities.len(), 2, "{field}: the return restores A's snapshot");
+        let defaults = admission_requests(&local, "default");
+        assert_eq!(defaults.len(), 1, "{field}: unchanged heads retain legacy admission");
+        assert_eq!(defaults[0].body["fields"]["delivery_key"], json!(canonical_hash(&(
+            "admission-review", "default", json!(17), Some("vcs.pull-request"),
+            Some(4_u64), Some("head-a"),
+        )).unwrap()));
+        assert!(defaults[0].body["fields"].get("admission").is_none());
+        assert!(defaults[0].body["fields"].get("authors").is_none());
+    }
+}
+
+#[test]
+fn ready_head_only_preparation_keeps_the_mirror_baseline_for_noncompact_facts() {
+    let local = Store::open_memory("local").unwrap();
+    let remote = Store::open_memory("remote").unwrap();
+    let subscriptions = publish_admission_watch(&local, &[("default", "")]);
+    observe_admission_pulls(&local, &subscriptions, json!([]));
+    let original = admission_pull();
+    observe_admission_pulls(&local, &subscriptions, json!([original.clone()]));
+    let mirror = crate::model::MirroredPrior {
+        compact: true,
+        items: HashMap::from([(
+            "resource/admission-repo/pull-request/4".into(),
+            Value::Object(item_facts("resource/admission-repo", "pull_requests", 4, None, &original)),
+        )]),
+    };
+    replicate_admission(&local, &remote);
+    let mut changed = original.clone();
+    changed["body_digest"] = json!("body-b");
+    // A noncompact observer records B even though default admission ignores body changes.
+    observe_admission_pulls(&remote, &subscriptions, json!([changed]));
+    replicate_admission(&remote, &local);
+    let graph = fractal_store::store::resources::preparation_observation(
+        &local.readers.get(), "resource/admission-repo/pull-request/4",
+    ).unwrap().actual.unwrap();
+    assert_eq!(graph["facts"]["body_digest"], "body-b", "the replicated graph differs from the mirror");
+    let revision = local.selected_desired_revision("observer/admission-repo").unwrap().unwrap();
+    let facts = json!({"repository_id": 17, "pull_requests": [original]});
+    let prepared = resource_preparation::read_inputs(&local.readers.get(), resource_preparation::Observation {
+        observer: "observer/admission-repo", desired_revision: &revision, attempt: None,
+        resource: "resource/admission-repo", facts: &facts, subscriptions: &subscriptions,
+        mirrored: Some(&mirror),
+    }).unwrap();
+    assert_eq!(prepared.active_subscriptions, subscriptions, "the durable default policy remains active");
+    assert_eq!(prepared.recorded_items["resource/admission-repo/pull-request/4"].as_ref().unwrap().0["body_digest"], "body-a");
+    assert!(prepared.discovered.is_empty());
+    assert_eq!(admission_requests(&local, "default").len(), 1);
+}

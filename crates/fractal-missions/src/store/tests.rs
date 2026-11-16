@@ -25,6 +25,8 @@ use proptest::prelude::*;
 mod huge_part_rebuild_bench;
 mod run_projection_fence_cost;
 mod run_mutation_writer_guard;
+#[path = "resource_preparation/admission_replica_tests.rs"]
+mod admission_replica_tests;
 use fractal_delivery::store::shared_missions::*;
 mod run_retry;
 mod mission_supersession;
@@ -12126,6 +12128,493 @@ fn only_a_new_ready_head_of_an_open_pull_request_asks_for_review() {
     );
 }
 
+fn publish_admission_watch(
+    store: &Store,
+    policies: &[(&str, &str)],
+) -> Vec<(String, crate::model::SubscriptionSpec)> {
+    publish_admission_watch_for_mission(store, policies, "admission-review")
+}
+
+fn publish_admission_watch_for_mission(
+    store: &Store,
+    policies: &[(&str, &str)],
+    mission: &str,
+) -> Vec<(String, crate::model::SubscriptionSpec)> {
+    let subscriptions = policies.iter().map(|(name, policy)| format!(
+        r#"subscription "{name}" {{
+  observer "observer/admission-repo"; on "pull_requests"
+  delivery "mission" {{
+    mission "{mission}"; resource "source"; workspace "/srv/reviews"
+    {policy}
+  }}
+}}"#,
+    )).collect::<Vec<_>>().join("\n");
+    let source = format!(r#"version 2
+resource "admission-repo" {{ kind "vcs.repository" }}
+observer "admission-repo" {{
+  resource "resource/admission-repo"; provider "github.repository"; locator "acme/garden"; field "pull_requests"; field "comments"
+}}
+mission "{mission}" state="ready" {{
+  goal "Evaluate the observed pull request."
+  input "source" kind="resource"
+  step "evaluate" {{ agentless }}
+}}
+{subscriptions}
+"#);
+    let intent = parse_intent(&source, "node").unwrap();
+    let planned = store.mission(&intent, IntentInput {
+        kdl: source, source_name: None,
+    }).unwrap();
+    store.apply(&intent, &planned.subject_tokens, &format!("admission-watch-{}", uuid::Uuid::now_v7())).unwrap();
+    policies.iter().map(|(name, _)| {
+        let subject = format!("subscription/{name}");
+        let spec = crate::graph::subscription_spec(&intent.subjects[&subject].desired).unwrap();
+        (subject, spec)
+    }).collect()
+}
+
+fn observe_admission_pulls(
+    store: &Store,
+    subscriptions: &[(String, crate::model::SubscriptionSpec)],
+    pulls: Value,
+) {
+    let revision = store.selected_desired_revision("observer/admission-repo").unwrap().unwrap();
+    store.record_resource_observation_attempt(
+        "observer/admission-repo", &revision, None, "resource/admission-repo", None,
+        &json!({"repository_id": 17, "pull_requests": pulls}),
+        now_ms() + 60_000, subscriptions, None, None, None,
+    ).unwrap();
+}
+
+fn admission_requests(store: &Store, name: &str) -> Vec<ClaimRecord> {
+    store.claims_for(
+        &format!("subscription/{name}"), Some("subscription.mission-requested"),
+    ).unwrap()
+}
+
+fn admission_pull() -> Value {
+    json!({
+        "number": 4, "state": "open", "draft": false, "head": "head-a",
+        "author": "orchid-bot", "base_branch": "main", "base_sha": "base-a",
+        "checks_state": "pending", "checks": [], "required_checks": [],
+        "review_decision": "REVIEW_REQUIRED", "reviews": [],
+        "comments": 0, "body_digest": "body-a"
+    })
+}
+
+#[test]
+fn admission_ignores_listing_metadata_and_default_keeps_the_legacy_delivery_key() {
+    let store = Store::open_memory("node").unwrap();
+    let subscriptions = publish_admission_watch(&store, &[
+        ("relevant", r#"admission "relevant-changes""#), ("default", ""),
+    ]);
+    observe_admission_pulls(&store, &subscriptions, json!([]));
+    let mut pull = admission_pull();
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    let default = admission_requests(&store, "default");
+    assert_eq!(default[0].body["fields"]["delivery_key"], json!(canonical_hash(&(
+        "admission-review", "default", json!(17), Some("vcs.pull-request"),
+        Some(4_u64), Some("head-a"),
+    )).unwrap()));
+    assert!(default[0].body["fields"].get("admission").is_none());
+    assert!(default[0].body["fields"].get("authors").is_none());
+    for (field, value) in [
+        ("title", json!("A renamed pull request")),
+        ("updated_at", json!("2026-11-15T12:00:00Z")),
+        ("author", json!("another-person")),
+        ("opened_by", json!("agent/node.builder")),
+        ("url", json!("https://github.com/acme/demo/pull/4")),
+    ] {
+        pull[field] = value;
+        observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+        assert_eq!(admission_requests(&store, "relevant").len(), 1, "{field}");
+        assert_eq!(admission_requests(&store, "default").len(), 1, "{field}");
+    }
+}
+
+#[test]
+fn repeated_check_outcomes_are_new_transitions_but_repeated_polls_are_not() {
+    let store = Store::open_memory("node").unwrap();
+    let subscriptions = publish_admission_watch(&store, &[("relevant", r#"admission "relevant-changes""#)]);
+    observe_admission_pulls(&store, &subscriptions, json!([]));
+    let mut pull = admission_pull();
+    for (index, outcome) in ["success", "failure", "success"].into_iter().enumerate() {
+        pull["checks_state"] = json!(outcome);
+        observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+        observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+        assert_eq!(admission_requests(&store, "relevant").len(), index + 1);
+    }
+    let requests = admission_requests(&store, "relevant");
+    let keys = requests.iter().map(|request| request.body["fields"]["delivery_key"].clone())
+        .collect::<Vec<_>>();
+    assert_ne!(keys[0], keys[1]);
+    assert_ne!(keys[0], keys[2], "returning to success is a new transition");
+}
+
+#[test]
+fn relevant_changes_admit_each_pull_request_fact_once_without_changing_ready_heads() {
+    // Each case has a fresh durable history. An identical poll must never make
+    // another request, whether the change qualifies under one policy or both.
+    for (field, value, default_admits) in [
+        ("draft", json!(true), false),
+        ("state", json!("closed"), false),
+        ("merged", json!(true), false),
+        ("head", json!("head-b"), true),
+        ("checks_state", json!("failure"), false),
+        ("checks", json!([{"name": "build", "conclusion": "failure"}]), false),
+        ("required_checks", json!([{"name": "build", "conclusion": "success"}]), false),
+        ("review_decision", json!("APPROVED"), false),
+        ("reviews", json!([{"id": 8, "state": "CHANGES_REQUESTED"}]), false),
+        ("comments", json!(1), false),
+        ("last_comment", json!({"id": 9, "at": "2026-11-15T12:00:00Z", "body": "Please revise"}), false),
+        ("recent_comments", json!([{"id": 9, "kind": "comment", "at": "2026-11-15T12:00:00Z", "body": "Please revise"}]), false),
+        ("body_digest", json!("body-b"), false),
+        ("base_branch", json!("release"), false),
+        ("base_sha", json!("base-b"), false),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let subscriptions = publish_admission_watch(&store, &[
+            ("relevant", r#"admission "relevant-changes""#), ("default", ""),
+        ]);
+        observe_admission_pulls(&store, &subscriptions, json!([]));
+        let original = admission_pull();
+        observe_admission_pulls(&store, &subscriptions, json!([original.clone()]));
+        assert_eq!(admission_requests(&store, "relevant").len(), 1, "{field}");
+        assert_eq!(admission_requests(&store, "default").len(), 1, "{field}");
+        let mut changed = original.clone();
+        changed[field] = value;
+        // Open observations authoritatively say unmerged.
+        if field == "merged" {
+            changed["state"] = json!("closed");
+        }
+        observe_admission_pulls(&store, &subscriptions, json!([changed.clone()]));
+        observe_admission_pulls(&store, &subscriptions, json!([changed]));
+        let relevant = admission_requests(&store, "relevant");
+        assert_eq!(relevant.len(), 2, "{field}");
+        assert_ne!(relevant[0].body["fields"]["delivery_key"], relevant[1].body["fields"]["delivery_key"], "{field}");
+        assert!(relevant.iter().all(|request| request.body["fields"]["admission"] == "relevant-changes"));
+        let default = admission_requests(&store, "default");
+        assert_eq!(default.len(), if default_admits { 2 } else { 1 }, "{field}");
+        assert!(default.iter().all(|request| request.body["fields"].get("admission").is_none()));
+    }
+}
+
+#[test]
+fn relevant_changes_admit_draft_creation_closure_and_reopening_at_the_same_head() {
+    let store = Store::open_memory("node").unwrap();
+    let subscriptions = publish_admission_watch(&store, &[
+        ("relevant", r#"admission "relevant-changes""#), ("default", ""),
+    ]);
+    observe_admission_pulls(&store, &subscriptions, json!([]));
+    let mut pull = admission_pull();
+    pull["draft"] = json!(true);
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    assert_eq!(admission_requests(&store, "relevant").len(), 1);
+    assert!(admission_requests(&store, "default").is_empty());
+    pull["draft"] = json!(false);
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    assert_eq!(admission_requests(&store, "relevant").len(), 2);
+    assert_eq!(admission_requests(&store, "default").len(), 1);
+    pull["state"] = json!("closed");
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    assert_eq!(admission_requests(&store, "relevant").len(), 3);
+    pull["state"] = json!("open");
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    observe_admission_pulls(&store, &subscriptions, json!([pull]));
+    assert_eq!(admission_requests(&store, "relevant").len(), 4);
+    assert_eq!(admission_requests(&store, "default").len(), 1);
+}
+
+#[test]
+fn relevant_change_bursts_leave_only_the_latest_pending_snapshot_per_pull_request() {
+    let store = Store::open_memory("node").unwrap();
+    let subscriptions = publish_admission_watch(&store, &[
+        ("relevant", r#"admission "relevant-changes""#), ("default", ""),
+    ]);
+    observe_admission_pulls(&store, &subscriptions, json!([]));
+    let mut pull = admission_pull();
+    for head in ["head-a", "head-b", "head-c"] {
+        pull["head"] = json!(head);
+        observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    }
+    let requests = admission_requests(&store, "relevant");
+    assert_eq!(requests.len(), 3);
+    let pending = store.pending_subscription_mission_requests("subscription/relevant").unwrap();
+    assert_eq!(pending.len(), 1);
+    let discovery = pending[0].body["fields"]["discovery"].as_str().unwrap();
+    let snapshot = store.claims_for("resource/admission-repo/pull-request/4", None)
+        .unwrap().into_iter().find(|claim| claim.id == discovery).unwrap();
+    assert_eq!(snapshot.body["fields"]["facts"]["head_sha"], "head-c");
+    assert_eq!(store.pending_subscription_mission_requests("subscription/default").unwrap().len(), 3);
+    assert_eq!(store.subscription_requests("subscription/relevant").unwrap().iter()
+        .filter(|request| request.status == "cancelled").count(), 2);
+}
+
+#[test]
+fn author_scopes_wait_for_attribution_and_match_case_insensitively_in_both_modes() {
+    for policy in [r#"admission "relevant-changes""#, r#"admission "ready-heads""#] {
+        let store = Store::open_memory("node").unwrap();
+        let scoped = format!(r#"{policy}; author "OrChId-BoT""#);
+        let subscriptions = publish_admission_watch(&store, &[("scoped", &scoped)]);
+        observe_admission_pulls(&store, &subscriptions, json!([]));
+        let mut pull = admission_pull();
+        pull.as_object_mut().unwrap().remove("author");
+        observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+        assert!(admission_requests(&store, "scoped").is_empty());
+        let attribution = store.latest_claim("subscription/scoped", Some("subscription.attribution")).unwrap().unwrap();
+        assert_eq!(attribution.body["fields"]["status"], "attribution-pending");
+        assert!(attribution.body["fields"].get("delivery_key").is_none());
+        pull["author"] = json!("another-person");
+        observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+        assert!(admission_requests(&store, "scoped").is_empty());
+        assert_eq!(store.latest_claim("subscription/scoped", Some("subscription.attribution"))
+            .unwrap().unwrap().body["fields"]["status"], "scope-excluded");
+        pull["author"] = json!("orchid-BOT");
+        observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+        observe_admission_pulls(&store, &subscriptions, json!([pull]));
+        let requests = admission_requests(&store, "scoped");
+        assert_eq!(requests.len(), 1, "{policy}");
+        assert_eq!(requests[0].body["fields"]["authors"], json!(["OrChId-BoT"]));
+    }
+}
+
+#[tokio::test]
+async fn fake_github_observations_admit_relevant_changes_end_to_end() {
+    use crate::resource::ObservationRequest;
+    use crate::resource::test_github::{
+        FakeGithub, age_pull_request_check, observe,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("fake-github-admission.db"), "node").unwrap();
+    let subscriptions = publish_admission_watch(&store, &[
+        ("relevant", r#"admission "relevant-changes""#),
+        ("default", ""),
+        ("scoped", r#"admission "relevant-changes"; author "OrChId-BoT""#),
+    ]);
+    let revision = store.selected_desired_revision("observer/admission-repo").unwrap().unwrap();
+    let (github, base) = FakeGithub::start().await;
+    github.route("/repos/acme/garden", json!({"id": 7}));
+    let mut listed = json!({
+        "number": 4, "title": "Review this change", "state": "open", "draft": true,
+        "html_url": "https://github.com/acme/garden/pull/4",
+        "pull_request": {"merged_at": null}, "user": null,
+        "created_at": "2026-09-01T00:00:00Z", "body": "original PR body", "comments": 1,
+    });
+    let mut pull = json!({
+        "number": 4, "title": "Review this change",
+        "url": "https://github.com/acme/garden/pull/4",
+        "isDraft": true, "headRefOid": "head-a", "headRefName": "agent/pull-4",
+        "baseRefName": "main", "baseRefOid": "base-a", "author": null,
+        "createdAt": "2026-09-01T00:00:00Z", "reviewDecision": "REVIEW_REQUIRED",
+        "mergeQueueEntry": null,
+        "latestReviews": {"nodes": [{
+            "author": {"login": "fern"}, "state": "COMMENTED",
+            "submittedAt": "2026-09-01T01:00:00Z", "commit": {"oid": "head-a"},
+        }]},
+        "commits": {"nodes": [{"commit": {"statusCheckRollup": {
+            "state": "PENDING", "contexts": {"nodes": [
+                {"__typename": "StatusContext", "context": "garden/ci", "state": "PENDING"},
+            ]},
+        }}}]},
+    });
+    let mut comment = json!({
+        "id": 91, "issue_url": "https://api.github.com/repos/acme/garden/issues/4",
+        "html_url": "https://github.com/acme/garden/pull/4#issuecomment-91",
+        "user": {"login": "fern"}, "body": "original comment",
+        "created_at": "2026-09-10T00:00:00Z", "updated_at": "2026-09-10T00:00:00Z",
+    });
+    // Historical watermarks keep every request and transition independent of wall-clock time.
+    let mut cursor = Some(json!({
+        "items_since": "2026-09-09T00:00:00Z",
+        "comments_since": "2026-09-09T00:00:00Z",
+    }).to_string());
+    let mut previous_facts = None;
+    let stages = [
+        ("empty baseline", Value::Null, 0, 0, 0),
+        ("draft creation", Value::Null, 1, 0, 0),
+        ("excluded author", json!("another-person"), 1, 0, 0),
+        ("matching author", json!("orchid-BOT"), 1, 0, 1),
+        ("ready", json!(false), 2, 1, 2),
+        ("closed", json!("closed"), 3, 1, 3),
+        ("reopened", json!("open"), 4, 1, 4),
+        ("head", json!("head-b"), 5, 2, 5),
+        ("base branch", json!("release"), 6, 2, 6),
+        ("base sha", json!("base-b"), 7, 2, 7),
+        ("body", json!("edited PR body"), 8, 2, 8),
+        ("checks", json!("SUCCESS"), 9, 2, 9),
+        ("review", json!("APPROVED"), 10, 2, 10),
+        ("comment digest", json!("edited comment"), 11, 2, 11),
+    ];
+    let mut original_body_digest = Value::Null;
+    let mut original_comment_digest = Value::Null;
+    for (index, (stage, value, relevant_count, default_count, scoped_count)) in
+        stages.into_iter().enumerate()
+    {
+        match stage {
+            "excluded author" | "matching author" => {
+                listed["user"] = json!({"login": value});
+                pull["author"] = listed["user"].clone();
+            }
+            "ready" => {
+                listed["draft"] = value.clone();
+                pull["isDraft"] = value;
+            }
+            "closed" | "reopened" => listed["state"] = value,
+            "head" => pull["headRefOid"] = value,
+            "base branch" => pull["baseRefName"] = value,
+            "base sha" => pull["baseRefOid"] = value,
+            "body" => listed["body"] = value,
+            "checks" => {
+                pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] = value.clone();
+                pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0]["state"] = value;
+            }
+            "review" => {
+                pull["reviewDecision"] = value.clone();
+                pull["latestReviews"]["nodes"][0]["state"] = value;
+            }
+            "comment digest" => {
+                comment["body"] = value;
+                comment["updated_at"] = json!(format!("2026-09-10T{index:02}:00:00Z"));
+            }
+            "empty baseline" | "draft creation" => {}
+            _ => unreachable!(),
+        }
+        listed["updated_at"] = json!(format!("2026-09-10T{index:02}:00:00Z"));
+        // Poll twice through HTTP, advancing the actual provider cursor each time.
+        // The second poll is not a replay of a fabricated store-level observation.
+        for duplicate in [false, true] {
+            let position: Value = serde_json::from_str(cursor.as_deref().unwrap()).unwrap();
+            let since = |field: &str| {
+                (chrono::DateTime::parse_from_rfc3339(position[field].as_str().unwrap()).unwrap()
+                    - chrono::Duration::seconds(1))
+                    .format("%Y-%m-%dT%H:%M:%SZ").to_string()
+            };
+            let listing = if index == 0 { json!([]) } else { json!([listed.clone()]) };
+            github.route("/repos/acme/garden/issues?state=open&per_page=100",
+                if listed["state"] == "closed" { json!([]) } else { listing.clone() });
+            github.route(&format!(
+                "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={}&per_page=100",
+                since("items_since"),
+            ), listing);
+            github.route(&format!(
+                "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={}&per_page=100",
+                since("comments_since"),
+            ), if index == 0 { json!([]) } else { json!([comment.clone()]) });
+            github.open_pull_requests(if index == 0 || listed["state"] == "closed" {
+                json!([])
+            } else {
+                json!([pull.clone()])
+            });
+            if index != 0 || duplicate {
+                age_pull_request_check(&base, std::time::Duration::from_secs(60 * 60));
+            }
+            let observed = observe(ObservationRequest {
+                provider: "github.repository".into(), locator: "acme/garden".into(),
+                fields: BTreeSet::from(["pull_requests".into(), "comments".into()]),
+                cursor: cursor.clone(), previous_facts: previous_facts.clone(),
+                every_ms: Some(0), refresh: false, webhook_covered: false, workflow_runs: None,
+            }, &base).await.unwrap();
+            if !duplicate && index == 1 {
+                let facts = &observed.facts["pull_requests"][0];
+                original_body_digest = facts["body_digest"].clone();
+                original_comment_digest = facts["last_comment"]["body_digest"].clone();
+                assert!(original_body_digest.is_string());
+                assert!(original_comment_digest.is_string());
+            }
+            if !duplicate && matches!(stage, "body" | "comment digest") {
+                let facts = &observed.facts["pull_requests"][0];
+                assert!(facts.get("body").is_none());
+                assert!(facts["last_comment"].get("body").is_none());
+                if stage == "body" {
+                    assert_ne!(facts["body_digest"], original_body_digest);
+                } else {
+                    assert_ne!(facts["last_comment"]["body_digest"], original_comment_digest);
+                }
+            }
+            store.record_resource_observation_attempt(
+                "observer/admission-repo", &revision, None, "resource/admission-repo",
+                observed.cursor.as_deref(), &observed.facts, now_ms() + 60_000,
+                &subscriptions, None, None, None,
+            ).unwrap();
+            cursor = observed.cursor;
+            previous_facts = Some(observed.facts);
+            for (name, count) in [
+                ("relevant", relevant_count), ("default", default_count), ("scoped", scoped_count),
+            ] {
+                assert_eq!(admission_requests(&store, name).len(), count,
+                    "{stage}, {name}, duplicate={duplicate}");
+            }
+            if matches!(stage, "draft creation" | "excluded author") {
+                assert_eq!(
+                    store.latest_claim("subscription/scoped", Some("subscription.attribution"))
+                        .unwrap().unwrap().body["fields"]["status"],
+                    if stage == "draft creation" { "attribution-pending" } else { "scope-excluded" },
+                );
+            }
+        }
+    }
+    let relevant = admission_requests(&store, "relevant");
+    assert!(relevant.iter().all(|request|
+        request.body["fields"]["admission"] == "relevant-changes"
+            && request.body["fields"]["change_identity"].is_string()));
+    let scoped = admission_requests(&store, "scoped");
+    assert!(scoped.iter().all(|request|
+        request.body["fields"]["authors"] == json!(["OrChId-BoT"])));
+    let default = admission_requests(&store, "default");
+    assert!(default.iter().all(|request| request.body["fields"].get("admission").is_none()));
+    for name in ["relevant", "scoped"] {
+        let requests = admission_requests(&store, name);
+        let pending = store.pending_subscription_mission_requests(&format!("subscription/{name}")).unwrap();
+        assert_eq!(pending.len(), 1, "{name}");
+        assert_eq!(pending[0].id, requests.last().unwrap().id, "{name}");
+        let discovery = pending[0].body["fields"]["discovery"].as_str().unwrap();
+        let snapshot = store.claims_for("resource/admission-repo/pull-request/4", None)
+            .unwrap().into_iter().find(|claim| claim.id == discovery).unwrap();
+        let facts = &snapshot.body["fields"]["facts"];
+        assert_eq!(facts["head_sha"], "head-b");
+        assert_ne!(facts["last_comment"]["body_digest"], original_comment_digest);
+        assert_eq!(store.subscription_requests(&format!("subscription/{name}")).unwrap().iter()
+            .filter(|request| request.status == "cancelled").count(), requests.len() - 1);
+    }
+}
+
+#[test]
+fn relevant_change_delivery_keys_survive_restart_replication_and_snapshot_revisits() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("admission.db");
+    let store = Store::open(&path, "node").unwrap();
+    let subscriptions = publish_admission_watch(&store, &[("relevant", r#"admission "relevant-changes""#)]);
+    observe_admission_pulls(&store, &subscriptions, json!([]));
+    let original = admission_pull();
+    observe_admission_pulls(&store, &subscriptions, json!([original.clone()]));
+    let first_key = admission_requests(&store, "relevant")[0].body["fields"]["delivery_key"].clone();
+    drop(store);
+    let store = Store::open(&path, "node").unwrap();
+    observe_admission_pulls(&store, &subscriptions, json!([original.clone()]));
+    assert_eq!(admission_requests(&store, "relevant").len(), 1);
+    let replica = Store::open_memory("replica").unwrap();
+    let exchange = exchange_from(&store, &replica.replication_inventory().unwrap());
+    receive_and_project(&replica, "node", &exchange);
+    receive_and_project(&replica, "node", &exchange);
+    replica.replay_replication_graph().unwrap();
+    let mut changed = original.clone();
+    changed["body_digest"] = json!("body-b");
+    for target in [&store, &replica] {
+        observe_admission_pulls(target, &subscriptions, json!([original.clone()]));
+        observe_admission_pulls(target, &subscriptions, json!([changed.clone()]));
+        observe_admission_pulls(target, &subscriptions, json!([original.clone()]));
+        let requests = admission_requests(target, "relevant");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.iter().filter(|request| request.body["fields"]["delivery_key"] == first_key).count(), 1);
+    }
+    let local_keys = admission_requests(&store, "relevant").into_iter()
+        .map(|request| request.body["fields"]["delivery_key"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
+    let replica_keys = admission_requests(&replica, "relevant").into_iter()
+        .map(|request| request.body["fields"]["delivery_key"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
+    assert_eq!(local_keys, replica_keys);
+}
+
 #[test]
 fn queue_metadata_survives_runtime_views_and_reordering_resets_moved_work() {
     let store = Store::open_memory("node").unwrap();
@@ -12903,4 +13392,94 @@ mission "wake-history" state="ready" {
         assert!(created.wake.is_some());
         assert_eq!(created.wake, read.wake);
     }
+}
+
+#[test]
+fn relevant_admission_frontier_lookup_is_bounded_across_history_and_subscription_incarnations() {
+    let store = Store::open_memory("node").unwrap();
+    let mut count = 0;
+    let mut costs = Vec::new();
+    for history in [8, 128, 1024] {
+        while count < history {
+            let subject = format!("subscription/incarnation-{}/review-scope", count / 2);
+            let request = store.append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "subscription.mission-requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("mission".into(), json!("mission/review")),
+                    ("resource".into(), json!("resource/repo/pull-request/1")),
+                    ("discovery".into(), json!(format!("snapshot-{count}"))),
+                    ("resource_input".into(), json!("source")),
+                    ("workspace".into(), json!(".")),
+                    ("admission".into(), json!("relevant-changes")),
+                    ("delivery_key".into(), json!(format!("delivery-{count}"))),
+                    ("change_identity".into(), json!(format!("change-{count}"))),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.append_claim(&ClaimInput {
+                subject,
+                kind: "subscription.mission-request-cancelled".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([
+                    ("request".into(), json!(request.id)),
+                    ("reason".into(), json!("finished fixture")),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            count += 1;
+        }
+        let connection = store.readers.get();
+        let mut query = super::missions::prepare_latest_relevant_delivery(&connection).unwrap();
+        let found = query.query_map(
+            ["mission/review", "review-scope", "resource/repo/pull-request/1"],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).unwrap().next().transpose().unwrap().unwrap();
+        assert_eq!(found, (format!("delivery-{}", count - 1), format!("change-{}", count - 1)));
+        costs.push(query.get_status(rusqlite::StatementStatus::VmStep));
+    }
+    for cost in &costs {
+        assert!(*cost < 100, "frontier seek must stay bounded: {costs:?}");
+        assert!((cost - costs[0]).abs() < 20, "frontier seek grew with history: {costs:?}");
+    }
+}
+
+#[test]
+fn relevant_admission_preserves_each_mission_frontier_when_a_subscription_switches_back() {
+    let store = Store::open_memory("controller").unwrap();
+    let accepted_at = now_ms();
+    store.set_write_clock_at(accepted_at).unwrap();
+    let mut subscriptions = publish_admission_watch(
+        &store, &[("relevant", r#"admission "relevant-changes""#)],
+    );
+    observe_admission_pulls(&store, &subscriptions, json!([]));
+    let mut pull = admission_pull();
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    pull["body_digest"] = json!("body-b");
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    let previous = admission_requests(&store, "relevant")[1].body["fields"]["delivery_key"].clone();
+    subscriptions = publish_admission_watch_for_mission(
+        &store, &[("relevant", r#"admission "relevant-changes""#)], "admission-other",
+    );
+    pull["body_digest"] = json!("body-c");
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    assert_eq!(admission_requests(&store, "relevant").len(), 3);
+    // The all-status mission frontier is authoritative across rebuild and replication,
+    // independently of the one current pending request for this subscription/resource.
+    store.rebuild_claim_projections().unwrap();
+    let replica = Store::open_memory("worker").unwrap();
+    replicate_fully(&store, &replica);
+    replica.set_write_clock_at(accepted_at + 1).unwrap();
+    subscriptions = publish_admission_watch_for_mission(
+        &replica, &[("relevant", r#"admission "relevant-changes""#)], "admission-review",
+    );
+    pull["body_digest"] = json!("body-a");
+    observe_admission_pulls(&replica, &subscriptions, json!([pull.clone()]));
+    observe_admission_pulls(&replica, &subscriptions, json!([pull]));
+    let requests = admission_requests(&replica, "relevant");
+    assert_eq!(requests.len(), 4, "M → N → M must not rediscover the first M delivery key");
+    assert_eq!(requests[3].body["fields"]["previous_delivery_key"], previous);
+    assert_ne!(requests[3].body["fields"]["delivery_key"], requests[0].body["fields"]["delivery_key"]);
+    assert_eq!(replica.pending_subscription_mission_requests("subscription/relevant").unwrap().len(), 1);
 }

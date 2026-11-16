@@ -189,6 +189,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_dirty",
         "local_resource_preparation_deferred",
         "local_resource_preparation_rebuild",
+        // Member-local relevant-change frontiers and queues, rebuilt from canonical claims.
+        "local_subscription_request_frontier",
+        "local_subscription_admission_frontier",
+        "local_subscription_request_pending",
+        "local_subscription_request_dirty",
         // Member-local completion-health candidates and hydration progress, rebuilt from claims.
         "local_completion_health_v1_claims",
         "local_completion_health_v1_fields",
