@@ -12026,8 +12026,13 @@ pub fn accept_message_response_authorized(
         }
         _ => None,
     };
-    let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
-    let subject = format!("message/{id}");
+    let key_hash = Sha256::digest(request.idempotency_key.as_bytes());
+    let subject = if at.is_some() {
+        // Stage the body under the mailbox identity used by due delivery.
+        format!("message/scheduled-{key_hash:x}")
+    } else {
+        format!("message/{}", &hex::encode(key_hash)[..16])
+    };
     let previous = state
         .store
         .operation_claim(&request.idempotency_key)
@@ -12393,59 +12398,9 @@ fn settle_answered_message(
     reply: &str,
     reply_claim: &str,
 ) -> Result<(), ApiError> {
-    let parent = message_subject(parent);
-    let Some(message) = store.message(&parent).map_err(ApiError::internal)? else {
-        return Ok(());
-    };
-    // A thread participant can send a follow-up without consuming the other party's inbox.
-    if message.to != from || message.from != to {
-        return Ok(());
-    }
-    for lifecycle in ["delivered", "read", "closed"] {
-        let current = store
-            .message(&parent)
-            .map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::not_found(format!("message `{parent}` does not exist")))?;
-        let needed = match lifecycle {
-            "delivered" => matches!(current.status.as_str(), "sent" | "staged"),
-            "read" => current.status == "delivered",
-            "closed" => current.status == "read",
-            _ => unreachable!(),
-        };
-        if !needed {
-            continue;
-        }
-        let input = ClaimInput {
-            subject: parent.clone(),
-            kind: format!("message.{lifecycle}"),
-            actor: Some(from.into()),
-            fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
-            evidence: vec![reply_claim.into()],
-            expected_subject: None,
-            idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
-        };
-        if current.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
-            // The parent lives in the stream even though its reply cites a graph claim.
-            // The shard writer validates the step and makes a concurrent/repeated step a no-op.
-            crate::store::retirements::admit_mail_claim_to(
-                &store.readers.get(), &input, &current,
-            )
-            .map_err(ApiError::bad)?;
-            crate::store::messages_shard::record_lifecycle(
-                store,
-                &input.subject,
-                &input.kind,
-                input.actor.as_deref(),
-                &input.fields,
-            )
-            .map_err(ApiError::bad)?;
-            continue;
-        }
-        store
-            .append_claim(&input)
-            .map_err(ApiError::bad)?;
-    }
-    Ok(())
+    store
+        .settle_answered_message(parent, from, to, reply, reply_claim)
+        .map_err(ApiError::bad)
 }
 
 #[derive(Deserialize)]

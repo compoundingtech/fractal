@@ -187,6 +187,56 @@ fn append(tx: &Transaction<'_>, origin: &str, subject: &str, kind: &str, actor: 
 }
 
 impl Store {
+    /// A recipient's successful reply consumes its parent, for immediate and timed sends alike.
+    /// Stream lifecycle writes retain their own writer boundary, as on immediate acceptance.
+    pub fn settle_answered_message(
+        &self,
+        parent: &str,
+        from: &str,
+        to: &str,
+        reply: &str,
+        reply_claim: &str,
+    ) -> Result<(), FractalError> {
+        let parent = if parent.starts_with("message/") {
+            parent.to_owned()
+        } else {
+            format!("message/{parent}")
+        };
+        let Some(message) = self.message(&parent).map_err(internal)? else {
+            return Ok(());
+        };
+        // A follow-up from the original sender does not consume the recipient's inbox.
+        if message.to != from || message.from != to {
+            return Ok(());
+        }
+        for lifecycle in ["delivered", "read", "closed"] {
+            let current = self.message(&parent).map_err(internal)?
+                .ok_or_else(|| FractalError::new("not-found", format!("message `{parent}` does not exist")))?;
+            let needed = match lifecycle {
+                "delivered" => matches!(current.status.as_str(), "sent" | "staged"),
+                "read" => current.status == "delivered",
+                "closed" => current.status == "read",
+                _ => unreachable!(),
+            };
+            if !needed { continue; }
+            let input = ClaimInput {
+                subject: parent.clone(), kind: format!("message.{lifecycle}"),
+                actor: Some(from.into()),
+                fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
+                evidence: vec![reply_claim.into()], expected_subject: None,
+                idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
+            };
+            if current.created_index >= messages_shard::STREAM_INDEX_BASE {
+                retirements::admit_mail_claim_to(&self.readers.get(), &input, &current)?;
+                messages_shard::record_lifecycle(self, &input.subject, &input.kind,
+                    input.actor.as_deref(), &input.fields)?;
+            } else {
+                self.append_claim(&input)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn schedule_message(&self, input: &ClaimInput, at_unix_ms: u128, key: &str) -> Result<ScheduledMessageView, FractalError> {
         if input.kind != "message.sent" || key.trim().is_empty() || i64::try_from(at_unix_ms).is_err() {
             return Err(FractalError::new("invalid-scheduled-message", "a message, nonempty key and representable UTC instant are required"));
@@ -266,7 +316,8 @@ impl Store {
     }
 
     pub fn reconcile_scheduled_messages_at(&self, now: u128) -> Result<ScheduledMessagePass> {
-        self.connection.batched(|tx| -> Result<ScheduledMessagePass> {
+        let mut replies = Vec::new();
+        let pass = self.connection.batched(|tx| -> Result<ScheduledMessagePass> {
             let mut pass = ScheduledMessagePass::default();
             let clock = i64::try_from(now).unwrap_or(i64::MAX);
             pass.next_deadline = tx.query_row("SELECT MIN(at) FROM local_scheduled_message_pending WHERE at>?1",
@@ -305,7 +356,13 @@ impl Store {
                 // Graph-native insertion is intentional: a cross-file shard write cannot
                 // atomically serialize with cancel and the delivered receipt.
                 if !message_sent::message_sent_tx(tx, &input.subject)? {
-                    message_routing::send_message_tx(tx, &self.origin, &input, Some("scheduled-atomic"))?;
+                    let reply = append_claim_tx(tx, &self.origin, &input.subject, &input.kind,
+                        input.actor.as_deref(), &json!({"fields":input.fields,"evidence":input.evidence}),
+                        &[], None)?;
+                    if let Some(parent) = input.fields.get("in_reply_to").and_then(Value::as_str) {
+                        replies.push((parent.to_owned(), field(&request,"from")?.to_owned(),
+                            to.to_owned(), input.subject.clone(), reply.id));
+                    }
                 }
                 append(tx, &self.origin, &id, DELIVERED, RUNTIME,
                     json!({"request":request.id,"message":input.subject,"owner_claim":owner_claim}),
@@ -314,6 +371,13 @@ impl Store {
                 pass.changed = true;
             }
             Ok(pass)
-        }).map_err(anyhow::Error::msg)?
+        }).map_err(anyhow::Error::msg)??;
+        // Like immediate acceptance, insertion and its receipt commit before parent settlement.
+        // In particular, a stream parent's lifecycle uses the shard's own writer.
+        for (parent, from, to, reply, claim) in replies {
+            self.settle_answered_message(&parent, &from, &to, &reply, &claim)
+                .map_err(anyhow::Error::new)?;
+        }
+        Ok(pass)
     }
 }

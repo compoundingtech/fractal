@@ -56,6 +56,93 @@ async fn full_text(state: &AppState, subject: &str) -> String {
 }
 
 #[tokio::test]
+async fn scheduled_large_bodies_survive_pending_retention_and_read_whole_after_due_delivery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    state.store.bind_fleet(fleet).unwrap();
+    state.store.pin_fleet_anchor(key.public()).unwrap();
+    let public = key.public().to_owned();
+    state.store.set_member_key(Some(Arc::new(key))).unwrap();
+    state.store.append_claim(&ClaimInput {
+        subject: format!("host/{}", state.node),
+        kind: "fleet.member-admitted".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("fleet_id".into(), json!(fleet)),
+            ("member_key".into(), json!(public)),
+            ("via".into(), json!("anchor")),
+            ("mode".into(), json!("listening")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    state.store.project_replication_backlog().unwrap();
+    state.store.fleet_membership().unwrap();
+    let intent = parse_intent(&format!(
+        "version 2\nnotice-owner {{ member \"{}\"; member-key \"{public}\"; always-on }}\nagent \"example/target\" {{ command \"true\"; workspace \"/tmp\"; }}",
+        state.node,
+    ), &state.node).unwrap();
+    let expected = intent.subjects.keys().map(|subject| (subject.clone(), vec![])).collect();
+    state.store.apply_as(&intent, &expected, "body-schedule-setup", Some("person/example")).unwrap();
+    let at = "2030-01-02T03:04:05Z";
+    let due = u128::try_from(chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis()).unwrap();
+    let content = text(INLINE_MAX_BYTES + 1024);
+    let bodies = message_body::bodies(&state.state_dir);
+    for (key, cancel) in [("body-schedule-deliver", false), ("body-schedule-cancel", true)] {
+        let request = MessageSendRequest {
+            at: Some(at.into()), owner: None, idempotency_key: key.into(),
+            from: "agent/example/sender".into(), to: "agent/example/target".into(),
+            content: content.clone(), title: None, in_reply_to: None,
+            tags: Vec::new(), attachments: Vec::new(),
+        };
+        let response = messages::send_message(
+            State(state.clone()), Some(BoundActor::Agent(request.from.clone())),
+            None, None, None, Json(request),
+        ).await.unwrap().0;
+        let crate::model::MessageSendResponse::Scheduled { scheduled } = response else {
+            panic!("timed send must return a schedule");
+        };
+        let subject = format!("message/scheduled-{:x}", Sha256::digest(key.as_bytes()));
+        assert!(state.store.message(&subject).unwrap().is_none());
+        assert_eq!(bodies.read("agent/example/sender", &subject).unwrap().unwrap(), content.as_bytes());
+        std::fs::OpenOptions::new().write(true)
+            .open(bodies_path(&state.state_dir, "agent/example/sender", &subject)).unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(31 * 86400)).unwrap();
+        let sweep = || bodies.reconcile(
+            |file| if crate::store::message_bodies::body_is_pending(&state.store, file) {
+                None
+            } else {
+                message_body::retention_from(None)
+            },
+            |file| crate::store::message_bodies::body_is_named(&state.store, file),
+        );
+        assert_eq!(sweep(), 0, "pending bodies are neither orphaned nor expired");
+        assert!(bodies.exists("agent/example/sender", &subject));
+        if cancel {
+            state.store.cancel_scheduled_message(&scheduled.id, "agent/example/sender", "No longer needed").unwrap();
+            assert_eq!(sweep(), 1, "cancellation releases the orphan pin");
+            assert!(!bodies.exists("agent/example/sender", &subject));
+            assert!(!bodies.is_expired("agent/example/sender", &subject));
+        } else {
+            assert!(!state.store.reconcile_scheduled_messages_at(due - 1).unwrap().changed);
+            assert!(state.store.reconcile_scheduled_messages_at(due).unwrap().changed);
+            let delivered = state.store.scheduled_message(&scheduled.id).unwrap().unwrap();
+            assert_eq!(delivered.message_id.as_deref(), Some(subject.as_str()));
+            let message = state.store.message(&subject).unwrap().unwrap();
+            assert!(message.body_ref.is_some());
+            assert_ne!(message.content, content);
+            assert_eq!(full_text(&state, &subject).await, content);
+            assert!(!state.store.reconcile_scheduled_messages_at(due + 1).unwrap().changed);
+            assert_eq!(sweep(), 1, "delivered bodies return to normal retention");
+            assert!(bodies.is_expired("agent/example/sender", &subject));
+        }
+    }
+}
+
+#[tokio::test]
 async fn bodies_of_4_kib_100_kib_and_256_kib_send_and_read_whole() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
@@ -535,7 +622,7 @@ fn what_one_sender_and_one_machine_keep_is_bounded_and_orphans_are_reconciled() 
     let fresh = temporary(".going.1.1.part");
     std::fs::OpenOptions::new().write(true).open(&stale).unwrap().set_modified(old).unwrap();
     assert!(bodies.files().iter().any(|file| file.temporary && file.id == ".gone.1.0.part"));
-    let removed = bodies.reconcile(None, |file| file.id == "kept");
+    let removed = bodies.reconcile(|_| None, |file| file.id == "kept");
     assert_eq!(removed, 2);
     assert!(!stale.exists() && fresh.exists());
     assert!(!bodies.exists("person/blair", "message/orphan"));
@@ -793,10 +880,10 @@ async fn an_expired_body_reads_as_expired_and_keeps_the_message_valid() {
     let named = |file: &message_body::BodyFile| crate::store::message_bodies::body_is_named(&state.store, file);
     // Inside its retention the body stays; past it, the text goes and a marker stays.
     age(10);
-    assert_eq!(bodies.reconcile(message_body::retention_from(None), named), 0);
+    assert_eq!(bodies.reconcile(|_| message_body::retention_from(None), named), 0);
     assert!(bodies.exists("person/alex", &subject));
     age(31);
-    assert_eq!(bodies.reconcile(message_body::retention_from(None), named), 1);
+    assert_eq!(bodies.reconcile(|_| message_body::retention_from(None), named), 1);
     assert!(!bodies.exists("person/alex", &subject));
     assert!(bodies.is_expired("person/alex", &subject));
     // The claim, preview and reference are untouched.
@@ -830,6 +917,6 @@ async fn an_expired_body_reads_as_expired_and_keeps_the_message_valid() {
     assert_eq!(full_text(&state, &subject).await, body);
     // Keeping bodies (`0`) never expires them.
     age(4000);
-    assert_eq!(bodies.reconcile(message_body::retention_from(Some("0")), named), 0);
+    assert_eq!(bodies.reconcile(|_| message_body::retention_from(Some("0")), named), 0);
     assert!(bodies.exists("person/alex", &subject));
 }

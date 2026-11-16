@@ -15,7 +15,11 @@ pub fn spawn_reconciler(store: std::sync::Arc<super::Store>, state_dir: PathBuf)
             let (store, state_dir) = (store.clone(), state_dir.clone());
             let _ = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("message_body.reconcile", || {
                 let bodies = bodies(&state_dir);
-                bodies.reconcile(retention(), |file| body_is_named(&store, file));
+                let keep = retention();
+                bodies.reconcile(
+                    |file| if body_is_pending(&store, file) { None } else { keep },
+                    |file| body_is_named(&store, file),
+                );
             }))
             .await;
             tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -23,12 +27,22 @@ pub fn spawn_reconciler(store: std::sync::Arc<super::Store>, state_dir: PathBuf)
     }));
 }
 
-/// Whether a message claim here still names this body. Only a message the store says does not
-/// exist leaves its body unnamed: a read that fails says nothing, and a body is never deleted on
-/// one.
+/// Whether a delivered message or pending schedule still names this body. Failed reads
+/// cannot establish that a body is orphaned.
 pub fn body_is_named(store: &super::Store, file: &BodyFile) -> bool {
     match store.message(&format!("message/{}", file.id)) {
-        Ok(None) => false,
+        Ok(None) => body_is_pending(store, file),
         Ok(Some(_)) | Err(_) => true,
+    }
+}
+
+/// A pending durable schedule pins its body until delivery or cancellation. Failed reads
+/// cannot establish that a pin ended, so the sweep leaves those files alone.
+pub fn body_is_pending(store: &super::Store, file: &BodyFile) -> bool {
+    let Some(hash) = file.id.strip_prefix("scheduled-") else { return false };
+    match store.scheduled_message(&format!("message-schedule/{hash}")) {
+        Ok(Some(schedule)) => schedule.state == "pending",
+        Ok(None) => false,
+        Err(_) => true,
     }
 }

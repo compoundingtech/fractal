@@ -157,3 +157,82 @@ fn scheduled_message_can_wake_its_own_existing_seat() {
     assert_eq!(sent(&owner),1);
     assert_eq!(owner.scheduled_message(&request.id).unwrap().unwrap().state,"delivered");
 }
+
+#[test]
+fn scheduled_reply_settles_graph_or_stream_parent_only_when_delivered() {
+    for stream in [false, true] {
+        let (owner, _) = setup();
+        let owner = Arc::new(owner);
+        let root = tempfile::tempdir().unwrap();
+        let shard = stream.then(|| messages_shard::open(&owner, root.path()).unwrap());
+        let mut parent = input("00000000000000d1");
+        parent.actor = Some(TARGET.into());
+        parent.fields.insert("from".into(), json!(TARGET));
+        parent.fields.insert("to".into(), json!(SENDER));
+        if let Some(shard) = &shard {
+            shard.append_claim(&parent).unwrap();
+        } else {
+            owner.append_claim(&parent).unwrap();
+        }
+        let mut reply = input("timed-answer");
+        // Bare references have the same meaning as on immediate acceptance.
+        reply.fields.insert("in_reply_to".into(), json!("00000000000000d1"));
+        let scheduled = owner.schedule_message(&reply, AT, "timed-answer").unwrap();
+        assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "sent");
+        assert!(!owner.reconcile_scheduled_messages_at(AT - 1).unwrap().changed);
+        assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "sent");
+        assert!(owner.reconcile_scheduled_messages_at(AT).unwrap().changed);
+        let delivered = owner.scheduled_message(&scheduled.id).unwrap().unwrap();
+        assert_eq!(delivered.state, "delivered");
+        assert!(owner.message(delivered.message_id.as_deref().unwrap()).unwrap().is_some());
+        let settled = owner.message(&parent.subject).unwrap().unwrap();
+        assert_eq!(settled.status, "closed");
+        assert_eq!(settled.created_index >= messages_shard::STREAM_INDEX_BASE, stream);
+        if stream {
+            assert!(messages_shard::mailbox_reads::lifecycle_step(&owner, &parent.subject, "message.read").unwrap().is_some());
+        } else {
+            assert!(owner.claims_for(&parent.subject, Some("message.read")).unwrap().len() == 1
+                || message_marks::recorded_at(&owner.readers.get(), &parent.subject,
+                    &["message.read"], Some(SENDER)).unwrap().is_some());
+        }
+        assert!(!owner.reconcile_scheduled_messages_at(AT + 1).unwrap().changed);
+        assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "closed");
+    }
+}
+
+#[test]
+fn scheduled_followups_and_unrelated_replies_do_not_consume_parent() {
+    for (key, parent_from, parent_to) in [
+        ("same-direction", SENDER, TARGET),
+        ("unrelated", "agent/example/other", SENDER),
+    ] {
+        let (owner, _) = setup();
+        let mut parent = input(&format!("parent-{key}"));
+        parent.actor = Some(parent_from.into());
+        parent.fields.insert("from".into(), json!(parent_from));
+        parent.fields.insert("to".into(), json!(parent_to));
+        owner.append_claim(&parent).unwrap();
+        let mut reply = input(key);
+        reply.fields.insert("in_reply_to".into(), json!(parent.subject));
+        let scheduled = owner.schedule_message(&reply, AT, key).unwrap();
+        owner.reconcile_scheduled_messages_at(AT).unwrap();
+        assert_eq!(owner.scheduled_message(&scheduled.id).unwrap().unwrap().state, "delivered");
+        assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "sent");
+    }
+}
+
+#[test]
+fn cancelled_scheduled_reply_does_not_settle_parent() {
+    let (owner, _) = setup();
+    let mut parent = input("cancelled-parent");
+    parent.actor = Some(TARGET.into());
+    parent.fields.insert("from".into(), json!(TARGET));
+    parent.fields.insert("to".into(), json!(SENDER));
+    owner.append_claim(&parent).unwrap();
+    let mut reply = input("cancelled-answer");
+    reply.fields.insert("in_reply_to".into(), json!(parent.subject));
+    let scheduled = owner.schedule_message(&reply, AT, "cancelled-answer").unwrap();
+    owner.cancel_scheduled_message(&scheduled.id, SENDER, "no longer needed").unwrap();
+    owner.reconcile_scheduled_messages_at(AT).unwrap();
+    assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "sent");
+}

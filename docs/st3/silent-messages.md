@@ -57,6 +57,9 @@ the handle, sender, recipient, original content, UTC due time, immutable key, st
 current owner, optional mailbox message ID, owner blocker and cancellation reason. A delivered state means durable
 mailbox insertion through native message delivery, not that a model read or acted
 on the content. Inspect the resulting message with `messages status`/`read`.
+Large-message bodies are staged under the eventual mailbox identity and retained
+while their schedule is pending, even past normal body retention. Cancellation
+releases that pin for orphan cleanup; delivered messages use normal body retention.
 
 `--key` aliases the existing `--idempotency-key`. For timed delivery a key names one
 immutable request: an identical retry returns the same handle; changing its time,
