@@ -7,6 +7,7 @@ struct Scenario: Sendable {
   let id: String
   let title: String
   let description: String
+  var inboxActivityPeriod: InboxActivity.Period? = nil
   let prepare: @MainActor @Sendable (Date) async -> AttentionModel
 }
 
