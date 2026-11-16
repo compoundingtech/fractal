@@ -277,3 +277,20 @@ fn unread_marked_row_is_a_private_reminder_and_opening_it_seeks_the_anchor() {
     let Mutation::ClearUnread(clear) = write.mutation else { panic!("expected clear") };
     assert_eq!(clear.observed_marks, [mark]);
 }
+
+#[test]
+fn unread_stable_reading_rule_is_shared_by_all_thread_placements() {
+    for host in [HOST, "home:attention/item", "chat:agent/example/atlas/builder", "mission:mission/test"] {
+        let mut ui = fixture(true, &[]);
+        let now = std::time::Instant::now();
+        let shown = [(ID.into(), ["message/visible".into()].into())].into();
+        ui.threads.presented(host, &shown, now);
+        assert!(ui.threads.writes().is_empty(), "{host}: initial frame is not a read");
+        ui.threads.presented(host, &shown, now + std::time::Duration::from_millis(499));
+        assert!(ui.threads.writes().is_empty(), "{host}: dwell is incomplete");
+        ui.threads.presented(host, &shown, now + std::time::Duration::from_millis(500));
+        let write = ui.threads.writes().pop().expect("each placement uses the same dwell rule");
+        let Mutation::MarkRead(read) = write.mutation else { panic!("expected natural read") };
+        assert_eq!(read.seen_message_ids, ["message/visible"]);
+    }
+}
