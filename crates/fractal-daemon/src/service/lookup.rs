@@ -178,19 +178,28 @@ fn systemd_search_paths(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec
 
 #[cfg(target_os = "macos")]
 pub(super) fn native() -> Result<Services> {
-    let default_instance = crate::instance::current().is_none();
-    // Home Manager's legacy phase uses its own agent labels for both default-instance services.
-    let old = [
-        (service_label(), default_instance.then_some("org.nix-community.home.smalltalk")),
-        (replication_service_label(), default_instance.then_some("org.nix-community.home.smalltalk-replication")),
-    ];
-    let resolve = |(old, home_manager_name): (&str, Option<&str>)| -> Result<ServiceStatus> {
-        let names = candidate_names(old, home_manager_name);
-        select(names.iter().map(|name| {
-            launchd_service_status(name, &launchd_path(name)?)
-        }).collect::<Result<Vec<_>>>()?)
+    launchd(
+        crate::instance::current().is_none(),
+        [service_label(), replication_service_label()],
+        |name| launchd_service_status(name, &launchd_path(name)?),
+    )
+}
+
+/// Home Manager's legacy phase uses its own agent labels for both default-instance services.
+#[cfg(any(target_os = "macos", test))]
+fn launchd(
+    default_instance: bool,
+    [daemon, replication]: [&str; 2],
+    status: impl Fn(&str) -> Result<ServiceStatus>,
+) -> Result<Services> {
+    let resolve = |old: &str, home_manager_name: &'static str| -> Result<ServiceStatus> {
+        let names = candidate_names(old, default_instance.then_some(home_manager_name));
+        select(names.iter().map(|name| status(name)).collect::<Result<Vec<_>>>()?)
     };
-    let services = Services { daemon: resolve(old[0])?, replication: resolve(old[1])? };
+    let services = Services {
+        daemon: resolve(daemon, "org.nix-community.home.smalltalk")?,
+        replication: resolve(replication, "org.nix-community.home.smalltalk-replication")?,
+    };
     check_conflicts([&services.daemon, &services.replication])?;
     Ok(services)
 }
@@ -424,5 +433,33 @@ mod tests {
         assert!(systemd_installed_in("smalltalk.service", &paths));
         assert!(!systemd_installed_in("st3.service", &paths));
         assert!(!systemd_installed_in("st3-replication.service", &paths));
+    }
+
+    #[test]
+    fn launchd_resolves_home_manager_agents_for_the_default_instance_only() {
+        const LABELS: [&str; 2] = ["com.compoundingtech.st3", "com.compoundingtech.st3.replication"];
+        let hm_running = |name: &str| Ok(status(name, name.starts_with("org.nix-community.home.smalltalk"), name.starts_with("org.nix-community.home.smalltalk")));
+        let services = launchd(true, LABELS, hm_running).unwrap();
+        assert_eq!(
+            (services.daemon.name.as_str(), services.daemon.running),
+            ("org.nix-community.home.smalltalk", true),
+        );
+        assert_eq!(
+            (services.replication.name.as_str(), services.replication.running),
+            ("org.nix-community.home.smalltalk-replication", true),
+        );
+
+        // Home Manager agents belong to the default instance; a named instance never adopts them.
+        let named = launchd(false, ["com.compoundingtech.st3-try", "com.compoundingtech.st3-try.replication"], hm_running).unwrap();
+        assert_eq!(named.replication.name, "com.compoundingtech.st3-try.replication");
+        assert!(!named.replication.installed && !named.replication.running);
+
+        // Staged cutover: the running legacy agent and the installed Fractal agent conflict.
+        let staged = launchd(true, LABELS, |name: &str| {
+            let hm = name.starts_with("org.nix-community.home.smalltalk");
+            Ok(status(name, hm || name.starts_with("com.compoundingtech.fractal"), hm))
+        });
+        let Err(conflict) = staged else { panic!("a staged cutover must conflict") };
+        assert!(conflict.to_string().contains("conflicting service units"));
     }
 }
