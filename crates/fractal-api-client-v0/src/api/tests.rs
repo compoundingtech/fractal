@@ -359,7 +359,6 @@ objective "factory/work-throughput" {
             fields: BTreeMap::from([("merged_at".into(), json!(at))]),
             evidence: vec![],
             idempotency_key: None,
-            expected_revision: None,
         }).unwrap();
     }
     let app = router(state.clone());
