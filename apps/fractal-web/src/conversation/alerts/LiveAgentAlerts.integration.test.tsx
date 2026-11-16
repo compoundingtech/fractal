@@ -5,7 +5,7 @@ import { expect, it, vi } from 'vitest'
 import type * as Native from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
-const data = vi.hoisted(() => ({ attention: [] as unknown[], act: vi.fn(), actions: 'granted' }))
+const data = vi.hoisted(() => ({ attention: [] as unknown[], act: vi.fn(), actions: 'granted', unread: false, freshness: 'live' }))
 vi.mock('@stylexjs/stylex', () => ({
   create: (styles: unknown) => styles,
   defineVars: (variables: unknown) => variables,
@@ -14,9 +14,9 @@ vi.mock('@stylexjs/stylex', () => ({
   props: () => ({}),
 }))
 vi.mock('../../data/react.tsx', () => ({
-  useAttention: () => ({ _tag: 'Observed', value: data.attention, freshness: 'live' }),
+  useAttention: () => ({ _tag: 'Observed', value: data.attention, freshness: data.freshness }),
   useDataSource: () => ({ alertActions: { act: data.act } }),
-  useGrants: () => ({ actions: data.actions }),
+  useGrants: () => ({ actions: data.actions, ...(data.unread ? { unread: true } : {}) }),
 }))
 
 import { LiveAgentAlerts } from './AgentAlerts.tsx'
@@ -118,6 +118,21 @@ it('shows options disabled on a device without the action grant', async () => {
   expect(container.textContent).toContain('This device is read-only')
   expect(container.querySelector<HTMLInputElement>('input[type="radio"]')!.disabled).toBe(true)
   data.actions = 'granted'
+  await dispose()
+})
+
+it.each([
+  ['retained from before a disconnect', () => { data.freshness = 'stale' }],
+  ['open before the capabilities answer is read', () => { data.actions = 'ungranted'; data.unread = true }],
+])('pauses answers, never read-only, on a feed %s', async (_, arrange) => {
+  arrange()
+  data.attention = [ask('attention/one')]
+  const { container, render, dispose } = mount()
+  await render()
+  expect(container.textContent).toContain('Updates paused. Answer once Fractal reconnects.')
+  expect(container.textContent).not.toContain('read-only')
+  expect(container.querySelector<HTMLInputElement>('input[type="radio"]')!.disabled).toBe(true)
+  Object.assign(data, { actions: 'granted', unread: false, freshness: 'live' })
   await dispose()
 })
 
