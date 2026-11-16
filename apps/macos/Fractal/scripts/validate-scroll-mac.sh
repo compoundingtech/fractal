@@ -11,16 +11,13 @@ out=${TRAY_PERF_OUT:-"$PWD/tmp/perf-scroll-mac/$(date -u +%Y%m%dT%H%M%SZ)"}
 mkdir -p "$out"
 case "$mode" in
   check)
-    : "${FRACTAL_CLIENT_PATH:?Use the attention-tray Nix development shell with the pinned FractalClient package}"
-    # Nix source closures have no .git directory. Record the locked revision and
-    # the actual package path rather than requiring an external client checkout.
-    printf '%s\n' "$FRACTAL_CLIENT_PATH" | tee "$out/fractal-client-path.txt"
-    nix eval --impure --raw --expr '(builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.fractal.locked.rev' \
-      | tee "$out/fractal-client-head.txt"
-    /usr/bin/swift build --product AttentionTray 2>&1 | tee "$out/build-tray.txt"
-    /usr/bin/swift build --product TrayGallery 2>&1 | tee "$out/build-gallery.txt"
+    root=$(git rev-parse --show-toplevel)
+    printf '%s\n' "$root/clients/swift/FractalClient" | tee "$out/fractal-client-path.txt"
+    git -C "$root" rev-parse HEAD | tee "$out/fractal-client-head.txt"
+    /usr/bin/swift build --product Fractal 2>&1 | tee "$out/build-tray.txt"
+    /usr/bin/swift build --product FractalMacGallery 2>&1 | tee "$out/build-gallery.txt"
     /usr/bin/swift test 2>&1 | tee "$out/tests.txt"
-    .build/debug/TrayGallery "$out" --scroll-probe 2>&1 | tee "$out/probe.txt"
+    .build/debug/FractalMacGallery "$out" --scroll-probe 2>&1 | tee "$out/probe.txt"
     echo 'PASS requires four probe PASS lines (inline/pinned × 300/400 pt), stable offset and zero section writes.'
     ;;
   trace)
@@ -39,7 +36,7 @@ case "$mode" in
     xcrun xctrace export --input "$out/first-frame.trace" --xpath '/trace-toc/run[@number="1"]/data/table' --output "$out/first-frame.xml"
     cat <<'THRESHOLDS'
 Mac reviewer must inspect traces in Instruments (no automatic PASS from command success):
-- Points of Interest: dev.schickling.attention-tray / NavigationFirstFrame, every drill-in/back <100 ms.
+- Points of Interest: tech.compounding.fractal.mac / NavigationFirstFrame, every drill-in/back <100 ms.
   Interval is click handler → first AppKit draw submission, NOT proof of presentation.
   Correlate with rendered-frame presentation in Animation Hitches; first presented frame must also be <100 ms.
 - At 120 Hz, each scrolling frame fits 8.333 ms; zero dropped frames / zero animation hitches throughout each 60s capture.

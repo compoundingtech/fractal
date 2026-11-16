@@ -2,22 +2,22 @@
 # Real window-server captures of the tray inside a headless macOS VM (README.md, Design gallery).
 #
 #   capture-vm.sh provision          once per VM host: pull the guest, SSH key, Screen Recording
-#   capture-vm.sh [capture] [args…]  build TrayGallery here, capture in the guest, write
+#   capture-vm.sh [capture] [args…]  build FractalMacGallery here, capture in the guest, write
 #                                    design/renders/capture/ + capture.json (args go to --capture:
 #                                    --only <text>)
-#   capture-vm.sh stop               stop a guest left running (ATTENTION_TRAY_CAPTURE_KEEP=1)
+#   capture-vm.sh stop               stop a guest left running (FRACTAL_MAC_CAPTURE_KEEP=1)
 #
-# The guest runs on ATTENTION_TRAY_CAPTURE_HOST (an SSH host, or `local` for this Mac) under tart
+# The guest runs on FRACTAL_MAC_CAPTURE_HOST (an SSH host, or `local` for this Mac) under tart
 # with no window anywhere: `--no-graphics` plus CI=1, otherwise tart opens Screen Sharing on the
 # host's display. The gallery uses the guest's own window server, so nothing appears on anyone's
 # screen and no consent or idle wait applies. The guest's macOS is the captures' macOS;
 # capture.json records it.
 set -euo pipefail
 
-vm=${ATTENTION_TRAY_CAPTURE_VM:-attention-tray-capture}
-host=${ATTENTION_TRAY_CAPTURE_HOST:-mbp2021}
-state_dir=.local/state/attention-tray-capture # under $HOME on the VM host
-# Pinned like the tray's own nixpkgs input (flakes/attention-tray/flake.nix).
+vm=${FRACTAL_MAC_CAPTURE_VM:-fractal-mac-capture}
+host=${FRACTAL_MAC_CAPTURE_HOST:-mbp2021}
+state_dir=.local/state/fractal-mac-capture # under $HOME on the VM host
+# Pinned tooling for the optional gallery capture VM.
 nixpkgs=github:NixOS/nixpkgs/4ba99f3209788ed04f01af38f77ddb803ad6ec63
 
 log() { printf 'capture-vm: %s\n' "$*" >&2; }
@@ -86,21 +86,21 @@ start() {
 }
 
 stop_if_started() {
-  if ((started)) && [[ -z ${ATTENTION_TRAY_CAPTURE_KEEP:-} ]]; then ./tart/bin/tart stop "$vm" >/dev/null; fi
+  if ((started)) && [[ -z ${FRACTAL_MAC_CAPTURE_KEEP:-} ]]; then ./tart/bin/tart stop "$vm" >/dev/null; fi
 }
 
 # The guest macOS: 27.0 like the Macs the tray ships to, so captures show macOS 27's glass.
-# Virtualization.framework runs macOS 27 guests on hosts from 26.6.2. ATTENTION_TRAY_CAPTURE_IMAGE
+# Virtualization.framework runs macOS 27 guests on hosts from 26.6.2. FRACTAL_MAC_CAPTURE_IMAGE
 # names another tart image (for example ghcr.io/cirruslabs/macos-tahoe-vanilla:26.5 on an older host).
 image() {
-  if [[ -n ${ATTENTION_TRAY_CAPTURE_IMAGE:-} ]]; then
-    echo "$ATTENTION_TRAY_CAPTURE_IMAGE"
+  if [[ -n ${FRACTAL_MAC_CAPTURE_IMAGE:-} ]]; then
+    echo "$FRACTAL_MAC_CAPTURE_IMAGE"
     return
   fi
   local major minor patch
   IFS=. read -r major minor patch _ <<<"$(sw_vers -productVersion).0.0"
   ((major >= 27 || (major == 26 && (minor > 6 || (minor == 6 && patch >= 2))))) ||
-    die "macOS $(sw_vers -productVersion) on $(hostname -s) cannot run the macOS 27 guest (needs 26.6.2 or later); update it or set ATTENTION_TRAY_CAPTURE_IMAGE"
+    die "macOS $(sw_vers -productVersion) on $(hostname -s) cannot run the macOS 27 guest (needs 26.6.2 or later); update it or set FRACTAL_MAC_CAPTURE_IMAGE"
   echo ghcr.io/cirruslabs/macos-golden-gate-vanilla:27.0
 }
 
@@ -156,7 +156,7 @@ host_provision() {
   stop_if_started
 }
 
-# stdin: tar with TrayGallery and renders/capture.json; stdout: tar with capture.json + capture/.
+# stdin: tar with FractalMacGallery and renders/capture.json; stdout: tar with capture.json + capture/.
 # The gallery binary embeds its own build identity, recorded as each manifest's `trayRev`.
 host_capture() {
   exists || die "no $vm VM on $(hostname -s): run capture-vm.sh provision first"
@@ -166,7 +166,7 @@ host_capture() {
   guest 'rm -rf ~/gallery && mkdir ~/gallery && tar -x -C ~/gallery -f -'
   log "capturing on macOS $(guest 'sw_vers -productVersion') ($vm on $(hostname -s))"
   # Nobody uses the guest's screen: consent is implied and there is no idle wait.
-  guest "cd ~/gallery && ./TrayGallery renders --capture --consent --away 0 $(printf '%q ' "$@")" >&2
+  guest "cd ~/gallery && ./FractalMacGallery renders --capture --consent --away 0 $(printf '%q ' "$@")" >&2
   guest 'cd ~/gallery/renders && tar -c -f - capture.json capture'
 }
 
@@ -180,20 +180,20 @@ fi
 # Local side: builds the gallery and drives the host.
 
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
-renders="$root/flakes/attention-tray/design/renders"
+renders="$root/apps/macos/Fractal/design/renders"
 
 on_host() {
   if [[ $host == local ]]; then
     mkdir -p "$HOME/$state_dir"
     cp "${BASH_SOURCE[0]}" "$HOME/$state_dir/capture-vm.sh"
-    ATTENTION_TRAY_CAPTURE_VM=$vm bash "$HOME/$state_dir/capture-vm.sh" host "$@"
+    FRACTAL_MAC_CAPTURE_VM=$vm bash "$HOME/$state_dir/capture-vm.sh" host "$@"
   else
     # shellcheck disable=SC2029 # expands on the host
     ssh -o BatchMode=yes "$host" "mkdir -p $state_dir && cat >$state_dir/capture-vm.sh" <"${BASH_SOURCE[0]}"
     # shellcheck disable=SC2029
     ssh -o BatchMode=yes "$host" \
-      "$(printf '%q=%q ' ATTENTION_TRAY_CAPTURE_VM "$vm" ATTENTION_TRAY_CAPTURE_KEEP "${ATTENTION_TRAY_CAPTURE_KEEP:-}" \
-        ATTENTION_TRAY_CAPTURE_IMAGE "${ATTENTION_TRAY_CAPTURE_IMAGE:-}")bash $state_dir/capture-vm.sh host $(printf '%q ' "$@")"
+      "$(printf '%q=%q ' FRACTAL_MAC_CAPTURE_VM "$vm" FRACTAL_MAC_CAPTURE_KEEP "${FRACTAL_MAC_CAPTURE_KEEP:-}" \
+        FRACTAL_MAC_CAPTURE_IMAGE "${FRACTAL_MAC_CAPTURE_IMAGE:-}")bash $state_dir/capture-vm.sh host $(printf '%q ' "$@")"
   fi
 }
 
@@ -203,11 +203,11 @@ case $command in
   provision) on_host provision ;;
   stop) on_host stop ;;
   capture)
-    gallery=$(nix build --no-link --print-out-paths "$root/flakes/attention-tray#gallery")
+    gallery=$(nix build --no-link --print-out-paths "$root#fractal-mac-gallery")
     stage=$(mktemp -d)
     trap 'rm -rf "$stage"' EXIT
     mkdir -p "$stage/seed/renders" "$stage/out"
-    cp "$gallery/bin/attention-tray-gallery" "$stage/seed/TrayGallery"
+    cp "$gallery/bin/fractal-mac-gallery" "$stage/seed/FractalMacGallery"
     # The gallery merges into the manifest it finds: a --only run keeps every other entry.
     [[ -f $renders/capture.json ]] && cp "$renders/capture.json" "$stage/seed/renders/"
     tar -c -f - -C "$stage/seed" . | on_host capture "$@" | tar -x -f - -C "$stage/out"

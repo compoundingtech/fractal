@@ -1,4 +1,4 @@
-# Attention tray
+# Fractal for Mac
 
 A native macOS 14+ SwiftUI menu-bar client for one person's Fractal: the
 attention inbox, the person's availability and directive note, and the
@@ -134,7 +134,7 @@ collection, but `FractalClient` has no typed attention or availability stream.
   words. A member without the read (an empty 404, which the client reports as
   `unsupported-capability`) shows "History unavailable on this Fractal version"
   instead of a failure, and is asked again hourly. A design-review build
-  (`ATTENTION_TRAY_HISTORY_PREVIEW=1`) draws a sample week there instead, badged
+  (`FRACTAL_MAC_HISTORY_PREVIEW=1`) draws a sample week there instead, badged
   "Preview data" above the chart, in the header and on the tile, until the member
   serves the person's own history.
 - **Presence** (`POST v1/client/presence`): this Mac reports its raw state
@@ -150,7 +150,7 @@ collection, but `FractalClient` has no typed attention or availability stream.
   once; keyboard-only returns show within a minute. A failed report is retried
   after a minute, never while asleep. Reports and failures are logged once per
   change.
-- **Speech** (with `ATTENTION_SPEECH_SOCKET`): the tray decides what it asks the
+- **Speech** (with `FRACTAL_SPEECH_SOCKET`): the tray decides what it asks the
   local speech service (`flakes/speech-service`, wire v2) to say; the service
   decides how, and holds the person's controls (mute, calls, Stop) for every
   caller, this tray and the person's `speak` alike.
@@ -208,148 +208,86 @@ queued`, `speaking`, then `spoken`, `skipped`, `held (…)` or the service's
   identity, refresh and Settings…; launch and each change of refresh outcome are
   logged to stderr.
 - Settings holds Show in Menu Bar (`MenuBarExtra(isInserted:)`) and Quit. With
-  the item hidden the tray keeps running; opening AttentionTray again brings it
+  the item hidden the tray keeps running; opening Fractal again brings it
   back.
 
 ## Packaging and configuration
 
-`nix build ./flakes/attention-tray#attention-tray` produces an unsigned
-`Applications/AttentionTray.app` for `aarch64-darwin`, using Apple's host Swift
-SDK. SwiftPM consumes the exact locked Fractal Swift client via
-`FRACTAL_CLIENT_PATH`; builds use two Swift jobs. The standalone flake pins the
-Fractal revision carrying the availability API (`availabilityList`,
-`availabilitySet`, `presenceReport`, `notesSet`); the root tray input follows the
-root Fractal source, so the deployed tray uses the client of the daemon it talks
-to, and builds only once that source carries the same API.
+From the repository root, `nix build .#fractal-mac` produces the unsigned
+`Applications/Fractal.app` for `aarch64-darwin`, using Apple's host Swift SDK
+and two Swift jobs. Its bundle identifier is `tech.compounding.fractal.mac`;
+the executable is `Fractal.app/Contents/MacOS/Fractal`.
 
-The tray carries the canonical build identity (effect-utils
-`context/builds/01-identity`) through the shared Swift reader
-`flakes/swift-shared/build-identity`. The Nix build compiles exactly the
-`flakes/attention-tray` closure in `nix/buck2-products/source-paths.json` (its
-Swift package and the shared reader) and embeds that closure's NixStamp: `rev`
-and `commitTs` name the commit that produced it
-(`nix/buck2-products/product-revs/flakes/attention-tray.json`), so unrelated
-repository commits, docs and design renders neither rebuild nor restart the
-tray. `baseVersion` in `Sources/TrayViews/Build.swift` is the one version
-literal (also `CFBundleShortVersionString`). Fractal sees the tray as
-`attention-tray <machineVersion>`.
+The SwiftPM dependency is the repository-local
+`clients/swift/FractalClient` package. App and generated client therefore
+change atomically; there is no external client pin or `FRACTAL_CLIENT_PATH`.
+Run native checks on a Mac with:
 
-The footer follows the identity spec's UI modality, refreshed each minute:
+```sh
+cd apps/macos/Fractal
+/usr/bin/swift build
+/usr/bin/swift test
+```
 
-- Every source kind abbreviates to the base version and the shared Swift
-  `BuildIdentity.short(now:)` form (seven revision characters, `*` iff dirty,
-  compact commit age): `0.2.0 · 883b657 · 2h`.
-- A stamped source run or dev build adds a compact `local` marker:
-  `0.2.0 · d7a78ae* · 2h · local`. The age always describes the commit, never
-  process uptime; a missing revision or commit timestamp is shown as `n/a`.
-- Its hover lists `displayVersion`, `machineVersion` (`0.2.0+2c3b5d77c917`,
-  `0.2.0+local.d7a78aea1b`), the absolute commit time (and a dev build's start
-  time) and the FractalClient revision (`FractalClientRevision` in
-  `Info.plist`).
+The package has five modules: `FractalMacCore` (model and projections),
+`FractalMacUI` (views and template resources), `FractalMac` (live adapters and
+app lifecycle), `FractalMacGallery` (fixture renderer), and
+`FractalMacCoreTests`. The app product is named `Fractal`.
 
-A build that does not run `flake.nix` (the dev channel, `swift run`) leaves the
-`__CLI_BUILD_STAMP__` placeholder in `Build.swift` and must pass a LocalStamp in
-the tray process's `CLI_BUILD_STAMP` environment variable (effect-utils
-`cliBuildStamp`'s shape, timestamps in Unix seconds):
-`{"type":"local","rev":"<git rev-parse --short HEAD>","ts":<start>,"commitTs":<git log -1 --format=%ct HEAD>,"dirty":<false|true>}`.
-Without it the footer shows `0.2.0 · n/a · n/a`; the shared reader classifies
-this as a package identity because source provenance is unknown.
-`Contents/Resources/nix-build-stamp.json` is no longer read.
+The canonical build identity is decoded by the shared Swift reader in
+`apps/macos/shared/build-identity`. Nix embeds the stamp from
+`nix/build-stamp.nix`; `rev`, `fullRev` and `commitTs` identify the same
+repository revision as `FractalClientRevision` in `Info.plist`.
+`baseVersion` in `Sources/FractalMacUI/Build.swift` owns the version literal,
+also used for `CFBundleShortVersionString`. The member sees
+`fractal-mac <machineVersion>` as the client name.
 
-For a source review install, capture the built HEAD and its
-`git log -1 --format=%ct HEAD` together; use that revision's real timestamp,
-not the install time, for `commitTs`. Set `ts` to the install time and `dirty`
-from `git status --porcelain -- flakes/attention-tray` in the built checkout.
-Do not reuse an earlier review's stamp or append a feature label to its revision.
+The footer refreshes each minute. It shows the base version, seven revision
+characters, `*` if dirty, and compact commit age:
+`0.2.0 · 883b657 · 2h`. Source builds add `local`; hover reveals the full
+machine version, absolute commit time and client revision.
 
-Run tests with `nix develop ./flakes/attention-tray -c /usr/bin/swift test`.
-The compiler-free shell avoids nixpkgs' xcrun stub; explicit `/usr/bin/swift`
-uses Apple's host toolchain, consistent with the package build.
+For a source run, set `CLI_BUILD_STAMP` to the canonical LocalStamp:
+`{"type":"local","rev":"<git short HEAD>","ts":<start>,"commitTs":<HEAD commit time>,"dirty":false}`.
+Use the exact built revision and its real commit timestamp, never the install
+time. An unstamped source build shows `n/a` rather than fabricated provenance.
 
-Standalone launches require three explicit environment variables:
-`ATTENTION_FRACTAL_SOCKET` (absolute path of this Mac's Fractal member socket),
-`ATTENTION_FRACTAL_PERSON` (`person/<id>`) and `ATTENTION_FRACTAL_URL`. There
-are no defaults and no Boss fallbacks. The tray talks to the member over its
-owner-only Unix socket as that person (local person trust, as `fractal note set`
-does): no endpoint, bearer, pairing or gateway, and so no App Transport Security
-exception. The application loads no keychain, 1Password item or device profile.
-`ATTENTION_SPEECH_SOCKET` (optional, absolute) turns speech on.
-`ATTENTION_TRAY_HISTORY_PREVIEW=1` (review builds only) draws the labelled sample
-history where the member has no history read.
-`ATTENTION_TRAY_SNAPSHOT=<png>` refreshes once, renders the open panel to that
-file and exits.
-Snapshot mode starts no presence reporter, so its speech gate stays quiet.
+Standalone launches require `FRACTAL_SOCKET` (an absolute member socket path),
+`FRACTAL_PERSON` (`person/<id>`) and `FRACTAL_URL` (an HTTP(S) origin).
+No defaults or legacy environment aliases are accepted. The app uses the
+owner-only local person socket without a bearer, pairing or device profile.
+`FRACTAL_SPEECH_SOCKET` optionally enables the local speech client.
+`FRACTAL_MAC_HISTORY_PREVIEW=1` enables labelled sample history only where the
+member does not support history. `FRACTAL_MAC_SNAPSHOT=<png>` renders one
+refreshed panel and exits without starting the presence reporter.
 
-On mbp2025, `services.attentionTray.enable = true` with
-`services.attentionTray.person = "person/schickling"` imports the Home Manager
-module. Its activation bundle installs `~/Applications/AttentionTray.app`, signs
-it ad-hoc, registers it with Launch Services and converges the GUI launch agent
-`com.schickling.attention.tray`. `KeepAlive.PathState` on the member socket
-`<services.smalltalk.stateDir>/run/fractal.sock` runs it while the member runs;
-`RunAtLoad` is absent, so the agent is inert while the member is down, including
-across unrelated Home Manager activations. Missing web prerequisites fail with a
-clear wrapper log under `ThrottleInterval = 60`, not a tight loop. There is no
-separate Login Items or SMAppService enrollment. Changed payloads restart once
-while the member runs; unchanged activation does not restart the process.
+Home Manager installation, launchd, signing, Permissions Host and speech
+service configuration belong to dotfiles, not this package. Its
+`services.fractalMac` module consumes a pinned Fractal package, installs
+`~/Applications/Fractal.app` and owns `tech.compounding.fractal.mac`.
+The speech host must authorize the installed executable path in the same
+activation as an app identity change. Rebuilding this unsigned package does
+not itself install, sign, authorize or launch it.
 
-`services.attentionTray.speechSocket` (default null) makes the wrapper export
-`ATTENTION_SPEECH_SOCKET`. Point it at the speech service's socket only where that
-service admits `~/Applications/AttentionTray.app/Contents/MacOS/AttentionTray` as
-its one caller; any other executable, including a development build, is closed
-unanswered and logged as `speech service unreachable`. On mbp2025 it follows
-`services.speechService.socketPath` whenever `services.speechService.enable` is
-set, whose `authorizedCaller` is that installed executable.
+The app requests Notifications on its first speech-enabled launch, with no
+Screen Recording, Accessibility, Microphone, Camera, AppleEvents or Developer
+Tools permission. Notification authorization is bundle-id keyed; the rename
+from AttentionTray requires one new consent. The installer signs the bundle
+so notifications can bind its `Info.plist`.
+`FRACTAL_MAC_NOTIFICATION_CHECK=1` exercises a fixture notification locally,
+logs the result and exits after a minute without sending data to the member
+or speech service. Focus may suppress banners while Notification Center still
+receives the notification.
 
-Activation verification checks only installed build/configuration facts
-(signature and registered launchd job). The member socket and web availability
-are checked by both the launcher and the separate `attention-tray-readiness`
-command, never by the Home Manager activation. The module asserts that the
-rendered XML has `PathState` and no `RunAtLoad`.
-This matches [launchd.plist(5)](https://www.manpagez.com/man/5/launchd.plist/osx-10.11.6.php):
-`PathState = true` keeps the job alive while the path exists; unlike
-`SuccessfulExit`, it does not imply `RunAtLoad`. The shared activation helper
-installs the rendered plist directly; neither nix-darwin nor HM adds a launch
-condition. Filesystem notifications can be lossy: if the member starting does
-not start the tray, inspect the resolved domain and kickstart only this job.
-
-The wrapper requires the member socket to be a socket owned by the user and not
-a symlink; the member creates it owner-only, which is the whole trust boundary.
-The tray acts as the configured person and holds no credential, so there is
-nothing to pair, rotate or revoke. It reads `v1/client/capabilities` and shows a
-read-only note instead of answer controls unless `work.done` is granted.
-
-The Fractal URL has one source of truth: the configured local Fractal daemon's
-`<services.smalltalk.stateDir>/web-launch-url`. This is the same private
-rendezvous consumed by `fractal web`; the wrapper retains only the HTTP origin,
-not its one-use login token, and requires the file to be owned, not a symlink
-and owner-only (`0400` or `0600`). Missing runtime prerequisites do not block
-activation: an explicit launcher/readiness diagnostic identifies them.
-
-The tray asks for one permission, Notifications (`UNUserNotificationCenter`,
-alerts only), on its first launch with a speech service; it needs no Screen
-Recording, Accessibility, Microphone, Camera, AppleEvents or Developer Tools
-permission and no entitlements (call detection and the Stop hotkey are the
-speech service's). Notifications need the bundle signature to bind
-`Info.plist`: Home Manager's ad-hoc bundle signing of
-`~/Applications/AttentionTray.app` does, the store bundle's linker-only
-signature does not (`UNErrorDomain` 1, no prompt). The permission is keyed by
-bundle identifier and stays granted when a rebuild changes the cdhash. No
-keychain unlock or op-proxy panel is needed for this tray installation.
-
-`ATTENTION_TRAY_NOTIFICATION_CHECK=1` verifies notifications: the tray asks for
-the permission, logs the result, shows one fixture notification through the
-real path (nothing is sent to Fractal or the speech service, clicked actions
-are logged) and exits after a minute. Focus suppresses banners; the
-notification still lands in Notification Center.
 
 ## Design gallery
 
-The panel's views live in the `TrayViews` target and read only `AttentionCore`
+The panel's views live in `FractalMacUI` and read only `FractalMacCore`
 and the build identity.
-`TrayGallery` drives the real `AttentionModel` through fixture scenarios (busy,
+`FractalMacGallery` drives the real `AttentionModel` through fixture scenarios (busy,
 answering, snooze and dismiss, quiet, read-only, degraded, unconfigured;
 speech: speaking, in a call, muted) for the design Storybook in `design/`, from
-the Nix-built gallery (`nix run ./flakes/attention-tray#gallery -- <dir> …`).
+the Nix-built gallery (`nix run .#fractal-mac-gallery -- <dir> …`).
 Every manifest's `trayRev` records the gallery build's `machineVersion`, and
 the footers show its build identity at render time. It needs a Mac with a login
 session and has these outputs:
@@ -359,9 +297,9 @@ a deterministic 520 pt scroll budget, not an uncapped page. Live panels instead
 use their own screen's available height. Their synthetic Fractal fixtures cover
 all tones, unmeasured producer objectives, daemon-health misses and a 37%-used
 weekly budget. Render just these on a Mac with:
-`swift run TrayGallery <out-dir> glance-quiet glance-busy`.
+`swift run FractalMacGallery <out-dir> glance-quiet glance-busy`.
 
-- `devenv tasks run attention-tray:gallery`: every scenario, light and dark,
+- `swift run FractalMacGallery design/renders`: every scenario, light and dark,
   as `@2x` PNGs, and the status item in every state, plus `manifest.json`,
   via the same `NSHostingView` + `cacheDisplay` path as snapshot mode.
   Window-server materials (the menu-bar window's Liquid Glass) are not in
@@ -369,30 +307,30 @@ weekly budget. Render just these on a Mac with:
   scenarios render its content model (`SpeechNoticeView`: text fields and
   actions), not macOS notification chrome, which only Notification Center
   draws. Committed.
-- `devenv tasks run attention-tray:gallery-capture`: real captures. The gallery
+- `swift run FractalMacGallery design/renders --capture --consent`: real captures. The gallery
   runs the actual `MenuBarExtra`, opens it under its status item and captures
   the region with ScreenCaptureKit over a fixed backdrop, other apps' menu-bar
   items masked: every scenario, and the status item in every state, into
   `renders/capture/` plus `capture.json`, committed when a run produces them
   (until then the Storybook shows the fallbacks). Captures show windows on the
   real screen, so they run only with the person's consent
-  (`ATTENTION_TRAY_CAPTURE_CONSENT=1`, `--consent`), wait until the Mac has had
+  (`--consent`), wait until the Mac has had
   no input for ten minutes (`--away <seconds>`), abort and write nothing on any
   input, and need Screen Recording for the terminal they run from (System
   Settings › Privacy & Security › Screen & System Audio Recording).
   `--only <text>` redoes the captures whose file name contains it.
-- `devenv tasks run attention-tray:gallery-capture-vm`: the same captures with
+- `bash scripts/capture-vm.sh capture`: the same captures with
   nobody's screen involved. `scripts/capture-vm.sh` builds the gallery here and
   runs `--capture` inside a headless macOS VM (tart, Virtualization.framework,
   paravirtualized GPU: Liquid Glass and materials render as on a Mac) on
-  `ATTENTION_TRAY_CAPTURE_HOST` (an SSH host, default `mbp2021`, or `local`),
+  `FRACTAL_MAC_CAPTURE_HOST` (an SSH host or `local`),
   then writes `renders/capture/` and `capture.json`; extra arguments go to
   `--capture` (`--only <text>`). The guest never draws a host window:
   tart runs with `--no-graphics` and `CI=1` (without them it opens Screen
   Sharing on the host's display). `capture-vm.sh provision` prepares a host
   once (a few minutes, plus a first pull of ~30 GB): it clones the macOS 27.0
   guest `ghcr.io/cirruslabs/macos-golden-gate-vanilla:27.0`, which needs a host
-  on macOS 26.6.2 or later (`ATTENTION_TRAY_CAPTURE_IMAGE` names another tart
+  on macOS 26.6.2 or later (`FRACTAL_MAC_CAPTURE_IMAGE` names another tart
   image), refuses to cross the host's reclaim-disk floor (a guest takes about
   35 GB), installs an SSH key and grants Screen Recording to
   `sshd-keygen-wrapper` through the guest's System Settings over the VM's
@@ -400,87 +338,6 @@ weekly budget. Render just these on a Mac with:
   programmatically. The guest's macOS is the captures' macOS: `capture.json`
   records it.
 
-## mbp2025 rollout: root agent and Johannes only
-
-Preparation is not permission to deploy. The root agent obtains Johannes's
-approval and uses the intended reviewed revision. Person-valued commands run
-only in Johannes's idle `as-schickling` PTYs, never in an agent's bound shell:
-use `pty root --json` (`.nativeDefault.path`), `pty --root ROOT list --json`,
-peek first and send only to an idle shell.
-
-### 1. Johannes's browser session
-
-The root agent sends `fractal web` through the idle mbp2025 `as-schickling` PTY.
-It opens an authenticated local browser session and writes the protected
-`web-launch-url` rendezvous. Do not print, paste or cache that file. If it
-reports missing assets/person configuration, repair the existing daemon
-installation; do not start a second daemon or invent an origin.
-
-### 2. Root agent deploys after Johannes approves
-
-From the intended dotfiles checkout on mbp2025:
-
-```sh
-nix run .#mbp2025-substrate-deploy -- -m "Attention tray over the local Fractal member socket"
-```
-
-This is the AGENTS.md entrypoint, not `home-manager switch` or
-`darwin-rebuild`. Do not sit at an interactive sudo prompt. The member socket
-and the web rendezvous are runtime prerequisites, not activation prerequisites;
-the agent stays idle while the member is down.
-
-### 3. Root agent verifies; Johannes checks the UI
-
-On mbp2025 in the active GUI session:
-
-```sh
-nix run .#nix.activations.aarch64-darwin.mbp2025.attention-tray.verify
-codesign --verify --deep --strict "$HOME/Applications/AttentionTray.app"
-launchctl print "gui/$(id -u)/com.schickling.attention.tray"
-attention-tray-readiness
-```
-
-The shared domain resolver selects `gui/<uid>` when Aqua exists, else
-`user/<uid>`; use that same resolved domain for inspection outside a GUI
-session. Readiness validates the member socket, the web rendezvous and a live
-launchd PID; expect no repeated nonzero exits. Logs are
-`~/.local/state/attention-tray/{stdout,stderr}.log`. The stderr log has one
-line per change of refresh outcome, for example
-`attention ok (3 asks, 1 updates); slo ok (28 rows, 7 need attention)`; a
-refusal appears there verbatim.
-
-Johannes opens the menu-bar icon and checks that configuration is valid,
-freshness is current (not stale), current pending asks appear and objectives
-match `fractal slo` on mbp2025: member-measured objectives describe this
-member. Compare with Fractal's authenticated attention view, respecting the
-tray's supported-answer filter and full pagination. Wait at least one 30-second
-interval and observe refresh. Answering is proven on an ask raised for the
-purpose (for example `fractal work ask` from an agent seat), never on a real
-one: the card shows Sending, then committed, and leaves on the next read; the
-asking agent sees the answer. Open in Fractal must open `/w/<agent>` for its
-conversation/requester and the authenticated page must load.
-
-### 4. Root agent retires the gateway transport's paired device
-
-Only after step 3 passed: the tray's earlier dev5-gateway transport used a
-paired device whose bearer is in
-`~/.config/attention-tray/fractal/fractal-devices.json` on mbp2025. Revoke it
-on dev5, the member that paired it, by its nonsecret device ID (recorded in
-`CREDENTIALS.md`), through the idle dev5 `as-schickling` PTY:
-
-```sh
-fractal devices --as person/schickling revoke device/DEVICE_ID --reason "Attention tray moved to the local member socket"
-```
-
-Then, through the idle mbp2025 `as-schickling` PTY:
-
-```sh
-rm -r "$HOME/.config/attention-tray/fractal"
-rmdir "$HOME/.config/attention-tray" 2>/dev/null || true
-```
-
-Never print the profile. Report only the revoke result and that the directory
-is gone.
 
 ## Scroll and refresh performance Mac gate
 
@@ -500,24 +357,24 @@ the observed ~288 MB footprint was dominated by ~258 MB of owned unmapped graphi
 not JSON decoding or resident malloc growth. Changes to the displayed state still redraw
 the same template image, including its accessibility label.
 
-Run from the repository root on an authorized Mac, with the compatible FractalClient
-package supplied by the development shell (record its exact SHA):
+Run from `apps/macos/Fractal` on an authorized Mac; the Swift client is
+the package in the same checkout:
 
 ```sh
-nix develop ./flakes/attention-tray -c bash flakes/attention-tray/scripts/validate-scroll-mac.sh check
-# Attach to an already-running, muted tray; do not launch another copy:
-bash flakes/attention-tray/scripts/validate-scroll-mac.sh trace "$TRAY_PID"
-bash flakes/attention-tray/scripts/validate-scroll-mac.sh memory "$TRAY_PID"
+bash scripts/validate-scroll-mac.sh check
+# Attach only to an already-running, muted app with authorization:
+bash scripts/validate-scroll-mac.sh trace "$FRACTAL_PID"
+bash scripts/validate-scroll-mac.sh memory "$FRACTAL_PID"
 ```
 
 The `check` mode builds both products, runs Swift tests and invokes the offscreen
-`TrayGallery <out-dir> --scroll-probe`. The probe fails unless the bottom is reachable
+`FractalMacGallery <out-dir> --scroll-probe`. The probe fails unless the bottom is reachable
 at 300/400 pt with inline/pinned answers, and 20 identical full refreshes preserve the
 scroll view/offset without any context, excerpt or attachment writes. It never orders
 a window front and does **not** measure actual screen presentation or 120 Hz behavior.
 
-For navigation, build first (`swift build -c release` with the approved
-`FRACTAL_CLIENT_PATH`), then run `.build/release/TrayGallery <out-dir> --navigation-probe`.
+For navigation, build first (`/usr/bin/swift build -c release`), then run
+`.build/release/FractalMacGallery <out-dir> --navigation-probe`.
 It also never orders a window front, and records `navigation-probe.json` (phase,
 window, content, viewport, offset) at 300/400/1578 pt. It fails unless Back restores the
 same native scroll view and offset on the inbox and the top level, a re-opened page gets a
@@ -530,14 +387,40 @@ The script lists the interaction procedure and strict pass thresholds: every dri
 and back first frame <100 ms; at 120 Hz, 8.333 ms/frame with zero drops/hitches.
 `NavigationFirstFrame` signposts measure first AppKit draw submission; the reviewer must
 also correlate actual presentation in Instruments. Missing data is not a passing result.
-`memory` captures `footprint -p "$TRAY_PID"` and `vmmap -summary "$TRAY_PID"` at roughly
+`memory` captures `footprint -p "$FRACTAL_PID"` and `vmmap -summary "$FRACTAL_PID"` at roughly
 one-second cadence for three minutes. Inspect category totals, not RSS alone: owned
 unmapped graphics can dominate a transient footprint spike. For a periodic-refresh
 regression check, also sample at ten-second cadence for at least six minutes and record
 the process peak so short spikes between samples are not missed.
 
-Release build, Swift tests and all four offscreen scroll probes passed on macOS for the
-menu-bar refresh fix. Screen presentation/120 Hz behavior was not remeasured: the panel
-and its navigation paths are unchanged. The V4 base's flake client may fail on
-`AvailabilityRule.word`; use and record the compatible client revision rather than
-treating a mismatched dependency build as a tray result.
+## Brand assets
+
+Regenerate committed icons and template PDFs on macOS with
+`swift scripts/generate-icons.swift`. The generator uses AppKit and `iconutil`;
+the SVG sources are the authority, not the generated binary assets.
+
+`Resources/AppIcon/fractal-app-macos.svg` is Johannes's selected final Fractal
+mark (I2 Ink Light · D1 · Closest, 2026-11-16) on Apple's macOS icon grid: an
+824 px squircle at offset 100 on the 1024 px canvas, with a drop shadow (10 px
+down, σ 10, 30 % black). It renders the 64 px and larger slots of
+`Resources/AppIcon.icns`. The small-size masters `fractal-app-macos-32.svg`
+(16 pt @2x and 32 pt @1x) and `fractal-app-macos-16.svg` (16 pt @1x) change only
+the mark stroke: 0.13372 and 0.18299 mark units, against the large master's
+0.07038 (1.9× and 2.6×). NSImage's SVG decoder ignores filters, so the generator
+draws the master's declared `feDropShadow` with Core Graphics.
+
+`Resources/MenuBar/*.svg` supplies the template PDFs in
+`Sources/FractalMacUI/Resources/MenuBar`. The owner's picks are I1 (idle:
+1.25 pt outline with the count), Z1 (zero: the idle glyph with no count, so no
+separate asset), U3 (urgent: filled badge dot at the top right), O2 (offline:
+hollow ring at the top right, last count kept), and N2 (unconfigured: `!` badge,
+a filled disc with a transparent `!` cut-out, no count). All states share the
+18.67×16 pt artwork, which reserves the badge area so the count never shifts.
+It is centered in a 19×16 pt PDF page because NSPDFImageRep rounds fractional
+page sizes up. Masks become even-odd clips, so every cut-out is transparent.
+The label code draws the unread dot: 4 pt across, 2 pt after the count (3 pt
+after the glyph when the count is hidden), vertically centered in the 22 pt
+item, and never with unconfigured. Menu-bar rendering keeps the template-image
+and equatable boundary; assets decode only once and freshness-only polls do not
+trigger another image render.
+
