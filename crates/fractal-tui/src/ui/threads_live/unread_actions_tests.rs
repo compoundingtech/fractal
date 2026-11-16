@@ -382,7 +382,7 @@ async fn unread_v2_peer_requires_upgrade_without_querying_new_thread_endpoints()
             caps["api_version"] = serde_json::json!(fractal_client::API_VERSION);
             caps["value"]["capabilities"] = serde_json::json!([
                 {"id":"collections","version":1,"state":"granted"},
-                {"id":"threads-v1","version":2,"state":"granted"},
+                {"id":"threads-v1","version":3,"state":"granted"},
                 {"id":"thread-summary-feed","version":1,"state":"granted"}
             ]);
             axum::Json(caps)

@@ -956,6 +956,11 @@ mod tests {
         state.store.configure_thread_write_rollout([]);
         let (status, ready) = get_capabilities(&state, LOCAL_PERSON_HEADER, person).await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            ready["value"]["capabilities"].as_array().unwrap().iter()
+                .find(|capability| capability["id"] == "threads-v1").unwrap()["version"],
+            3,
+        );
         for id in ["threads-v1", "thread-summary-feed", "thread.mark-unread", "thread.clear-unread", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen"] {
             assert_eq!(grant(&ready, id), "granted", "{id}");
         }

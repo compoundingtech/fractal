@@ -500,7 +500,7 @@ mod access_tests {
         let mut caps = capabilities(false);
         caps.capabilities = vec![fractal_client::Capability {
             id: "threads-v1".into(),
-            version: 2,
+            version: 3,
             state: fractal_client::CapabilityState::Granted,
         }];
         assert_eq!(access(&caps, false), ThreadAccess::default());
