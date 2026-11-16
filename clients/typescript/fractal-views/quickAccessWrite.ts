@@ -16,15 +16,18 @@ const code = (error: unknown): unknown => typeof error === 'object' && error !==
 
 /** Only an explicit guarantee releases the original request. Unknown takes precedence over
  * stale/rate-limited shorthand, and a replay-unsafe outcome never permits a fresh identity. */
-export const quickAccessNotApplied = (error: unknown): boolean => appliedAnswer(error) !== 'unknown'
-  && details(error)?.applied !== 'unknown' && (details(error)?.replay_unsafe === undefined || details(error)?.replay_unsafe === false) && notApplied(error)
+const unsafe = (error: unknown): boolean => appliedAnswer(error) === 'unknown' || details(error)?.applied === 'unknown'
+  || (details(error)?.replay_unsafe !== undefined && details(error)?.replay_unsafe !== false)
+export const quickAccessNotApplied = (error: unknown): boolean => !unsafe(error) && notApplied(error)
 
 /** One in-memory compound edit, bound to the original gateway and immutable request bodies.
- * Reads never settle it. Only an identical explicit check can recover a missing receipt. */
+ * Reads never settle ambiguous writes. A definite create race may adopt the exact live identity. */
 export class QuickAccessWrite {
   stage: 'create' | 'membership'
   unconfirmed = false
   refused = false
+  private adopting = false
+  get needsAdoption(): boolean { return this.adopting }
   private readonly create: Create | undefined
   private readonly membership: Membership
   constructor(private readonly gateway: Gateway, selection: { owner: string; subject: string },
@@ -35,23 +38,30 @@ export class QuickAccessWrite {
     this.stage = this.create === undefined ? 'membership' : 'create'
   }
   async send(): Promise<void> {
-    let checking = this.unconfirmed
+    let checking = this.unconfirmed && !this.adopting
     this.refused = false
     try {
       if (this.stage === 'create') {
-        try {
-          const created = await this.gateway.arrangementEdit(this.create!)
-          if (created.value.status !== 'completed' || created.value.action_id !== this.create!.id) throw new TypeError('Quick access creation is not confirmed')
-        } catch (error) {
-          if (checking || code(error) !== 'arrangement-exists' || !quickAccessNotApplied(error)) {
-            this.refused = !checking && quickAccessNotApplied(error)
-            throw error
+        if (!this.adopting) {
+          try {
+            const created = await this.gateway.arrangementEdit(this.create!)
+            if (created.value.status !== 'completed' || created.value.action_id !== this.create!.id) throw new TypeError('Quick access creation is not confirmed')
+          } catch (error) {
+            // This canonical first-attempt refusal precedes the write. It has no applied field.
+            if (checking || code(error) !== 'arrangement-exists' || unsafe(error)) {
+              this.refused = !checking && quickAccessNotApplied(error)
+              throw error
+            }
+            this.adopting = true
           }
-          // Another device created the reserved collection. Adopt only that same live v2 identity.
+        }
+        if (this.adopting) {
+          // A failed read retains validation, not an ambiguous CREATE. Explicit checks only GET.
           const { owner, subject } = this.membership.parameters
           const existing = (await this.gateway.arrangementsGet(owner.slice('person/'.length), subject.slice(subject.lastIndexOf('/') + 1))).value
-          if (existing.id !== subject || existing.owner !== owner || existing.deleted || existing.body.version !== 2)
+          if (existing.id !== subject || existing.owner !== owner || existing.deleted !== false || existing.body.version !== 2)
             throw new TypeError('The reserved Quick access collection cannot be adopted')
+          this.adopting = false
         }
         this.stage = 'membership'
         this.unconfirmed = false

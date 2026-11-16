@@ -137,8 +137,12 @@ collection produces a refusal without an edit.
 `quickAccessWrite.ts` is the internal delivery engine for one immutable compound
 edit. It retains the original gateway, request bodies, identities and fences in
 memory after an unconfirmed response. An explicit identical check is required;
-reads never settle delivery. Only a matching completed action receipt settles a
-replayed stage. The shared follow below owns its read lifecycle and explicit delivery checks.
+reads never settle ambiguous writes. Only a matching completed action receipt
+settles a replayed stage. A first-attempt canonical `arrangement-exists` refusal
+starts adoption of the exact live owner/v2 identity. A failed adoption read retains
+validation; explicit recovery repeats only GET, then sends the original membership.
+Unknown or replay-unsafe errors never start adoption. The shared follow below owns its read lifecycle and explicit delivery checks.
+
 
 `followQuickAccess` follows the exact reserved root Pins arrangement and all
 membership pages. Whole-container invalidation includes changes outside the first

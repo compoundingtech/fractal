@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Only a completed receipt settles a repeated check. A replay refusal cannot prove the original attempt unapplied. Recovery state is in-memory only and is lost when the follow closes or the process exits; this does not provide a durable outbox."
+    "detail": "Only a completed receipt settles a repeated check. A replay refusal cannot prove the original attempt unapplied. Recovery state is in-memory only and is lost when the follow closes or the process exits; this does not provide a durable outbox. A first-attempt canonical create-race refusal validates the reserved live owner/v2 identity; failed validation retains an explicit GET-only recovery step without repeating CREATE. Ambiguous or replay-unsafe errors cannot adopt."
   }
 }
