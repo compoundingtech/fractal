@@ -39,7 +39,7 @@ async fn collection_http_empty_terminal_and_one_unrelated_commit() {
     assert_eq!(status, StatusCode::OK);
     let before = state.store.index().unwrap();
     state.store.append_claim(&ClaimInput {
-        subject:"custom/http-unrelated".into(), kind:"custom.http.unrelated".into(),
+        subject:"custom/http/unrelated".into(), kind:"custom.http.unrelated".into(),
         actor:None, fields:BTreeMap::new(), evidence:vec![],
         expected_subject:None, idempotency_key:None,
     }).unwrap();
