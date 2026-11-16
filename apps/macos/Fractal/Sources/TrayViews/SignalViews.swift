@@ -90,7 +90,7 @@ private struct SignalSparkline: View {
       buckets: history.buckets.map { bucket in
         bucket.remainingPercent.map { [.init(value: min(max($0, 0), 100), color: tint)] } ?? []
       },
-      maximum: 100)
+      maximum: 100, minimumBarHeight: 1)
     .frame(width: 36, height: 12)
     .accessibilityHidden(true)
   }
