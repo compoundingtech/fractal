@@ -2873,7 +2873,8 @@ pub struct ScheduledMessageView {
     pub from: String,
     pub to: String,
     pub at: String,
-    pub at_unix_ms: u128,
+    /// Persisted UTC milliseconds, bounded to SQLite's nonnegative signed 64-bit range.
+    pub at_unix_ms: u64,
     pub key: String,
     pub state: String,
     pub content: String,
@@ -2892,6 +2893,37 @@ pub struct ScheduledMessageView {
 pub enum MessageSendResponse {
     Scheduled { scheduled: Box<ScheduledMessageView> },
     Sent(Box<MessageSendReceipt>),
+}
+
+#[cfg(test)]
+mod message_send_response_tests {
+    use super::{MessageSendResponse, ScheduledMessageView};
+
+    #[test]
+    fn scheduled_response_round_trips_through_the_native_untagged_envelope() {
+        let scheduled = ScheduledMessageView {
+            id: "message-schedule/example".into(),
+            from: "agent/example/sender".into(),
+            to: "agent/example/recipient".into(),
+            at: "2100-01-02T03:04:05Z".into(),
+            at_unix_ms: 4_102_542_245_000,
+            key: "example-timed-send".into(),
+            state: "pending".into(),
+            content: "A future message.".into(),
+            owner: None,
+            message_id: None,
+            blocker: None,
+            cancel_reason: None,
+        };
+        let encoded = serde_json::to_string(&MessageSendResponse::Scheduled {
+            scheduled: Box::new(scheduled.clone()),
+        }).unwrap();
+        let decoded = serde_json::from_str::<MessageSendResponse>(&encoded).unwrap();
+        let MessageSendResponse::Scheduled { scheduled: decoded } = decoded else {
+            panic!("scheduled response decoded as an immediate receipt");
+        };
+        assert_eq!(*decoded, scheduled);
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

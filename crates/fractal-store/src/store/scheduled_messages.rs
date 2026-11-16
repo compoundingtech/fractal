@@ -180,7 +180,8 @@ fn view(connection: &Connection, request: &ClaimRecord, origin: &str) -> Result<
     let at_unix_ms = due(request)?;
     Ok(ScheduledMessageView {
         id: request.subject.clone(), from: field(request,"from")?.into(), to: field(request,"to")?.into(),
-        at: crate::external_sessions::timestamp(at_unix_ms), at_unix_ms,
+        at: crate::external_sessions::timestamp(at_unix_ms),
+        at_unix_ms: u64::try_from(at_unix_ms).context("scheduled timestamp exceeds persisted range")?,
         key: field(request,"key")?.into(), state: state.into(), blocker,
         content: request.body["fields"]["message"]["content"].as_str().unwrap_or("").to_owned(),
         owner: notice_authority::owner(connection).ok().map(|(owner,_)| owner.member),
