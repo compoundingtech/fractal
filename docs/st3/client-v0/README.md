@@ -941,6 +941,12 @@ documented filters. The server clamps `limit` to `capabilities.limits.max_page_i
 sort after present values, strings compare as Unicode scalar sequences, and the final key is always
 the stable `id` ascending. No locale-sensitive ordering is permitted.
 
+The owner-wide unread-reminder list, `GET /v1/client/threads?marked_unread=true`,
+uses bounded candidate pages. A page can return `items: []` with a non-null
+`next_cursor`; this does **not** mean the collection is empty. Continue with the
+same selector and each returned cursor until `next_cursor` is null before
+presenting an empty collection.
+
 | Resource | List and detail routes | Deterministic list order |
 |---|---|---|
 | Attention (alerts) | `/attention`, `/attention/{id}`; also `/alerts`, `/alerts/{id}` | priority descending, requested time ascending, ID |
