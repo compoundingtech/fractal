@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Remove the legacy missions publish and agents apply commands; publish KDL with fractal apply",
+  "replay": { "status": "none", "detail": "Historical publications retain their existing representation and replay behavior." },
+  "schema": { "status": "none", "detail": "No database or KDL schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "changed", "detail": "The CLI no longer accepts missions publish or agents apply. The canonical apply command and owned-set publication are unchanged." },
+  "downtime": { "status": "none", "detail": "No service restart or interruption is required." },
+  "manual": { "status": "changed", "detail": "Replace missions publish FILE with fractal apply FILE using the same options; replace agents apply FILE with fractal apply FILE --no-gate-check." },
+  "recovery": { "status": "none", "detail": "No durable-state mutation or new recovery procedure." }
+}

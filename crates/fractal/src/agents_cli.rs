@@ -306,39 +306,6 @@ pub(super) async fn run_agents(
             println!("{}", response.value.workspace);
             Ok(())
         }
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-        AgentsCommand::Apply(args) => {
-            crate::stderr_message("st", format_args!("agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"));
-            let client = cli_client(endpoint);
-            if !args.dry_run {
-                let (kdl, source_name) = read_intent(Some(&args.file))?;
-                let response = publish_text(
-                    &client,
-                    kdl,
-                    source_name.unwrap_or_else(|| "standard input".into()),
-                    args.actor,
-                )
-                .await?;
-                return print_value(&response, json_output);
-            }
-            publish_mission_file(
-                &client,
-                MissionPublishArgs {
-                    file: args.file,
-                    dry_run: true,
-                    at_index: None,
-                    actor: args.actor,
-                    workspace: PathBuf::from("."),
-                    no_gate_check: true,
-                    check: false,
-                    inputs: vec![],
-                    force_reason: None,
-                },
-                json_output,
-            )
-            .await
-        }
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
         AgentsCommand::Start(args) => {
             let client = cli_client(endpoint);
             let (subject, tokens, existing, mission) =
@@ -1525,9 +1492,6 @@ async fn run_agent_inspection(
         | AgentsCommand::Lane { .. }
         | AgentsCommand::Handoff { .. }
         | AgentsCommand::Repos { .. }
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-        | AgentsCommand::Apply(_)
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
         | AgentsCommand::Start(_)
         | AgentsCommand::Stop(_)
         | AgentsCommand::Retire(_)

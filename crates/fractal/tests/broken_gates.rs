@@ -271,23 +271,11 @@ mission "example/preview" state="ready" {
     for (prefix, flag) in [
         (vec!["apply"], "--dry-run"),
         (vec!["apply"], "--preview"),
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-        (vec!["agents", "apply"], "--dry-run"),
-        (vec!["missions", "publish"], "--dry-run"),
-        (vec!["missions", "publish"], "--preview"),
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
     ] {
         let mut args = prefix.clone();
         args.extend([file, "--as", PUBLISHER, flag]);
         let output = daemon.run_cli(&args);
         assert!(output.status.success(), "{output:?}");
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            stderr.contains("is legacy; use fractal apply FILE"),
-            prefix.len() == 2
-        );
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
         let preview = daemon.command(&args);
         let resolved = preview["resolved_intent"]["kdl"].as_str().unwrap();
         let intent = fractal_daemon::graph::parse_intent(resolved, "orchid").unwrap();
@@ -393,10 +381,6 @@ fn mission_publish_dry_run_prints_blockers_before_refusing_publication() {
     .unwrap();
     for prefix in [
         vec!["apply"],
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
-        vec!["agents", "apply"],
-        vec!["missions", "publish"],
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
     ] {
         let mut args = prefix;
         args.extend([file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run"]);
@@ -1504,7 +1488,6 @@ mission "orchid/round-output" state="ready" {
 
     for args in [
         vec!["apply", "--help"],
-        vec!["missions", "publish", "--help"],
         vec!["missions", "check", "--help"],
     ] {
         let help = daemon.run_cli_format(&args, false);
