@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "GitHub watch authentication failures identify the failed resolution step and remedy; doctor probes the same credential resolution read-only without displaying tokens (schickling/dotfiles#9558).",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persistent schema changes." },
+  "rules": { "status": "none", "detail": "No coordinated upgrade required." },
+  "compatibility": { "status": "none", "detail": "Existing watch error codes and doctor JSON shape are unchanged; unresolved GitHub authentication now reports fail instead of warn." },
+  "downtime": { "status": "none", "detail": "No additional startup work." },
+  "manual": { "status": "none", "detail": "No configuration changes required; diagnostics explain account login-shell authentication remedies." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

@@ -23,6 +23,60 @@ pub mod app_read;
 
 pub const GITHUB_AUTH_REMEDY: &str = "GitHub observers have no token; run `gh auth login` as the daemon account or export GH_TOKEN/GITHUB_TOKEN in that account's login-shell startup files. Check the daemon PATH with `st doctor`. No anonymous request was sent; failed or rejected credentials are checked again after a 30-second refresh backoff. HTTP requests are never retried.";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubAuthStep {
+    TokenAbsent,
+    GhNotFound,
+    GhFailed,
+    EmptyToken,
+    SnapshotUnavailable,
+    SnapshotStale,
+}
+
+impl GithubAuthStep {
+    pub const fn step(self) -> &'static str {
+        match self {
+            Self::TokenAbsent => "GH_TOKEN absent (GITHUB_TOKEN absent too)",
+            Self::GhNotFound => "gh binary not found on snapshot PATH",
+            Self::GhFailed => "gh auth token",
+            Self::EmptyToken => "empty token",
+            Self::SnapshotUnavailable => "login-shell snapshot unavailable",
+            Self::SnapshotStale => "login-shell snapshot stale",
+        }
+    }
+}
+
+/// Only safe metadata is retained: neither command output nor snapshot errors
+/// may enter an error chain, Debug output, a log, or an HTTP response.
+#[derive(Clone, Debug)]
+pub struct GithubAuthError {
+    pub step: GithubAuthStep,
+    detail: String,
+    exported_absent: bool,
+}
+
+impl GithubAuthError {
+    pub fn new(step: GithubAuthStep) -> Self {
+        Self { step, detail: String::new(), exported_absent: false }
+    }
+
+    pub const fn step(&self) -> &'static str {
+        self.step.step()
+    }
+}
+
+impl std::fmt::Display for GithubAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GitHub authentication failed at {}{}", self.step(), self.detail)?;
+        if self.exported_absent {
+            write!(f, "; {}", GithubAuthStep::TokenAbsent.step())?;
+        }
+        write!(f, ". Remedy: run `gh auth login` as the daemon account, or export GH_TOKEN in its login-shell startup files; ensure `gh` is on that shell's PATH. For an unavailable or stale snapshot, repair shell startup and retry after the 60-second refresh; inspect `fractal doctor`.")
+    }
+}
+
+impl std::error::Error for GithubAuthError {}
+
 tokio::task_local! {
     /// The observer whose observation sends the GitHub requests in this task.
     static GITHUB_SPENDER: String;
@@ -81,6 +135,7 @@ impl GithubAuth {
 struct TokenState {
     token: Option<Arc<String>>,
     retry_at: Option<Instant>,
+    failure: Option<GithubAuthError>,
     file_version: Option<FileVersion>,
     default_version: Option<DefaultVersion>,
 }
@@ -210,6 +265,9 @@ impl TokenCache {
             });
         }
         if state.retry_at.is_some_and(|at| at > Instant::now()) {
+            if let Some(error) = &state.failure {
+                return Err(error.clone().into());
+            }
             bail!("GitHub credential refresh is backing off; try the next poll");
         }
         // Cancellation releases the acquisition lock without suppressing the next lookup.
@@ -218,11 +276,13 @@ impl TokenCache {
             Ok(token) => Arc::new(token),
             Err(error) => {
                 state.retry_at = Some(Instant::now() + AUTH_REFRESH_BACKOFF);
+                state.failure = error.downcast_ref::<GithubAuthError>().cloned();
                 return Err(error);
             }
         };
         state.token = Some(token.clone());
         state.retry_at = None;
+        state.failure = None;
         Ok(GithubAuth::Local {
             token,
             cache: Some(self.clone()),
@@ -377,15 +437,25 @@ where
     cache
         .acquire_default(lookup)
         .await
-        .context(GITHUB_AUTH_REMEDY)
 }
 
 pub async fn github_auth() -> Result<GithubAuth> {
     let config = configured_source(&SOURCE)?;
     auth_for_config(config.clone(), token_cache(), || async {
-        tokio::task::spawn_blocking(|| crate::task_cpu::blocking("github.auth", crate::environment::snapshot)).await?
+        tokio::task::spawn_blocking(|| crate::task_cpu::blocking("github.auth", crate::environment::github_snapshot)).await?
+            .map_err(anyhow::Error::new)
     })
     .await
+}
+
+/// Read-only resolution with a private cache: doctor neither trusts a cached
+/// token nor changes observers' refresh/backoff state. No GitHub request is sent.
+pub async fn diagnose_github_auth() -> Result<GithubAuth> {
+    let config = configured_source(&SOURCE)?;
+    auth_for_config(config.clone(), &Arc::new(TokenCache::default()), || async {
+        tokio::task::spawn_blocking(|| crate::task_cpu::blocking("github.auth", crate::environment::github_snapshot)).await?
+            .map_err(anyhow::Error::new)
+    }).await
 }
 
 fn configured_source(
@@ -397,25 +467,55 @@ fn configured_source(
 }
 
 pub async fn lookup_github_token(environment: &BTreeMap<String, String>) -> Result<String> {
-    if let Some(token) = ["GH_TOKEN", "GITHUB_TOKEN"]
-        .into_iter()
+    resolve_github_token(environment, |environment| async move {
+        let mut command = tokio::process::Command::from(
+            crate::environment::command_in("gh", environment)
+                .map_err(|_| GithubAuthError::new(GithubAuthStep::GhNotFound))?,
+        );
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            command.args(["auth", "token"]).kill_on_drop(true).output(),
+        ).await
+            .map_err(|_| GithubAuthError::new(GithubAuthStep::GhFailed))?
+            .map_err(|_| GithubAuthError::new(GithubAuthStep::GhFailed))
+    }).await.map_err(anyhow::Error::new)
+}
+
+async fn resolve_github_token<'a, F, Fut>(
+    environment: &'a BTreeMap<String, String>, run: F,
+) -> std::result::Result<String, GithubAuthError>
+where
+    F: FnOnce(&'a BTreeMap<String, String>) -> Fut,
+    Fut: Future<Output = std::result::Result<std::process::Output, GithubAuthError>>,
+{
+    if let Some(token) = ["GH_TOKEN", "GITHUB_TOKEN"].into_iter()
         .filter_map(|name| environment.get(name))
         .find(|value| !value.trim().is_empty())
     {
         return Ok(token.clone());
     }
-    let mut command =
-        tokio::process::Command::from(crate::environment::command_in("gh", environment)?);
-    let output = tokio::time::timeout(
-        Duration::from_secs(10),
-        command.args(["auth", "token"]).kill_on_drop(true).output(),
-    )
-    .await
-    .context("GitHub credential lookup timed out")??;
-    anyhow::ensure!(output.status.success(), "gh auth token failed");
-    let token = String::from_utf8(output.stdout).context("gh returned a non-UTF-8 token")?;
+    let output = run(environment).await.map_err(|mut error| {
+        error.exported_absent = true;
+        error
+    })?;
+    let failure = |step, detail| GithubAuthError { step, detail, exported_absent: true };
+    if !output.status.success() {
+        // Arbitrary helpers can echo credentials in any format, including unprefixed
+        // tokens. Redact the ENTIRE stderr rather than guessing token spellings.
+        // Only bounded metadata survives; stdout is never diagnostic material.
+        return Err(failure(GithubAuthStep::GhFailed, format!(
+            " exited non-zero (status {}); stderr: [redacted, {} bytes{}]",
+            output.status.code().map_or_else(|| "signal".into(), |code| code.to_string()),
+            output.stderr.len().min(512),
+            if output.stderr.len() > 512 { ", truncated" } else { "" },
+        )));
+    }
+    let token = String::from_utf8(output.stdout)
+        .map_err(|_| failure(GithubAuthStep::GhFailed, " returned non-UTF-8 output".into()))?;
     let token = token.trim();
-    anyhow::ensure!(!token.is_empty(), "gh returned an empty token");
+    if token.is_empty() {
+        return Err(failure(GithubAuthStep::EmptyToken, String::new()));
+    }
     Ok(token.to_owned())
 }
 
@@ -790,6 +890,71 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn auth_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt as _;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 256 }),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_diagnostic_names_missing_export_and_binary() {
+        let error = resolve_github_token(&BTreeMap::new(), |_| async {
+            Err(GithubAuthError::new(GithubAuthStep::GhNotFound))
+        }).await.unwrap_err();
+        assert_eq!(error.step, GithubAuthStep::GhNotFound);
+        assert!(error.to_string().contains("GH_TOKEN absent"));
+        assert!(error.to_string().contains("snapshot PATH"));
+        assert!(error.to_string().contains("Remedy:"));
+        assert_eq!(GithubAuthError::new(GithubAuthStep::TokenAbsent).step(), "GH_TOKEN absent (GITHUB_TOKEN absent too)");
+    }
+
+    #[tokio::test]
+    async fn auth_diagnostic_redacts_nonzero_stderr_and_stdout() {
+        let secret = "ghp_FICTIONAL_SECRET_NEVER_DISPLAY_123456";
+        let stderr = format!("authentication failed: {secret} {}", "x".repeat(2048));
+        let error = resolve_github_token(&BTreeMap::new(), |_| async {
+            Ok(auth_output(false, secret.as_bytes(), stderr.as_bytes()))
+        }).await.unwrap_err();
+        assert_eq!(error.step, GithubAuthStep::GhFailed);
+        let rendered = format!("{error}; {error:?}");
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("exited non-zero"));
+        assert!(rendered.contains("redacted, 512 bytes, truncated"));
+        assert!(rendered.len() < 1500);
+    }
+
+    #[tokio::test]
+    async fn auth_diagnostic_names_empty_token() {
+        let error = resolve_github_token(&BTreeMap::new(), |_| async {
+            Ok(auth_output(true, b" \n", b""))
+        }).await.unwrap_err();
+        assert_eq!(error.step, GithubAuthStep::EmptyToken);
+        assert!(error.to_string().contains("empty token"));
+    }
+
+    #[tokio::test]
+    async fn auth_diagnostic_export_bypasses_gh_without_disclosing_token() {
+        let environment = BTreeMap::from([("GH_TOKEN".into(), "fictional-exported-token".into())]);
+        let token = resolve_github_token(&environment, |_| async {
+            panic!("exported token must bypass gh")
+        }).await.unwrap();
+        assert_eq!(token, "fictional-exported-token");
+    }
+
+    #[tokio::test]
+    async fn auth_diagnostic_survives_refresh_backoff() {
+        let cache = Arc::new(TokenCache::default());
+        let first = cache.acquire(|| async {
+            Err(GithubAuthError::new(GithubAuthStep::GhNotFound).into())
+        }).await.err().unwrap();
+        let next = cache.acquire(|| async { panic!("backoff must not resolve again") }).await.err().unwrap();
+        assert_eq!(first.to_string(), next.to_string());
+        assert!(next.downcast_ref::<GithubAuthError>().is_some());
+    }
 
     #[test]
     fn budget_header_samples_preserve_graphql_point_units() {

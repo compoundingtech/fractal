@@ -225,6 +225,47 @@ pub fn snapshot() -> Result<Environment> {
         )
 }
 
+/// Authentication must never silently use an expired login-shell snapshot.
+pub fn github_snapshot() -> Result<Environment, crate::github_http::GithubAuthError> {
+    use crate::github_http::{GithubAuthError, GithubAuthStep};
+    let mut cache = cache().lock()
+        .map_err(|_| GithubAuthError::new(GithubAuthStep::SnapshotUnavailable))?;
+    let environment = cache.get(|| capture_within(Duration::from_secs(10)))
+        .map_err(|_| GithubAuthError::new(GithubAuthStep::SnapshotUnavailable))?;
+    validate_github_snapshot_age(cache.captured.as_ref().map(|(at, _)| at.elapsed()))?;
+    Ok(environment)
+}
+
+fn validate_github_snapshot_age(age: Option<Duration>) -> Result<(), crate::github_http::GithubAuthError> {
+    use crate::github_http::{GithubAuthError, GithubAuthStep};
+    match age {
+        None => Err(GithubAuthError::new(GithubAuthStep::SnapshotUnavailable)),
+        Some(age) if age >= REFRESH_INTERVAL => Err(GithubAuthError::new(GithubAuthStep::SnapshotStale)),
+        Some(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod github_snapshot_tests {
+    use super::*;
+    use crate::github_http::GithubAuthStep;
+
+    #[test]
+    fn auth_diagnostic_snapshot_unavailable() {
+        let error = validate_github_snapshot_age(None).unwrap_err();
+        assert_eq!(error.step, GithubAuthStep::SnapshotUnavailable);
+        assert!(error.to_string().contains("login-shell snapshot unavailable"));
+    }
+
+    #[test]
+    fn auth_diagnostic_snapshot_stale() {
+        let error = validate_github_snapshot_age(Some(REFRESH_INTERVAL)).unwrap_err();
+        assert_eq!(error.step, GithubAuthStep::SnapshotStale);
+        assert!(error.to_string().contains("login-shell snapshot stale"));
+        assert!(validate_github_snapshot_age(Some(Duration::ZERO)).is_ok());
+    }
+}
+
 /// The captured environment without waiting on a login shell: the last capture, refreshed in
 /// the background once it is older than the refresh interval, or `None` while a capture runs and
 /// nothing has been captured. For reads that must answer at once, such as a diagnostic (#5209).
