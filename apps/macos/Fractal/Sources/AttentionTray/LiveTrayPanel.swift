@@ -1,3 +1,4 @@
+import AppKit
 import AttentionCore
 import BuildIdentity
 import SwiftUI
@@ -9,11 +10,13 @@ struct LiveTrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
   @State private var lastSize = CGSize(width: 360, height: 280)
+  @State private var availableHeight = max(0, (NSScreen.main?.visibleFrame.height ?? 600) - 12)
 
   var body: some View {
     Group {
       if model.isPanelVisible {
         TrayPanel(model: model, build: build)
+          .environment(\.panelAvailableHeight, availableHeight)
           .background {
             GeometryReader { geometry in
               Color.clear
@@ -25,6 +28,6 @@ struct LiveTrayPanel: View {
         Color.clear.frame(width: lastSize.width, height: lastSize.height)
       }
     }
-    .background(PanelVisibility(model: model))
+    .background(PanelVisibility(model: model, availableHeight: $availableHeight))
   }
 }

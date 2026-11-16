@@ -11,13 +11,14 @@ struct AttentionPage: View {
   private var answersHere: Bool { record.role == .ask(.native) && model.canAnswer }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
+    PanelPage {
       PageHeader(title: RecordSymbol.kind(record), model: model) {
         Link(destination: record.url) { Label("Open in Fractal", systemImage: "arrow.up.forward.app") }
           .labelStyle(.iconOnly)
           .buttonStyle(.borderless)
           .help("Open in Fractal: \(record.url.absoluteString)")
       }
+    } content: {
       PanelScroll {
         VStack(alignment: .leading, spacing: 14) {
           Heading(record: record, model: model)
@@ -28,6 +29,7 @@ struct AttentionPage: View {
         .padding(.horizontal, PanelMetrics.inset)
         .padding(.vertical, 8)
       }
+    } footer: {
       if answersHere {
         Divider().padding(.horizontal, PanelMetrics.inset)
         actions

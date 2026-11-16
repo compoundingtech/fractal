@@ -148,7 +148,7 @@ for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
     guard
       let png = await PanelSnapshot.png(
         model: model, build: GalleryBuild.identity, appearance: appearance.value,
-        scrollHeight: scenario.id.hasPrefix("glance-") ? PanelSnapshot.liveScrollHeight : .infinity),
+        scrollHeight: scenario.id.hasPrefix("glance-") ? PanelSnapshot.compactScrollHeight : .infinity),
       let bitmap = NSBitmapImageRep(data: png)
     else { fail("could not render \(scenario.id) \(appearance.name)", code: 1) }
     let file = "\(scenario.id)-\(appearance.name).png"
@@ -158,7 +158,7 @@ for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
     print("rendered \(file) \(bitmap.pixelsWide)×\(bitmap.pixelsHigh)")
   }
 }
-// The open design questions, at the live panel's scroll limit so the fold shows.
+// The open design questions, at a deterministic compact-screen limit so the fold shows.
 for entry in variantScenarios where wanted.isEmpty || wanted.contains(entry.scenario.id) {
   let scenario = entry.scenario
   manifest.scenarios.append(.init(id: scenario.id, title: scenario.title, description: scenario.description))
@@ -167,7 +167,7 @@ for entry in variantScenarios where wanted.isEmpty || wanted.contains(entry.scen
     guard
       let png = await PanelSnapshot.png(
         model: model, build: GalleryBuild.identity, appearance: appearance.value, variant: entry.variant,
-        scrollHeight: PanelSnapshot.liveScrollHeight),
+        scrollHeight: PanelSnapshot.compactScrollHeight),
       let bitmap = NSBitmapImageRep(data: png)
     else { fail("could not render \(scenario.id) \(appearance.name)", code: 1) }
     let file = "\(scenario.id)-\(appearance.name).png"
@@ -180,7 +180,7 @@ for entry in variantScenarios where wanted.isEmpty || wanted.contains(entry.scen
 // Space: every panel scenario's height as shown (scroll-capped) and uncapped.
 for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
   var points: [Int] = []
-  for limit in [PanelSnapshot.liveScrollHeight, .infinity] {
+  for limit in [PanelSnapshot.compactScrollHeight, .infinity] {
     let model = await scenario.prepare(.now)
     guard
       let png = await PanelSnapshot.png(

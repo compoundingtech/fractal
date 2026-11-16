@@ -4,8 +4,8 @@ import XCTest
 
 @testable import TrayViews
 
-/// The footer's three forms: a Nix build's compact form, its hover, and a dev build's
-/// local-source prose (effect-utils `context/builds/01-identity/spec.md`).
+/// All source kinds use the shared compact form; local source runs retain a marker.
+/// The hover preserves the canonical versions (effect-utils build identity spec).
 final class BuildFooterTests: XCTestCase {
   // 2027-01-15 08:00:00 UTC.
   private let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -49,14 +49,12 @@ final class BuildFooterTests: XCTestCase {
       """)
   }
 
-  func testDevBuildFooterSaysItRunsFromLocalSource() {
+  func testDevBuildFooterIsCompactAndMarkedLocal() {
     let dev = devBuild()
     XCTAssertEqual(dev.sourceKind, .local)
+    XCTAssertEqual(dev.footerText(now: now), "0.2.0 · d7a78ae · 2h · local")
     XCTAssertEqual(
-      dev.footerText(now: now), "0.2.0 — running from local source (d7a78aea1b, committed 2 hours ago)")
-    XCTAssertEqual(
-      devBuild(dirty: true).footerText(now: now),
-      "0.2.0 — running from local source (d7a78aea1b, committed 2 hours ago, with uncommitted changes)")
+      devBuild(dirty: true).footerText(now: now), "0.2.0 · d7a78ae* · 2h · local")
     XCTAssertEqual(
       dev.hoverText(now: now, fractalClientRev: nil, timeZone: utc),
       """
@@ -69,11 +67,23 @@ final class BuildFooterTests: XCTestCase {
       """)
   }
 
-  func testUnstampedSourceRunShowsThePackageVersion() {
+  func testUnstampedSourceRunUsesTheSharedUnknownIdentityForm() {
     let identity = BuildIdentity.resolve(baseVersion: "0.2.0", buildStamp: "__CLI_BUILD_STAMP__", environment: [:])
-    XCTAssertEqual(identity.footerText(now: now), "0.2.0")
+    XCTAssertEqual(identity.sourceKind, .package)
+    XCTAssertEqual(identity.footerText(now: now), "0.2.0 · n/a · n/a")
     XCTAssertEqual(
       identity.hoverText(now: now, fractalClientRev: nil, timeZone: utc),
       "displayVersion: 0.2.0\nmachineVersion: 0.2.0\nFractalClient: unknown revision")
+  }
+
+  func testLocalCommitAgeNeverFallsBackToRunStartTime() {
+    let identity = BuildIdentity.resolve(
+      baseVersion: "0.2.0", buildStamp: "__CLI_BUILD_STAMP__",
+      environment: [
+        "CLI_BUILD_STAMP":
+          #"{"type":"local","rev":"883b657abcdef","ts":\#(Int(now.timeIntervalSince1970) - 300),"dirty":true}"#
+      ])
+    XCTAssertEqual(identity.footerText(now: now), "0.2.0 · 883b657* · n/a · local")
+    XCTAssertEqual(identity.machineVersion, "0.2.0+local.883b657abcdef.dirty")
   }
 }

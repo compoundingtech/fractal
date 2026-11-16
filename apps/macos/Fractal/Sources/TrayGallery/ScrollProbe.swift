@@ -53,7 +53,8 @@ import TrayViews
         model.open(.attention("attention/ship-tray"))
         await model.readOpenPage()
         let size = CGSize(width: 360, height: height)
-        let host = NSHostingView(rootView: TrayPanel(model: model, build: GalleryBuild.identity))
+        let host = NSHostingView(rootView: TrayPanel(model: model, build: GalleryBuild.identity)
+          .environment(\.panelAvailableHeight, height))
         host.sizingOptions = []
         let window = NSWindow(contentRect: CGRect(origin: CGPoint(x: -20000, y: -20000), size: size),
           styleMask: [.borderless], backing: .buffered, defer: false)
