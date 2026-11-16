@@ -133,3 +133,9 @@ with `null` meaning the end. The host supplies its canonical fractional-key
 function. Equal concurrent keys or an exhausted bounded gap can be rebalanced in
 one atomic edit while retaining the observed order. A missing anchor or invalid
 collection produces a refusal without an edit.
+
+`quickAccessWrite.ts` is the internal delivery engine for one immutable compound
+edit. It retains the original gateway, request bodies, identities and fences in
+memory after an unconfirmed response. An explicit identical check is required;
+reads never settle delivery. Only a matching completed action receipt settles a
+replayed stage. This commit adds no followed UI or public editing controller.
