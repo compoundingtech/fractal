@@ -1,9 +1,8 @@
-import { ClientError, type ActionResult, type EnvelopeOf } from '@fractal/client'
+import { actionReceiptCheck, ClientError, type ActionResult, type EnvelopeOf } from '@fractal/client'
 import * as Native from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { expect, it } from 'vitest'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
-import { actionReceiptCheck } from './unreadReceipt.ts'
 
 const envelope = Schema.encodeSync(Native.Envelope)(Native.decodeUnknownSync(Native.Envelope)(fixture.capabilities))
 const receipt = (affected_ids: string[]): EnvelopeOf<ActionResult> => {

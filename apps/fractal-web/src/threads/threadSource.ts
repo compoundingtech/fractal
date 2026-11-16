@@ -1,4 +1,4 @@
-import { sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
+import { actionReceiptCheck, sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import type { ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { FollowEvent, ThreadWindow } from '@fractal/sdk/read'
@@ -8,7 +8,6 @@ import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
 import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
-import { actionReceiptCheck } from './unreadReceipt.ts'
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
 
@@ -391,7 +390,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     kind: ThreadActionKind,
     target: () => string,
     prepare: (attempt: Attempt) => {
-      readonly expected: ActionReceiptExpectation | { readonly kind: 'unread'; readonly actionId: string; readonly targetId: string }
+      readonly expected: ActionReceiptExpectation
       readonly send: (request: Request) => ReturnType<FractalClient['threadReply']>
       readonly revisions?: Record<string, string>
     },
