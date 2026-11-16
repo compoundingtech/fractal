@@ -16,11 +16,12 @@ import SwiftUI
   /// whole pages. `variant` picks options of the open design questions.
   public static func png(
     model: AttentionModel, build: BuildIdentity, appearance: NSAppearance.Name, variant: PanelVariant = .shipped,
-    scrollHeight: CGFloat = .infinity
+    scrollHeight: CGFloat = .infinity, inboxActivityPeriod: InboxActivity.Period? = nil
   ) async -> Data? {
     await png(
       TrayPanel(model: model, build: build)
         .environment(\.panelScrollHeight, scrollHeight)
+        .environment(\.inboxActivityPeriod, inboxActivityPeriod)
         .panelVariant(variant),
       appearance: appearance)
   }
