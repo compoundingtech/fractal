@@ -23,6 +23,7 @@ impl Visit {
         self.captured = reminder.map_or_else(Vec::new, |reminder| reminder.marks.clone());
     }
 
+    #[cfg(test)]
     pub(super) fn leave(&mut self) {
         self.thread = None;
         self.captured.clear();

@@ -224,10 +224,9 @@ impl FrameInfo {
                 *final_rows |= 2;
             }
         }
-        messages.into_iter().filter_map(|(id, (geometry, count, final_rows, consistent))| {
-            (consistent && count > 0 && final_rows == if count == 1 { 1 } else { 3 })
-                .then(|| (id.to_owned(), geometry))
-        }).collect()
+        messages.into_iter().filter(|(_, (_, count, final_rows, consistent))| {
+            *consistent && *count > 0 && *final_rows == if *count == 1 { 1 } else { 3 }
+        }).map(|(id, (geometry, ..))| (id.to_owned(), geometry)).collect()
     }
 }
 

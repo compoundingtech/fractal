@@ -406,10 +406,10 @@ async fn unread_v2_peer_requires_upgrade_without_querying_new_thread_endpoints()
         vec![client], false, true, true, Some("person/fixture".into()), updates, requests));
     let (available, access, upgrade_required) = tokio::task::spawn_blocking(move || {
         loop {
-            match received.recv_timeout(std::time::Duration::from_secs(5)).unwrap() {
-                fractal_feed::Update::ThreadSupport { available, access, upgrade_required } =>
-                    break (available, access, upgrade_required),
-                _ => {}
+            if let fractal_feed::Update::ThreadSupport { available, access, upgrade_required } =
+                received.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+            {
+                break (available, access, upgrade_required);
             }
         }
     }).await.unwrap();
