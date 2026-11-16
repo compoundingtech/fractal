@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Stage read-only normal-update policy admission file checks without adding an active controller.",
+  "replay": {
+    "status": "none",
+    "detail": "No event replay behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No active database or policy format change; reuse the existing staged policy schema."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No active scheduler or permission boundary changes. Native decision authenticity remains outside the unused reader."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, server or wire behavior changes. No serving compatibility or physical acceptance is inferred."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service or device changes; no active caller, installation, launch or scheduler is added."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required for this inert source component. Any future activation requires its own reviewed exact policy."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No active recovery change. The reader cannot create, repair or append to the revocation file."
+  }
+}

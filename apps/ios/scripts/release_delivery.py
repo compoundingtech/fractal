@@ -10,6 +10,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -97,6 +98,64 @@ def revoked_policy_digests(contents):
         raise ValueError("Malformed update policy deny line")
     return frozenset(lines)
 
+
+
+# Inactive until the policy controller is wired. No environment/CLI trust override.
+POLICY_STORE = Path("/nix/store")
+POLICY_OWNER = 0
+POLICY_JOB = "dev.schickling.smalltalk-release-delivery"
+
+
+def read_policy_deny(path):
+    """Read only; creation, repair and append are governed Deployer effects."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as file:
+        info = os.fstat(file.fileno())
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.getuid() or info.st_size > 1024 * 1024):
+            raise ValueError("Update revocation file must be owned, regular and mode 0600")
+        raw = file.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("Update revocation file exceeds bounded size")
+    return revoked_policy_digests(raw.decode("ascii"))
+
+def read_policy(path, env):
+    path = path.resolve(strict=True)
+    info = path.stat()
+    if (not path.is_relative_to(POLICY_STORE) or not stat.S_ISREG(info.st_mode)
+            or info.st_mode & 0o222 or info.st_uid != POLICY_OWNER
+            or info.st_size > MAX_OBSERVER_BODY):
+        raise ValueError("Update policy must be a read-only Nix-store file")
+    with path.open("rb") as file:
+        envelope = observer_json(file.read(MAX_OBSERVER_BODY + 1))
+    policy = validate_update_policy(envelope, hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+    if len({str(Path(lane["state"]).resolve()) for lane in policy["lanes"]}) != 2:
+        raise ValueError("Update policy states resolve to the same directory")
+    if envelope["approval"]["sha256"] in read_policy_deny(policy["deny_file"]):
+        raise ValueError("Update policy has been permanently revoked")
+    # Read the LOADED job, not merely the file on disk. A disabled/removed job or
+    # a new active policy stops an old process at its next effect boundary.
+    loaded = run(["launchctl", "print", f"gui/{os.getuid()}/{POLICY_JOB}"],
+                 capture=True, env=env, timeout=10)
+    arguments, blocks, in_arguments, complete = [], 0, False, False
+    for line in loaded.splitlines():
+        if line.strip() == "arguments = {":
+            blocks += 1
+            if blocks != 1:
+                raise ValueError("Active updater job has multiple argument blocks")
+            in_arguments = True
+        elif in_arguments and line.strip() == "}":
+            in_arguments, complete = False, True
+        elif in_arguments:
+            arguments.append(line.strip())
+    if blocks != 1 or not complete:
+        raise ValueError("Active updater job has no complete argument block")
+    if arguments.count("--policy") != 1:
+        raise ValueError("Active updater job has no unique policy argument")
+    index = arguments.index("--policy")
+    if index + 1 >= len(arguments) or arguments[index + 1] != str(path):
+        raise ValueError("Update policy is not the active job policy")
+    return envelope
 
 def bundle_id(variant):
     return BUNDLE_ID + (".test" if variant == "test" else "")

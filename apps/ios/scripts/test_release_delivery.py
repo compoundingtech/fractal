@@ -6,6 +6,7 @@ No Apple tools, network access, or device are needed.
 
 import copy
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,8 @@ import tempfile
 import textwrap
 import time
 import unittest
+
+import release_delivery
 
 from release_delivery import (DAILY_BUILD_ENV, FABRIC_FRAMEWORK, build_environment,
                               bundle_id, framework_hash, ios_env, policy_digest, revoked_policy_digests,
@@ -2300,6 +2303,122 @@ class CompatibilityDataTests(unittest.TestCase):
             side = commit("side contract", "C")
             with self.assertRaises(ValueError):
                 newest_compatible_main(repo, main, [side], first)
+
+
+class PolicyAdmissionFileTests(unittest.TestCase):
+    """Real filesystem/process fixtures; never read the actual launchd job or devices."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.store = self.root / "store"
+        self.store.mkdir()
+        self.store = self.store.resolve()
+        self.deny = self.root / "revoked-policies"
+        self.deny.write_text("")
+        self.deny.chmod(0o600)
+        self.loaded = self.root / "loaded"
+        binary = self.root / "bin"
+        binary.mkdir()
+        tool = binary / "launchctl"
+        tool.write_text("#!" + sys.executable + "\nfrom pathlib import Path\nimport sys\n"
+                        + "sys.stdout.write(Path(" + repr(str(self.loaded)) + ").read_text())\n")
+        tool.chmod(0o755)
+        self.env = {"PATH": str(binary) + ":/usr/bin:/bin"}
+        old = release_delivery.POLICY_STORE, release_delivery.POLICY_OWNER
+        self.addCleanup(setattr, release_delivery, "POLICY_STORE", old[0])
+        self.addCleanup(setattr, release_delivery, "POLICY_OWNER", old[1])
+        release_delivery.POLICY_STORE, release_delivery.POLICY_OWNER = self.store, os.getuid()
+        fixture = UpdatePolicySchemaTests()
+        fixture.setUp()
+        self.policy = fixture.policy
+        self.policy.update(updater_sha256=hashlib.sha256(SCRIPT.read_bytes()).hexdigest(),
+                           deny_file=str(self.deny))
+        self.path = self.store / "policy.json"
+        self.activate()
+
+    def activate(self):
+        value = {"version": 1, "policy": self.policy,
+                 "approval": {"decision": "step-run/fixture/ask", "sha256": policy_digest(self.policy)}}
+        if self.path.exists():
+            self.path.chmod(0o600)
+        self.path.write_text(json.dumps(value))
+        self.path.chmod(0o444)
+        self.loaded.write_text("arguments = {\n fixed-launcher\n --policy\n " + str(self.path) + "\n}\n")
+        return value
+
+    def test_active_store_binding_and_global_revocation_are_rechecked(self):
+        value = self.activate()
+        self.assertEqual(release_delivery.read_policy(self.path, self.env), value)
+        self.deny.write_text(value["approval"]["sha256"] + "\n")
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, "permanently revoked"):
+                release_delivery.read_policy(self.path, self.env)
+        self.assertEqual(self.deny.read_text(), value["approval"]["sha256"] + "\n")
+        self.policy["policy_revision"] += 1
+        revised = self.activate()
+        self.assertEqual(release_delivery.read_policy(self.path, self.env), revised)
+        self.loaded.write_text("arguments = {\n fixed-launcher\n --policy\n /other-policy\n}\n")
+        with self.assertRaisesRegex(ValueError, "active job policy"):
+            release_delivery.read_policy(self.path, self.env)
+
+    def test_missing_bad_mode_malformed_and_symlink_deny_refuse_without_repair(self):
+        for fault in ("missing", "mode", "malformed", "symlink", "fifo"):
+            if self.deny.exists() or self.deny.is_symlink():
+                self.deny.unlink()
+            self.deny.write_text("")
+            self.deny.chmod(0o600)
+            if fault == "missing":
+                self.deny.unlink()
+            elif fault == "mode":
+                self.deny.chmod(0o644)
+            elif fault == "malformed":
+                self.deny.write_text("partial")
+            elif fault == "symlink":
+                self.deny.unlink()
+                self.deny.symlink_to(self.path)
+            else:
+                self.deny.unlink()
+                os.mkfifo(self.deny, 0o600)
+            with self.subTest(fault=fault), self.assertRaises((OSError, ValueError)):
+                release_delivery.read_policy(self.path, self.env)
+            if fault == "missing":
+                self.assertFalse(self.deny.exists())
+            elif fault == "malformed":
+                self.assertEqual(self.deny.read_text(), "partial")
+
+    def test_policy_size_and_complete_unique_argument_block_are_required(self):
+        for fault in ("oversized", "truncated", "duplicate"):
+            self.activate()
+            if fault == "oversized":
+                self.path.chmod(0o600)
+                self.path.write_bytes(b" " * (release_delivery.MAX_OBSERVER_BODY + 1))
+                self.path.chmod(0o444)
+            elif fault == "truncated":
+                self.loaded.write_text(self.loaded.read_text().rsplit("}", 1)[0])
+            else:
+                self.loaded.write_text(self.loaded.read_text() + "arguments = {\n unrelated\n}\n")
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                release_delivery.read_policy(self.path, self.env)
+
+    def test_writable_copy_wrong_owner_and_duplicate_active_policy_refuse(self):
+        self.path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            release_delivery.read_policy(self.path, self.env)
+        self.path.chmod(0o444)
+        outside = self.root / "copy"
+        outside.write_bytes(self.path.read_bytes())
+        outside.chmod(0o444)
+        with self.assertRaises(ValueError):
+            release_delivery.read_policy(outside, self.env)
+        release_delivery.POLICY_OWNER = os.getuid() + 1
+        with self.assertRaises(ValueError):
+            release_delivery.read_policy(self.path, self.env)
+        release_delivery.POLICY_OWNER = os.getuid()
+        self.loaded.write_text(self.loaded.read_text().replace(" --policy\n", " --policy\n --policy\n"))
+        with self.assertRaises(ValueError):
+            release_delivery.read_policy(self.path, self.env)
 
 
 if __name__ == "__main__":
