@@ -801,4 +801,31 @@ pub(crate) mod retained_discussion {
         assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
         assert_not_in_attention(&state);
     }
+
+    #[tokio::test]
+    async fn retained_discussion_unread_batch_preserves_frozen_threads_after_terminal_fallback() {
+        let (_root, state, origin) = fixture(true);
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        start(&state, &owner, request(&state, &origin,
+            "thread/unread-original", "unread-original")).await.unwrap();
+        retire_original_with_fallback(&state);
+        start(&state, &owner, fallback_request(&state, &origin,
+            "thread/unread-fallback", "unread-fallback")).await.unwrap();
+        let fallback = "agent/garden/fallback";
+        crate::store::thread_delivery::append_reply(&state.store, &ClaimInput {
+            subject:"message/unread-terminal-fallback".into(), kind:"message.sent".into(),
+            actor:Some(fallback.into()),
+            fields:serde_json::from_value(json!({
+                "from":fallback, "to":PERSON, "content":"The new participant replied.",
+                "thread_id":"thread/unread-fallback",
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("unread-terminal-fallback".into()),
+        }, thread_metadata::PersonAuthority::BoundAgent { actor:fallback }, None).unwrap();
+        let keys = [(SOURCE, origin.episode.as_str()), (SOURCE, "claim/never-opened-unread")];
+        assert_eq!(thread_metadata::unread_inbox_positions(&state.store, PERSON, &keys).unwrap(),
+            std::collections::BTreeSet::from([0]));
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/unread-original").unwrap().agent_id, AGENT);
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/unread-fallback").unwrap().agent_id, fallback);
+        assert_not_in_attention(&state);
+    }
 }
