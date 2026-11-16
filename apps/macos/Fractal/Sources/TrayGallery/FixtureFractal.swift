@@ -7,7 +7,7 @@ struct FixtureFailure: Error, CustomStringConvertible {
 
 /// Fractal as fixtures: every read answers from the scenario, and each ask's answer hangs
 /// (still sending), commits, or is refused, so the panel shows the model's real answer states.
-actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
+actor FixtureFractal: AttentionAdapter, AvailabilityAdapter, InboxActivityAdapter {
   enum Submit: Sendable {
     case commit
     case hang
@@ -27,13 +27,15 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   private let contexts: [String: AttentionContext]
   private let excerpts: [String: ConversationExcerpt]
   private let attachments: [String: Data]
+  private let activity: [InboxActivity.Period: InboxActivity]
   private var failure: String?
 
   init(
     page: AttentionPage, slo: SloSnapshot, histories: [String: [Double?]], availability: AvailabilitySnapshot,
     availabilityHistory: HistoryFixture = .unsupported, submits: [String: Submit] = [:],
     controls: [String: Submit] = [:], contexts: [String: AttentionContext] = [:],
-    excerpts: [String: ConversationExcerpt] = [:], attachments: [String: Data] = [:]
+    excerpts: [String: ConversationExcerpt] = [:], attachments: [String: Data] = [:],
+    activity: [InboxActivity.Period: InboxActivity] = [:]
   ) {
     self.page = page
     self.slo = slo
@@ -45,6 +47,7 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
     self.contexts = contexts
     self.excerpts = excerpts
     self.attachments = attachments
+    self.activity = activity
   }
 
   /// Every later read fails with this reason; the model keeps its last data, marked stale.
@@ -57,6 +60,11 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
 
   func readAttention() async throws -> AttentionPage { try serve(page) }
   func readSlo() async throws -> SloSnapshot { try serve(slo) }
+
+  func readInboxActivity(_ period: InboxActivity.Period, now: Date) async throws -> InboxActivity {
+    guard let value = activity[period] else { throw FixtureFailure(description: "No activity fixture") }
+    return try serve(value)
+  }
 
   func readSloHistory(_ request: SloHistoryRequest) async throws -> SloHistory {
     let steps = histories[request.id] ?? Array(repeating: nil, count: request.steps)

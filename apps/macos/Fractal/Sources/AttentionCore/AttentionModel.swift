@@ -68,6 +68,7 @@ public enum AnswerState: Sendable, Equatable {
   /// Each listed row's history by `SloEntry.id`, read after the rows it belongs to.
   public private(set) var sloHistory = LiveSection<[String: SloHistory]>()
   private var sloHistoryCache = SloHistoryCache()
+  public internal(set) var inboxActivity: [InboxActivity.Period: LiveSection<InboxActivity>] = [:]
   /// The person's availability and directive note.
   public internal(set) var availability = LiveSection<AvailabilitySnapshot>()
   /// The person's availability over the last four weeks, read with the refresh at most every
@@ -200,6 +201,9 @@ public enum AnswerState: Sendable, Equatable {
       await withTaskGroup(of: Void.self) { group in
         group.addTask { await self.readAttention(from: adapter, now: now) }
         group.addTask { await self.readSlo(from: adapter, now: now) }
+        if let activityAdapter = adapter as? any InboxActivityAdapter {
+          group.addTask { await self.readInboxActivity(from: activityAdapter, now: now ?? .now) }
+        }
         if let availabilityAdapter {
           group.addTask { await self.readAvailability(from: availabilityAdapter, now: now) }
           group.addTask { await self.readAvailabilityHistory(from: availabilityAdapter, now: now) }
