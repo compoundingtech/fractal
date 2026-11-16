@@ -16,6 +16,19 @@ public enum PanelRoute: Hashable, Sendable {
   case inbox
 }
 
+/// One page on the panel's navigation stack. Its ID is fresh for every push, so a page opened
+/// again starts anew, while a page still on the stack keeps its identity (and with it the view
+/// state the panel retains for it, such as its scroll position) until it is popped.
+public struct PanelNavigationEntry: Identifiable, Hashable, Sendable {
+  public let id: UUID
+  public let route: PanelRoute
+
+  public init(_ route: PanelRoute) {
+    id = UUID()
+    self.route = route
+  }
+}
+
 /// Everything a card's page shows beyond its row, read fresh when the page opens: the full
 /// request as the asker wrote it, the work it belongs to, and where its subjects stand.
 public struct AttentionContext: Sendable, Equatable {

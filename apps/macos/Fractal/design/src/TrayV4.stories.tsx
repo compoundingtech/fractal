@@ -113,7 +113,7 @@ const benchmarks: readonly {
   {
     what: 'Transition',
     native: 'undocumented; the panel resizes',
-    v4: 'push: pages enter from and leave to the trailing edge, critically damped 0.32 s; a cross-fade with Reduce Motion. VoiceOver moves to the page title, and back to the row or tile',
+    v4: 'push: the page left disappears at once as the panel takes the new height; the arriving page slides in from the trailing edge (Back: the leading edge), critically damped 0.32 s; a fade with Reduce Motion. Pages on the stack keep their scroll position. VoiceOver moves to the page title, and back to the row or tile',
   },
 ]
 

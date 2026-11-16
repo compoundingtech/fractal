@@ -88,6 +88,9 @@ extension EnvironmentValues {
 
 /// Reserve actual chrome heights before giving the remaining screen space to scrolling
 /// content. The same budget reaches Glance's inbox cap, so signals are never budgeted twice.
+/// The layout measures the chrome in the same pass it sizes the content, so a page is never
+/// taller than the screen allows, not even in its first pass before the measured heights reach
+/// the environment.
 struct PanelPage<Header: View, Content: View, Footer: View>: View {
   @Environment(\.panelAvailableHeight) private var availableHeight
   @Environment(\.panelScrollHeight) private var scrollHeight
@@ -98,16 +101,47 @@ struct PanelPage<Header: View, Content: View, Footer: View>: View {
   @ViewBuilder let footer: () -> Footer
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
+    PanelPageLayout(available: availableHeight, scrollHeight: scrollHeight) {
       VStack(alignment: .leading, spacing: 0, content: header)
         .fixedSize(horizontal: false, vertical: true)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
-      content()
+      VStack(alignment: .leading, spacing: 0, content: content)
         .environment(\.panelScrollHeight, min(scrollHeight, max(0, availableHeight - headerHeight - footerHeight)))
       VStack(alignment: .leading, spacing: 0, content: footer)
         .fixedSize(horizontal: false, vertical: true)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
     }
+  }
+}
+
+/// Header, content, footer, top to bottom. The content is proposed exactly the height left
+/// after the chrome's ideal heights; the window's own proposal (a menu-bar window proposes its
+/// previous height) never reaches it.
+private struct PanelPageLayout: Layout {
+  let available: CGFloat
+  let scrollHeight: CGFloat
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let sizes = stack(width: proposal.width, subviews)
+    return CGSize(
+      width: proposal.width ?? sizes.map(\.width).max() ?? 0, height: sizes.map(\.height).reduce(0, +))
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    var y = bounds.minY
+    for (subview, size) in zip(subviews, stack(width: bounds.width, subviews)) {
+      subview.place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(width: bounds.width, height: size.height))
+      y += size.height
+    }
+  }
+
+  private func stack(width: CGFloat?, _ subviews: Subviews) -> [CGSize] {
+    let ideal = ProposedViewSize(width: width, height: nil)
+    guard subviews.count == 3 else { return subviews.map { $0.sizeThatFits(ideal) } }
+    let header = subviews[0].sizeThatFits(ideal)
+    let footer = subviews[2].sizeThatFits(ideal)
+    let room = min(scrollHeight, max(0, available - header.height - footer.height))
+    return [header, subviews[1].sizeThatFits(ProposedViewSize(width: width, height: room)), footer]
   }
 }
 
@@ -120,6 +154,18 @@ extension EnvironmentValues {
   var pageTitle: String? {
     get { self[PageTitleKey.self] }
     set { self[PageTitleKey.self] = newValue }
+  }
+}
+
+private struct PanelPageIsActiveKey: EnvironmentKey {
+  static let defaultValue = true
+}
+
+extension EnvironmentValues {
+  /// Whether this page is the one shown; false while a pushed page covers it on the stack.
+  var panelPageIsActive: Bool {
+    get { self[PanelPageIsActiveKey.self] }
+    set { self[PanelPageIsActiveKey.self] = newValue }
   }
 }
 
@@ -146,8 +192,8 @@ struct PageHeader<Trailing: View>: View {
         .help("Back (Esc)")
         .accessibilityLabel("Back")
         Text(title).font(.headline).lineLimit(1).accessibilityAddTraits(.isHeader)
-          // A push lands VoiceOver on the page it opened.
-          .focusOnArrival(true)
+          // A push lands VoiceOver on the page it opened; Back lands on what opened the page left.
+          .focusOnArrival(model.backFrom == nil)
         Spacer(minLength: 8)
         trailing()
       }
@@ -166,8 +212,8 @@ extension PageHeader where Trailing == EmptyView {
   }
 }
 
-/// Pushes and backs. The transition is the panel's (`TrayPanel`): a slide, or with Reduce Motion
-/// a cross-fade.
+/// Pushes and backs. The swap is instant and only the arriving page moves (`TrayPanel`'s
+/// `PageArrival`): a slide, or with Reduce Motion a fade.
 @MainActor enum PanelMotion {
   static let duration = 0.32
   /// Critically damped: a push follows a click, not a flick, so it never overshoots.
@@ -176,28 +222,29 @@ extension PageHeader where Trailing == EmptyView {
   /// Pushes a page, then reads what it shows.
   static func open(_ route: PanelRoute, in model: AttentionModel) {
     PanelPerformance.begin()
-    withAnimation(push) { model.open(route) }
+    model.open(route)
     Task { await model.readOpenPage() }
   }
 
   static func back(in model: AttentionModel) {
     PanelPerformance.begin()
-    withAnimation(push) { model.back() }
+    model.back()
   }
 }
 
-/// Moves VoiceOver focus to this element when it arrives with a page change, once the push has
-/// settled: the route swap replaces the element VoiceOver was on, and focus set mid-transition
-/// is lost. Nothing happens unless an assistive technology is running.
+/// Moves VoiceOver focus to this element when its page is shown with `arrives` holding (a page
+/// pushed, or a covered page returned to by Back), once the arrival has settled: focus set
+/// mid-transition is lost. Nothing happens unless an assistive technology is running.
 private struct FocusOnArrival: ViewModifier {
   let arrives: Bool
+  @Environment(\.panelPageIsActive) private var isActive
   @AccessibilityFocusState private var focused: Bool
 
   func body(content: Content) -> some View {
     content
       .accessibilityFocused($focused)
-      .task {
-        guard arrives else { return }
+      .task(id: arrives && isActive) {
+        guard arrives && isActive else { return }
         do { try await Task.sleep(for: .seconds(PanelMotion.duration)) } catch { return }
         focused = true
       }
@@ -205,7 +252,7 @@ private struct FocusOnArrival: ViewModifier {
 }
 
 extension View {
-  /// VoiceOver focus lands here when the view appears with a page change and `arrives` holds.
+  /// VoiceOver focus lands here when its page is shown with a page change and `arrives` holds.
   func focusOnArrival(_ arrives: Bool) -> some View {
     modifier(FocusOnArrival(arrives: arrives))
   }

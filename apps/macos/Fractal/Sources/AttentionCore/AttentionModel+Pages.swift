@@ -15,22 +15,27 @@ extension AttentionModel {
   /// Attachments larger than this are left to Fractal web.
   public static let attachmentByteLimit = 8 << 20
 
-  /// Shows a page (callers animate it); the previous receipt is cleared, since the person moved
-  /// on. A page opened from another page (a card from the full inbox) remembers it, so Back
-  /// returns there. A card's page then needs `readOpenPage()`.
+  /// Shows a page (callers animate it). A page still on the stack (the top level always is) is
+  /// returned to as it was, popping the pages above it; any other page is pushed as a fresh
+  /// entry, so a page popped before starts anew. The shown page is no change. Otherwise the
+  /// previous receipt is cleared, since the person moved on. A card's page then needs
+  /// `readOpenPage()`.
   public func open(_ next: PanelRoute) {
-    pageParent = route == .home ? nil : route
-    route = next
+    guard next != route else { return }
+    if let live = navigationEntries.lastIndex(where: { $0.route == next }) {
+      navigationEntries.removeSubrange((live + 1)...)
+    } else {
+      navigationEntries.append(PanelNavigationEntry(next))
+    }
     receipt = nil
     backFrom = nil
   }
 
-  /// Back to the page that opened this one, else the top level (Back, Esc); either returns focus
-  /// to what opened the page.
+  /// Back to the page that opened this one (Back, Esc), which returns focus to what opened it.
+  /// Nothing at the top level.
   public func back() {
-    backFrom = route
-    route = pageParent ?? .home
-    pageParent = nil
+    guard navigationEntries.count > 1 else { return }
+    backFrom = navigationEntries.removeLast().route
   }
 
   /// Reads the open card's detail and its asker's conversation concurrently, each kept on

@@ -13,15 +13,14 @@ extension AttentionModel {
     return false
   }
 
-  /// The panel's window came on screen or left it. Leaving returns it to the top level, as
+  /// The panel's window came on screen or left it. Leaving pops every page to the top level, as
   /// Control Center reopens there (drafts stay); coming on screen marks the cards it holds and
   /// re-reads the open page, which refreshes skip while nobody sees it.
   public func setPanelVisible(_ visible: Bool) async {
     isPanelVisible = visible
     guard visible else {
-      if route != .home { route = .home }
+      if navigationEntries.count > 1 { navigationEntries = [navigationEntries[0]] }
       backFrom = nil
-      pageParent = nil
       return
     }
     for record in rowsInPanel.values { await markSeen(record) }

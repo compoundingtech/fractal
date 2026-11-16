@@ -136,6 +136,11 @@ if arguments == ["--scroll-probe"] {
   exit(0)
 }
 
+if arguments == ["--navigation-probe"] {
+  await NavigationProbe.run(out: out)
+  exit(0)
+}
+
 let wanted = Set(arguments)
 if let unknown = wanted.subtracting(panels.map(\.id) + variantScenarios.map(\.scenario.id) + noticeScenarios.map(\.id)).first {
   fail("unknown scenario \(unknown)", code: 2)

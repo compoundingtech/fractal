@@ -240,14 +240,16 @@ struct RecordSymbol: View {
 }
 
 /// Tells the model this card is on screen (per revision) and when it leaves; the model marks it
-/// seen only while the panel's window is on screen.
+/// seen only while the panel's window is on screen. A row on a page covered by a pushed page is
+/// out of sight: a new revision there waits until Back shows it.
 struct MarksSeen: ViewModifier {
   let record: AttentionRecord
   let model: AttentionModel
+  @Environment(\.panelPageIsActive) private var isActive
 
   func body(content: Content) -> some View {
     content
-      .task(id: record.revision) { await model.rowAppeared(record) }
+      .task(id: isActive ? record.revision : nil) { if isActive { await model.rowAppeared(record) } }
       .onDisappear { model.rowDisappeared(record.id) }
   }
 }
