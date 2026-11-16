@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "GitHub watch excerpts remove hidden HTML and real element tags only in Markdown prose, preserving inline, indented and fenced code, including quote/list containers with four-column tab stops and partially consumed tab indentation; unclosed container fences do not protect outside prose, script/style closing tags require exact name boundaries, and quotes or unclosed tag candidates after prose comparisons do not hide later HTML boundaries; preprocessing remains linear before the 600-character cut",
+  "summary": "GitHub watch excerpts remove hidden HTML and real element tags only in Markdown prose, preserving inline, indented and fenced code, including quote/list containers with four-column tab stops and partially consumed tab indentation; unclosed container fences do not protect outside prose, script/style closing tags require exact name boundaries, and only well-formed recognized tags shield quoted attributes from hidden-content filtering; malformed and unknown candidates remain scanned prose, with linear preprocessing before the 600-character cut",
   "replay": {
     "status": "none",
     "detail": "No replay; new excerpts are computed when watches observe GitHub items."

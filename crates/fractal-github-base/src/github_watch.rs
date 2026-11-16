@@ -985,10 +985,31 @@ fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Tag ends for every opening angle bracket, computed backwards so malformed candidates
+/// cannot repeatedly scan the same suffix. The three states are outside, single- and double-quoted.
+fn html_tag_ends(text: &str) -> Vec<(usize, Option<usize>)> {
+    let mut ends = Vec::new();
+    let (mut outside, mut single, mut double) = (None, None, None);
+    for (at, byte) in text.bytes().enumerate().rev() {
+        match byte {
+            b'<' => {
+                ends.push((at, outside));
+                outside = Some(at);
+            }
+            b'>' => outside = Some(at),
+            b'\'' => (outside, single) = (single, outside),
+            b'"' => (outside, double) = (double, outside),
+            _ => {}
+        }
+    }
+    ends
+}
+
 /// Strip HTML only in prose. Every search consumes its prefix and compares fixed-size ASCII windows in place,
 /// keeping repeated hidden elements linear without allocating lowercase copies of the remaining document.
 fn without_html_tags(text: &str) -> String {
     let ranges = markdown_code_ranges(text);
+    let mut tag_ends = html_tag_ends(text);
     let mut range = 0;
     let mut visible = String::with_capacity(text.len());
     let mut rest = text;
@@ -1007,33 +1028,29 @@ fn without_html_tags(text: &str) -> String {
             rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
             continue;
         }
-        // A prose comparison is not a tag: its quotes must not swallow later HTML boundaries.
-        if !tag.as_bytes().get(1).is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'/' | b'!')) {
+        let name_start = if tag.as_bytes().get(1) == Some(&b'/') { 2 } else { 1 };
+        let name_end = tag.bytes().enumerate().skip(name_start)
+            .find(|(_, byte)| !byte.is_ascii_alphanumeric() && *byte != b'-')
+            .map_or(tag.len(), |(at, _)| at);
+        let name = &tag[name_start..name_end];
+        // Only recognized, well-formed element names may shield their quoted attributes.
+        // Unknown or malformed candidates stay prose, scanned one '<' at a time.
+        if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            || !tag.as_bytes().get(name_end).is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>'))
+            || !(name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style")
+                || HTML_ELEMENTS.iter().any(|element| name.eq_ignore_ascii_case(element)))
+        {
             visible.push('<');
             rest = &tag[1..];
             continue;
         }
-        let mut quote = None;
-        let Some(end) = tag.bytes().enumerate().skip(1).find_map(|(at, byte)| {
-            if let Some(delimiter) = quote {
-                if byte == delimiter { quote = None; }
-            } else if matches!(byte, b'"' | b'\'') {
-                quote = Some(byte);
-            } else if matches!(byte, b'<' | b'>') {
-                return Some(at);
-            }
-            None
-        }) else {
+        while tag_ends.last().is_some_and(|(at, _)| *at < absolute) { tag_ends.pop(); }
+        let Some(end) = tag_ends.last().and_then(|(_, end)| *end).map(|end| end - absolute) else {
             // An unclosed candidate is text, not permission to expose later hidden HTML.
             visible.push('<');
             rest = &tag[1..];
             continue;
         };
-        let name = tag[1..end]
-            .trim_start_matches('/')
-            .split(|c: char| c.is_whitespace() || c == '/')
-            .next()
-            .unwrap_or("");
         if tag.as_bytes()[end] != b'>' {
             visible.push('<');
             rest = &tag[1..];
@@ -1056,12 +1073,7 @@ fn without_html_tags(text: &str) -> String {
             };
             continue;
         }
-        if HTML_ELEMENTS.iter().any(|element| name.eq_ignore_ascii_case(element)) {
-            rest = &tag[end + 1..];
-        } else {
-            visible.push_str(&tag[..=end]);
-            rest = &tag[end + 1..];
-        }
+        rest = &tag[end + 1..];
     }
     visible.push_str(rest);
     visible
@@ -1925,6 +1937,40 @@ mod tests {
                 assert_eq!(quote(&source).as_deref(), Some(expected.as_str()), "{source}");
             }
         }
+    }
+
+    #[test]
+    fn excerpts_filter_hidden_html_inside_balanced_prose_quotes() {
+        for (prefix, suffix) in [("a <b, it's ", " that's >Visible"), ("a <b, \"quoted ", "\" >Visible")] {
+            for hidden in ["<!-- SECRET -->", "<script>SECRET</script>", "<style>SECRET</style>"] {
+                let source = format!("{prefix}{hidden}{suffix}");
+                let expected = format!("> {prefix}{suffix}");
+                assert_eq!(quote(&source).as_deref(), Some(expected.as_str()), "{source}");
+            }
+            for hidden in ["<!-- SECRET", "<script>SECRET", "<style>SECRET"] {
+                let source = format!("{prefix}{hidden}{suffix}");
+                let expected = format!("> {}", prefix.trim_end());
+                assert_eq!(quote(&source).as_deref(), Some(expected.as_str()), "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_tag_attributes_do_not_shield_hidden_html() {
+        assert_eq!(
+            quote("<custom title='<!-- SECRET --><script>SECRET</script><style>SECRET</style>'>Visible").as_deref(),
+            Some("> <custom title=''>Visible")
+        );
+        assert_eq!(quote("<b it's <!-- SECRET --> that's >Visible").as_deref(), Some("> Visible"));
+    }
+
+    #[test]
+    fn repeated_unclosed_tag_candidates_are_linear() {
+        let source = format!("{}<!-- SECRET -->Visible", "<b '".repeat(64_000));
+        let start = std::time::Instant::now();
+        let visible = without_html_tags(&source);
+        assert_eq!(visible, format!("{}Visible", "<b '".repeat(64_000)));
+        assert!(start.elapsed() < Duration::from_secs(2), "excerpt preprocessing took {:?}", start.elapsed());
     }
 
     #[test]
