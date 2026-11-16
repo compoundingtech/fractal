@@ -2094,7 +2094,6 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
-        | "invalid-thread-cursor"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
