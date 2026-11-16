@@ -1,0 +1,29 @@
+{
+  "$genie": {
+    "source": "package.json.genie.ts",
+    "warning": "DO NOT EDIT - changes will be overwritten",
+    "workspaceClosureDirs": [
+      "flakes/attention-tray/design"
+    ]
+  },
+  "name": "@schickling/attention-tray-design",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@overeng/utils-storybook": "https://overeng-effect-utils.cachix.org/serve/0m61ikw100p4xkqzd7ha5v2immxwjgb6/overeng-utils-storybook.tgz",
+    "@storybook/react": "10.6.0",
+    "@storybook/react-vite": "10.6.0",
+    "@types/node": "26.5.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "storybook": "10.6.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
+  }
+}
