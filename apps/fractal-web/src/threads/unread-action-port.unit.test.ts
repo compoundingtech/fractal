@@ -1,72 +1,176 @@
 import { FractalClient } from '@fractal/client'
+import type { ThreadTimelinePage } from '@fractal/client/schema/read'
+import { Option } from 'effect'
+import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { gatewayUnreadActions, type ThreadUnreadReminder } from './unread-action-port.ts'
+import type { Feed } from '../data/source.ts'
+import type { ThreadObservation } from './threadSource.ts'
+import { gatewayUnreadActions, type GatewayUnreadActionsOptions, type UnreadActionResult } from './unread-action-port.ts'
 
-afterEach(() => vi.restoreAllMocks())
+const registries: AtomRegistry.AtomRegistry[] = []
+afterEach(() => {
+  for (const registry of registries) registry.dispose()
+  registries.length = 0
+  vi.restoreAllMocks()
+})
 
-const harness = () => {
-  let requests = 0
-  let credentials = 0
+const threadId = 'thread/example'
+const anchor = 'message/anchor'
+const mark = { mark_id: 'signed-operation/mark', anchor_message_id: anchor }
+const observation: ThreadObservation = {
+  summary: {
+    id: threadId, agent_id: 'agent/example', title: 'Example', title_revision: 'revision/title',
+    revision: 'revision/thread', state: 'open', unread: false,
+    unread_reminder: Option.some({ marks: [mark], anchor_message_id: anchor }),
+  },
+  snapshotId: 'snapshot/thread',
+}
+const message = { kind: 'message', id: anchor, actor_id: 'person/example', accepted_at_unix_ms: 1, content: 'Real body', thread_quote_id: null }
+const page = (state = 'current', items: readonly unknown[] = state === 'current' ? [message] : []) => ({
+  items, next_cursor: null, anchor: { message_id: anchor, state },
+})
+
+const harness = ({
+  response = page(),
+  sendResult = { _tag: 'Sent' },
+}: { readonly response?: unknown; readonly sendResult?: UnreadActionResult } = {}) => {
+  const registry = AtomRegistry.make()
+  registries.push(registry)
+  const access = Atom.make({ read: true, actor: 'person/example', actions: new Set(['thread.mark-unread', 'thread.clear-unread']) })
+  const detail = Atom.make<Feed<ThreadObservation>>({ _tag: 'Observed', value: observation, freshness: 'live' })
+  const sent: { thread: ThreadObservation; edit: Parameters<GatewayUnreadActionsOptions['send']>[1] }[] = []
+  const hydrated: { threadId: string; page: ThreadTimelinePage }[] = []
+  const requests: URL[] = []
   const client = new FractalClient({
     baseUrl: 'https://gateway.invalid',
-    credential: async () => {
-      credentials += 1
-      return 'unused'
-    },
-    fetchImpl: async () => {
-      requests += 1
-      throw new Error('Unread reminders must not call an unsupported gateway API.')
+    fetchImpl: async input => {
+      requests.push(new URL(String(input)))
+      const value = await response
+      return value instanceof Response ? value : Response.json({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/around' }, value })
     },
   })
-  return { client, requests: () => requests, credentials: () => credentials }
+  const port = gatewayUnreadActions({
+    client, registry, access, detail: () => detail,
+    send: async (thread, edit) => { sent.push({ thread, edit }); return sendResult },
+    onFound: (id, found) => { hydrated.push({ threadId: id, page: found }) },
+  })
+  return { port, registry, access, detail, sent, hydrated, requests }
 }
 
-const unsupported = {
-  _tag: 'Unavailable',
-  detail: 'This connection does not support unread reminders.',
-}
+describe('gateway unread reminders', () => {
+  it('reads only authoritative reminder marks, independently of natural unread', () => {
+    const { port, registry, detail, requests } = harness()
+    const reminder = port.reminder(threadId)
+    expect(port.reminder(threadId)).toBe(reminder)
+    expect(registry.get(reminder)).toEqual({ _tag: 'Known', reminder: { marks: [mark], anchor_message_id: anchor } })
+    registry.set(detail, { _tag: 'Observed', value: { ...observation, summary: { ...observation.summary, unread: true, unread_reminder: Option.none() } }, freshness: 'live' })
+    expect(registry.get(reminder)).toEqual({ _tag: 'Known', reminder: undefined })
+    expect(requests).toEqual([])
+  })
 
-const reminder: ThreadUnreadReminder = {
-  marks: [{ mark_id: 'signed-operation/opaque', anchor_message_id: 'message/anchor' }],
-  anchor_message_id: 'message/anchor',
-}
+  it('delegates captured mark IDs and the live observation without minting IDs or doing network reads', async () => {
+    const mint = vi.spyOn(crypto, 'randomUUID')
+    const { port, sent, requests } = harness()
+    await expect(port.mark({ threadId, anchor_message_id: anchor, observed_marks: [mark.mark_id] })).resolves.toEqual({ _tag: 'Sent' })
+    await expect(port.clear({ threadId, observed_marks: [mark.mark_id] })).resolves.toEqual({ _tag: 'Sent' })
+    expect(sent).toEqual([
+      { thread: observation, edit: { kind: 'thread.mark-unread', anchor_message_id: anchor, observed_marks: [mark.mark_id] } },
+      { thread: observation, edit: { kind: 'thread.clear-unread', observed_marks: [mark.mark_id] } },
+    ])
+    expect(requests).toEqual([])
+    expect(mint).not.toHaveBeenCalled()
+  })
 
-describe('gatewayUnreadActions', () => {
-  it('keeps the per-thread read unavailable rather than claiming an empty reminder', () => {
-    const gateway = harness()
-    const port = gatewayUnreadActions(gateway.client)
-    const registry = AtomRegistry.make()
-    try {
-      expect(port.canMark).toBe(false)
-      expect(port.reminder('thread/one')).toBe(port.reminder('thread/one'))
-      expect(registry.get(port.reminder('thread/one'))).toEqual(unsupported)
-      expect(registry.get(port.reminder('thread/two'))).toEqual(unsupported)
-      expect(gateway.requests()).toBe(0)
-      expect(gateway.credentials()).toBe(0)
-    } finally {
-      registry.dispose()
+  it('reacts to revoked grants and refuses edits without both grants', async () => {
+    const { port, registry, access, sent } = harness()
+    const reminder = port.reminder(threadId)
+    expect(registry.get(reminder)._tag).toBe('Known')
+    expect(port.canMark).toBe(true)
+    registry.set(access, { read: true, actor: 'person/example', actions: new Set(['thread.mark-unread']) })
+    expect(port.canMark).toBe(false)
+    await expect(port.mark({ threadId, anchor_message_id: anchor, observed_marks: [] })).resolves.toMatchObject({ _tag: 'Unavailable' })
+    registry.set(access, { read: false, actor: 'person/example', actions: new Set() })
+    expect(registry.get(reminder)._tag).toBe('Unavailable')
+    await expect(port.clear({ threadId, observed_marks: [mark.mark_id] })).resolves.toMatchObject({ _tag: 'Unavailable' })
+    expect(sent).toEqual([])
+  })
+
+  it('does not interpret a stale or unavailable read as an absent reminder or editable state', async () => {
+    const { port, registry, detail, sent } = harness()
+    const reminder = port.reminder(threadId)
+    registry.set(detail, { _tag: 'Observed', value: observation, freshness: 'stale' })
+    expect(registry.get(reminder)._tag).toBe('Unavailable')
+    await expect(port.clear({ threadId, observed_marks: [mark.mark_id] })).resolves.toMatchObject({ _tag: 'Unavailable' })
+    registry.set(detail, { _tag: 'Waiting' })
+    expect(registry.get(reminder)._tag).toBe('Unavailable')
+    await expect(port.mark({ threadId, anchor_message_id: anchor, observed_marks: [] })).resolves.toMatchObject({ _tag: 'Unavailable' })
+    expect(sent).toEqual([])
+  })
+
+  it('keeps delivery refusals visible and does not optimistically replace reminder marks', async () => {
+    const { port, registry } = harness({ sendResult: { _tag: 'Refused', detail: 'Fractal refused this edit.' } })
+    await expect(port.clear({ threadId, observed_marks: [mark.mark_id] })).resolves.toEqual({ _tag: 'Refused', detail: 'Fractal refused this edit.' })
+    expect(registry.get(port.reminder(threadId))).toEqual({ _tag: 'Known', reminder: { marks: [mark], anchor_message_id: anchor } })
+  })
+
+  it('seeks using the exact around API and hydrates only its real current message', async () => {
+    const { port, requests, hydrated } = harness()
+    await expect(port.seek({ threadId, anchor_message_id: anchor })).resolves.toEqual({ _tag: 'Found', messageId: anchor })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.pathname).toBe('/v1/client/threads/example/timeline')
+    expect(requests[0]?.searchParams.get('around')).toBe(anchor)
+    expect(requests[0]?.searchParams.has('cursor')).toBe(false)
+    expect(hydrated).toHaveLength(1)
+    expect(hydrated[0]?.threadId).toBe(threadId)
+    expect(hydrated[0]?.page.items[0]).toMatchObject({ kind: 'message', id: anchor, content: 'Real body' })
+  })
+
+  it.each(['pending', 'unavailable'])('never hydrates a %s anchor or activates a reminder from it', async state => {
+    const { port, hydrated, registry } = harness({ response: page(state) })
+    await expect(port.seek({ threadId, anchor_message_id: anchor })).resolves.toMatchObject({ _tag: state === 'pending' ? 'Pending' : 'Unavailable' })
+    expect(hydrated).toEqual([])
+    expect(registry.get(port.reminder(threadId))).toEqual({ _tag: 'Known', reminder: { marks: [mark], anchor_message_id: anchor } })
+  })
+
+  it('rejects missing bodies, mismatched anchors and malformed around reads without hydration', async () => {
+    for (const response of [page('current', []), { ...page(), anchor: { message_id: 'message/other', state: 'current' } }, {}]) {
+      const { port, hydrated } = harness({ response })
+      await expect(port.seek({ threadId, anchor_message_id: anchor })).resolves.toMatchObject({ _tag: 'Unavailable' })
+      expect(hydrated).toEqual([])
     }
   })
 
-  it('returns unavailable for mark, clear and seek without network, credentials or minted IDs', async () => {
-    const randomUUID = vi.spyOn(crypto, 'randomUUID')
-    const gateway = harness()
-    const port = gatewayUnreadActions(gateway.client)
-    const observed_marks = Object.freeze(reminder.marks.map(mark => mark.mark_id))
-    const mark = Object.freeze({ threadId: 'thread/one', anchor_message_id: reminder.anchor_message_id, observed_marks })
-    const clear = Object.freeze({ threadId: 'thread/one', observed_marks })
-    const seek = Object.freeze({ threadId: 'thread/one', anchor_message_id: reminder.anchor_message_id })
+  it('renders unresolved observed-mark dependencies as unavailable, never inferred pending or reminder intent', async () => {
+    const { port, registry, detail, hydrated } = harness({ response: Response.json({
+      api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'seek/dependencies',
+      code: 'thread-unavailable', message: 'Thread unavailable.', retryable: false,
+    }, { status: 404 }) })
+    registry.set(detail, { _tag: 'Observed', value: { ...observation, summary: { ...observation.summary, unread_reminder: Option.none() } }, freshness: 'live' })
+    await expect(port.seek({ threadId, anchor_message_id: anchor })).resolves.toMatchObject({ _tag: 'Unavailable' })
+    expect(hydrated).toEqual([])
+    expect(registry.get(port.reminder(threadId))).toEqual({ _tag: 'Known', reminder: undefined })
+  })
 
-    expect(await port.mark(mark)).toEqual(unsupported)
-    expect(await port.clear(clear)).toEqual(unsupported)
-    expect(await port.seek(seek)).toEqual(unsupported)
-    expect(await port.mark({ ...mark, observed_marks: [] })).toEqual(unsupported)
-    expect(await port.clear({ ...clear, observed_marks: [] })).toEqual(unsupported)
-    expect(observed_marks).toEqual(['signed-operation/opaque'])
-    expect(gateway.requests()).toBe(0)
-    expect(gateway.credentials()).toBe(0)
-    expect(randomUUID).not.toHaveBeenCalled()
+  it('does not hydrate an in-flight seek after read access is revoked', async () => {
+    const response = Promise.withResolvers<unknown>()
+    const { port, registry, access, hydrated } = harness({ response: response.promise })
+    const seeking = port.seek({ threadId, anchor_message_id: anchor })
+    registry.set(access, { read: false, actor: 'person/example', actions: new Set() })
+    response.resolve(page())
+    await expect(seeking).resolves.toMatchObject({ _tag: 'Unavailable' })
+    expect(hydrated).toEqual([])
+  })
+
+  it('does not let an older seek replace the latest requested timeline', async () => {
+    const response = Promise.withResolvers<unknown>()
+    const { port, hydrated } = harness({ response: response.promise })
+    const first = port.seek({ threadId, anchor_message_id: anchor })
+    const second = port.seek({ threadId, anchor_message_id: anchor })
+    response.resolve(page())
+    await expect(first).resolves.toMatchObject({ _tag: 'Unavailable' })
+    await expect(second).resolves.toEqual({ _tag: 'Found', messageId: anchor })
+    expect(hydrated).toHaveLength(1)
   })
 })

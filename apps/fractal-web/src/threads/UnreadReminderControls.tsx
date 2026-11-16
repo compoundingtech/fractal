@@ -74,15 +74,16 @@ export function UnreadReminderControls({ threadId, port, visibleReplies, timelin
     })
   }
 
-  // Option/Alt-click on a visible reply marks unread from that reply. The listener reads the latest render through a ref.
-  const latest = React.useRef({ canMutate, reminder, markFrom, visibleReplies })
-  latest.current = { canMutate, reminder, markFrom, visibleReplies }
+  // Option/Alt-click on a visible reply marks unread from that reply. Listeners read the latest render through a ref.
+  const [awaiting, setAwaiting] = React.useState<string>()
+  const latest = React.useRef({ canMutate, reminder, markFrom, visibleReplies, awaiting })
+  latest.current = { canMutate, reminder, markFrom, visibleReplies, awaiting }
   const optionClick = React.useMemo(() => timeline === null ? noListener : Atom.make(get => {
     const click = (event: MouseEvent) => {
       if (!event.altKey || event.button !== 0 || !latest.current.canMutate || !(event.target instanceof Element)) return
       if (event.target.closest('a, button, input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null) return
-      const row = event.target.closest('[data-thread-message]')
-      const anchor = row === null || !timeline.contains(row) ? null : row.getAttribute('data-thread-message')
+      const row = event.target.closest(anchorRows)
+      const anchor = row === null || !timeline.contains(row) ? null : anchorId(row)
       // A hidden, covered or offscreen row is not one the person deliberately chose.
       if (anchor === null || !latest.current.visibleReplies().includes(anchor)) return
       event.preventDefault()
@@ -94,19 +95,40 @@ export function UnreadReminderControls({ threadId, port, visibleReplies, timelin
   }), [timeline])
   useAtomValue(optionClick)
 
+  // A found reply can still be committing to the timeline after seek hydrated it: watch once for that row, scoped to
+  // this jump, and reveal it on arrival. A new jump, a new timeline or unmounting disposes the watch.
+  const arrival = React.useMemo(() => timeline === null || awaiting === undefined ? noListener : Atom.make(get => {
+    const observer = new MutationObserver(() => {
+      // A superseded watch never moves the view, even before the registry finalizes it.
+      if (latest.current.awaiting !== awaiting) { observer.disconnect(); return }
+      const row = findAnchor(timeline, awaiting)
+      if (row === undefined) return
+      observer.disconnect()
+      reveal(row)
+      setAwaiting(undefined)
+      setNotice(undefined)
+    })
+    observer.observe(timeline, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-thread-anchor', 'data-thread-message'] })
+    get.addFinalizer(() => observer.disconnect())
+    return undefined
+  }), [timeline, awaiting])
+  useAtomValue(arrival)
+
   const jump = async (current: ThreadUnreadReminder) => {
     if (timeline === null || busy.current) return
     busy.current = true
     setPending(true)
     setRefusal(undefined)
     setNotice(undefined)
+    setAwaiting(undefined)
     try {
       const found = await port.seek({ threadId, anchor_message_id: current.anchor_message_id })
-      if (found._tag === 'Unavailable') { setNotice(found.detail); return }
-      const row = [...timeline.querySelectorAll('[data-thread-message]')].find(row => row.getAttribute('data-thread-message') === found.messageId)
-      if (row === undefined) { setNotice('The reply marked unread is not loaded in this view.'); return }
-      const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-      row.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
+      // Neither outcome supplies a message body or changes the reminder; the reader sees only why Jump stopped.
+      if (found._tag !== 'Found') { setNotice(found.detail); return }
+      const row = findAnchor(timeline, found.messageId)
+      if (row !== undefined) { reveal(row); return }
+      setNotice('The reply marked unread is not loaded in this view.')
+      setAwaiting(found.messageId)
     } catch {
       setNotice('Fractal could not locate the reply marked unread.')
     } finally {
@@ -144,6 +166,16 @@ export function UnreadReminderControls({ threadId, port, visibleReplies, timelin
 }
 
 const noListener = Atom.make<undefined>(undefined)
+
+/** Message rows carry `data-thread-anchor`; `data-thread-message` rows are accepted as the same anchor. */
+const anchorRows = '[data-thread-anchor], [data-thread-message]'
+const anchorId = (row: Element): string | null => row.getAttribute('data-thread-anchor') ?? row.getAttribute('data-thread-message')
+const findAnchor = (timeline: HTMLElement, messageId: string): Element | undefined =>
+  [...timeline.querySelectorAll(anchorRows)].find(row => anchorId(row) === messageId)
+const reveal = (row: Element) => {
+  const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  row.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })
+}
 
 const styles = stylex.create({
   group: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0, minWidth: 0, gap: s.xs },

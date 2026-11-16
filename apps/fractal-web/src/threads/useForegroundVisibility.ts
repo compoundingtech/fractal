@@ -25,13 +25,15 @@ export const foregroundVisibility = (container: HTMLElement | null, active: bool
     const bounds = viewportBounds(container)
     const visibleMessageIds = rows().flatMap(row => {
       if (!intersecting.has(row)) return []
-      const rect = row.getBoundingClientRect()
+      const content = row.querySelector<HTMLElement>('[data-thread-message-content]') ?? row
+      if (content.textContent?.trim() === '') return []
+      const rect = content.getBoundingClientRect()
       const left = Math.max(rect.left, bounds.left), right = Math.min(rect.right, bounds.right)
       const top = Math.max(rect.top, bounds.top), bottom = Math.min(rect.bottom, bounds.bottom)
       if (right <= left || bottom <= top) return []
       // Intersections do not account for covering content. Check the actually exposed point too.
       const exposed = document.elementFromPoint?.((left + right) / 2, (top + bottom) / 2)
-      if (exposed != null && !row.contains(exposed)) return []
+      if (exposed != null && !content.contains(exposed)) return []
       const id = row.getAttribute('data-thread-message')
       return id === null ? [] : [id]
     })

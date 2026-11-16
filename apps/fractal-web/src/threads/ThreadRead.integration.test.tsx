@@ -12,7 +12,7 @@ import { gatewayThreads } from './threadSource.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
-it.each(['manual', 'foreground'] as const)('marks only current visible message rows through their newest message (%s)', async mode => {
+it.each(['manual', 'foreground', 'inactive-pane'] as const)('marks only current visible message rows through their newest message (%s)', async mode => {
   let focused = false
   vi.spyOn(document, 'hasFocus').mockImplementation(() => focused)
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
@@ -81,7 +81,7 @@ it.each(['manual', 'foreground'] as const)('marks only current visible message r
   const root = createRoot(host)
   const mark = () => [...host.querySelectorAll('button')].find(row => row.getAttribute('aria-label') === 'Mark visible replies read')
   try {
-    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveThreadPane threadId={id} /></DataSourceProvider>))
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveThreadPane threadId={id} active={mode !== 'inactive-pane'} /></DataSourceProvider>))
     await vi.waitFor(() => expect(observations.at(-1)?.rows.size).toBe(1))
     const older = [...host.querySelectorAll('button')].find(row => row.textContent === 'Load earlier messages')
     expect(older).toBeDefined()
@@ -91,6 +91,8 @@ it.each(['manual', 'foreground'] as const)('marks only current visible message r
     const row = (id: string) => [...viewport.rows].find(element => element.getAttribute('data-thread-message') === id)!
     for (const element of viewport.rows) {
       vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 120, 100, 40))
+      const content = element.querySelector('[data-thread-message-content]')
+      if (content !== null) vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 120, 100, 40))
     }
     expect(mark()?.disabled).toBe(true)
     expect(writes).toEqual([])
@@ -110,6 +112,11 @@ it.each(['manual', 'foreground'] as const)('marks only current visible message r
         focused = true
         window.dispatchEvent(new Event('focus'))
       })
+      if (mode === 'inactive-pane') {
+        expect(writes).toEqual([])
+        await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveThreadPane threadId={id} active /></DataSourceProvider>))
+        await act(async () => observations.at(-1)?.changed([entry(row('message/visible'), true)]))
+      }
     }
     expect(writes).toHaveLength(1)
     expect(writes[0]).toMatchObject({

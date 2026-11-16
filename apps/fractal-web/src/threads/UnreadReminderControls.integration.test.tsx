@@ -151,7 +151,7 @@ it('refuses without a visible reply and shows Fractal refusals as one alert', as
   } finally { await view.dispose() }
 })
 
-it('jumps to the reminded reply, and names an anchor it cannot show instead of guessing', async () => {
+it('jumps to the reminded reply, and names an anchor it cannot show yet instead of guessing', async () => {
   const scrolled = vi.fn()
   Element.prototype.scrollIntoView = scrolled
   const view = await setup({ read: reminded, canMark: false })
@@ -167,10 +167,36 @@ it('jumps to the reminded reply, and names an anchor it cannot show instead of g
     expect(view.host.querySelector('[role=status]')?.textContent).toBe('That reply is no longer in this thread.')
     expect(view.host.querySelector('[role=alert]')).toBeNull()
 
+    // Pending supplies no body and changes no badge; only the reason shows.
+    view.seek.mockResolvedValueOnce({ _tag: 'Pending', detail: 'Fractal is still locating that reply.' } satisfies UnreadSeekResult)
+    await view.press(jump)
+    expect(view.host.querySelector('[role=status]')?.textContent).toBe('Fractal is still locating that reply.')
+    expect(view.host.querySelectorAll('[data-thread-unread-reminder]')).toHaveLength(1)
+    expect(view.timeline.querySelectorAll('[data-thread-message], [data-thread-anchor]')).toHaveLength(3)
+    expect(scrolled).toHaveBeenCalledOnce()
+
+    // Found before the hydrated page commits: say so, then reveal the row once it renders.
     view.seek.mockResolvedValueOnce({ _tag: 'Found', messageId: 'message/older' })
     await view.press(jump)
     expect(view.host.querySelector('[role=status]')?.textContent).toBe('The reply marked unread is not loaded in this view.')
     expect(scrolled).toHaveBeenCalledOnce()
+    const older = document.createElement('article')
+    older.setAttribute('data-thread-anchor', 'message/older')
+    await act(async () => { view.timeline.prepend(older) })
+    expect(scrolled).toHaveBeenCalledTimes(2)
+    expect(scrolled.mock.contexts[1]).toBe(older)
+    expect(view.host.querySelector('[role=status]')).toBeNull()
+
+    // A newer jump disposes the earlier watch: a late row for the superseded answer is not revealed.
+    view.seek.mockResolvedValueOnce({ _tag: 'Found', messageId: 'message/first' })
+    await view.press(jump)
+    view.seek.mockResolvedValueOnce({ _tag: 'Unavailable', detail: 'That reply is no longer in this thread.' })
+    await view.press(jump)
+    const late = document.createElement('article')
+    late.setAttribute('data-thread-anchor', 'message/first')
+    await act(async () => { view.timeline.prepend(late) })
+    expect(scrolled).toHaveBeenCalledTimes(2)
+    expect(view.host.querySelector('[role=status]')?.textContent).toBe('That reply is no longer in this thread.')
   } finally {
     await view.dispose()
     Reflect.deleteProperty(Element.prototype, 'scrollIntoView')

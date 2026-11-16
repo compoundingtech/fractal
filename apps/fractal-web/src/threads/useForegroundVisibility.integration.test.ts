@@ -40,6 +40,20 @@ it('requires foreground focus, an active pane and actual intersections; dialogs 
     expect(registry.get(atom).foreground).toBe(false)
     dialog.remove(); await Promise.resolve()
     expect(registry.get(atom).foreground).toBe(true)
+    // Seeing only a sender heading is not seeing meaningful message content.
+    const content = document.createElement('div')
+    content.setAttribute('data-thread-message-content', '')
+    content.textContent = 'Actual body'
+    row.append(content)
+    vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(new DOMRect(10, 2000, 100, 50))
+    window.dispatchEvent(new Event('resize'))
+    expect(registry.get(atom).visibleMessageIds).toEqual([])
+    vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(new DOMRect(10, 10, 100, 50))
+    window.dispatchEvent(new Event('resize'))
+    expect(registry.get(atom).visibleMessageIds).toEqual(['message/a'])
+    content.textContent = ' '
+    window.dispatchEvent(new Event('resize'))
+    expect(registry.get(atom).visibleMessageIds).toEqual([])
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
     document.dispatchEvent(new Event('visibilitychange'))
     expect(registry.get(atom).visibleMessageIds).toEqual([])
