@@ -2121,9 +2121,12 @@ fractal devices --as person/alex pair "Tag reader" \
   --person-scope read.arrangements
 ```
 
-No scopes are added implicitly to an explicit list; the daemon validates it and returns any
-validation error unchanged. `--person-scope` conflicts with `--read-only`, `--full-control`,
-and `--assistant`. Assistant grants continue to use their separate typed `--scope` flag.
+No scopes are added implicitly to an explicit list. The CLI rejects scopes outside the limited
+pairing ceiling; the daemon revalidates the list and its errors are surfaced unchanged.
+`--person-scope` conflicts with `--read-only`, `--full-control`, and `--assistant`.
+Assistant grants continue to use their separate typed `--scope` flag. Human pairing-begin
+output labels the list as **requested**, because the challenge response does not return granted
+scopes. Completion reports the daemon's exact **granted** scopes in both human and `--json` output.
 For an
 intentionally trusted device that needs Chat sends, mission/work actions, runtime control, and
 terminal input, the initiating person

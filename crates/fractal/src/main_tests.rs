@@ -7642,8 +7642,11 @@ fn person_scope_pairing_parses_exact_scopes_and_conflicts() {
         assert!(Cli::try_parse_from(base.into_iter().chain(scopes).chain([conflict])).is_err());
     }
     assert!(Cli::try_parse_from(base.into_iter().chain(["--person-scope"])).is_err());
-    // Person scope names belong to the daemon's validation, not the assistant enum.
-    assert!(Cli::try_parse_from(base.into_iter().chain(["--person-scope", "unknown.scope"])).is_ok());
+    for rejected in ["unknown.scope", "control.messages", "terminal.write"] {
+        let error = Cli::try_parse_from(base.into_iter().chain(["--person-scope", rejected])).err().unwrap();
+        assert!(error.to_string().contains(rejected), "{error}");
+        assert!(error.to_string().contains("limited pairing scopes"), "{error}");
+    }
 }
 
 #[tokio::test]
