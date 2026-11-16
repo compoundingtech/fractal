@@ -49,6 +49,8 @@ fn episode_parts(episode: &str) -> Option<(&str, u64, u64)> {
 fn retained_events(
     conn: &Connection, source: &str, cut: u64,
 ) -> Result<(Vec<RetainedEvent>, bool), FractalError> {
+    // SQLite's store indices are signed; larger read ceilings include the entire index.
+    let cut = i64::try_from(cut).unwrap_or(i64::MAX);
     let kinds = PERSON_HISTORY_KINDS.split(',').map(|kind| format!("({kind})"))
         .collect::<Vec<_>>().join(",");
     let sql = canonical_sql(&format!(
@@ -172,7 +174,7 @@ pub fn retained_person_episode(
          LEFT JOIN mission_revisions r ON r.mission_id=m.mission_id AND r.revision=g.revision
            AND r.created_index<=?2
          WHERE g.id=?1",
-        params![source_generation, cut, RETAINED_TOTAL_BYTES],
+        params![source_generation, i64::try_from(cut).unwrap_or(i64::MAX), RETAINED_TOTAL_BYTES],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(internal)?;
     let Some((revision, Some(body))) = definition else {
