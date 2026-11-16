@@ -695,3 +695,30 @@ async fn browser_pairing_pending_cap_rechecks_admitted_candidate_membership() {
         assert!(error.message.contains("at most three"), "{fault}: {error:?}");
     }
 }
+
+#[tokio::test]
+async fn browser_retained_discussion_rechecks_revocation_and_exact_expiry() {
+    use super::thread_fence_tests::retained_discussion;
+    let (_root, state, owner) = fixture().await;
+    let origin = retained_discussion::install_source(&state, true);
+    let key = "c".repeat(64);
+    let pending = start(&state, &owner, &key).await;
+    answer(&state, &owner, &pending, "approve").unwrap();
+    let granted = poll(&state, &owner, &pending, &key).await.unwrap().0;
+    assert!(granted["bearer"].as_str().is_some());
+    let completion = state.store.claims_for_subject_kind_at(&begun(&state, &pending).subject,
+        "custom.client.pairing-completed", None, true, 1).unwrap().claims.remove(0);
+    let browser = paired_client_session(&state, &completion, "fabric-loopback", false).unwrap();
+    let expiry = completion.body["fields"]["expires_at_unix_ms"].as_u64().unwrap();
+    assert!(paired_client_session_at(&state, &completion, "fabric-loopback", false, u128::from(expiry)).is_err());
+    let first = retained_discussion::request(&state, &origin, "thread/browser-retained", "browser-retained");
+    retained_discussion::start(&state, &browser, first.clone()).await.unwrap();
+    revoke_current(State(state.clone()), Extension(browser.clone())).await.unwrap();
+    for request in [first, retained_discussion::request(&state, &origin,
+        "thread/browser-retained-denied", "browser-retained-denied")] {
+        let denied = retained_discussion::start(&state, &browser, request).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    }
+    assert!(state.store.claims_for("thread/browser-retained-denied", None).unwrap().is_empty());
+    assert_eq!(crate::store::thread_metadata::summary(&state.store, "person/operator", "thread/browser-retained").unwrap().message_count, 1);
+}

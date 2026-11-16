@@ -308,7 +308,9 @@ fn request_history_current_custom_origin_has_explicit_unsupported_marker() {
         })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: Some("history-custom-close".into()),
     }).unwrap();
-    assert_eq!(thread_request_history(&store, PERSON, THREAD, None, 1).unwrap_err().code, "thread-unavailable");
+    let retained = thread_request_history(&store, PERSON, THREAD, None, 1).unwrap();
+    assert!(matches!(retained.source_support, Some(HistorySourceSupport::UnsupportedSource)));
+    assert!(retained.items.is_empty());
 }
 
 #[test]
@@ -334,4 +336,50 @@ fn request_history_denied_predecessor_does_not_disclose_edge_or_boundary() {
     for secret in [hidden.source_id.as_str(), hidden.episode.as_str(), "hidden-parent-reason"] {
         assert!(!serialized.contains(secret));
     }
+}
+
+#[test]
+fn retained_runtime_discussion_starts_after_resolution_without_reopening_attention_and_keeps_links() {
+    let (store, _, input) = fixture();
+    store.configure_thread_write_rollout([]);
+    let seed = ask(&store, &input, "retained-runtime-seed");
+    finish(&store, &seed, false);
+    start(&store, &seed, THREAD, AGENT);
+    assert_eq!(status(&page(&store), &seed), "completed");
+    assert!(!store.attention_items(Some(PERSON)).unwrap().iter().any(|item| item.subject == seed.source_id));
+    let child = ask(&store, &input, "retained-runtime-child");
+    attach(&store, &child, Some(&seed), "retained-runtime-link");
+    finish(&store, &child, true);
+    let history = page(&store);
+    assert_eq!(keys(&history), BTreeSet::from([seed.clone(), child.clone()]));
+    assert_eq!(status(&history, &seed), "completed");
+    assert_eq!(status(&history, &child), "cancelled");
+    assert_eq!(history.relations.len(), 1);
+    assert_eq!(history.relations[0].predecessor, seed);
+    assert_eq!(history.relations[0].request, child);
+    assert!(!store.attention_items(Some(PERSON)).unwrap().iter()
+        .any(|item| item.subject == seed.source_id || item.subject == child.source_id));
+}
+
+#[test]
+fn retained_runtime_start_rejects_reassigned_away_and_never_opened_episodes() {
+    let (store, _, input) = fixture();
+    store.configure_thread_write_rollout([]);
+    let seed = ask(&store, &input, "retained-runtime-reassigned");
+    rename_live(&store);
+    let message = ClaimInput {
+        subject:"message/denied-retained-runtime".into(), kind:"message.sent".into(), actor:Some(PERSON.into()),
+        fields:serde_json::from_value(json!({"from":PERSON,"to":AGENT,"content":"Denied discussion","status":"sent"})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None,
+    };
+    for (key, episode) in [("reassigned", seed.episode.as_str()), ("never-opened", "claim/never-opened")] {
+        let origin = InboxOrigin { source_id:seed.source_id.clone(), episode:episode.into() };
+        let error = start_from_inbox(&store, StartFromInbox {
+            thread:"thread/denied-retained-runtime", title:"Denied", person:PERSON, origin:&origin,
+            key, first_message:&message,
+        }).unwrap_err();
+        assert_eq!(error.code, "thread-unavailable");
+    }
+    assert!(store.claims_for("thread/denied-retained-runtime", None).unwrap().is_empty());
+    assert!(store.claims_for(&message.subject, None).unwrap().is_empty());
 }

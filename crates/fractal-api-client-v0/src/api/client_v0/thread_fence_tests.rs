@@ -213,3 +213,330 @@ async fn arrangement_thread_authority_is_rechecked_after_preflight_before_writes
         }
     }
 }
+
+pub(crate) mod retained_discussion {
+    use super::*;
+    use crate::store::thread_metadata::{self, InboxOrigin, ThreadContext};
+
+    const PERSON: &str = "person/operator";
+    const AGENT: &str = "agent/garden/seed";
+    const SOURCE: &str = "custom/garden/review/v1/retained";
+
+    fn fixture(resolved: bool) -> (tempfile::TempDir, AppState, InboxOrigin) {
+        let root = tempfile::tempdir().unwrap();
+        let state = tests::test_state_named(root.path(), "retained-discussion");
+        let origin = install_source(&state, resolved);
+        (root, state, origin)
+    }
+
+    pub(crate) fn install_source(state: &AppState, resolved: bool) -> InboxOrigin {
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"garden/seed\" { workspace \"/work/garden\"; harness \"omp\" {} }",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "retained-declare").unwrap();
+        state.store.configure_thread_write_rollout([]);
+        state.store.register_custom_kind(&crate::store::custom::RegistrationRequest {
+            manifest: serde_json::from_str(include_str!("../../../../../examples/fractal/custom-review.json")).unwrap(),
+            actor: AGENT.into(),
+        }).unwrap();
+        let opening = state.store.append_claim(&ClaimInput {
+            subject: SOURCE.into(), kind: "custom.garden.review.v1.requested".into(),
+            actor: Some(AGENT.into()),
+            fields: serde_json::from_value(json!({
+                "title":"Retained review", "detail":"Choose a path", "recipient":PERSON,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("retained-open".into()),
+        }).unwrap();
+        let origin = InboxOrigin { source_id: SOURCE.into(), episode: opening.id };
+        if resolved {
+            state.store.append_claim(&ClaimInput {
+                subject: SOURCE.into(), kind: "custom.garden.review.v1.answered".into(),
+                actor: Some(PERSON.into()),
+                fields: serde_json::from_value(json!({
+                    "request":origin.episode, "selection":"keep", "text":"Proceed.",
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: Some("retained-answer".into()),
+            }).unwrap();
+        }
+        origin
+    }
+
+    pub(crate) fn request(state: &AppState, origin: &InboxOrigin, thread: &str, key: &str) -> ActionRequest {
+        serde_json::from_value(json!({
+            "api_version":CLIENT_API_VERSION, "id":format!("action/{key}"),
+            "type":"thread.start", "idempotency_key":key,
+            "fence":{"snapshot_id":new_client_snapshot(state).id},
+            "parameters":{"target_id":thread, "agent_id":AGENT,
+                "origin":origin, "title":"Discuss retained review", "content":"Explain the decision."},
+        })).unwrap()
+    }
+
+    pub(crate) async fn start(state: &AppState, session: &ClientSession, request: ActionRequest) -> Result<Value, ApiError> {
+        threads::message_action(state.clone(), session.clone(), request).await.map(|result| result.0)
+    }
+
+    fn assert_not_in_attention(state: &AppState) {
+        assert!(!state.store.attention_items(Some(PERSON)).unwrap().iter()
+            .any(|item| item.subject == SOURCE));
+    }
+
+    #[tokio::test]
+    async fn resolved_custom_start_replays_and_different_key_opens_existing_thread_without_message() {
+        let (_root, state, origin) = fixture(true);
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        assert_not_in_attention(&state);
+        let first_request = request(&state, &origin, "thread/retained-first", "retained-first");
+        let first = start(&state, &owner, first_request.clone()).await.unwrap();
+        let replay = start(&state, &owner, first_request).await.unwrap();
+        assert_eq!(replay["affected_ids"], first["affected_ids"]);
+        assert_eq!(replay["operation_id"], first["operation_id"]);
+        let existing = start(&state, &owner,
+            request(&state, &origin, "thread/retained-unused", "retained-different")).await.unwrap();
+        assert_eq!(existing["affected_ids"], first["affected_ids"]);
+        assert_eq!(existing["operation_id"], first["operation_id"]);
+        assert!(state.store.claims_for("thread/retained-unused", None).unwrap().is_empty());
+        let history = thread_metadata::list_context(&state.store, PERSON,
+            ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap();
+        assert_eq!(history.items.len(), 1);
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/retained-first").unwrap().message_count, 1);
+        assert_not_in_attention(&state);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_retained_starts_share_the_real_store_writer_and_return_one_creation() {
+        let (_root, state, origin) = fixture(true);
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let a = request(&state, &origin, "thread/retained-race-a", "retained-race-a");
+        let b = request(&state, &origin, "thread/retained-race-b", "retained-race-b");
+        // Different action keys bypass the per-key API lock; both reach the batched store writer.
+        let (a, b) = tokio::join!(start(&state, &owner, a), start(&state, &owner, b));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a["affected_ids"], b["affected_ids"]);
+        assert_eq!(a["operation_id"], b["operation_id"]);
+        let history = thread_metadata::list_context(&state.store, PERSON,
+            ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap();
+        assert_eq!(history.items.len(), 1);
+        let thread = a["affected_ids"][0].as_str().unwrap();
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, thread).unwrap().message_count, 1);
+        let creations = ["thread/retained-race-a", "thread/retained-race-b"].iter()
+            .map(|thread| state.store.claims_for(thread, Some("thread.created")).unwrap().len()).sum::<usize>();
+        assert_eq!(creations, 1);
+    }
+
+    #[tokio::test]
+    async fn retained_custom_rejects_wrong_person_fabricated_and_cross_source_episodes() {
+        let (_root, state, origin) = fixture(true);
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let other = ClientSession::local(Some("person/other")).unwrap();
+        let error = start(&state, &other, request(&state, &origin, "thread/denied-owner", "denied-owner")).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        for (key, denied) in [
+            ("fabricated", InboxOrigin { episode:"claim/never-opened".into(), ..origin.clone() }),
+            ("foreign", InboxOrigin { source_id:"custom/garden/review/v1/never-opened".into(), ..origin.clone() }),
+        ] {
+            let thread = format!("thread/denied-{key}");
+            let error = start(&state, &owner, request(&state, &denied, &thread, key)).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::NOT_FOUND);
+            assert!(state.store.claims_for(&thread, None).unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn current_custom_start_and_reply_remain_live_and_do_not_deduplicate_origins() {
+        let (_root, state, origin) = fixture(false);
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        for key in ["current-a", "current-b"] {
+            start(&state, &owner, request(&state, &origin, &format!("thread/{key}"), key)).await.unwrap();
+        }
+        let reply: ActionRequest = serde_json::from_value(json!({
+            "api_version":CLIENT_API_VERSION, "id":"action/current-reply", "type":"thread.reply",
+            "idempotency_key":"current-reply", "fence":{"snapshot_id":new_client_snapshot(&state).id},
+            "parameters":{"target_id":"thread/current-a", "content":"A current follow-up."},
+        })).unwrap();
+        start(&state, &owner, reply).await.unwrap();
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/current-a").unwrap().message_count, 2);
+        assert_eq!(thread_metadata::list_context(&state.store, PERSON,
+            ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap().items.len(), 2);
+        assert!(state.store.attention_items(Some(PERSON)).unwrap().iter().any(|item| item.subject == SOURCE));
+    }
+
+    #[tokio::test]
+    async fn revoked_device_cannot_start_or_recover_retained_threads() {
+        let (_root, state, origin) = fixture(true);
+        let grant = "custom/client/pairing-retained-device";
+        let completed = state.store.append_client_operation_claim(&ClaimInput {
+            subject:grant.into(), kind:"custom.client.pairing-completed".into(), actor:Some(PERSON.into()),
+            fields:serde_json::from_value(json!({
+                "person_id":PERSON, "session_actor":"person/operator/session/retained",
+                "device_id":"device/retained", "credential_hash":"test-not-a-secret",
+                "expires_at_unix_ms":client_now_ms()+60_000, "scopes":["read.projections","control.messages"],
+            })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        let paired = paired_client_session(&state, &completed, "fabric-loopback", false).unwrap();
+        let expiry = u128::from(completed.body["fields"]["expires_at_unix_ms"].as_u64().unwrap());
+        assert!(paired_client_session_at(&state, &completed, "fabric-loopback", false, expiry - 1).is_ok());
+        assert!(paired_client_session_at(&state, &completed, "fabric-loopback", false, expiry).is_err());
+        let first = request(&state, &origin, "thread/retained-device", "retained-device");
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        start(&state, &owner, first.clone()).await.unwrap();
+        state.store.append_client_operation_claim(&ClaimInput {
+            subject:grant.into(), kind:"custom.client.pairing-revoked".into(), actor:Some(PERSON.into()),
+            fields:BTreeMap::new(), evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        for denied in [first, request(&state, &origin, "thread/retained-device-denied", "retained-device-denied")] {
+            assert_eq!(start(&state, &paired, denied).await.unwrap_err().status, StatusCode::FORBIDDEN);
+        }
+        assert!(state.store.claims_for("thread/retained-device-denied", None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolved_gate_review_starts_after_its_real_owner_step_completes() {
+        let (_root, state, _) = fixture(true);
+        state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
+        let intent = crate::graph::parse_intent(
+            "version 2\nmission \"retained-gate\" state=\"ready\" { goal \"Review work\"; step \"review\" { goal \"Approve work\"; agentless } }",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "retained-gate-mission").unwrap();
+        let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission:"retained-gate".into(), revision:None, workspace:"/work/garden".into(),
+            requester:Some(PERSON.into()), mode:Some("run".into()), inputs:BTreeMap::new(),
+            idempotency_key:"retained-gate-run".into(),
+        }).unwrap();
+        let step = &run.steps[0];
+        let opening = state.store.append_claim(&ClaimInput {
+            subject:"gate-operation/retained-discussion/review".into(), kind:"gate.requested".into(), actor:None,
+            fields:serde_json::from_value(json!({
+                "owner":step.subject, "reviewer":PERSON, "question":"Approve work?",
+                "review_targets":[], "decisions":["approved","rejected"],
+                "operation":"gate-operation/retained-discussion/review",
+                "mission_revision":run.revision, "step_definition":step.definition_hash, "attempt":step.attempt,
+            })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:Some("retained-gate-open".into()),
+        }).unwrap();
+        assert_eq!(state.store.pending_human_reviews(Some(PERSON)).unwrap().len(), 1);
+        state.store.set_step_state(&step.subject, "completed", None).unwrap();
+        assert!(state.store.pending_human_reviews(Some(PERSON)).unwrap().is_empty());
+        let origin = InboxOrigin { source_id:step.subject.clone(), episode:opening.id };
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let result = start(&state, &owner, request(&state, &origin, "thread/retained-gate", "retained-gate")).await.unwrap();
+        assert_eq!(result["affected_ids"][0], "thread/retained-gate");
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/retained-gate").unwrap().message_count, 1);
+        assert!(state.store.pending_human_reviews(Some(PERSON)).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retained_start_chooses_newest_owned_creation_from_current_source_history() {
+        let (_root, state, origin) = fixture(false);
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let older = start(&state, &owner, request(&state, &origin, "thread/newest-old", "newest-old")).await.unwrap();
+        let newer = start(&state, &owner, request(&state, &origin, "thread/newest-new", "newest-new")).await.unwrap();
+        assert_ne!(older["affected_ids"], newer["affected_ids"]);
+        state.store.append_claim(&ClaimInput {
+            subject:SOURCE.into(), kind:"custom.garden.review.v1.answered".into(), actor:Some(PERSON.into()),
+            fields:serde_json::from_value(json!({"request":origin.episode,"selection":"keep","text":"Proceed."})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("newest-answer".into()),
+        }).unwrap();
+        let retained = start(&state, &owner, request(&state, &origin, "thread/newest-unused", "newest-retained")).await.unwrap();
+        assert_eq!(retained["affected_ids"], newer["affected_ids"]);
+        assert_eq!(retained["operation_id"], newer["operation_id"]);
+        assert!(state.store.claims_for("thread/newest-unused", None).unwrap().is_empty());
+        assert_not_in_attention(&state);
+    }
+
+    #[tokio::test]
+    async fn resolved_authored_step_without_recipient_bearing_opening_cannot_start() {
+        let (_root, state, _) = fixture(true);
+        state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
+        let intent = crate::graph::parse_intent(
+            "version 2\nmission \"never-opened-authored\" state=\"ready\" { goal \"Choose\"; step \"review\" { assigned-to \"person/operator\"; goal \"Choose path\"; } }",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "never-opened-authored-mission").unwrap();
+        let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission:"never-opened-authored".into(), revision:None, workspace:"/work/garden".into(),
+            requester:Some(PERSON.into()), mode:Some("run".into()), inputs:BTreeMap::new(),
+            idempotency_key:"never-opened-authored-run".into(),
+        }).unwrap();
+        let step = &run.steps[0];
+        state.store.set_step_state(&step.subject, "ready", None).unwrap();
+        let current = state.store.attention_items(Some(PERSON)).unwrap().into_iter()
+            .find(|item| item.subject == step.subject).unwrap();
+        state.store.set_step_state(&step.subject, "completed", None).unwrap();
+        let origin = InboxOrigin { source_id:step.subject.clone(), episode:current.episode };
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let denied = start(&state, &owner, request(&state, &origin,
+            "thread/never-opened-authored", "never-opened-authored")).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::NOT_FOUND);
+        assert!(state.store.claims_for("thread/never-opened-authored", None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn manifest_derived_custom_episode_retains_authority_but_unproven_episode_still_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tests::test_state_named(root.path(), "non-claim-custom-episode");
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"garden/seed\" { workspace \"/work/garden\"; harness \"omp\" {} }",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "non-claim-declare").unwrap();
+        state.store.configure_thread_write_rollout([]);
+        let mut manifest: Value = serde_json::from_str(include_str!("../../../../../examples/fractal/custom-review.json")).unwrap();
+        manifest["attention"]["episode"] = json!({"op":"field","slot":"request","field":"title"});
+        state.store.register_custom_kind(&crate::store::custom::RegistrationRequest {
+            manifest:serde_json::from_value(manifest).unwrap(), actor:AGENT.into(),
+        }).unwrap();
+        let opening = state.store.append_claim(&ClaimInput {
+            subject:SOURCE.into(), kind:"custom.garden.review.v1.requested".into(), actor:Some(AGENT.into()),
+            fields:serde_json::from_value(json!({"title":"non-claim-episode","detail":"Choose","recipient":PERSON})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("non-claim-open".into()),
+        }).unwrap();
+        let origin = InboxOrigin { source_id:SOURCE.into(), episode:"non-claim-episode".into() };
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let unproven = InboxOrigin { episode:"unproven-title-episode".into(), ..origin.clone() };
+        let denied = start(&state, &owner, request(&state, &unproven,
+            "thread/non-claim-current-denied", "non-claim-current-denied")).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::NOT_FOUND);
+        let current = start(&state, &owner,
+            request(&state, &origin, "thread/non-claim-current", "non-claim-current")).await.unwrap();
+        state.store.append_claim(&ClaimInput {
+            subject:SOURCE.into(), kind:"custom.garden.review.v1.answered".into(), actor:Some(PERSON.into()),
+            fields:serde_json::from_value(json!({"request":opening.id,"selection":"keep","text":"Proceed."})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("non-claim-answer".into()),
+        }).unwrap();
+        let retained = start(&state, &owner, request(&state, &origin,
+            "thread/non-claim-retained", "non-claim-retained")).await.unwrap();
+        assert_eq!(retained["affected_ids"], current["affected_ids"]);
+        assert_eq!(retained["operation_id"], current["operation_id"]);
+        assert!(state.store.claims_for("thread/non-claim-retained", None).unwrap().is_empty());
+        let denied = start(&state, &owner, request(&state, &unproven,
+            "thread/non-claim-retained-denied", "non-claim-retained-denied")).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::NOT_FOUND);
+        for thread in ["thread/non-claim-current-denied", "thread/non-claim-retained-denied"] {
+            assert!(state.store.claims_for(thread, None).unwrap().is_empty());
+        }
+        assert_not_in_attention(&state);
+    }
+
+    #[tokio::test]
+    async fn expired_persisted_device_grant_cannot_start_a_retained_discussion() {
+        let (_root, state, origin) = fixture(true);
+        let expired_at = client_now_ms() - 1;
+        let completed = state.store.append_client_operation_claim(&ClaimInput {
+            subject:"custom/client/pairing-expired-retained".into(),
+            kind:"custom.client.pairing-completed".into(), actor:Some(PERSON.into()),
+            fields:serde_json::from_value(json!({
+                "person_id":PERSON, "session_actor":"person/operator/session/expired-retained",
+                "device_id":"device/expired-retained", "credential_hash":"test-not-a-secret",
+                "expires_at_unix_ms":expired_at, "scopes":["read.projections","control.messages"],
+            })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        // Recover the session at its actual valid side of the expiry boundary, then pass
+        // that cached session to the API at wall-clock now. No fabricated session fields.
+        let session = paired_client_session_at(&state, &completed, "fabric-loopback", false, expired_at - 1).unwrap();
+        let denied = start(&state, &session, request(&state, &origin,
+            "thread/expired-retained", "expired-retained")).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+        assert!(state.store.claims_for("thread/expired-retained", None).unwrap().is_empty());
+    }
+}
