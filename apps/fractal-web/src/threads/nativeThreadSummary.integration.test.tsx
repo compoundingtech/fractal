@@ -8,6 +8,7 @@ import ts from 'typescript'
 import { afterEach, expect, it, vi } from 'vitest'
 import * as Native from '@fractal/client/schema/read'
 import type { Snapshot, ThreadSummary } from '@fractal/client/schema/read'
+import { Schema } from 'effect'
 
 // Exercise the production native paging, exact-summary hooks and JSX with real
 // React mount/update/cleanup. Only native hosts and the timeline body are ports;
@@ -43,7 +44,7 @@ type Handlers = { onWindow: (window: Window) => void; onIssue: (issue: string, r
 // real brands; `changed` re-decodes a summary after a server-side change.
 type SummaryChange = { title?: string; title_revision?: string; revision?: string; state?: 'open' | 'closed'; unread?: boolean }
 const decodeSummary = Native.decodeUnknownSync(Native.ThreadSummary)
-const changed = (base: ThreadSummary, fields: SummaryChange): ThreadSummary => decodeSummary({ ...base, ...fields })
+const changed = (base: ThreadSummary, fields: SummaryChange): ThreadSummary => decodeSummary({ ...Schema.encodeSync(Native.ThreadSummary)(base), ...fields })
 const summary = (id: number): ThreadSummary => decodeSummary({ id: `thread/${id}`, agent_id: 'agent/reviewer', title: `Review ${id}`,
   state: 'open', unread: true, message_count: 2, revision: 'fence/one', title_revision: 'title/one' })
 let observation = 0
