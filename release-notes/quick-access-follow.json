@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Only matching completed receipts settle ambiguous stages. A definite first-attempt create race may instead validate the reserved live owner/v2 identity; failed validation retains explicit GET-only recovery. Source reads and replay refusals never settle an ambiguous original. State is in memory only, not a durable outbox. No application controls or active writes are enabled by this helper."
+    "detail": "Only matching completed receipts settle ambiguous stages. A safe canonical create conflict, including on explicit create replay, may instead validate the reserved live owner/v2 identity; failed validation retains explicit GET-only recovery without proving our CREATE applied. Incompatible validation stays locked with an explicit reason and never recreates the reserved identity. Source reads and replay refusals never settle an ambiguous original. State is in memory only, not a durable outbox. No application controls or active writes are enabled by this helper."
   }
 }

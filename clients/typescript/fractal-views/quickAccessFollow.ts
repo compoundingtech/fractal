@@ -166,7 +166,7 @@ export const followQuickAccess = async (options: FollowOptions): Promise<QuickAc
   let latest: QuickAccessState = { phase: 'connecting', members: [] }
   const present = () => {
     if (closed) return
-    options.onState(pending?.unconfirmed ? { ...latest, phase: editing ? 'pending' : 'unconfirmed', editable: false, unconfirmed: { stage: pending.stage }, detail: pending.needsAdoption ? 'The create request was not applied because Quick access already exists. Check delivery to validate the shared collection before sending your edit.' : 'Fractal may have changed Quick access. Check delivery before making another edit.' }
+    options.onState(pending?.unconfirmed ? { ...latest, phase: editing ? 'pending' : 'unconfirmed', editable: false, unconfirmed: { stage: pending.stage }, detail: pending.needsAdoption ? pending.adoptionIssue ?? 'Quick access already exists. Check delivery to validate the shared collection before sending your edit.' : 'Fractal may have changed Quick access. Check delivery before making another edit.' }
       : editing ? { ...latest, phase: 'pending', editable: false } : latest)
   }
   const close = () => { closed = true; generation++; sessionAbort?.abort(); current?.close(); current = undefined; options.signal?.removeEventListener('abort', close) }
