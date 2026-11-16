@@ -2,11 +2,15 @@ import { API_VERSION, type ActionResult, type EnvelopeOf } from './Models.genera
 import { ClientError } from './Client.generated.ts';
 import { appliedAnswer, outcomeUnknown } from './errors.ts';
 
-/** The durable result each action is allowed to acknowledge; payload and platform auth stay outside it. */
+/**
+ * The durable result each action may acknowledge; payload and platform auth stay outside it.
+ * An unread receipt's operation_id is not a mark ID. Read the thread summary for mark_id values.
+ */
 export type ActionReceiptExpectation = { actionId: string } & (
   | { kind: 'message'; targetId?: string; messageId?: string }
   | { kind: 'metadata'; targetId: string }
   | { kind: 'read'; readMessageIds: readonly string[] }
+  | { kind: 'unread'; targetId: string }
 );
 
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
@@ -59,6 +63,8 @@ function matchesAffected(value: ActionResult, expected: ActionReceiptExpectation
   switch (expected.kind) {
     case 'read': return value.affected_ids.every(id => expected.readMessageIds.includes(id));
     case 'metadata': return value.affected_ids.includes(expected.targetId) && nonempty(value.metadata_claim_id);
+    case 'unread': return value.status === 'completed' && value.affected_ids.length === 1
+      && value.affected_ids[0] === expected.targetId;
     case 'message': return (expected.messageId ? value.affected_ids.includes(expected.messageId) : value.affected_ids.some(id => id.startsWith('message/')))
       && (!expected.targetId || value.affected_ids.includes(expected.targetId) && value.affected_ids.length === 2);
   }
