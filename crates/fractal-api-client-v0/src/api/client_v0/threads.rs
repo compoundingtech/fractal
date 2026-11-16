@@ -12,6 +12,7 @@ pub(super) struct ListQuery {
     origin_episode: Option<String>,
     mission_id: Option<String>,
     recently_closed: Option<bool>,
+    marked_unread: Option<bool>,
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -28,6 +29,7 @@ pub(super) async fn list(
             origin_episode: query.origin_episode,
             mission_id: query.mission_id,
             recently_closed: query.recently_closed,
+            marked_unread: query.marked_unread,
         };
         let context = resolve_context(&selection)?;
         thread_metadata::list_context(
@@ -42,23 +44,38 @@ pub(super) async fn list(
     .await
 }
 
+fn list_query_error(message: impl Into<String>) -> ApiError {
+    let mut error = validation(message);
+    error.code = "invalid-thread-list-query".into();
+    error
+}
+
 fn resolve_context(selection: &ThreadCollectionContext) -> Result<ThreadContext<'_>, ApiError> {
+    if let Some(marked) = selection.marked_unread {
+        if !marked || selection.agent_id.is_some() || selection.origin_source.is_some()
+            || selection.origin_episode.is_some() || selection.mission_id.is_some()
+            || selection.recently_closed.is_some()
+        {
+            return Err(list_query_error("thread discovery requires exactly one valid context"));
+        }
+        return Ok(ThreadContext::MarkedUnread);
+    }
     if selection.origin_source.is_some() || selection.origin_episode.is_some() {
         if selection.agent_id.is_some() || selection.mission_id.is_some()
             || selection.recently_closed.is_some()
         {
-            return Err(validation("thread discovery requires exactly one context"));
+            return Err(list_query_error("thread discovery requires exactly one context"));
         }
         let (Some(source), Some(episode)) = (
             selection.origin_source.as_deref(), selection.origin_episode.as_deref(),
         ) else {
-            return Err(validation("an Inbox origin requires source and episode"));
+            return Err(list_query_error("an Inbox origin requires source and episode"));
         };
         if source.is_empty() || source.len() > 512 || episode.is_empty() || episode.len() > 512 {
-            return Err(validation("the Inbox origin is invalid"));
+            return Err(list_query_error("the Inbox origin is invalid"));
         }
         fractal_schema::registry().validate_subject(source)
-            .map_err(|error| validation(error.to_string()))?;
+            .map_err(|error| list_query_error(error.to_string()))?;
         return Ok(ThreadContext::Inbox { source, episode });
     }
     let family = |id: &str, expected| {
@@ -78,7 +95,7 @@ fn resolve_context(selection: &ThreadCollectionContext) -> Result<ThreadContext<
             Ok(ThreadContext::Mission(mission))
         }
         (None, None, Some(true)) => Ok(ThreadContext::RecentlyClosed),
-        _ => Err(validation(
+        _ => Err(list_query_error(
             "thread discovery requires exactly one valid context",
         )),
     }
@@ -99,6 +116,7 @@ pub(super) async fn detail(
 pub(super) struct TimelineQuery {
     cursor: Option<String>,
     limit: Option<usize>,
+    around: Option<String>,
 }
 
 pub(super) async fn timeline(
@@ -107,12 +125,18 @@ pub(super) async fn timeline(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<TimelineQuery>,
 ) -> ReadResult<TimelinePage> {
+    if query.cursor.is_some() && query.around.is_some() {
+        let mut error = validation("around and cursor are mutually exclusive");
+        error.code = "invalid-thread-cursor".into();
+        return Err(error);
+    }
     with_owner(state, session, id, move |store, person, subject, _| {
         thread_metadata::mixed_timeline(
             store,
             person,
             subject,
             query.cursor.as_deref(),
+            query.around.as_deref(),
             query.limit.unwrap_or(40),
         )
         .map_err(store_error)
@@ -263,7 +287,7 @@ pub(super) fn stream_rows(
             stream_page(vec![summary], false)
         }
         StreamSelection::Thread(subject) => {
-            let page = thread_metadata::mixed_timeline(store, person, subject, None, limit)
+            let page = thread_metadata::mixed_timeline(store, person, subject, None, None, limit)
                 .map_err(store_error)?;
             stream_page(page.items, page.next_cursor.is_some())
         }
@@ -398,6 +422,59 @@ fn run_lifecycle(
         "status": "completed", "affected_ids": [claim.subject], "metadata_claim_id": claim.id,
         "snapshot_id": new_client_snapshot(state).id,
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnreadParameters {
+    target_id: String,
+    anchor_message_id: Option<String>,
+    /// Opaque stable mark operation IDs captured by the client.
+    observed_marks: Vec<String>,
+}
+
+pub(super) async fn unread_action(
+    state: AppState,
+    session: ClientSession,
+    request: ActionRequest,
+) -> Result<Json<Value>, ApiError> {
+    validate_action_admission(&session, &request)?;
+    let gate = action_gate(&state, &session, &request.idempotency_key);
+    let _guard = gate.lock_owned().await;
+    blocking_store(move || Ok((|| {
+        use crate::store::thread_reading::{self, Edit};
+        let current = current_session(&state, &session)?;
+        require_scope(&current, "control.messages")?;
+        let person = &current.authority_actor;
+        let authority = edit_authority(&current)?;
+        validate_snapshot_fence(&state, &request.fence)?;
+        let parameters: UnreadParameters = serde_json::from_value(request.parameters.clone())
+            .map_err(|error| validation(error.to_string()))?;
+        validate_subject(&parameters.target_id)?;
+        let edit = match (request.action_type.as_str(), parameters.anchor_message_id.as_deref()) {
+            ("thread.mark-unread", Some(anchor_message)) => Edit::Mark {
+                anchor_message, observed_marks: &parameters.observed_marks,
+            },
+            ("thread.clear-unread", None) => Edit::Clear {
+                observed_marks: &parameters.observed_marks,
+            },
+            _ => return Err(validation("invalid thread unread parameters")),
+        };
+        let key = format!("client-thread:{}", creation_key(&current, &request));
+        let (_, appended) = thread_reading::apply_as(
+            &state.store, authority, person, &parameters.target_id, &key, edit,
+        ).map_err(store_error)?;
+        if appended {
+            crate::api::signal_visible_change(&state);
+        }
+        // Reminder mark IDs come only from the summary, never from a claim ID.
+        Ok(Json(json!({
+            "kind": "action-result", "action_id": request.id,
+            "operation_id": format!("operation/{}", action_request_digest(&request)?),
+            "status": "completed", "affected_ids": [parameters.target_id],
+            "snapshot_id": new_client_snapshot(&state).id,
+        })))
+    })())).await?
 }
 
 #[derive(Deserialize)]
@@ -647,6 +724,38 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt;
 
+    #[test]
+    fn marked_unread_requires_an_exclusive_context() {
+        let context: ThreadCollectionContext = serde_json::from_value(json!({"marked_unread":true})).unwrap();
+        assert!(matches!(resolve_context(&context), Ok(ThreadContext::MarkedUnread)));
+        for value in [
+            json!({"marked_unread":false}),
+            json!({"marked_unread":true,"agent_id":"agent/atlas"}),
+            json!({"marked_unread":true,"origin_source":"ask/source","origin_episode":"episode"}),
+            json!({"marked_unread":true,"mission_id":"mission/work"}),
+            json!({"marked_unread":true,"recently_closed":true}),
+        ] {
+            let context = serde_json::from_value(value).unwrap();
+            let Err(error) = resolve_context(&context) else { panic!("mixed selector was accepted") };
+            assert_eq!(error.code, "invalid-thread-list-query");
+        }
+    }
+
+    #[tokio::test]
+    async fn timeline_around_rejects_cursor_without_store_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-around-query");
+        let before = state.store.read_snapshot(Ok).unwrap();
+        let response = crate::api::router(state.clone()).oneshot(
+            Request::builder().uri("/v1/client/threads/fixture/timeline?around=message%2Fanchor&cursor=opaque")
+                .header(LOCAL_PERSON_HEADER, "person/operator").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "invalid-thread-cursor", "{body}");
+        assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+    }
+
     #[tokio::test]
     async fn conflicting_creation_is_unavailable_on_every_exact_thread_route() {
         let root = tempfile::tempdir().unwrap();
@@ -756,6 +865,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unread_reminder_mark_retry_read_projection_and_clear_compose_with_real_store() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "unread-api-composition");
+        state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        state.store.configure_thread_write_rollout([]);
+        let person = "person/operator";
+        let thread = "thread/reminder";
+        let agent = "agent/reminder";
+        let message = "message/reminder-anchor";
+        thread_metadata::apply(&state.store, person, thread, "create-reminder",
+            thread_metadata::Edit::Create { agent, title: "Return here" }).unwrap();
+        crate::store::thread_delivery::append_reply(&state.store, &ClaimInput {
+            subject: message.into(), kind: "message.sent".into(), actor: Some(agent.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(agent)), ("to".into(), json!(person)),
+                ("content".into(), json!("Return anchor")), ("status".into(), json!("sent")),
+                ("thread_id".into(), json!(thread)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("reminder-message".into()),
+        }, thread_metadata::PersonAuthority::TrustedLocal, None).unwrap();
+        let observer = paired_native_device(&state, "Reminder observer", Some(&["read.projections"])).await;
+        let bearer = format!("Bearer {}", observer["credential"].as_str().unwrap());
+        let read = |path: &'static str| {
+            let app = crate::api::router(state.clone());
+            let bearer = bearer.clone();
+            async move {
+                let response = app.oneshot(Request::builder().uri(path)
+                    .header(AUTHORIZATION, bearer).body(Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                serde_json::from_slice::<Value>(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap()["value"].clone()
+            }
+        };
+        let action = json!({
+            "api_version":CLIENT_API_VERSION,"id":"action/mark-reminder","type":"thread.mark-unread",
+            "idempotency_key":"mark-reminder",
+            "fence":{"snapshot_id":new_client_snapshot(&state).id},
+            "parameters":{"target_id":thread,"anchor_message_id":message,"observed_marks":[]},
+        });
+        for _ in 0..2 {
+            local_post(&state, "/v1/client/actions", action.clone()).await;
+        }
+        let summary = read("/v1/client/threads/reminder").await;
+        let reminder = &summary["unread_reminder"];
+        assert_eq!(reminder["anchor_message_id"], message);
+        assert_eq!(reminder["marks"].as_array().unwrap().len(), 1);
+        assert_eq!(reminder["marks"][0]["anchor_message_id"], message);
+        assert!(reminder["marks"][0]["mark_id"].is_string());
+        let persisted = state.store.claims_for(thread, Some(fractal_schema::threads::UNREAD_MARKED)).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(reminder["marks"][0]["mark_id"], persisted[0].operation_id.as_deref().unwrap());
+        assert_ne!(reminder["marks"][0]["mark_id"], persisted[0].id);
+        assert_eq!(summary["unread"], true);
+        let list = read("/v1/client/threads?agent_id=agent%2Freminder").await;
+        assert_eq!(list["items"][0]["unread_reminder"], *reminder);
+        assert_eq!(state.store.claims_for(message, Some("message.read")).unwrap().len(), 0);
+        local_post(&state, "/v1/client/actions", json!({
+            "api_version":CLIENT_API_VERSION,"id":"action/clear-reminder","type":"thread.clear-unread",
+            "idempotency_key":"clear-reminder",
+            "fence":{"snapshot_id":new_client_snapshot(&state).id},
+            "parameters":{"target_id":thread,"observed_marks":[reminder["marks"][0]["mark_id"]]},
+        })).await;
+        let cleared = read("/v1/client/threads/reminder").await;
+        assert!(cleared["unread_reminder"].is_null());
+        assert_eq!(cleared["unread"], true);
+        assert_eq!(state.store.claims_for(message, Some("message.read")).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
     async fn thread_capabilities_require_the_same_fleet_writer_gate() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "thread-capabilities");
@@ -768,7 +945,7 @@ mod tests {
         state.store.configure_thread_write_rollout([]);
         let (status, ready) = get_capabilities(&state, LOCAL_PERSON_HEADER, person).await;
         assert_eq!(status, StatusCode::OK);
-        for id in ["threads-v1", "thread-summary-feed", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen"] {
+        for id in ["threads-v1", "thread-summary-feed", "thread.mark-unread", "thread.clear-unread", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen"] {
             assert_eq!(grant(&ready, id), "granted", "{id}");
         }
         assert_eq!(grant(&ready, "thread.link-ask"), "ungranted");
@@ -793,6 +970,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unread_reminder_actions_require_message_control() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-unread-scope");
+        state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        state.store.configure_thread_write_rollout([]);
+        let paired = paired_native_device(&state, "Reminder reader", Some(&["read.projections"])).await;
+        let bearer = format!("Bearer {}", paired["credential"].as_str().unwrap());
+        for action in ["thread.mark-unread", "thread.clear-unread"] {
+            assert_eq!(action_scope(action), Some("control.messages"));
+            let mut parameters = json!({"target_id":"thread/reminder", "observed_marks":["opaque-mark-operation"]});
+            if action == "thread.mark-unread" {
+                parameters["anchor_message_id"] = json!("message/anchor");
+            }
+            let response = crate::api::router(state.clone()).oneshot(
+                Request::builder().method("POST").uri("/v1/client/actions")
+                    .header(AUTHORIZATION, &bearer).header("Content-Type", "application/json")
+                    .body(Body::from(json!({
+                        "api_version":CLIENT_API_VERSION,"id":"action/reminder","type":action,
+                        "idempotency_key":action,
+                        "fence":{"snapshot_id":new_client_snapshot(&state).id},
+                        "parameters":parameters,
+                    }).to_string())).unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{action}");
+        }
+    }
+
+    #[tokio::test]
     async fn thread_capabilities_honor_read_only_and_revoked_pairings() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "thread-capability-pair");
@@ -804,7 +1009,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{read}");
         assert_eq!(grant(&read, "threads-v1"), "granted");
         assert_eq!(grant(&read, "thread-summary-feed"), "granted");
-        for id in ["thread.read", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen", "thread.link-ask"] {
+        for id in ["thread.read", "thread.mark-unread", "thread.clear-unread", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen", "thread.link-ask"] {
             assert_eq!(grant(&read, id), "ungranted", "{id}");
         }
 
