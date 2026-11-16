@@ -133,3 +133,12 @@ with `null` meaning the end. The host supplies its canonical fractional-key
 function. Equal concurrent keys or an exhausted bounded gap can be rebalanced in
 one atomic edit while retaining the observed order. A missing anchor or invalid
 collection produces a refusal without an edit.
+
+`followQuickAccess` follows the exact reserved arrangement and all membership
+pages. A whole-container membership invalidation rereads all pages, including
+changes outside the held first window. It is transport-only and does not depend
+on the web UI, Effect schemas, or native platform APIs. The host owns immutable
+action IDs, idempotency keys, and fences. Creation requires a distinct identity
+and explicit `v2ReadersReady`; discovering server support does not establish
+that every arrangement reader has been upgraded. A retired arrangement is never
+silently replaced or migrated. Lost follows remain unavailable until the caller closes and reopens them; refresh only rereads a connected follow. No edit is replayed.

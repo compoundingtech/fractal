@@ -14,3 +14,4 @@ export * from './sidebarView.ts';
 export * from './syncNotice.ts';
 export * from './documentView.ts';
 export * from './quickAccess.ts';
+export * from './quickAccessFollow.ts';
