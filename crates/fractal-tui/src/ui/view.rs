@@ -229,6 +229,8 @@ pub struct Attention {
     /// theirs. It stays open meanwhile, and its deadline does not move.
     #[serde(skip)]
     pub snoozed_until: Option<chrono::DateTime<chrono::FixedOffset>>,
+    /// Kept off Inbox until the person brings it back, independently of any return time.
+    #[serde(skip)]
     pub snoozed_indefinitely: bool,
     /// The asking claim of an ask (st's `episode`): a closed row is matched by it to the
     /// auto-resolved row it became. None where st names none.
