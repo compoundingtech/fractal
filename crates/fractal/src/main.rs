@@ -2248,6 +2248,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// One exact person-device scope; repeat for each scope. The daemon validates the list.
+        /// Nothing is granted implicitly. Use --scope instead for assistant grants.
+        #[arg(long = "person-scope", value_name = "SCOPE", conflicts_with_all = ["read_only", "full_control", "assistant"])]
+        person_scopes: Vec<String>,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
@@ -10273,6 +10277,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            person_scopes,
             fabric_gateway,
             gateway,
             assistant: None,
@@ -10298,12 +10303,16 @@ async fn run_devices(
                     device_name,
                     person_id: person.clone(),
                     full_control: full_control.then_some(true),
-                    scopes: read_only.then(|| {
-                        READ_ONLY_PAIRING_SCOPES
-                            .iter()
-                            .map(|scope| (*scope).to_owned())
-                            .collect()
-                    }),
+                    scopes: if person_scopes.is_empty() {
+                        read_only.then(|| {
+                            READ_ONLY_PAIRING_SCOPES
+                                .iter()
+                                .map(|scope| (*scope).to_owned())
+                                .collect()
+                        })
+                    } else {
+                        Some(person_scopes)
+                    },
                     fabric_gateway: fabric_gateway.then_some(true),
                 })
                 .await?;

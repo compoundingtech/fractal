@@ -2106,11 +2106,25 @@ client diagnostics writes, availability, presence and note writes for the paired
 reads and control, terminal reads, attention control,
 and launch control. The begin request may narrow that default with `scopes`, a non-empty
 subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
-`write.availability`, `write.presence`, `write.notes`, `read.glasses`, `control.glasses`, `terminal.read`,
-`control.attention`, `control.launches`); any other scope, or `scopes` combined with
-`full_control`, is rejected with a validation error. `fractal devices --as person/alex pair
---read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so
-the device can observe but every attention, launch, and other action returns `403`. For an
+`write.availability`, `write.presence`, `write.notes`, `read.glasses`, `read.arrangements`,
+`control.glasses`, `terminal.read`, `control.attention`, `control.launches`); any other scope, or
+`scopes` combined with `full_control`, is rejected with a validation error.
+`fractal devices --as person/alex pair --read-only "Wall display"` requests `read.projections`,
+`read.glasses`, `read.arrangements`, and `terminal.read`, so the device can observe but every
+attention, launch, and other action returns `403`. To request an exact person-device grant
+without terminal access, repeat `--person-scope`:
+
+```sh
+fractal devices --as person/alex pair "Tag reader" \
+  --person-scope read.projections \
+  --person-scope read.glasses \
+  --person-scope read.arrangements
+```
+
+No scopes are added implicitly to an explicit list; the daemon validates it and returns any
+validation error unchanged. `--person-scope` conflicts with `--read-only`, `--full-control`,
+and `--assistant`. Assistant grants continue to use their separate typed `--scope` flag.
+For an
 intentionally trusted device that needs Chat sends, mission/work actions, runtime control, and
 terminal input, the initiating person
 must use `fractal devices --as person/alex pair --full-control "Alex iPhone"` on the trusted local
