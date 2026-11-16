@@ -2,9 +2,10 @@ use super::*;
 use super::identities;
 use crate::model::MissionRunRetryRequest;
 
-enum RunCreationLineage<'a> {
+enum RunCreationSource<'a> {
     Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
     Supersession(&'a MissionRunView, &'a str),
+    Declaration(MissionWorkspaceDeclaration),
 }
 pub(super) fn continuity_step_paths_tx(
     connection: &Connection,
@@ -536,7 +537,7 @@ impl Store {
         };
         self.create_mission_run_context(
             &request, None, None, None,
-            Some(RunCreationLineage::Retry(&source, options)), None, None,
+            Some(RunCreationSource::Retry(&source, options)), None,
         )
     }
 
@@ -552,7 +553,7 @@ impl Store {
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
     ) -> Result<MissionRunView, FractalError> {
-        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None, None)
+        self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None)
     }
 
     /// Start from a launcher's workspace root, retaining its identity for later supersession.
@@ -565,7 +566,7 @@ impl Store {
         workspace_declaration: MissionWorkspaceDeclaration,
     ) -> Result<MissionRunView, FractalError> {
         self.create_mission_run_context(request, child, occurrence_subject, latest_ref,
-            None, None, Some(workspace_declaration))
+            Some(RunCreationSource::Declaration(workspace_declaration)), None)
     }
 
     /// Complete an authorized revision cutover inside its approval transaction.
@@ -659,7 +660,7 @@ impl Store {
         };
         self.create_mission_run_context(
             &request, child, None, None,
-            Some(RunCreationLineage::Supersession(source, publication)), Some(transaction), None,
+            Some(RunCreationSource::Supersession(source, publication)), Some(transaction),
         )
     }
 
@@ -669,14 +670,14 @@ impl Store {
         child: Option<ChildMissionContext>,
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
-        lineage: Option<RunCreationLineage<'_>>,
+        source: Option<RunCreationSource<'_>>,
         provided_transaction: Option<&Transaction<'_>>,
-        workspace_declaration: Option<MissionWorkspaceDeclaration>,
     ) -> Result<MissionRunView, FractalError> {
-        let (retry, supersession) = match lineage {
-            Some(RunCreationLineage::Retry(source, options)) => (Some((source, options)), None),
-            Some(RunCreationLineage::Supersession(source, publication)) => (None, Some((source, publication))),
-            None => (None, None),
+        let (retry, supersession, workspace_declaration) = match source {
+            Some(RunCreationSource::Retry(source, options)) => (Some((source, options)), None, None),
+            Some(RunCreationSource::Supersession(source, publication)) => (None, Some((source, publication)), None),
+            Some(RunCreationSource::Declaration(declaration)) => (None, None, Some(declaration)),
+            None => (None, None, None),
         };
         let mission_identity = match provided_transaction {
             Some(transaction) => mission_storage_id(transaction, &request.mission)?,

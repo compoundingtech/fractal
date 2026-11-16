@@ -228,7 +228,7 @@ fn authored_human_gate_reuses_original_authenticated_approval_without_new_reques
         let request = append_claim_tx(tx, &store.origin, "gate-operation/original", "gate.requested", None,
             &json!({"fields":fields}), &[], None)?;
         append_claim_tx(tx, &store.origin, &request.subject, "gate.result", Some("person/test"),
-            &json!({"fields":{"request":request.id,"verdict":"pass"}}), &[request.id.clone()], None)?;
+            &json!({"fields":{"request":request.id,"verdict":"pass"}}), std::slice::from_ref(&request.id), None)?;
         Ok(request)
     }).unwrap().unwrap();
     let second = gate_run(&store, "gate-second");
@@ -267,7 +267,7 @@ fn legacy_run_human_gate_requires_confirmation_and_reuses_original_approval_by_r
         let request = append_claim_tx(tx, &store.origin, "gate-operation/legacy-root", "gate.requested", None,
             &json!({"fields":fields}), &[], None)?;
         append_claim_tx(tx, &store.origin, &request.subject, "gate.result", Some("person/test"),
-            &json!({"fields":{"request":request.id,"verdict":"pass"}}), &[request.id.clone()], None)?;
+            &json!({"fields":{"request":request.id,"verdict":"pass"}}), std::slice::from_ref(&request.id), None)?;
         Ok(request)
     }).unwrap().unwrap();
     let target = gate_run(&store, "root-target");

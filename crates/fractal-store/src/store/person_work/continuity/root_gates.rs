@@ -88,7 +88,11 @@ pub fn eligible_root_gate_requests_tx(connection: &Connection, source: &MissionR
     Ok(eligible)
 }
 
-pub(super) fn record_root_gate_carry_tx(tx: &Transaction<'_>, origin: &str, target: &MissionRunView, actor: &str, request: &ClaimRecord, answer: &ClaimRecord, binding: &Value, legacy_confirmed: bool, source_confirmation: Option<&str>) -> Result<()> {
+pub(super) fn record_root_gate_carry_tx(
+    tx: &Transaction<'_>, origin: &str, target: &MissionRunView, actor: &str,
+    (request, answer, binding): (&ClaimRecord, &ClaimRecord, &Value),
+    legacy_confirmed: bool, source_confirmation: Option<&str>,
+) -> Result<()> {
     if root_reference_matches_tx(tx,target,request,answer,binding)? { return Ok(()); }
     let mut body = json!({"fields":{"source_run":request.body["fields"]["owner"],"source_request":request.id,
         "source_answer":answer.id,"target_generation":target.generation,"continuity":binding,
@@ -118,7 +122,7 @@ pub fn carry_root_gate_answers_tx(tx: &Transaction<'_>, origin: &str, source: &M
             Some(root_confirmation_tx(tx,source,&request,&answer,&binding)?
                 .ok_or_else(|| anyhow::anyhow!("the original person confirmation is no longer retained"))?)
         } else { None };
-        record_root_gate_carry_tx(tx,origin,target,actor,&request,&answer,&binding,confirmed_here,source_confirmation.as_deref())?;
+        record_root_gate_carry_tx(tx,origin,target,actor,(&request,&answer,&binding),confirmed_here,source_confirmation.as_deref())?;
         carried.push(request.id);
     }
     Ok(carried)

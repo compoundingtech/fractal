@@ -578,7 +578,7 @@ impl PersonWorkStore for Store {
                     &json!({"fields":{"source_step_run":fields["origin_step"],
                         "source_attempt":fields["origin_attempt"],"attempt":origin.attempt,
                         "status":origin.status,"worker_reported":origin.worker_reported},
-                        "evidence":[answered.id]}), &[answered.id.clone()], None).map_err(claim_append_error)?;
+                        "evidence":[answered.id]}), std::slice::from_ref(&answered.id), None).map_err(claim_append_error)?;
                 return step(tx, &answered.subject).map_err(internal)?
                     .ok_or_else(|| FractalError::new("missing-step-run", "the original answered ask is no longer retained"));
             }

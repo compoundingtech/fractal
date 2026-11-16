@@ -60,7 +60,7 @@ impl Store {
                     }
                 } else if request.body["fields"]["owner"] != owner {
                     super::root_gates::record_root_gate_carry_tx(tx,&self.origin,run,"daemon/runtime",
-                        &request,&answer,&value,false,None).map_err(internal)?;
+                        (&request,&answer,&value),false,None).map_err(internal)?;
                 }
                 return Ok((value, Some(request)));
             }

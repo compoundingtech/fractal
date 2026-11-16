@@ -136,7 +136,7 @@ fn direct_person_answer_preview_names_bound_and_legacy_originals() {
         assert_eq!(work["eligibility"], if legacy { "requires-person-confirmation" } else { "eligible" });
         if legacy {
             let result = store.recover_mission_continuity(&source.subject,
-                preview["preview_hash"].as_str().unwrap(), "person/operator", &[original.subject.clone()]).unwrap();
+                preview["preview_hash"].as_str().unwrap(), "person/operator", std::slice::from_ref(&original.subject)).unwrap();
             let recovered = store.mission_run(result["recovered_run"].as_str().unwrap()).unwrap().unwrap();
             let recovered_step = recovered.steps.iter().find(|step| step.step == "prepare").unwrap();
             let confirmation = store.claims_for(&recovered_step.subject, Some("step-run.carried")).unwrap();
@@ -197,7 +197,7 @@ fn legacy_root_approval_is_previewed_and_recovered_only_by_explicit_reference() 
     assert_eq!(root["answer"]["id"], answer.id);
     assert_eq!(root["eligibility"], "requires-person-confirmation");
     let result = store.recover_mission_continuity(&source.subject,
-        preview["preview_hash"].as_str().unwrap(), "person/operator", &[request.id.clone()]).unwrap();
+        preview["preview_hash"].as_str().unwrap(), "person/operator", std::slice::from_ref(&request.id)).unwrap();
     let recovered = result["recovered_run"].as_str().unwrap();
     let references = store.claims_for(recovered, Some("mission-run.gate-carried")).unwrap();
     assert_eq!(references.len(), 1);
