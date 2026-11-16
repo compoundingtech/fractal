@@ -4,6 +4,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
+    RequestHistoryPage,
     ThreadListQuery, ThreadSummary, ThreadSummaryPage, ThreadTimelinePage, PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
@@ -745,6 +746,7 @@ export class FractalClient {
     async threadList(options: ThreadListQuery, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummaryPage>> { return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }
     async threadGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummary>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}`, undefined, requestOptions); }
     async threadTimeline(id: string, options: { cursor?: string; around?: never; limit?: number } | { around: string; cursor?: never; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadTimelinePage>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}/timeline` + query(options), undefined, requestOptions); }
+    async threadRequestHistory(id: string, options: { cursor?: string; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<RequestHistoryPage>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}/request-history` + query(options), undefined, requestOptions); }
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }

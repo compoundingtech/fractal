@@ -2064,6 +2064,14 @@ export type Envelope = {
   value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | AvailabilityHistory | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
+export type EpisodeState = ({
+  answers: Array<unknown>;
+  availability: "available";
+  status: string;
+} | {
+  availability: "unavailable";
+});
+
 export type ErrorCode = (
   "recipient-retired"
   | "agents-publication-row-too-large"
@@ -2712,6 +2720,24 @@ export type HarnessTodoTotals = {
   pending: number;
 };
 
+export type HistoricalPayload = ({
+  availability: "available";
+  provenance: RequestProvenance;
+  references: Array<HistoricalReference>;
+  request: unknown;
+  text: string;
+  title: (string | null);
+} | {
+  availability: "unavailable";
+  reason: PayloadUnavailable;
+});
+
+export type HistoricalReference = {
+  revision: (string | null);
+  semantics: ReferenceSemantics;
+  target_id: string;
+};
+
 export type History = ResourceHeader & {
   event_type: string;
   kind: "history";
@@ -2720,6 +2746,8 @@ export type History = ResourceHeader & {
   summary: string;
   targets: Array<Id>;
 };
+
+export type HistorySourceSupport = "person-step" | "unsupported-source";
 
 export type HostId = string;
 
@@ -3637,6 +3665,8 @@ export type PairingComplete = {
 
 export type ParticipantRef = string;
 
+export type PayloadUnavailable = "retained-definition-unavailable" | "retained-step-unavailable" | "opening-unavailable" | "historical-interpolation-unavailable" | "boundary-unavailable" | "payload-unavailable" | "read-bound-exceeded";
+
 export type PersonAnswer = {
   id?: string;
   label?: string;
@@ -3954,6 +3984,8 @@ export type ReadPositionPage = {
   sync?: SyncNotice;
 };
 
+export type ReferenceSemantics = "retained-reference" | "live-reference";
+
 export type RelatedRunWait = {
   detail?: string;
   kind: string;
@@ -3985,7 +4017,39 @@ export type RequestAnswerOption = {
   outcome?: "accept" | "decline" | "request_changes";
 };
 
+export type RequestHistoryItem = {
+  complete: boolean;
+  key: SourceEpisode;
+  payload: HistoricalPayload;
+  state: EpisodeState;
+};
+
+export type RequestHistoryPage = {
+  boundary_items: Array<RequestHistoryItem>;
+  complete: boolean;
+  items: Array<RequestHistoryItem>;
+  next_cursor: (string | null);
+  relations: Array<RequestHistoryRelation>;
+  source_episodes: Array<SourceEpisodeGroup>;
+  source_support: (HistorySourceSupport | null);
+};
+
+export type RequestHistoryRelation = {
+  predecessor: SourceEpisode;
+  reason: string;
+  request: SourceEpisode;
+};
+
 export type RequestId = string;
+
+export type RequestProvenance = ({
+  asking_claim_id: string;
+  kind: "runtime-ask";
+} | {
+  kind: "authored-episode";
+  mission_revision: string;
+  opening_claim_id: string;
+});
 
 export type RequestSubject = {
   kind: 
@@ -4278,6 +4342,16 @@ export type SnapshotId = string;
 export type SourceBlob = {
   hash: string;
   text: string;
+};
+
+export type SourceEpisode = {
+  episode: string;
+  source_id: string;
+};
+
+export type SourceEpisodeGroup = {
+  episodes: Array<SourceEpisode>;
+  source_id: string;
 };
 
 export type SourceMapClaim = {

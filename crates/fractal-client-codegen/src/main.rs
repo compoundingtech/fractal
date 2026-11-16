@@ -290,6 +290,10 @@ fn rust_operation_methods(
             writeln!(out, r#"    pub async fn thread_get(&self, id: &str) -> Result<Envelope<ThreadSummary>, ClientError> {{ self.get(&format!("/v1/client/threads/{{}}", thread_path_segment(id)?)).await }}"#)?;
             continue;
         }
+        if id == "thread.request-history" {
+            writeln!(out, r#"    pub async fn thread_request_history(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<RequestHistoryPage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/request-history", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
+            continue;
+        }
         if id == "thread.timeline" {
             writeln!(out, r#"    pub async fn thread_timeline(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
             writeln!(out, r#"    pub async fn thread_timeline_around(&self, id: &str, message_id: &str, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline?around={{}}", thread_path_segment(id)?, percent_encode(message_id)); if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }} self.get(&path).await }}"#)?;
@@ -565,6 +569,10 @@ fn swift_operation_methods(
         }
         if id == "thread.get" {
             writeln!(out, r#"    public func threadGet(id: String) async throws -> Envelope<ThreadSummary> {{ try await get("v1/client/threads/\(try Self.routedThreadID(id))") }}"#)?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, r#"    public func threadRequestHistory(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<RequestHistoryPage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/request-history", query: query) }}"#)?;
             continue;
         }
         if id == "thread.timeline" {
@@ -1002,6 +1010,12 @@ fn validate_surfaces(
         "ThreadSummaryPage",
         "ThreadTimelineAnchor",
         "ThreadTimelinePage",
+        "SourceEpisode",
+        "HistoricalReference",
+        "RequestHistoryItem",
+        "RequestHistoryRelation",
+        "SourceEpisodeGroup",
+        "RequestHistoryPage",
         "ThreadTargetParameters",
         "ThreadRenameParameters",
         "ThreadStartParameters",
@@ -1874,6 +1888,10 @@ fn typescript_operation_methods(
         }
         if id == "thread.get" {
             writeln!(out, "    async threadGet(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummary>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}`, undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, "    async threadRequestHistory(id: string, options: {{ cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<RequestHistoryPage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/request-history` + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "thread.timeline" {

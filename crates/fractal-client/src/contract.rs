@@ -80,6 +80,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("thread.list", "/v1/client/threads"),
     ("thread.get", "/v1/client/threads/{id}"),
     ("thread.timeline", "/v1/client/threads/{id}/timeline"),
+    ("thread.request-history", "/v1/client/threads/{id}/request-history"),
     ("harness-questions.list", "/v1/client/harness-questions"),
     ("harness-questions.get", "/v1/client/harness-questions/{id}"),
     ("notes.list", "/v1/client/notes"),
