@@ -31,7 +31,7 @@ import { workspaceHref } from '../web/workspaceView.ts'
 import type { ThreadDraft, ThreadSource } from './threadSource.ts'
 import { gatewayUnreadActions } from './unread-action-port.ts'
 
-const legend = 'synthetic ports, not authenticated live API'
+const legend = 'Demo data; nothing is sent to Fractal'
 const agentRef = 'agent/build-host-a/release-worker'
 const actor = 'person/operator'
 const now = Date.parse('2026-11-16T12:00:00Z')
@@ -63,7 +63,7 @@ type RawEvent =
   | { readonly kind: 'thread.renamed'; readonly id: string; readonly actor_id: string; readonly accepted_at_unix_ms: number; readonly previous_title: string; readonly title: string }
 /** One fixture thread. `marks` is the summary's unread reminder: the only place mark IDs come from. */
 type Row = { readonly id: string; readonly title: string; readonly state: 'open' | 'closed'; readonly titleRevision: number; readonly marks: readonly Mark[] }
-type LogEntry = { readonly id: number; readonly kind: 'seek' | 'clear' | 'mark' | 'fixture'; readonly text: string }
+type LogEntry = { readonly id: number; readonly kind: 'seek' | 'clear' | 'mark' | 'fixture'; readonly text: string; readonly details: string }
 
 const message = (id: string, author: string, minutes: number, content: string): RawEvent =>
   ({ kind: 'message', id, actor_id: author, accepted_at_unix_ms: now + minutes * 60_000, content, thread_quote_id: null })
@@ -141,7 +141,7 @@ function createWorld(scenario: Scenario, initialPaging: Paging): World {
   const paging = Atom.keepAlive(Atom.make<Paging>(initialPaging))
   const log = Atom.keepAlive(Atom.make<readonly LogEntry[]>([]))
   let sequence = 0, external = 0, replies = 0, marks = 0
-  const record = (kind: LogEntry['kind'], text: string) => registry.set(log, [...registry.get(log), { id: ++sequence, kind, text }])
+  const record = (kind: LogEntry['kind'], text: string, details: string) => registry.set(log, [...registry.get(log), { id: ++sequence, kind, text, details }])
   const titleOf = (id: string) => registry.get(rows).find(row => row.id === id)?.title ?? id
   const edit = (id: string, change: (row: Row) => Row) => registry.set(rows, registry.get(rows).map(row => row.id === id ? change(row) : row))
   const append = (id: string, event: RawEvent) => registry.set(history, { ...registry.get(history), [id]: [event, ...(registry.get(history)[id] ?? [])] })
@@ -194,7 +194,7 @@ function createWorld(scenario: Scenario, initialPaging: Paging): World {
     const threadId = `thread/${thread}`
     const items = registry.get(history)[threadId] ?? []
     const state = items.some(item => item.id === around) ? 'current' : registry.get(pending)[threadId]?.id === around ? 'pending' : 'unavailable'
-    record('seek', `seek around ${around} in “${titleOf(threadId)}” → ${state}`)
+    record('seek', state === 'current' ? `Opened the reminded message in “${titleOf(threadId)}”` : state === 'pending' ? `The reminded message in “${titleOf(threadId)}” has not arrived yet` : `The reminded message in “${titleOf(threadId)}” is no longer available`, `seek around ${around} → ${state}`)
     // The wire page omits previous_cursor: a null there is not the client's optional string.
     return Response.json({ ...capabilities, value: { items, next_cursor: null, anchor: { message_id: around, state } } })
   } })
@@ -207,11 +207,11 @@ function createWorld(scenario: Scenario, initialPaging: Paging): World {
       // Observed-remove: only the exact mark IDs this view read from the summary leave the reminder.
       if (change.kind === 'thread.clear-unread') {
         edit(id, row => ({ ...row, marks: row.marks.filter(each => !change.observed_marks.includes(each.mark_id)) }))
-        record('clear', `clear ${change.observed_marks.join(', ')} on “${titleOf(id)}” → Sent`)
+        record('clear', `Reminder cleared after viewing “${titleOf(id)}”`, `clear ${change.observed_marks.join(', ')} → Sent`)
       } else {
         const next = mark(`synthetic-mark/${id.slice('thread/'.length)}-mark-${++marks}`, change.anchor_message_id)
         edit(id, row => ({ ...row, marks: [...row.marks.filter(each => !change.observed_marks.includes(each.mark_id)), next] }))
-        record('mark', `mark unread from ${change.anchor_message_id} on “${titleOf(id)}” → Sent`)
+        record('mark', `Marked “${titleOf(id)}” unread`, `mark unread from ${change.anchor_message_id} → Sent`)
       }
       return { _tag: 'Sent' }
     },
@@ -280,19 +280,19 @@ function createWorld(scenario: Scenario, initialPaging: Paging): World {
       const anchor = (registry.get(history)[id] ?? []).find(event => event.kind === 'message' && event.actor_id === agentRef)
       if (anchor === undefined) return
       edit(id, row => ({ ...row, marks: [...row.marks, mark(`synthetic-mark/${id.slice('thread/'.length)}-device-${++external}`, anchor.id)] }))
-      record('fixture', `another device marked ${anchor.id} on “${titleOf(id)}” unread`)
+      record('fixture', `Another device marked “${titleOf(id)}” unread`, `external mark from ${anchor.id}`)
     },
     agentReply: (id: string) => {
       const content = agentReplies[replies % agentReplies.length]!
       append(id, message(`message/walkthrough-agent-${++replies}`, agentRef, 0, content))
-      record('fixture', `agent replied in “${titleOf(id)}”`)
+      record('fixture', `The agent replied in “${titleOf(id)}”`, `append agent reply to ${id}`)
     },
     deliverPending: () => {
       const waiting = registry.get(pending)[cancellation]
       if (waiting === undefined) return
       append(cancellation, waiting)
       registry.set(pending, {})
-      record('fixture', `${waiting.id} arrived in “${titleOf(cancellation)}”`)
+      record('fixture', `The pending reply arrived in “${titleOf(cancellation)}”`, `deliver ${waiting.id}`)
     },
   }
   return { scenario, primary: world.primary, registry, source, navigation, rows, pending, paging, log, updates, lastThread: world.primary }
@@ -301,7 +301,7 @@ function createWorld(scenario: Scenario, initialPaging: Paging): World {
 const scenarioCopy: Readonly<Record<Scenario, { readonly label: string; readonly guide: string }>> = {
   revisit: {
     label: 'Reminder & revisit',
-    guide: 'Open “Release checklist” from Marked unread in the sidebar. Seeing its reminded reply for 500 ms clears the reminder. Mark unread again: it stays for this visit. Leave for Agent context, then return to Thread tab: it clears.',
+    guide: 'Open Release checklist from Marked unread. Its saved message appears. After viewing it, the reminder clears. Mark it unread again: it stays during this visit. Switch to Agent conversation and come back to see it clear.',
   },
   closed: {
     label: 'Closed thread',
@@ -336,7 +336,7 @@ function Controls({ world, threadRoute, paging, onScenario, onPaging }: {
   return <header data-unread-walkthrough-controls="" {...stylex.props(styles.controls)}>
     <div {...stylex.props(styles.line)}>
       <p data-walkthrough-legend="" {...stylex.props(styles.legend)}>{legend}</p>
-      <p {...stylex.props(styles.note)}>Production workspace, thread controller and Marked unread list over local fixture atoms. Nothing is sent to Fractal.</p>
+      <p {...stylex.props(styles.note)}>Try the real thread interface with sample conversations. Changes stay in this preview.</p>
     </div>
     <div {...stylex.props(styles.line)}>
       <RadioGroup orientation="horizontal" value={scenario} onChange={value => onScenario(value as Scenario)} {...stylex.props(styles.group)}>
@@ -351,12 +351,12 @@ function Controls({ world, threadRoute, paging, onScenario, onPaging }: {
     </div>
     <div {...stylex.props(styles.line)}>
       <RadioGroup orientation="horizontal" value={threadRoute === undefined ? 'agent' : 'thread'} onChange={value => go(value as 'agent' | 'thread')} {...stylex.props(styles.group)}>
-        <Label {...stylex.props(styles.groupLabel)}>In-app route</Label>
-        <Radio value="agent" className={segment}>Agent context</Radio>
+        <Label {...stylex.props(styles.groupLabel)}>View</Label>
+        <Radio value="agent" className={segment}>Agent conversation</Radio>
         <Radio value="thread" className={segment}>Thread tab</Radio>
       </RadioGroup>
-      <div role="group" aria-label="Fixture updates" {...stylex.props(styles.group)}>
-        <span {...stylex.props(styles.groupLabel)}>Fixture updates · “{titleOf(target)}”</span>
+      <div role="group" aria-label="Simulate an update" {...stylex.props(styles.group)}>
+        <span {...stylex.props(styles.groupLabel)}>Simulate an update · “{titleOf(target)}”</span>
         <Button onPress={() => world.updates.markElsewhere(target)} {...stylex.props(styles.action)}>Mark unread on another device</Button>
         <Button onPress={() => world.updates.agentReply(target)} {...stylex.props(styles.action)}>Agent posts a reply</Button>
         {scenario !== 'around' || pending[cancellation] === undefined ? null
@@ -366,17 +366,26 @@ function Controls({ world, threadRoute, paging, onScenario, onPaging }: {
     <p {...stylex.props(styles.guide)}>{scenarioCopy[scenario].guide}</p>
     <div {...stylex.props(styles.status)}>
       <dl {...stylex.props(styles.facts)}>
-        <dt {...stylex.props(styles.term)}>Route</dt>
-        <dd data-walkthrough-route="" {...stylex.props(styles.value)}>{threadRoute === undefined ? `Agent context · ${agentRef}` : `Thread tab · ${threadRoute}`}</dd>
+        <dt {...stylex.props(styles.term)}>View</dt>
+        <dd data-walkthrough-route="" {...stylex.props(styles.value)}>{threadRoute === undefined ? 'Agent conversation · Release worker' : `Thread · ${titleOf(threadRoute)}`}</dd>
         <dt {...stylex.props(styles.term)}>Foreground</dt>
         <dd {...stylex.props(styles.value)}>{foreground ? 'Page focused and visible: a reminded reply in view for 500 ms clears.' : 'Page not focused: click inside the canvas. Reminders only clear while it has focus.'}</dd>
         <dt {...stylex.props(styles.term)}>Reminders</dt>
-        <dd data-walkthrough-reminders="" {...stylex.props(styles.value)}>{reminded.length === 0 ? 'None' : reminded.map(row => `“${row.title}” (${row.marks.map(each => each.mark_id).join(', ')})`).join(' · ')}</dd>
+        <dd data-walkthrough-reminders="" {...stylex.props(styles.value)}>{reminded.length === 0 ? 'None' : reminded.map(row => `“${row.title}”`).join(' · ')}</dd>
       </dl>
-      <ol data-walkthrough-log="" aria-label="Port calls" {...stylex.props(styles.log)}>
-        {log.length === 0 ? <li {...stylex.props(styles.logEntry)}>No port calls yet.</li>
-          : log.slice(-5).toReversed().map(entry => <li key={entry.id} data-walkthrough-log-kind={entry.kind} {...stylex.props(styles.logEntry)}>{entry.id}. {entry.text}</li>)}
-      </ol>
+      <section aria-label="Actions in this demo">
+        <p {...stylex.props(styles.note)}>Actions in this demo</p>
+        <ol data-walkthrough-log="" aria-label="What happened" {...stylex.props(styles.log)}>
+          {log.length === 0 ? <li {...stylex.props(styles.logEntry)}>No changes yet.</li>
+            : log.slice(-5).toReversed().map(entry => <li key={entry.id} data-walkthrough-log-kind={entry.kind} {...stylex.props(styles.logEntry)}>{entry.text}</li>)}
+        </ol>
+        <details>
+          <summary {...stylex.props(styles.note)}>Technical details</summary>
+          <ol {...stylex.props(styles.log)}>
+            {log.map(entry => <li key={entry.id} {...stylex.props(styles.logEntry)}>{entry.id}. {entry.details}</li>)}
+          </ol>
+        </details>
+      </section>
     </div>
   </header>
 }
@@ -469,7 +478,7 @@ export const ControlledWorld: Story = {
     await expect(fact('route')).toBe('agent')
     await openRow(release)
     await waitFor(() => expect(fact('route')).toBe(release), { timeout: 10_000 })
-    await expect(canvasElement.querySelector('[data-walkthrough-log-kind="seek"]')?.textContent).toContain('→ current')
+    await expect(canvasElement.querySelector('[data-walkthrough-log-kind="seek"]')?.textContent).toContain('Opened the reminded message')
     // The entry captured the reminder; seeing its reply for a stable 500 ms clears it.
     await waitFor(() => expect(fact('clears')).toBe('1'), { timeout: 10_000 })
     await waitFor(() => expect(indicator()).toBeNull())
@@ -485,14 +494,14 @@ export const ControlledWorld: Story = {
     await waitFor(() => expect(row(release)).not.toBeNull())
 
     // 3. Leaving for the agent context ends the visit without clearing.
-    await userEvent.click(radios('In-app route').getByRole('radio', { name: 'Agent context' }))
+    await userEvent.click(radios('View').getByRole('radio', { name: 'Agent conversation' }))
     await waitFor(() => expect(fact('route')).toBe('agent'))
     await waitFor(() => expect(root().querySelector('[data-unread-walkthrough-stage] details[aria-label="Threads"]')).not.toBeNull(), { timeout: 30_000 })
     await settle(700)
     await expect(fact('clears')).toBe('1')
 
     // 4. A deliberate return is a new visit: it captures the mark and clears it once seen.
-    await userEvent.click(radios('In-app route').getByRole('radio', { name: 'Thread tab' }))
+    await userEvent.click(radios('View').getByRole('radio', { name: 'Thread tab' }))
     await waitFor(() => expect(fact('route')).toBe(release))
     await waitFor(() => expect(fact('clears')).toBe('2'), { timeout: 10_000 })
     await waitFor(() => expect(indicator()).toBeNull())

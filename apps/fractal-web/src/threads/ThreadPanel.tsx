@@ -196,7 +196,7 @@ const styles = stylex.create({
   inList: { borderWidth: 0, borderRadius: 0, borderBlockStartWidth: { default: g.hairline, ':first-child': 0 }, borderBlockStartStyle: 'solid', borderBlockStartColor: c.border },
   dedicated: { boxSizing: 'border-box', width: '100%', maxInlineSize: g.lane, marginInline: 'auto' },
   // Disclosure | unread dot | title | metadata | age. Fixed leading columns align rows down a list; metadata and age stay at the end.
-  header: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'baseline', columnGap: s.sm, boxSizing: 'border-box', width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightRegular },
+  header: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'baseline', columnGap: { default: s.sm, '@container thread-panel (max-width: 360px)': s.xs }, boxSizing: 'border-box', width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightRegular },
   rowColumns: { gridTemplateColumns: `${g.statusSm} ${g.statusSm} minmax(0, 1fr)` },
   dotColumns: { gridTemplateColumns: `${g.statusSm} minmax(0, 1fr)` },
   titleColumns: { gridTemplateColumns: 'minmax(0, 1fr)' },
@@ -207,7 +207,7 @@ const styles = stylex.create({
   title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: t.weightMedium },
   paneTitle: { fontSize: t.headingSize, lineHeight: t.headingLeading },
   metadata: { color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end', whiteSpace: 'nowrap' },
-  age: { minWidth: g.sidebarMetric, color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end', whiteSpace: 'nowrap' },
+  age: { minWidth: { default: g.sidebarMetric, '@container thread-panel (max-width: 360px)': 0 }, color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end', whiteSpace: 'nowrap' },
   origin: { margin: 0, paddingInline: s.sm, paddingBlockEnd: s.sm, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   readHeader: { position: 'sticky', top: 0, zIndex: 1, backgroundColor: c.canvas },
   readHeadingRow: { display: 'flex', alignItems: 'center', paddingInlineEnd: s.sm },

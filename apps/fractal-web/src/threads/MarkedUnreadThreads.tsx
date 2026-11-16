@@ -1,5 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { VisuallyHidden } from 'react-aria-components'
+import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import * as Atom from 'effect/reactivity/Atom'
 import { useAtomValue } from '@effect/atom-react'
 import { Option } from 'effect'
@@ -86,7 +88,9 @@ const MarkedUnreadRow = ({ thread, onOpenThread }: {
   }
   return <div data-marked-unread-thread={thread.id} aria-busy={opening._tag === 'Seeking'}>
     <ThreadPanel thread={thread} {...(thread.message_count === undefined ? {} : { messageCount: thread.message_count })} unread={thread.unread === true}
-      inList onActivate={() => { void open() }} age={<span data-private-unread-reminder="">Private reminder</span>}>
+      inList onActivate={() => { void open() }} age={<span data-private-unread-reminder="" title="Private reminder">
+        <Icon name="bell" size={12} /><VisuallyHidden elementType="span">Private reminder</VisuallyHidden>
+      </span>}>
       {null}
     </ThreadPanel>
     {opening._tag === 'Seeking' ? <SystemNotice kind="loading" scope="inline" title="Loading reminder message" />

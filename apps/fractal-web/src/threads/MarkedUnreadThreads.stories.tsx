@@ -152,7 +152,8 @@ export const Rows: Story = {
     // The second page's cleared row is skipped; the rollout row after it on that page still shows.
     await expect(row(canvasElement, cleared.id)).toBeNull()
     for (const thread of [review, cancellation, rollout]) {
-      await expect(within(row(canvasElement, thread.id)!).getByText('Private reminder')).toBeVisible()
+      await expect(row(canvasElement, thread.id)!.querySelector('[data-private-unread-reminder]')).toBeVisible()
+      await expect(within(row(canvasElement, thread.id)!).getByText('Private reminder')).toBeInTheDocument()
     }
     await expect(row(canvasElement, rollout.id)).toHaveTextContent('Closed')
     // Natural unread is independent of the reminder: only the naturally unread thread has the dot.
