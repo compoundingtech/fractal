@@ -418,12 +418,23 @@ input tool, not a transcript search and not a recorder of unsent drafts.
   not itself unknown eligibility. Future redaction/deletion features must add
   their canonical fact to this eligibility fold. Never reconstruct excluded text
   from a transcript, attachment or older cache.
+  History adds no secret detection and does not change sent-message retention;
+  an input sent without a canonical exclusion fact stays recallable.
 - Recalling text does not restore old attachments, execute commands or send a
   message. Attachment references in text remain text. The current unsent draft,
   its subject, attachment identities, selection and cursor remain recoverable.
 - Adjacent identical text is collapsed in the recall presentation, including at
   page boundaries; nonadjacent repetitions remain distinct. This never mutates
   sent messages or loses the selected message's provenance.
+
+The store's `input_history_candidates` primitive seeks body-free accepted-send
+headers by exact author and agent, optionally narrowing by source session. It
+uses derived source indexes rather than a separate journal. A bounded candidate
+window exposes its examined continuation independently of visible entries;
+authorization/eligibility errors abort the page, and current repair exclusions
+override frozen membership. This internal window is not a visible result count
+or text search. The client API owns body resolution, conversation identity
+mapping, search and opaque authorized result pagination.
 
 #### Authorized projection API
 
