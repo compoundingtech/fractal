@@ -42,6 +42,7 @@ struct InboxPage: View {
       }
     } content: {
       PanelScroll {
+        InboxActivityHistogram(model: model)
         if case .stale = model.attention.state { StaleRow(model: model) }
         if asks.isEmpty && updates.isEmpty { CaughtUpRow() }
         if !asks.isEmpty {
@@ -291,8 +292,10 @@ private struct Glance: View {
     let shownAsks = min(cap.visibleCount, asks.count)
     VStack(alignment: .leading, spacing: 0) { InboxNotices(model: model, asks: asks, isEmpty: total == 0) }
       .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { noticesHeight = $0 }
+    if total > 0 || model.inboxActivity[.days]?.value != nil {
+      InboxActivityLabel(model: model, count: total)
+    }
     if total > 0 {
-      SectionLabel(title: "Inbox", aside: "\(total)")
       ForEach(asks.prefix(shownAsks)) { InboxRow(record: $0, model: model) }
       ForEach(updates.prefix(cap.visibleCount - shownAsks)) { InboxRow(record: $0, model: model) }
       if cap.hiddenCount > 0 { MoreRow(count: cap.hiddenCount, model: model) }
@@ -304,7 +307,8 @@ private struct Glance: View {
 
   /// The scroll's own padding, notices, the inbox label, the snoozed note and the signals.
   private func fixedHeight(_ board: SignalBoard) -> CGFloat {
-    2 * PanelMetrics.scrollPadding + noticesHeight + SectionLabel.height + snoozedHeight
+    2 * PanelMetrics.scrollPadding + noticesHeight
+      + ((model.asks.count + model.updates.count > 0 || model.inboxActivity[.days]?.value != nil) ? InboxActivityLabel.height : 0) + snoozedHeight
       + SignalsSection.height(board)
   }
 }
