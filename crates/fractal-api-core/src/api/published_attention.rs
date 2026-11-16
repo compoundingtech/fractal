@@ -8,9 +8,63 @@ use crate::PublishedViewsAttentionStore;
 use crate::SummaryListStore;
 use crate::SeatsStore;
 use super::*;
-use crate::store::attention_list::{AttentionDelta, AttentionFleet, AttentionPublication};
+use crate::store::attention_list::{AttentionCohortFingerprint, AttentionCohortFingerprints, AttentionDelta, AttentionFleet, AttentionPublication};
 use crate::store::owner_lists::OwnerView;
 use std::collections::HashMap;
+
+/// Fingerprint JSON rows with length framing. Only a single row is serialized/cloned at a time.
+fn fingerprint_append(hash: &mut Sha256, bytes: &[u8]) -> anyhow::Result<()> {
+    hash.update(u64::try_from(bytes.len())?.to_be_bytes());
+    hash.update(bytes);
+    Ok(())
+}
+
+pub fn attention_cohort_fingerprint(rows: &[Value]) -> anyhow::Result<[u8; 32]> {
+    let mut hash = Sha256::new();
+    for row in rows { fingerprint_append(&mut hash, &serde_json::to_vec(row)?)?; }
+    Ok(hash.finalize().into())
+}
+
+fn compatible_cohort_fingerprints(rows: &[Value]) -> anyhow::Result<[AttentionCohortFingerprint; 4]> {
+    let mut profiles = Vec::with_capacity(4);
+    for profile in 0..4 {
+        let mut all = Sha256::new();
+        for raw in rows {
+            let mut row = raw.clone();
+            client_attention_compatibility(std::slice::from_mut(&mut row), AttentionCompatibility {
+                custom_forms: profile & 1 != 0, model_drift: profile & 2 != 0,
+            });
+            let bytes = serde_json::to_vec(&row)?;
+            fingerprint_append(&mut all, &bytes)?;
+        }
+        profiles.push(all.finalize().into());
+    }
+    profiles.try_into().map_err(|_| anyhow::anyhow!("four attention compatibility profiles"))
+}
+
+/// Shared off-request-path fingerprints; unchanged owner content retains its previous tokens.
+pub fn attention_cohort_fingerprints(
+    rows: &[Value], owners: &BTreeMap<String, Arc<Vec<Value>>>, previous: Option<&AttentionPublication>,
+) -> anyhow::Result<AttentionCohortFingerprints> {
+    if let Some(previous) = previous.filter(|p| std::ptr::eq(p.rows.as_slice(), rows)) {
+        return Ok(previous.cohort_fingerprints.clone());
+    }
+    let mut tokens = BTreeMap::new();
+    for (owner, rows) in owners {
+        let key = Some(owner.clone());
+        let kept = previous.filter(|p| p.owners.get(owner).is_some_and(|old| Arc::ptr_eq(old, rows) || old.as_slice() == rows.as_slice()))
+            .and_then(|p| p.cohort_fingerprints.get(&key)).cloned();
+        tokens.insert(key, match kept { Some(token) => token, None => Arc::new(compatible_cohort_fingerprints(rows)?) });
+    }
+    let all = if let Some(p) = previous.filter(|p| p.rows.as_slice() == rows) {
+        p.cohort_fingerprints.get(&None).cloned()
+    } else if owners.len() == 1 {
+        owners.iter().next().filter(|(_, owner_rows)| owner_rows.as_slice() == rows)
+            .and_then(|(owner, _)| tokens.get(&Some(owner.clone())).cloned())
+    } else { None };
+    tokens.insert(None, match all { Some(token) => token, None => Arc::new(compatible_cohort_fingerprints(rows)?) });
+    Ok(tokens)
+}
 
 /// The shortest pause between two refreshes. A refresh also pauses as long as it took, so the
 /// refresher never takes more than about half a core. Windows never wait for it: a summary
@@ -380,6 +434,10 @@ fn refresh_attention_list_reading(
         } else {
             AttentionPublication::index_owners(&rows)
         };
+        let cohort_fingerprints = match previous.as_ref().filter(|p| Arc::ptr_eq(&p.rows, &rows)) {
+            Some(previous) => previous.cohort_fingerprints.clone(),
+            None => attention_cohort_fingerprints(&rows, &owners, previous.as_deref())?,
+        };
         let published_at_unix_ms = client_now_ms();
         store.publish_attention_list(
             generation,
@@ -393,6 +451,7 @@ fn refresh_attention_list_reading(
                 rows,
                 fleet,
                 owners,
+                cohort_fingerprints,
                 ask_deadline_policy,
             },
             changed,
@@ -631,6 +690,29 @@ pub fn published_attention_rows(
         .cloned()
         .collect();
     Some((publication.cut, publication.published_at_unix_ms, rows))
+}
+
+/// A bounded window and its full compatible cohort token, from the same publication.
+pub fn published_attention_window(
+    store: &Store, index: u64, person: Option<&str>, keep: usize,
+    compatibility: AttentionCompatibility,
+) -> Option<(u64, u128, Vec<Value>, [u8; 32])> {
+    let publication = store.published_attention_list().or_else(|| {
+        store.request_attention_list_refresh(); None
+    })?;
+    if publication.cut < index { store.request_attention_list_refresh(); }
+    let empty: &[Value] = &[];
+    let rows: &[Value] = match person {
+        Some(person) => publication.owners.get(person).map_or(empty, |rows| rows.as_slice()),
+        None => &publication.rows,
+    };
+    let profile = usize::from(compatibility.custom_forms) | (usize::from(compatibility.model_drift) << 1);
+    let empty_token: [u8; 32] = Sha256::digest([]).into();
+    let profiles = publication.cohort_fingerprints.get(&person.map(str::to_owned));
+    assert!(rows.is_empty() || profiles.is_some(), "published attention rows must have cohort fingerprints");
+    let token = profiles.map_or(empty_token, |profiles| profiles[profile]);
+    let prefix = rows.iter().take(keep).cloned().collect();
+    Some((publication.cut, publication.published_at_unix_ms, prefix, token))
 }
 
 /// Shared owner-indexed attention rows: no scan or content cloning on the read path.
@@ -906,6 +988,7 @@ mod tests {
                 due_at_unix_ms: first.due_at_unix_ms,
                 future_after: first.future_after,
                 published_at_unix_ms: first.published_at_unix_ms,
+                cohort_fingerprints: attention_cohort_fingerprints(&rows, &AttentionPublication::index_owners(&rows), None).unwrap(),
                 owners: AttentionPublication::index_owners(&rows),
                 rows: Arc::new(rows),
                 fleet: first.fleet.clone(),
@@ -925,5 +1008,85 @@ mod tests {
 
     fn published_cut(store: &Store) -> u64 {
         store.newest_attention_list().1.unwrap().cut
+    }
+}
+
+#[cfg(test)]
+mod cohort_tests {
+    use super::*;
+
+    fn rows(count: usize) -> Arc<Vec<Value>> {
+        Arc::new((0..count).map(|n| json!({
+            "id":format!("attention/{n}"),"kind":"attention","person_id":"person/ada",
+            "source_kind":"custom","source_id":"custom/example/item","revision":"one",
+            "attention_kind":"custom.example","detail":"a semantic preview".repeat(20),
+            "priority":"normal","state":"open","actions":["custom.reply"],
+            "action_parameters":{"custom.reply":{"registration":"r","revision":"one","episode":"e"}},
+        })).collect())
+    }
+
+    #[test]
+    fn attention_cohort_fingerprints_cover_full_content_compatible_profiles_and_status() {
+        let rows = rows(203);
+        let owners = AttentionPublication::index_owners(&rows);
+        let tokens = attention_cohort_fingerprints(&rows, &owners, None).unwrap();
+        for profile in 0..4 {
+            let mut oracle = (*rows).clone();
+            client_attention_compatibility(&mut oracle, AttentionCompatibility {
+                custom_forms: profile & 1 != 0, model_drift: profile & 2 != 0,
+            });
+            let expected = attention_cohort_fingerprint(&oracle).unwrap();
+            assert_eq!(tokens[&Some("person/ada".into())][profile], expected);
+            assert_eq!(tokens[&None][profile], expected);
+        }
+        assert_ne!(tokens[&None][0], tokens[&None][1], "compatibility is part of the cohort");
+        let mut changed = (*rows).clone();
+        changed[202]["priority"] = json!("critical");
+        let changed_tokens = attention_cohort_fingerprints(&changed, &AttentionPublication::index_owners(&changed), None).unwrap();
+        assert_ne!(tokens[&None][0], changed_tokens[&None][0], "hidden priority content is not an ID/count token");
+        assert_eq!(&rows[..200], &changed[..200]);
+    }
+
+    #[test]
+    #[ignore = "explicit500/5000 cohort benchmark; run with --ignored --nocapture"]
+    fn attention_cohort_fingerprint_benchmark() {
+        for count in [500, 5_000] {
+            let rows = rows(count);
+            let owners = AttentionPublication::index_owners(&rows);
+            let start = Instant::now();
+            let tokens = attention_cohort_fingerprints(&rows, &owners, None).unwrap();
+            let cold = start.elapsed();
+            let publication = AttentionPublication {
+                cut:1, projection:None, evaluated_at_unix_ms:1, due_at_unix_ms:None, future_after:None,
+                published_at_unix_ms:1, rows:Arc::clone(&rows), owners:owners.clone(),
+                cohort_fingerprints:tokens, fleet:None, ask_deadline_policy:(0,0),
+            };
+            let start = Instant::now();
+            for _ in 0..1_000 { std::hint::black_box(attention_cohort_fingerprints(&rows, &owners, Some(&publication)).unwrap()); }
+            let unchanged = start.elapsed();
+            let mut changed = (*rows).clone();
+            changed[count - 1]["detail"] = json!("hidden edit");
+            let changed_owners = AttentionPublication::index_owners(&changed);
+            let start = Instant::now();
+            std::hint::black_box(attention_cohort_fingerprints(&changed, &changed_owners, Some(&publication)).unwrap());
+            let changed = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..100 { std::hint::black_box(attention_cohort_fingerprint(&rows).unwrap()); }
+            let per_read_hash = start.elapsed();
+            let store = Store::open_memory("cohort-bench").unwrap();
+            store.start_attention_list_refresher().unwrap();
+            store.publish_attention_list(0, publication, true);
+            let mut reads = Vec::new();
+            for limit in [1, 200] {
+                let start = Instant::now();
+                for _ in 0..100 {
+                    std::hint::black_box(published_attention_window(&store, 1, Some("person/ada"), limit,
+                        AttentionCompatibility {custom_forms:true, model_drift:true}).unwrap());
+                }
+                reads.push(start.elapsed().as_micros());
+            }
+            eprintln!("COHORT_BENCH rows={count} cold_us={} unchanged1000_us={} changed_us={} fullhash100_us={} prefix1_100_us={} prefix200_100_us={}",
+                cold.as_micros(), unchanged.as_micros(), changed.as_micros(), per_read_hash.as_micros(), reads[0], reads[1]);
+        }
     }
 }

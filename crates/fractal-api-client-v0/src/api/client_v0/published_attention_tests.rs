@@ -540,3 +540,45 @@ async fn after_a_forget_attention_folds_again_only_once_a_window_reads_it() {
     assert_eq!(items.len(), 1);
     state.store.stop_attention_list_refresher();
 }
+
+#[tokio::test]
+async fn attention_cohort_tokens_follow_person_compatibility_status_and_cache_boundaries() {
+    for published in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "cohort-scope");
+        custom(&state, "custom/garden/review/v1/ada-a", "person/ada");
+        custom(&state, "custom/garden/review/v1/ada-b", "person/ada");
+        custom(&state, "custom/garden/review/v1/robin", "person/robin");
+        if published {
+            state.store.start_attention_list_refresher().unwrap();
+            crate::api::refresh_attention_list(&state.store).unwrap();
+        }
+        let windows = collection_windows::Windows::attach(&state.store);
+        for profile in 0..4 {
+            let mut session = ClientSession::local(Some("person/ada")).unwrap();
+            session.custom_forms = profile & 1 != 0;
+            session.model_drift_attention = profile & 2 != 0;
+            for status in [None, Some("closed"), None] {
+                let request: CollectionSubscribe = serde_json::from_value(json!({
+                    "kind":"subscribe","id":"cohort-scope","collection":"attention","limit":1,"status":status,
+                })).unwrap();
+                let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
+                let read = collection_items_with_windows(&state, &session, &request, permit, windows.clone()).await;
+                if status.is_some() {
+                    assert_eq!(read.unwrap_err().status, StatusCode::UNPROCESSABLE_ENTITY, "attention status filters remain unsupported");
+                    continue;
+                }
+                let (_, rows, more, token) = read.unwrap();
+                let mut full = client_attention_resources_at(&state.store, Some("person/ada"), false, client_now_ms()).unwrap();
+                if published { crate::api::present_attention(&state.store, &mut full, None).unwrap(); }
+                client_attention_compatibility(&mut full, session.attention_compatibility());
+                full.retain(|row| status.is_none_or(|status| row["state"] == status));
+                assert_eq!(token, Some(CollectionRevision::Attention(
+                    super::super::published_attention::attention_cohort_fingerprint(&full).unwrap())));
+                assert_eq!(more, full.len() > 1);
+                full.truncate(1);
+                assert_eq!(rows, full, "published={published}, profile={profile}, status={status:?}");
+            }
+        }
+    }
+}

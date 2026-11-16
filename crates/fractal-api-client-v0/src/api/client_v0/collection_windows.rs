@@ -143,7 +143,7 @@ mod tests {
             revision: held.revision, period: held.period,
             valid_from: held.valid_from, valid_until: Some(200),
             items: held.items.clone(), has_more: held.has_more,
-            membership: held.membership,
+            pinned: held.pinned,
         }));
         drop(cached);
         assert_eq!(read(&windows, &state, &session, &agents, 199, &count), first);
