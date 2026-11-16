@@ -17,9 +17,9 @@ collection, but `FractalClient` has no typed attention or availability stream.
   Pages form a stack (the top level, the full inbox, a card opened from it): each
   page still on the stack stays mounted, hidden off to the leading side, so Back
   (or opening it again) returns to it at its exact scroll position, while a page
-  opened after it was popped starts at the top. The swap is instant: the page
-  left disappears in the same frame the panel takes the shown page's height (one
-  change per push or Back, never clipping a taller page), and only the arriving
+  opened after it was popped starts at the top. The live panel reserves its screen-height
+  budget from the first layout; arriving data and navigation never resize its window or
+  detach its top from the menu bar. The swap is instant, and only the arriving
   page slides in sideways, from the trailing side on a push and the leading side
   on Back; with Reduce Motion it fades in. VoiceOver focus moves to the page title
   and back to the row or tile that opened it. Closing the panel returns it to the
@@ -341,10 +341,11 @@ weekly budget. Render just these on a Mac with:
 
 ## Scroll and refresh performance Mac gate
 
-`PanelScroll` and `PanelForm` preserve their compact ideal height, bounded by the
-screen's available height after measured page chrome. A previous short window
-proposal cannot pin the panel below its content. Markdown blocks/inline attributed strings
-and attachment images use bounded content-keyed caches. Ages share one minute-aligned
+`PanelScroll` and `PanelForm` preserve their compact ideal height inside a live page's
+fixed screen-height budget after measured chrome. Only internal content scrolls;
+snapshots without a screen budget still size naturally. AppKit content resizing preserves
+the window's bottom-left origin, so content-driven live window heights are not safe.
+Markdown blocks/inline attributed strings and attachment images use bounded content-keyed caches. Ages share one minute-aligned
 clock. Identical page polls and pruning do not rewrite observable sections; separately
 kept successful-read timestamps preserve accurate subsequent stale errors. Closing the
 panel removes its page observation subscriptions, preserving only a lightweight sized
@@ -368,19 +369,20 @@ bash scripts/validate-scroll-mac.sh memory "$FRACTAL_PID"
 ```
 
 The `check` mode builds both products, runs Swift tests and invokes the offscreen
-`FractalMacGallery <out-dir> --scroll-probe`. The probe fails unless the bottom is reachable
-at 300/400 pt with inline/pinned answers, and 20 identical full refreshes preserve the
-scroll view/offset without any context, excerpt or attachment writes. It never orders
-a window front and does **not** measure actual screen presentation or 120 Hz behavior.
+`FractalMacGallery <out-dir> --scroll-probe` and `--navigation-probe`. The scroll probe fails
+unless the bottom is reachable at 300/400 pt with pinned answers, and 20 identical full
+refreshes preserve the scroll view/offset without any context, excerpt or attachment writes.
+Neither probe orders a window front or measures actual screen presentation or 120 Hz behavior.
 
 For navigation, build first (`/usr/bin/swift build -c release`), then run
 `.build/release/FractalMacGallery <out-dir> --navigation-probe`.
 It also never orders a window front, and records `navigation-probe.json` (phase,
-window, content, viewport, offset) at 300/400/1578 pt. It fails unless Back restores the
-same native scroll view and offset on the inbox and the top level, a re-opened page gets a
-new scroll view at the top, no viewport overflows the window, the height moves one way per
-transition, three refreshes on each page keep its scroll view and offset, and the tall top
-level shows all ten signals without scrolling.
+window height/top, content, viewport, offset) at 300/400/1578 pt. It asserts the menu-bar
+anchor through first-open loading, separately released SLO/availability reads, row arrival
+and removal, every navigation path and refresh. Back restores native scroll state; a fresh
+push starts at the top. Viewports stay bounded, identical polls preserve edge offsets, and
+a 19-row inbox fits without scrolling on the tall screen. Short screens apply `InboxCap`;
+showing every row when all rows and signals fit is intentional.
 
 `trace` records Animation Hitches and Time Profiler and exports their data tables.
 The script lists the interaction procedure and strict pass thresholds: every drill-in

@@ -11,11 +11,10 @@ import SwiftUI
 /// Every page on the model's navigation stack stays mounted under its entry's identity, so a
 /// page the person goes back to keeps its native view state (its scroll position above all);
 /// a popped page's state goes with it, and a page pushed again starts fresh. Only the shown
-/// page sizes the panel.
+/// page supplies the content inside the fixed screen-height budget. Navigation and arriving
+/// data never resize the live window or move its menu-bar anchor.
 ///
-/// The swap itself is instant: the page left is gone (covered or popped) in the same frame the
-/// panel takes the shown page's height, so no page is ever drawn taller than the panel. Only
-/// the arriving page moves, sideways (`PageArrival`).
+/// The swap itself is instant. Only the arriving page moves, sideways (`PageArrival`).
 public struct TrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
@@ -48,8 +47,7 @@ public struct TrayPanel: View {
           .layoutValue(key: PanelStackEntry.self, value: entry.id)
       }
     }
-    // A push or Back animates only the arriving page: the swap, the leaving page and the
-    // panel's height change at once, whatever animation the change came with.
+    // A push or Back animates only the arriving page, whatever animation the change came with.
     .transaction(value: active) { $0.animation = nil }
     .frame(width: width, alignment: .top)
     .clipped()
@@ -121,11 +119,8 @@ private struct PanelStackEntry: LayoutValueKey {
   static let defaultValue: UUID? = nil
 }
 
-/// The navigation stack's pages, laid out so the panel is exactly the shown page's height:
-/// never the larger of a leaving and an arriving page, so one height change per push or Back.
-/// A covered page keeps the size it asks for, so its scroll view's viewport, and with it its
-/// offset, is never clamped; it sits one panel width to the leading side, outside the panel's
-/// clip, until Back places it again.
+/// Retains covered pages and their native scroll state outside the panel's clip. Every live
+/// page uses the same screen-height budget; unbounded snapshots size to the active page.
 private struct PanelStackLayout: Layout {
   let active: UUID
 

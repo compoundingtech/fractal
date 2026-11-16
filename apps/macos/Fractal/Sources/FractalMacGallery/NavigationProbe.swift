@@ -9,6 +9,7 @@ import FractalMacUI
     let phase: String
     let route: String
     let windowHeight: CGFloat
+    let windowTop: CGFloat
     let contentHeight: CGFloat
     let viewportHeight: CGFloat
     let offset: CGFloat
@@ -29,8 +30,15 @@ import FractalMacUI
         && host.convert(scroll.contentView.bounds, from: scroll.contentView).intersects(host.bounds)
     }
   }
+  private static func identifiers(in element: Any) -> [String] {
+    let node = element as AnyObject
+    let identifier: String? = node.accessibilityIdentifier?()
+    let own = identifier.map { [$0] } ?? []
+    return own + (node.accessibilityChildren?() ?? []).flatMap { identifiers(in: $0) }
+  }
 
   static func run(out: URL) async {
+    NSApp.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
     var samples: [Sample] = []
     var failures: [String] = []
     for limit in [CGFloat(300), 400, 1578] {
@@ -39,13 +47,16 @@ import FractalMacUI
         fixture.record("navigation-\($0)", title: "Inbox navigation item \($0)", from: "agent/navigation",
           askedAgo: Double($0 + 1) * 60)
       }
-      let model = model(fixture.fractal(fixture.asks + extra))
-      await model.refresh()
+      let source = fixture.fractal(fixture.asks + extra)
+      await source.hold("slo")
+      await source.hold("availability")
+      let model = model(source, speech: FixtureSpeech().coordinator())
       let host = NSHostingView(rootView: TrayPanel(model: model, build: GalleryBuild.identity)
         .environment(\.panelAvailableHeight, limit))
       let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: 360, height: limit),
         styleMask: [.borderless], backing: .buffered, defer: false)
       window.contentView = host
+      let anchor = window.frame.maxY
       let prefix = "height=\(limit)"
 
       func require(_ condition: Bool, _ message: String) {
@@ -60,13 +71,16 @@ import FractalMacUI
         window.setContentSize(size)
         host.setFrameSize(size)
         host.layoutSubtreeIfNeeded()
+        require(abs(window.frame.maxY - anchor) < 1,
+          "\(phase): detached from menu-bar anchor \(anchor) -> \(window.frame.maxY), height \(window.frame.height)")
         let scrolls = visibleScrolls(in: host)
         for scroll in scrolls {
           let rect = host.convert(scroll.contentView.bounds, from: scroll.contentView)
           require(rect.minY >= -1 && rect.maxY <= host.bounds.maxY + 1,
             "\(phase): viewport \(rect) overflows container \(host.bounds)")
           samples.append(Sample(phase: "\(prefix) \(phase)", route: String(describing: model.route),
-            windowHeight: window.frame.height, contentHeight: scroll.documentView?.bounds.height ?? 0,
+            windowHeight: window.frame.height, windowTop: window.frame.maxY,
+            contentHeight: scroll.documentView?.bounds.height ?? 0,
             viewportHeight: scroll.contentView.bounds.height, offset: scroll.contentView.bounds.origin.y))
         }
         return size.height
@@ -129,17 +143,62 @@ import FractalMacUI
         }
       }
 
-      await settle("initial home")
+      func edges(_ phase: String) async {
+        guard let scroll = visibleScrolls(in: host).last, let document = scroll.documentView else {
+          require(false, "\(phase): missing edge-test scroll")
+          return
+        }
+        let extent = max(0, document.bounds.height - scroll.contentView.bounds.height)
+        for edge in [CGFloat(0), extent] {
+          scroll.contentView.scroll(to: CGPoint(x: 0, y: edge))
+          scroll.reflectScrolledClipView(scroll.contentView)
+          await settle("\(phase) edge \(edge)")
+          let saved = position()
+          if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+            wheel1: edge == 0 ? 120 : -120, wheel2: 0, wheel3: 0),
+            let wheel = NSEvent(cgEvent: event) {
+            scroll.scrollWheel(with: wheel)
+          } else {
+            require(false, "cannot construct native scroll-wheel event")
+          }
+          await settle("\(phase) outward wheel")
+          unchanged(saved, "\(phase) outward wheel")
+          await stableRefresh("\(phase) edge \(edge)")
+        }
+      }
+
+      await settle("first open before data")
+      let refresh = Task { await model.refresh() }
+      await settle("attention arrives before slo and availability")
+      require(model.attention.value != nil && model.slo.value == nil && model.availability.value == nil,
+        "first-open fixture did not stage independent reads")
+      await source.release("slo")
+      await settle("late slo arrives")
+      require(model.slo.value != nil && model.availability.value == nil, "late slo stage not reached")
+      await source.release("availability")
+      await refresh.value
+      await settle("late availability arrives")
       require(model.signalBoard.signals.count == 10, "home fixture must contain all ten signal tiles")
       if limit == 1578, let scroll = visibleScrolls(in: host).last, let document = scroll.documentView {
         require(document.bounds.height <= scroll.contentView.bounds.height + 1,
           "tall home still scrolls with all ten signals: document=\(document.bounds.height) viewport=\(scroll.contentView.bounds.height)")
       }
+      await edges("home")
       let home = await scrollPartway()
       await stableRefresh("home")
       await transition("push inbox") { model.open(.inbox) }
+      await edges("inbox")
       let inbox = await scrollPartway()
       await stableRefresh("inbox")
+      // Mutating a retained page must preserve its native offset, not just identical polls.
+      await source.replaceRecords(fixture.asks + extra + [fixture.update])
+      await model.refresh()
+      await settle("inbox row appended")
+      unchanged(inbox, "inbox row appended")
+      await source.replaceRecords(fixture.asks + extra)
+      await model.refresh()
+      await settle("inbox row removed")
+      unchanged(inbox, "inbox row removed")
       await transition("push ask from inbox") { model.open(.attention("attention/ship-tray")) }
       _ = await scrollPartway()
       await stableRefresh("ask")
@@ -159,14 +218,35 @@ import FractalMacUI
       await transition("back from fresh inbox") { model.back() }
       unchanged(home, "home after fresh inbox")
 
-      let signal = model.signalBoard.signals.first.map { PanelRoute.signal($0.id) }
-      let routes: [PanelRoute] = [.objectives, .availability] + (signal.map { [$0] } ?? [])
+      await source.replaceRecords(fixture.asks + extra + [fixture.update])
+      await model.refresh()
+      let routes: [PanelRoute] = [.objectives, .availability, .speech]
+        + model.signalBoard.signals.map { .signal($0.id) }
+        + (fixture.asks + [fixture.update]).map { .attention($0.id) }
       for route in routes {
         await transition("push \(route)") { model.open(route) }
         _ = await scrollPartway()
         await stableRefresh("\(route)")
+        await edges("\(route)")
         await transition("back from \(route)") { model.back() }
         unchanged(home, "home after \(route)")
+      }
+      // A screenshot-sized inbox fits on the tall display, but must cap on short displays.
+      await source.replaceRecords(fixture.asks + Array(extra.prefix(15)))
+      await model.refresh()
+      await settle("19-row home")
+      let ids = identifiers(in: host)
+      let rowCount = ids.filter { $0.hasPrefix("inbox-row-") }.count
+      require(limit == 1578 ? rowCount == 19 : rowCount == 3,
+        "InboxCap: expected \(limit == 1578 ? 19 : 3) mounted rows, got \(rowCount)")
+      require(ids.contains("inbox-more") == (limit != 1578), "InboxCap More row incorrect")
+      if let scroll = visibleScrolls(in: host).last, let document = scroll.documentView {
+        let extent = max(0, document.bounds.height - scroll.contentView.bounds.height)
+        if limit == 1578 {
+          require(extent < 1, "19-row inbox unnecessarily scrolls on tall screen")
+        }
+        await edges("19-row home")
+        print("navigation-probe 19-row home \(prefix): rows=\(rowCount) more=\(ids.contains("inbox-more")) document=\(document.bounds.height) viewport=\(scroll.contentView.bounds.height) extent=\(extent) top=\(window.frame.maxY) anchor=\(anchor)")
       }
       window.contentView = nil
       print("navigation-probe sampled \(prefix): home/inbox/ask/objectives/availability/signal; \(failures.count) cumulative failures")
@@ -180,6 +260,6 @@ import FractalMacUI
       for failure in Array(Set(failures)).sorted() { print("navigation-probe FAIL: \(failure)") }
       fail("navigation-probe: \(failures.count) failed assertions", code: 1)
     }
-    print("navigation-probe PASS: 3 height budgets; restore-on-back, fresh-push reset, bounded viewports, monotonic navigation height, stable refresh")
+    print("navigation-probe PASS: 3 height budgets; fixed window top through first-open/async/row mutations; all signals, speech, ask/update routes; restore-on-back; stable refresh; InboxCap 3/3/19; fitting content and edge wheel offsets stable")
   }
 }
