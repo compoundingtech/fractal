@@ -238,7 +238,7 @@ mod write_tests {
             "value":{"kind":"action-result","action_id":id,"operation_id":"operation/test","status":status,"affected_ids":[],"snapshot_id":"snapshot/2"}})).unwrap()
     }
     fn failure(code: ErrorCode, applied: Option<&str>) -> ClientError {
-        ClientError::Api(code.clone(), "refusal".into(), Box::new(ErrorEnvelope { api_version: "0".into(), error_version: "1".into(),
+        ClientError::Api(code.clone(), "refusal".into(), Box::new(ErrorEnvelope { applied: None, api_version: "0".into(), error_version: "1".into(),
             request_id: "request/test".into(), code, message: "refusal".into(), retryable: true, retry_after_ms: None,
             details: applied.map(|s| [("applied".into(), json!(s))].into()).unwrap_or_default() }))
     }

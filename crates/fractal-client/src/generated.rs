@@ -299,8 +299,21 @@ pub struct AgentsPublication {
     pub has_more: bool,
 }
 
+pub(crate) fn deserialize_error_applied<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ErrorEnvelope {
+    /// Raw application metadata: missing and explicit null remain distinct for safe classification.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_error_applied"
+    )]
+    pub applied: Option<Value>,
     pub api_version: String,
     pub error_version: String,
     pub request_id: String,
