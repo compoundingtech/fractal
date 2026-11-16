@@ -33,6 +33,7 @@ test('oversized drafts preserve the last durable copy and report recovery when r
   const view = new Map([['request:old:v1', 'existing notes'], ['request:new:v1', '📝'.repeat(600000)]]);
   await drafts.save('person/ada', view);
   assert.equal(raw, durable); assert.match(drafts.snapshot(), /storage is full/);
+  assert.match(drafts.snapshot(), /last saved copy is kept/); assert.match(drafts.snapshot(), /older text may reappear after reopening/);
   assert.equal(view.get('request:old:v1'), 'existing notes');
   view.delete('request:new:v1'); await drafts.save('person/ada', view);
   assert.equal(drafts.snapshot(), null); assert.equal(changes.length, 2); unsubscribe();

@@ -48,10 +48,10 @@ export class LocalDrafts {
       this.pendingDrafts = null; this.clearing = false;
       const raw = drafts ? JSON.stringify({ owner, entries: [...drafts] }) : '';
       if (new TextEncoder().encode(raw).length > MAX_BYTES) {
-        this.report('Draft storage is full. Your current drafts remain in this app session, but recent changes are not saved for reopening. Send or clear drafts to make room.');
+        this.report('Draft storage is full. Current edits stay in this app session. The last saved copy is kept, so older text may reappear after reopening. Send or clear drafts to make room.');
       } else {
         try { await this.storage.setItem(DRAFTS_KEY, raw); this.report(null); }
-        catch { this.report('Drafts could not be saved on this device. Keep the app open to retain your current notes.'); }
+        catch { this.report('Drafts could not be saved on this device. Current edits stay in this app session. The last saved copy is kept, so older text may reappear after reopening.'); }
       }
     }
     this.writing = null;
