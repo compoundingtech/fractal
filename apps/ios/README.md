@@ -194,6 +194,22 @@ inputs before checking its frozen-install cache. A missing `nix` or a failed
 member/publisher command fails closed as `build_failed` with reason
 `source_inputs_preparation_failed`; the build log contains the failing command.
 
+Delivery passes `--cache-only` to workspace preparation and explicitly sets
+`FRACTAL_NIX_CACHE_ONLY=1` only for the native builder invocation. Both toolchain
+closures must already exist in the store or configured binary caches; local,
+remote and external Nix builders are disabled during delivery. Workspace
+preparation realizes its pinned CLI separately before applying members, so a
+realization failure reports cache unavailability while apply errors retain their
+real diagnostics. Manual developer builds keep build-on-miss behavior when the
+native builder's opt-in is absent. Cargo and Xcode compilation are unchanged.
+
+The main-push-only ARM macOS cache publisher realizes `.#ios-rust-toolchain`
+and uploads its full closure, including substituted paths, to Cachix. The
+credential owner must configure the `FRACTAL_CACHIX_CACHE` repository variable
+and the cache-scoped `CACHIX_AUTH_TOKEN` write secret; without either, publishing
+is skipped. Fleet configuration must separately add this cache to substituters.
+The pinned workspace CLI closure still comes from its existing configured caches.
+
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
 Delivery options and push configuration prefer `FRACTAL_IOS_*` variables, with
 the corresponding `ST_IOS_*` spelling as a fallback only when the preferred name
