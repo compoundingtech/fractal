@@ -1,7 +1,7 @@
 //! Person asks are runtime steps. The immutable asking claim supplies their ownership fence;
 //! step_runs supplies their state. No separate attention record is created.
 use super::*;
-use crate::model::PersonRenameRequest;
+use crate::model::{PersonAskRequest, PersonRenameRequest};
 
 use crate::person_request::StructuredRequest;
 
@@ -9,6 +9,8 @@ use crate::person_request::StructuredRequest;
 mod reconcile_candidates_tests;
 #[cfg(test)]
 mod revision_provenance_tests;
+pub mod continuity;
+pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
 /// The structured request an ask claim carries. An ask from a newer build whose request this
 /// build cannot read is refused rather than answered as free text.
@@ -710,10 +712,18 @@ pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h96e1535e2ac0 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
-          json_extract(request.body,'$.fields.origin_step')=?1, resolution.kind,
-          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution JOIN claims request
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h58b7fa26fa6e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "WITH RECURSIVE sources(subject,attempt) AS (
+          SELECT ?1,?2 UNION
+          SELECT json_extract(carried.body,'$.fields.source_step_run'),
+            coalesce(json_extract(carried.body,'$.fields.source_attempt'),sources.attempt)
+          FROM sources JOIN claims carried ON carried.subject=sources.subject
+            AND carried.kind='step-run.carried'
+            AND json_extract(carried.body,'$.fields.attempt')=sources.attempt
+        )
+        SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
+          EXISTS(SELECT 1 FROM sources WHERE sources.subject=json_extract(request.body,'$.fields.origin_step')), resolution.kind,
+          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution LEFT JOIN claims request
         ON request.subject=resolution.subject AND request.kind='work.person-asked'
         WHERE resolution.kind IN ('work.person-done','work.person-cancelled','work.person-override')
           AND (resolution.kind!='work.person-override' OR (
@@ -725,15 +735,13 @@ pub fn enrich_responses(
                 AND deadline.subject=request.subject AND deadline.kind='work.person-done'
                 AND json_extract(deadline.body,'$.fields.resolved_by')='deadline'
                 AND json_extract(deadline.body,'$.fields.episode')=request.id)))
-          -- Only asks this step made, or the step's own ask: an index walk, not every answer.
-          AND resolution.subject IN (
-            SELECT subject FROM claims WHERE kind='work.person-asked'
-              AND json_extract(body,'$.fields.origin_step')=?1
-            UNION SELECT ?1)
-          AND ((json_extract(request.body,'$.fields.origin_step')=?1
-                AND json_extract(request.body,'$.fields.origin_attempt')=?2)
-            OR (resolution.subject=?1 AND (json_extract(resolution.body,'$.fields.attempt')=?2
-                OR (resolution.kind='work.person-override' AND json_extract(request.body,'$.fields.attempt')=?2))))
+          AND EXISTS(SELECT 1 FROM sources WHERE
+            (json_extract(request.body,'$.fields.origin_step')=sources.subject
+              AND json_extract(request.body,'$.fields.origin_attempt')=sources.attempt)
+            OR (resolution.subject=sources.subject AND
+              (json_extract(resolution.body,'$.fields.attempt')=sources.attempt
+               OR (resolution.kind='work.person-override'
+                 AND json_extract(request.body,'$.fields.attempt')=sources.attempt))))
         ORDER BY CANONICAL_ASC(resolution)",
     ))?;
     let responses = query

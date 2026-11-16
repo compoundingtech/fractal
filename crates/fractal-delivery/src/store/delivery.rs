@@ -301,7 +301,13 @@ impl DeliveryStore for Store {
             root_run_id: parent.root_mission_run.trim_start_matches("mission-run/").into(),
             parent_step_run: normalize_step_run(subscription), default_selector: None, started_by: None,
         });
-        self.create_mission_run_inner(request, child, None, Some((resource, discovery)))
+        let suffix = std::path::Path::new(&request.workspace).file_name()
+            .and_then(|name| name.to_str()).ok_or_else(|| FractalError::new(
+                "invalid-mission-workspace", "a subscription workspace needs its delivery suffix"))?;
+        self.create_declared_workspace_mission_run(request, child, None, Some((resource, discovery)),
+            fractal_store::store::missions::MissionWorkspaceDeclaration {
+                subject: subscription.to_owned(), suffix: suffix.to_owned(),
+            })
     }
 
     fn next_subscription_mission_retry_deadline(&self) -> Result<Option<u128>> {
