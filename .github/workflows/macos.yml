@@ -1,6 +1,3 @@
-# Generated file - DO NOT EDIT
-# Source: macos.yml.genie.ts
-
 name: macOS CI
 
 on:
@@ -20,14 +17,85 @@ permissions:
   actions: read
 
 concurrency:
-  group: "macos-${{ github.event.pull_request.number || github.run_id }}"
+  group: 'macos-${{ github.event.pull_request.number || github.run_id }}'
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  fractal-mac-changes:
+    name: fractal-mac-changes
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.detect.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Detect native Mac inputs
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python3 - <<'PY'
+          import fnmatch
+          import os
+          import subprocess
+
+          patterns = (
+              'apps/macos/Fractal/**',
+              'apps/macos/shared/build-identity/**',
+              'clients/swift/FractalClient/**',
+              'nix/fractal-mac.nix',
+              'nix/build-stamp.nix',
+              'flake.nix',
+              'flake.lock',
+              '.github/workflows/macos.yml*',
+          )
+          base = os.environ.get('BASE_SHA', '')
+          relevant = True
+          if base and set(base) != {'0'}:
+              subprocess.run(['git', 'fetch', '--no-tags', '--depth=1', 'origin', base], check=True)
+              names = subprocess.check_output(['git', 'diff', '--name-only', '--no-renames', '-z', base, 'HEAD']).decode().split('\0')
+              relevant = any(fnmatch.fnmatchcase(name, pattern) for name in names for pattern in patterns)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'relevant={str(relevant).lower()}\n')
+          PY
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Only inspects changed paths; no build inputs.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  fractal-mac:
+    name: fractal-mac
+    needs: [fractal-mac-changes]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-mac-changes.result == 'success' && needs.fractal-mac-changes.outputs.relevant == 'true') }}
+    runs-on: ['namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}']
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the native Mac release executable
+        run: swift build --package-path apps/macos/Fractal --configuration release --jobs 2 --disable-sandbox --product Fractal
+      - name: Test the native Mac package
+        run: swift test --package-path apps/macos/Fractal --jobs 2 --disable-sandbox
+      - name: Test shared Swift build identity
+        run: swift test --package-path apps/macos/shared/build-identity --jobs 2 --disable-sandbox
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Deliberately uncached host-Swift lane with repository-local dependencies; no downloaded dependency closure. Gallery rendering requires a login session and remains manual.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   ios-rust-toolchain-cache:
     name: Publish iOS Rust toolchain cache
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'compoundingtech' && github.event.repository.fork == false
-    runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
+    runs-on: ['namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}']
     timeout-minutes: 60
     permissions:
       contents: read
@@ -92,15 +160,15 @@ jobs:
   macos-ci:
     name: macos-ci
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
-    runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
+    runs-on: ['namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}']
     timeout-minutes: 120
     defaults:
       run:
         shell: bash
     env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
       CI_CACHE_DEV_SHELL: default
     steps:
       - uses: actions/checkout@v4
@@ -154,7 +222,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-aarch64-apple-darwin'].outputs['artifact-messaging'] }}
           CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-aarch64-apple-darwin'].outputs['artifact-id-messaging'] }}
-        run: 'python3 scripts/ci-compat-archive download messaging aarch64-apple-darwin "${{ steps[''compat-identity''].outputs.path }}"'
+        run: "python3 scripts/ci-compat-archive download messaging aarch64-apple-darwin \"${{ steps['compat-identity'].outputs.path }}\""
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -176,13 +244,13 @@ jobs:
             ${{ runner.temp }}/cargo-home/registry
             ${{ runner.temp }}/cargo-home/git
           key: "cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/**/Cargo.toml', '.cargo/config.toml') }}"
-          restore-keys: "cargo-${{ github.job }}-${{ runner.os }}-"
+          restore-keys: 'cargo-${{ github.job }}-${{ runner.os }}-'
       - name: Restore the local Nix cache
         id: nix-cache
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/fractal-ci-cache"
+          path: '${{ runner.temp }}/fractal-ci-cache'
           key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-${{ github.job }}-${{ runner.os }}-
@@ -260,7 +328,7 @@ jobs:
         if: success() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && env.CI_LOCAL_CACHES != '1' && steps.nix-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: "${{ runner.temp }}/fractal-ci-cache"
+          path: '${{ runner.temp }}/fractal-ci-cache'
           key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
       - id: build-snapshot-save
         name: Keep valid same-source build outputs
@@ -276,7 +344,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          path: '${{ runner.temp }}/ci-build-snapshot/build.tar.zst'
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
@@ -292,7 +360,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          path: '${{ runner.temp }}/ci-build-snapshot/build.tar.zst'
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
@@ -332,7 +400,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-0.outputs.cache-hit }}
-        run: 'python3 scripts/ci-compat-archive prepare messaging aarch64-apple-darwin "${{ steps[''identity-0''].outputs.path }}"'
+        run: "python3 scripts/ci-compat-archive prepare messaging aarch64-apple-darwin \"${{ steps['identity-0'].outputs.path }}\""
       - name: Save verified messaging archive
         if: steps.archive-0.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
