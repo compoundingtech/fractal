@@ -1,5 +1,6 @@
 /** The Alerts tab's Auto-resolved section over literal asks, in a fixed 256px sidebar, overridden against a stubbed port. */
 import type { AutoResolvedAsk } from '@fractal/client'
+import { markdownBlock, markdownInline } from '@fractal/client/markdown'
 import { assistantDarkTheme, compositionLightTheme } from '@fractal/ui/assistant-ui/shell'
 import type { Meta, StoryObj } from '@storybook/react'
 import * as stylex from '@stylexjs/stylex'
@@ -32,7 +33,7 @@ const asks = (now: number, expired: boolean): readonly AutoResolvedAsk[] => [
     resolved_at: new Date(now - 60 * 60_000).toISOString(), target_id: 'step-run/release/parser', episode: 'claim/example-parser',
     default_answer: { id: 'hold', label: 'Hold' },
     request: {
-      version: 1, type: 'decision', question: 'Merge the parser change?', why_person: 'You own the release.',
+      version: 1, type: 'decision', question: markdownBlock('Merge the parser change?'), why_person: markdownInline('You own the release.'),
       answers: [
         { id: 'merge', label: 'Merge', consequence: 'It joins the merge queue.' },
         { id: 'hold', label: 'Hold', consequence: 'The builder waits.' },
@@ -46,7 +47,7 @@ const asks = (now: number, expired: boolean): readonly AutoResolvedAsk[] => [
     resolved_at: new Date(now - 26 * 60 * 60_000).toISOString(), target_id: 'step-run/ops/rotate', episode: 'claim/example-rotate',
     default_answer: { id: 'later', label: 'Tonight' },
     request: {
-      version: 1, type: 'decision', question: 'Rotate the staging credentials now?', why_person: 'Rotation logs everyone out.',
+      version: 1, type: 'decision', question: markdownBlock('Rotate the staging credentials now?'), why_person: markdownInline('Rotation logs everyone out.'),
       answers: [
         { id: 'now', label: 'Now', consequence: 'Sessions end at once.' },
         { id: 'later', label: 'Tonight', consequence: 'Rotation runs at 02:00.' },

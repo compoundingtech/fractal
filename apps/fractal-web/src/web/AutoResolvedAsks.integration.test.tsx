@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { AutoResolvedAsk } from '@fractal/client'
+import { markdownBlock, markdownInline } from '@fractal/client/markdown'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -31,7 +32,7 @@ const ask = (n: string, title: string): AutoResolvedAsk => ({
   resolution_id: n.repeat(64), title, requester_id: 'agent/example/atlas', resolved_at: '2026-11-01T10:00:00Z',
   target_id: `step-run/release/${n}`, episode: `claim/${n}`, default_answer: { id: 'hold', label: 'Hold' },
   request: {
-    version: 1, type: 'decision', question: title, why_person: 'You own the release.',
+    version: 1, type: 'decision', question: markdownBlock(title), why_person: markdownInline('You own the release.'),
     answers: [
       { id: 'merge', label: 'Merge', consequence: 'It joins the merge queue.' },
       { id: 'hold', label: 'Hold', consequence: 'The builder waits.' },
@@ -75,7 +76,7 @@ const type = async (each: AutoResolvedAsk, text: string) => {
 const changes: AutoResolvedAsk = {
   ...ask('c', 'Ship the release notes?'),
   request: {
-    version: 1, type: 'decision', question: 'Ship the release notes?', why_person: 'You own the release.',
+    version: 1, type: 'decision', question: markdownBlock('Ship the release notes?'), why_person: markdownInline('You own the release.'),
     answers: [
       { id: 'hold', label: 'Hold', consequence: 'The builder waits.' },
       { id: 'change', label: 'Change it', consequence: 'The builder revises them from your words.', outcome: 'request_changes' },
