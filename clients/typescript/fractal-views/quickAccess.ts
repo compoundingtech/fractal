@@ -1,4 +1,4 @@
-import { PINS_ARRANGEMENT_UUID } from '../fractal-client/Models.generated.ts';
+import { PINS_ARRANGEMENT_UUID } from '@fractal/client';
 import type { OrderedMembership, OrderedMembershipOperation } from '@fractal/client';
 
 export type QuickAccessDestination = { kind: 'agent' | 'mission' | 'document' | 'glass' | 'resource'; subject: string };
