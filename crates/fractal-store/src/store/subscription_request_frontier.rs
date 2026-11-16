@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS claims_subscription_request_closer
  WHERE kind IN ('subscription.mission-started','subscription.mission-failed','subscription.mission-request-cancelled');
 CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_insert AFTER INSERT ON claims
  WHEN NEW.kind='subscription.mission-requested' AND json_extract(NEW.body,'$.fields.admission')='relevant-changes' BEGIN
- INSERT OR IGNORE INTO local_subscription_request_pending VALUES(NEW.id);
+ INSERT INTO local_subscription_request_pending VALUES(NEW.id) ON CONFLICT(claim_id) DO NOTHING;
  END;
 ")?;
     // Ordinary inserts take the constant-size pending path. Changes to ordering metadata or
@@ -51,7 +51,8 @@ CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_insert AFTER INSERT O
         let filter = if name.starts_with("claim_") { String::new() } else { format!(" AND {RELEVANT}") };
         tx.execute_batch(&format!(
             "CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_{name} {event} BEGIN
-             INSERT OR IGNORE INTO local_subscription_request_dirty {selection}{filter}; END;"
+             INSERT INTO local_subscription_request_dirty {selection}{filter}
+             ON CONFLICT(subject,resource) DO NOTHING; END;"
         ))?;
     }
     let initialized: bool = tx.query_row(

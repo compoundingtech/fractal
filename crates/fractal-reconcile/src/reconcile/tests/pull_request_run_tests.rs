@@ -526,6 +526,7 @@ fn superseding_subscription_runs_inherit_immutable_policy_and_pass_the_stale_fen
         let mut source = store.active_mission_runs_for_mission("review").unwrap().pop().unwrap();
         // Subscription delivery starts a root run; supersession is a separate lineage edge.
         assert!(source.parent_step_run.is_none());
+        let subscription_root = source.subject.clone();
         for (key, goal) in [("second", "Review the next revision."), ("third", "Review another revision.")] {
             apply_source(&store, &SOURCE.replace("Review one immutable pull request snapshot.", goal), key);
             store.supersede_mission_publications().unwrap();
@@ -543,7 +544,14 @@ fn superseding_subscription_runs_inherit_immutable_policy_and_pass_the_stale_fen
                 assert!(created.body["fields"].get("admission").is_none());
                 assert!(created.body["fields"].get("authors").is_none());
             }
-            assert!(store.stale_subscription_pull_request_run(&successor).unwrap().is_none());
+            let (stale, reads) = smallclaims::touched::record(|| {
+                store.stale_subscription_pull_request_run(&successor).unwrap()
+            });
+            assert!(stale.is_none());
+            assert!(reads.contains(PR), "successors must wake on current PR observations");
+            assert!(reads.contains(&source.subject));
+            assert!(reads.contains(&format!("subscription-run:{subscription_root}")));
+            assert!(!reads.contains("kind:subscription.mission-started"));
             source = successor;
         }
         observe_state(&store, &"b".repeat(40), state, draft);
@@ -580,6 +588,9 @@ fn retrying_subscription_runs_inherits_policy_without_changing_legacy_omission()
         }
         assert_eq!(store.retry_mission_run(&source.subject, &options).unwrap().subject, retry.subject);
         assert!(retry.parent_step_run.is_none());
+        assert!(store.stale_subscription_pull_request_run(&retry).unwrap().is_none());
+        observe(&store, &"b".repeat(40), "open");
+        assert!(store.stale_subscription_pull_request_run(&retry).unwrap().unwrap().contains("moved from head"));
     }
 }
 

@@ -13,6 +13,14 @@ fn replicate_admission(source: &Store, target: &Store) {
         source.replication_inventory().unwrap().digest,
         "the admission replica caught up",
     );
+    // A subsequent observation models a later state, not a concurrent write.
+    // Arrival order does not advance the other origin's canonical write clock.
+    let accepted: String = source.readers.get().query_row(
+        "SELECT accepted_at_unix_ms FROM claims
+         ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+        [], |row| row.get(0),
+    ).unwrap();
+    target.set_write_clock_at(accepted.parse::<u128>().unwrap() + 1).unwrap();
 }
 
 #[test]
@@ -29,6 +37,9 @@ fn relevant_admission_discovers_a_return_after_a_replicated_change_despite_a_sta
     ] {
         let local = Store::open_memory("local").unwrap();
         let remote = Store::open_memory("remote").unwrap();
+        // Canonical graph order starts with accepted time, not replication arrival.
+        // Pin each writer beyond the previous replica's accepted claims below.
+        local.set_write_clock_at(now_ms()).unwrap();
         let subscriptions = publish_admission_watch(&local, &[
             ("relevant", r#"admission "relevant-changes""#), ("default", ""),
         ]);
@@ -57,6 +68,13 @@ fn relevant_admission_discovers_a_return_after_a_replicated_change_despite_a_sta
         observe(&remote, &changed_pull, next_check);
         assert_eq!(admission_requests(&remote, "relevant").len(), 2, "{field}");
         replicate_admission(&remote, &local);
+        let graph = fractal_store::store::resources::preparation_observation(
+            &local.readers.get(), "resource/admission-repo/pull-request/4",
+        ).unwrap().actual.unwrap();
+        assert_eq!(
+            graph["facts"][field], changed_pull[field],
+            "{field}: the replicated change is the latest native graph snapshot",
+        );
         // Replication updates the graph, not this poller's private mirror, which still holds A.
         assert_eq!(mirror.items["resource/admission-repo/pull-request/4"][field], original[field]);
         let facts = json!({"repository_id": 17, "pull_requests": [original.clone()]});

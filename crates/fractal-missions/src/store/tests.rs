@@ -13448,6 +13448,8 @@ fn relevant_admission_frontier_lookup_is_bounded_across_history_and_subscription
 #[test]
 fn relevant_admission_preserves_each_mission_frontier_when_a_subscription_switches_back() {
     let store = Store::open_memory("controller").unwrap();
+    let accepted_at = now_ms();
+    store.set_write_clock_at(accepted_at).unwrap();
     let mut subscriptions = publish_admission_watch(
         &store, &[("relevant", r#"admission "relevant-changes""#)],
     );
@@ -13468,6 +13470,7 @@ fn relevant_admission_preserves_each_mission_frontier_when_a_subscription_switch
     store.rebuild_claim_projections().unwrap();
     let replica = Store::open_memory("worker").unwrap();
     replicate_fully(&store, &replica);
+    replica.set_write_clock_at(accepted_at + 1).unwrap();
     subscriptions = publish_admission_watch_for_mission(
         &replica, &[("relevant", r#"admission "relevant-changes""#)], "admission-review",
     );

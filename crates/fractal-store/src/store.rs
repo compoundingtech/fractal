@@ -2530,10 +2530,37 @@ const SUBSCRIPTION_STARTED_RUN_QUERY: &str =
      WHERE kind='subscription.mission-started'
      AND json_extract(body, '$.fields.mission_run')=?1)";
 
+/// Subscription ownership follows retry and supersession edges, not the child-run tree.
 pub fn subscription_started_run_tx(connection: &Connection, run: &str) -> Result<bool> {
-    Ok(connection
-        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h47cd51eebd32 owner=fractal_store::store TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h2bd2e40c7d6f owner=fractal_store::store TODO=trace-statement-and-value-representation */ [run], |row| row.get(0))?)
+    let mut started = connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h47cd51eebd32 owner=fractal_store::store TODO=trace-statement-and-value-representation */ SUBSCRIPTION_STARTED_RUN_QUERY)?;
+    if started.query_row([run], |row| row.get::<_, bool>(0))? {
+        return Ok(true);
+    }
+    // Each link is stored on both endpoints; follow only the replacement's copy
+    // back to its source. UNION bounds malformed cycles without scanning other runs.
+    let mut ancestors = connection.prepare_cached(
+        "WITH RECURSIVE ancestry(subject) AS (
+             SELECT ?1
+             UNION
+             SELECT json_extract(claims.body, '$.fields.source')
+             FROM ancestry CROSS JOIN claims INDEXED BY claims_subject_kind_index
+               ON claims.subject=ancestry.subject
+             WHERE (claims.kind='mission-run.retry-linked'
+                    AND json_extract(claims.body, '$.fields.retry')=ancestry.subject)
+                OR (claims.kind='mission-run.supersede-linked'
+                    AND json_extract(claims.body, '$.fields.replacement')=ancestry.subject)
+         ) SELECT subject FROM ancestry",
+    )?;
+    for ancestor in ancestors.query_map([run], |row| row.get::<_, String>(0))? {
+        let ancestor = ancestor?;
+        smallclaims::touched::note_read(|| ancestor.clone());
+        smallclaims::touched::note_read(|| format!("subscription-run:{ancestor}"));
+        if ancestor != run && started.query_row([&ancestor], |row| row.get::<_, bool>(0))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn stale_pull_request_request_tx(
