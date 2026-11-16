@@ -562,6 +562,7 @@ struct Daemon {
     state: AppState,
     server: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     member_key: Option<Arc<fractal_daemon::fleet::MemberKey>>,
+    seat_servers: Vec<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 impl Daemon {
@@ -584,6 +585,7 @@ impl Daemon {
             state,
             server: None,
             member_key: None,
+            seat_servers: Vec::new(),
         };
         daemon.serve().await;
         daemon
@@ -616,11 +618,18 @@ impl Daemon {
     fn socket(&self) -> PathBuf {
         self.root.path().join("st3.sock")
     }
+    fn actor_socket(&self, actor: &str) -> PathBuf {
+        if self.member_key.is_some() && matches!(actor, WORKER | READER) {
+            self.root.path().join(format!("{}.sock", actor.rsplit('/').next().unwrap()))
+        } else {
+            self.socket()
+        }
+    }
     fn store(&self) -> &Store {
         &self.state.store
     }
     fn client(&self, actor: &str) -> Client {
-        Client::unix_as(self.socket(), actor)
+        Client::unix_as(self.actor_socket(actor), actor)
     }
     fn transport(&self) -> fractal_daemon::client::Client {
         fractal_daemon::client::Client::unix_as(self.socket(), PERSON).unwrap()
@@ -662,11 +671,51 @@ impl Daemon {
         if let Err(error) = self.client(PERSON).capabilities().await {
             panic!("isolated daemon readiness failed: {error}");
         }
+        if self.member_key.is_some() {
+            // Substitute only the process-ancestry witness, as work_incarnation_tests does.
+            // The real serving boundary installs and enforces Store-aware actor binding.
+            fn worker(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_daemon::api::HarnessAncestry {
+                fractal_daemon::api::HarnessAncestry::Bound(WORKER.into())
+            }
+            fn reader(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_daemon::api::HarnessAncestry {
+                fractal_daemon::api::HarnessAncestry::Bound(READER.into())
+            }
+            type Ancestor = fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_daemon::api::HarnessAncestry;
+            for (actor, ancestor) in [(WORKER, worker as Ancestor), (READER, reader as Ancestor)] {
+                let socket = self.actor_socket(actor);
+                let state = self.state.clone();
+                let serving_socket = socket.clone();
+                self.seat_servers.push(tokio::spawn(async move {
+                    fractal_daemon::api::serve_unix_with_ancestor(
+                        &serving_socket, None, fractal_daemon::api::router(state.clone()),
+                        Some(state.store), ancestor,
+                    ).await
+                }));
+                tokio::time::timeout(Duration::from_secs(120), async {
+                    while !socket.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    self.client(actor).capabilities().await.unwrap();
+                }).await.expect("seat-bound listener must become ready");
+            }
+        }
     }
 
     /// End the listener and its router, reopen the on-disk store, and make fresh daemon state.
     /// No old Store, Notify, action gate, or projection cache is reused.
     async fn restart(&mut self) {
+        for server in self.seat_servers.drain(..) {
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+        if self.member_key.is_some() {
+            for actor in [WORKER, READER] {
+                let socket = self.actor_socket(actor);
+                if socket.exists() {
+                    std::fs::remove_file(socket).unwrap();
+                }
+            }
+        }
         let server = self.server.take().unwrap();
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
@@ -686,7 +735,7 @@ impl Daemon {
         self.store().set_member_key(Some(key.clone())).unwrap();
         self.store().admit_fleet_anchor("action-coverage-fleet", key.public(), "listening").unwrap();
         self.apply(&format!(
-            "version 2\nnotice-owner {{ member {NODE:?}; member-key {:?}; always-on }}\n",
+            "version 2\nnotice-owner {{ member {NODE:?}; member-key {:?}; always-on }}\nagent \"example/reader\" {{ workspace \"/tmp\"; command \"true\"; restart never }}\n",
             key.public(),
         ), "coverage-scheduled-owner");
         self.member_key = Some(key);
@@ -837,7 +886,7 @@ impl Daemon {
         command
             .args([
                 "--endpoint",
-                self.socket().to_str().unwrap(),
+                self.actor_socket(actor).to_str().unwrap(),
                 "--daemon-wait",
                 "0",
             ]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_INCARNATION").env_remove("FRACTAL_INCARNATION")
@@ -879,6 +928,9 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         if let Some(server) = &self.server {
+            server.abort();
+        }
+        for server in &self.seat_servers {
             server.abort();
         }
     }
@@ -1415,10 +1467,10 @@ async fn scheduled_message_cancellation_survives_stale_fences_and_restarts() {
     assert_eq!(daemon.store().scheduled_message(id).unwrap().unwrap().state, "pending");
     assert!(daemon.store().messages(Some(WORKER), true).unwrap().is_empty());
     let listed: Value = daemon.transport().get("/v1/client/scheduled-messages").await.unwrap();
-    assert_eq!(listed["value"]["items"][0]["id"], id);
+    assert_eq!(listed["items"][0]["id"], id);
     let shown: Value = daemon.transport().get(&format!("/v1/client/scheduled-messages/{id}")).await.unwrap();
-    assert_eq!(shown["value"]["id"], id);
-    assert_eq!(shown["value"]["state"], "pending");
+    assert_eq!(shown["id"], id);
+    assert_eq!(shown["state"], "pending");
     let fence = daemon.fence(WORKER).await;
     let cancelled = daemon.exercise(
         WORKER, "message.cancel-scheduled",
@@ -1436,7 +1488,6 @@ async fn cli_scheduled_messages_list_show_and_cancel_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
-    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-scheduled-unrelated-seat");
     daemon.scheduled_owner().await;
     let sent = cli_value(daemon.cli(WORKER, &[
         "messages", "send", WORKER, "--from", WORKER, "--body", "A future CLI kite.",
