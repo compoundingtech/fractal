@@ -2161,8 +2161,16 @@ pub fn commit_tx(
 
 /// Rebuild the existing desired and mission projections through exact set member references.
 pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
+    project_excluding_tx(transaction, &BTreeSet::new())
+}
+
+/// Leave only explicitly degraded set subjects untouched while projecting unrelated sets.
+pub fn project_excluding_tx(
+    transaction: &Transaction<'_>,
+    excluded_subjects: &BTreeSet<String>,
+) -> Result<(), FractalError> {
     for view in selected(transaction, None)? {
-        if !view.blockers.is_empty() {
+        if excluded_subjects.contains(&view.id) || !view.blockers.is_empty() {
             continue;
         } // Existing runtimes hold; callers fence actions below.
         for (s, (m, retired, implicit)) in effective_members(transaction, &view, None)? {
