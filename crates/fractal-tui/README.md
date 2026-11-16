@@ -143,11 +143,12 @@ Details focus also blocks program mouse motion and wheel input, and cancels a pe
 terminal key. If resizing hides the details, focus returns to the program and stays there
 when the pane widens again.
 
-Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
-conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
-its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
-conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced. A
-device that saved the older `terminal_first` keeps attaching. An alert for the agent shows on top
+Opening an agent shows its conversation by default. Turn off **Conversation first** in `Ctrl+K`
+to attach its terminal once its tab stays in front for a moment instead; `Ctrl+\` then `c` shows
+its conversation again. The choice is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced.
+Explicit terminal-first choices, including the older `terminal_first: true`, keep attaching;
+agents without terminals still show their conversation. Saved terminal tabs still restore as terminals.
+An alert for the agent shows on top
 of its attached terminal: click it to show it, click an answer to send it, or click
 "open in Inbox". A request's recommended answer comes first among its at most three answer buttons,
 green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
@@ -229,7 +230,7 @@ latency, also against a deliberately stalled getter, plus alternate-screen resto
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
 binary, pass its path followed by `--ui --no-panic`; the release build has no debug panic hook. The two
 `attach_default_probe` (run by `cargo test -p fractal-tui --lib`, beside `terminal_tab_protocols`) drives a
-real terminal tab in PTYs through the default attach, conversation first, an alert over the
+real terminal tab in PTYs through the conversation default, terminal-first opt-in, an alert over the
 terminal and a dropped link. The two
 QA scripts need a live daemon and the `pty` executable: one opens an agent from `Ctrl+K`, scrolls
 it and drags to copy; the other attaches the agent's terminal and leaves it by `Ctrl+\` then `c` and by a

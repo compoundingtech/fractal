@@ -517,7 +517,7 @@ pub struct Ui {
     /// the page before it.
     older_wanted: RefCell<BTreeSet<String>>,
     /// This device opens an agent's tab on its conversation rather than attaching its terminal:
-    /// its own choice, or `None` when it never chose and the terminal attaches.
+    /// its own choice, or `None` when it never chose and the conversation opens.
     conversation_first: Option<bool>,
     /// This device permits the daemon after a failed direct terminal route.
     pub(crate) terminal_fallback: bool,
@@ -1288,7 +1288,7 @@ impl Ui {
 
     /// Whether this device opens agents on their conversation instead of attaching.
     pub(crate) fn conversation_first(&self) -> bool {
-        self.conversation_first == Some(true)
+        self.conversation_first != Some(false)
     }
 
     /// Attach the terminal of an agent just opened whose tab has been in front for a moment,
@@ -4067,7 +4067,7 @@ impl Ui {
                 (terminal_keys.as_str(), terminal_what.as_str()),
                 (
                     "opening an agent",
-                    "attaches its terminal; \"Conversation first\" in the palette (ctrl+k) opens the conversation instead, on this device",
+                    "opens its conversation by default; turn off \"Conversation first\" in the palette (ctrl+k) to attach terminals on this device",
                 ),
                 (
                     "click an alert",
