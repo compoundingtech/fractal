@@ -222,7 +222,7 @@ the resource-capable SDK before using `lane.run`; legacy detached host `spawn` i
 this context rather than silently escaping containment.
 
 `ResourceError.code` distinguishes `admission-expired`, `unsupported-coverage`,
-`impossible-capacity`, `clock-uncertain`, `execution-timeout` and exact-generation
+`impossible`, `clock-uncertain`, `execution-timeout` and exact-generation
 retirement/cancellation outcomes. Queue expiry is not a failed payload execution.
 The tagged failure retains both `code` and the host's `message` through program-result
 encoding, so admission diagnostics remain available to callers and on replay.
