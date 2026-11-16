@@ -24,7 +24,10 @@ describe('scoped native resource lanes', () => {
   it.effect('acquires and executes through the native boundary, then awaits release', () => Effect.gen(function* () {
     const operations: ResourceRequest[] = []
     const program = Fractal.mission(intent, () => Effect.scoped(Effect.gen(function* () {
-      const lane = yield* Fractal.resources.lane('checks', { host: 'executor', admissionTimeout: '30m' })
+      const lane = yield* Fractal.resources.lane('checks', {
+        host: 'executor', admissionTimeout: '30m', class: 'check',
+        disk: { bytes: 15 * 1024 ** 3, path: '/workspace' }, io: 'heavy',
+      })
       yield* lane.exec('check', ['tools/check'], { timeout: '2h', cwd: '/source' })
       yield* lane.run('child', 'checks/child', { change: 'abc' })
     })))
@@ -42,7 +45,10 @@ describe('scoped native resource lanes', () => {
     expect(operations.map((request) => request.operation)).toEqual([
       'resource.lane.acquire', 'resource.lane.exec', 'resource.lane.run', 'resource.lane.release',
     ])
-    expect(operations[0]?.payload).toEqual({ name: 'checks', host: 'executor', coverage: 'logical', admissionTimeout: '1800000ms' })
+    expect(operations[0]?.payload).toEqual({
+      name: 'checks', host: 'executor', coverage: 'logical', admissionTimeout: '1800000ms',
+      class: 'check', disk: { bytes: 15 * 1024 ** 3, path: '/workspace' }, io: 'heavy',
+    })
     expect(operations[1]?.payload).toEqual({ membership, argv: ['tools/check'], options: { timeout: '7200000ms', cwd: '/source' } })
     expect(operations[2]?.payload).toEqual({ membership, mission: 'checks/child', input: { change: 'abc' } })
     expect(operations[3]?.payload).toEqual({ membership })
