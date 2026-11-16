@@ -7,6 +7,8 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
+    AutoResolvedAsks,
+    AvailabilitySet, AvailabilityHistory, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -351,10 +353,13 @@ export class FractalClient {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         // These projections have no missing-item 404, including an old router's empty response.
-        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
-        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
+        const route = path.split('?')[0];
+        const unsupported = path.startsWith('/v1/client/agent-related-runs/') ? 'agent-related-runs.get'
+            : route === '/v1/client/schedules' ? 'schedules.list'
+            : route === '/v1/client/availability/history' ? 'availability.history' : undefined;
+        if (response.status === 404 && unsupported) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${unsupported}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
@@ -469,6 +474,21 @@ export class FractalClient {
     /** Local diagnostic acceptance, without a snapshot fence or durable action receipt. */
     async observationsReport(report: ObservationReport, requestOptions: RequestOptions = {}): Promise<ObservationResponse> {
         return this.request('POST', '/v1/client/observations', report, undefined, undefined, requestOptions);
+    }
+
+    /** Set or clear the session person's own availability. Requires write.availability; agent sessions are refused. */
+    async availabilitySet(request: AvailabilitySet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailability>> {
+        return this.request<PersonAvailability>('PUT', '/v1/client/availability', request, undefined, undefined, requestOptions);
+    }
+
+    /** Report one device's raw state for the session person, on every state change and again at report_again_at; the daemon derives presence and assigns the source. Requires write.presence. */
+    async presenceReport(report: PresenceReport, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PresenceReportResult>> {
+        return this.request<PresenceReportResult>('POST', '/v1/client/presence', report, undefined, undefined, requestOptions);
+    }
+
+    /** Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused. */
+    async notesSet(request: DirectiveNoteSet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNoteSetResult>> {
+        return this.request<DirectiveNoteSetResult>('PUT', '/v1/client/notes', request, undefined, undefined, requestOptions);
     }
 
     /** Replace this paired device's local-only registration, without a graph receipt. */
@@ -700,6 +720,9 @@ export class FractalClient {
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
+    async autoResolvedList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AutoResolvedAsks>> { return this.get('/v1/client/auto-resolved', undefined, requestOptions); }
+    async availabilityList(person?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailabilities>> { return this.get('/v1/client/availability' + query({ person }), undefined, requestOptions); }
+    async availabilityHistory(options: { from: string; to: string; bucket_seconds: number; person?: string }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AvailabilityHistory>> { return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }
@@ -805,7 +828,10 @@ export class FractalClient {
     async agentSuspend(input: Omit<ActionOf<'agent.suspend'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'agent.suspend' } as ActionOf<'agent.suspend'>, requestOptions); }
     async arrangementEdit(input: Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.edit' } as ActionOf<'arrangement.edit'>, requestOptions); }
     async arrangementMembershipEdit(input: Omit<ActionOf<'arrangement.membership.edit'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.membership.edit' } as ActionOf<'arrangement.membership.edit'>, requestOptions); }
+    async attentionDismiss(input: Omit<ActionOf<'attention.dismiss'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.dismiss' } as ActionOf<'attention.dismiss'>, requestOptions); }
     async attentionResolve(input: Omit<ActionOf<'attention.resolve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.resolve' } as ActionOf<'attention.resolve'>, requestOptions); }
+    async attentionSeen(input: Omit<ActionOf<'attention.seen'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.seen' } as ActionOf<'attention.seen'>, requestOptions); }
+    async attentionSnooze(input: Omit<ActionOf<'attention.snooze'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.snooze' } as ActionOf<'attention.snooze'>, requestOptions); }
     async customReply(input: Omit<ActionOf<'custom.reply'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'custom.reply' } as ActionOf<'custom.reply'>, requestOptions); }
     async harnessAnswer(input: Omit<ActionOf<'harness.answer'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'harness.answer' } as ActionOf<'harness.answer'>, requestOptions); }
     async laneApprove(input: Omit<ActionOf<'lane.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.approve' } as ActionOf<'lane.approve'>, requestOptions); }
@@ -851,6 +877,7 @@ export class FractalClient {
     async workComplete(input: Omit<ActionOf<'work.complete'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.complete' } as ActionOf<'work.complete'>, requestOptions); }
     async workDone(input: Omit<ActionOf<'work.done'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.done' } as ActionOf<'work.done'>, requestOptions); }
     async workFail(input: Omit<ActionOf<'work.fail'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.fail' } as ActionOf<'work.fail'>, requestOptions); }
+    async workOverride(input: Omit<ActionOf<'work.override'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.override' } as ActionOf<'work.override'>, requestOptions); }
     async workProgress(input: Omit<ActionOf<'work.progress'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.progress' } as ActionOf<'work.progress'>, requestOptions); }
     async workPublishMission(input: Omit<ActionOf<'work.publish-mission'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.publish-mission' } as ActionOf<'work.publish-mission'>, requestOptions); }
     async workRelease(input: Omit<ActionOf<'work.release'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.release' } as ActionOf<'work.release'>, requestOptions); }

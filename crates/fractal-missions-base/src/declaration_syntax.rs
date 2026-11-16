@@ -394,6 +394,13 @@ pub fn validate_environment_name(name: &str) -> Result<(), FractalError> {
 }
 
 pub fn validate_full_subject(value: &str) -> Result<(), FractalError> {
+    if let Some(name) = value
+        .strip_prefix("${input.")
+        .and_then(|name| name.strip_suffix('}'))
+        .filter(|name| !name.contains('}'))
+    {
+        return crate::mission::validate_id(name, "mission input");
+    }
     if value.contains("${") {
         if value.starts_with("${")
             && value.ends_with('}')

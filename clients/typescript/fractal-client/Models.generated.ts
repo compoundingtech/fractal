@@ -2,6 +2,9 @@
 // Source: docs/st3/client-v0/schemas/client-v0.schema.json
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 
+import type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';
+export type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';
+
 export const API_VERSION = 'st3.client.v0' as const;
 
 /** Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>. */
@@ -27,6 +30,9 @@ export type ActionCommon = {
   | "private-notes.write"
   | "prompt.respond"
   | "attention.resolve"
+  | "attention.seen"
+  | "attention.snooze"
+  | "attention.dismiss"
   | "review.approve"
   | "review.reject"
   | "review.request-changes"
@@ -46,6 +52,7 @@ export type ActionCommon = {
   | "session.import"
   | "work.ask"
   | "work.done"
+  | "work.override"
   | "work.cancel-ask"
   | "work.claim"
   | "work.renew"
@@ -86,6 +93,7 @@ export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
+  attention_control?: AttentionControlState;
   harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   membership_revision?: Revision;
@@ -246,6 +254,7 @@ export type AgentMessageDay = {
   low_percent?: number | null;
   messages: number;
   since_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   until_ms: number;
   usage_cost_microusd: number;
@@ -282,7 +291,7 @@ export type AgentPresentation = {
 };
 
 export type AgentPresentationNow = AgentPresentationWork & {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   since: Timestamp;
 };
@@ -940,6 +949,7 @@ export type AssistantScope =
   | "write.assistant.messages"
   | "write.assistant.custom-reply"
   | "write.assistant.answers"
+  | "read.assistant.availability"
 ;
 
 export type AssistantSenderClass = "external-assistant";
@@ -1026,7 +1036,7 @@ export type Attention = ResourceHeader & {
   | "harness-prompt"
   | "model-drift"
  | string);
-  because?: string;
+  because?: MarkdownInline;
   blocked?: AttentionBlocked;
   conversation_id?: Id;
   conversation_ids?: Array<Id>;
@@ -1035,7 +1045,7 @@ export type Attention = ResourceHeader & {
 };
   deadline_at?: Timestamp;
   default_answer?: AskDefaultAnswer;
-  detail: string;
+  detail: MarkdownBlock;
   episode?: string;
   fix?: {
 
@@ -1054,6 +1064,8 @@ export type Attention = ResourceHeader & {
   requested_at: Timestamp;
   requester_id?: Id;
   review_mode?: "approve" | "feedback";
+  seen_at?: (Timestamp | null);
+  snoozed_until?: (Timestamp | null);
   source_id: Id;
   source_kind?: string;
   state: "open" | "resolved";
@@ -1062,6 +1074,7 @@ export type Attention = ResourceHeader & {
   targets?: Array<Id>;
   title: string;
   update?: PersonUpdate;
+  urgent?: boolean;
   variant_id?: Id;
   what?: string;
 };
@@ -1073,7 +1086,7 @@ export type AttentionActor = {
 
 export type AttentionBlocked = {
   attempt: number;
-  goal: string;
+  goal: MarkdownInline;
   step: string;
   step_run_id: Id;
 };
@@ -1106,6 +1119,19 @@ export type AttentionBudgetRequestRef = {
   subject: string;
 };
 
+export type AttentionControlId = string;
+
+export type AttentionControlState = {
+  attention_id: AttentionControlId;
+  seen_at: (Timestamp | null);
+  snoozed_until: (Timestamp | null);
+};
+
+export type AttentionDismissParameters = {
+  attention_id: AttentionControlId;
+  text?: string;
+};
+
 export type AttentionLaunchAgent = {
   harness: string | null;
   host: string | null;
@@ -1122,7 +1148,7 @@ export type AttentionLaunchAssignee = {
 export type AttentionLaunchPreview = {
   agents: Array<AttentionLaunchAgent>;
   asks_you: number;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   steps: Array<AttentionLaunchStep>;
   variant: string;
 };
@@ -1183,7 +1209,7 @@ export type AttentionPromptCall = {
 export type AttentionRevision = {
   from_revision: string;
   lines: Array<AttentionRevisionLine>;
-  reason: string;
+  reason: MarkdownInline;
   to_revision: string;
   truncated: boolean;
 };
@@ -1191,6 +1217,15 @@ export type AttentionRevision = {
 export type AttentionRevisionLine = {
   op: "+" | "-" | "~";
   text: string;
+};
+
+export type AttentionSeenParameters = {
+  attention_id: AttentionControlId;
+};
+
+export type AttentionSnoozeParameters = {
+  attention_id: AttentionControlId;
+  until: (Timestamp | null);
 };
 
 export type AttentionTargetState = {
@@ -1202,6 +1237,102 @@ export type AttentionTargetState = {
 export type AttentionWaiting = {
   path: string;
   step: StepRunId;
+};
+
+export type AutoResolvedAsk = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  request?: StructuredRequest;
+  requester_id: Id;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: Id;
+  title: string;
+};
+
+export type AutoResolvedAsks = {
+  complete: boolean;
+  items: Array<AutoResolvedAsk>;
+};
+
+export type AvailabilityDeadlineClock = ("run" | "hold-routine" | "hold-all" | string);
+
+export type AvailabilityDeadlineClockChange = {
+  until?: (Timestamp | null);
+  value: "run" | "hold-routine" | "hold-all";
+};
+
+export type AvailabilityDeadlineClockDurations = {
+  "hold-all": number;
+  "hold-routine": number;
+  run: number;
+};
+
+export type AvailabilityHistory = {
+  bucket_seconds: number;
+  buckets: Array<AvailabilityHistoryBucket>;
+  from: Timestamp;
+  person: string;
+  to: Timestamp;
+};
+
+export type AvailabilityHistoryBucket = {
+  covered_ms: number;
+  deadline_clock: AvailabilityDeadlineClockDurations;
+  interruptions: AvailabilityInterruptionsDurations;
+  presence: (AvailabilityPresenceDurations | null);
+  start: Timestamp;
+  status: AvailabilityStatusDurations;
+  status_source: AvailabilityStatusSourceDurations;
+};
+
+export type AvailabilityInterruptions = ("all" | "urgent" | "none" | string);
+
+export type AvailabilityInterruptionsChange = {
+  until?: (Timestamp | null);
+  value: "all" | "urgent" | "none";
+};
+
+export type AvailabilityInterruptionsDurations = {
+  all: number;
+  none: number;
+  urgent: number;
+};
+
+export type AvailabilityPresence = ("present" | "idle" | "locked" | "unreported" | string);
+
+export type AvailabilityPresenceDurations = {
+  idle: number;
+  locked: number;
+  present: number;
+  unreported: number;
+};
+
+export type AvailabilitySet = {
+  deadline_clock?: AvailabilityDeadlineClockChange;
+  interruptions?: AvailabilityInterruptionsChange;
+  status?: AvailabilityStatusChange;
+};
+
+export type AvailabilityStatus = ("available" | "away" | string);
+
+export type AvailabilityStatusChange = {
+  until?: (Timestamp | null);
+  value: ("available" | "away" | null);
+};
+
+export type AvailabilityStatusDurations = {
+  available: number;
+  away: number;
+};
+
+export type AvailabilityStatusSource = ("override" | "presence" | "unreported" | string);
+
+export type AvailabilityStatusSourceDurations = {
+  override: number;
+  presence: number;
+  unreported: number;
 };
 
 export type BlobChunk = {
@@ -1800,6 +1931,15 @@ export type DirectiveNote = {
   time: Timestamp;
 };
 
+export type DirectiveNoteSet = {
+  expires_at?: (Timestamp | null);
+  text: (string | null);
+};
+
+export type DirectiveNoteSetResult = {
+  note: (DirectiveNote | null);
+};
+
 export type DirectiveNotes = {
   notes: Array<DirectiveNote>;
 };
@@ -1853,7 +1993,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | AvailabilityHistory | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -1946,6 +2086,7 @@ export type ErrorCode = (
   | "private-notes-indeterminate"
   | "invalid-answer"
   | "not-answerable"
+  | "attention-dismiss-unsupported"
   | "internal"
  | string);
 
@@ -2360,6 +2501,8 @@ export type GlassTab = {
 
 export type GoldenResourceSet = Array<Resource>;
 
+export type GoldenResponseEvidence = Array<TimelineUsageBody>;
+
 export type HarnessAnswerInput = {
   positions: Array<number>;
 };
@@ -2605,11 +2748,11 @@ export type LaunchApproval = ResourceHeader & {
 
 export type LaunchDecision = ResourceHeader & {
   decision_type: "boolean" | "single-choice" | "multiple-choice" | "rank";
-  explanation?: string | null;
+  explanation?: MarkdownBlock | null;
   kind: "launch-decision";
   launch_id: Id;
   options: Array<DecisionOption>;
-  question: string;
+  question: MarkdownBlock;
   requested_at: Timestamp;
   response?: (DecisionResponse | null);
   state: "open" | "answered" | "withdrawn";
@@ -2627,8 +2770,8 @@ export type LaunchPreview = {
   automated: number;
   human: number;
 };
-  goal: string;
-  request_excerpt: string;
+  goal: MarkdownInline;
+  request_excerpt: MarkdownBlock;
   steps: Array<{
   assignee?: string | null;
   depends: Array<string>;
@@ -2692,7 +2835,7 @@ export type Message = ResourceHeader & {
   attachments?: Array<Attachment>;
   body_bytes?: number;
   body_ref?: string;
-  content: string;
+  content: MarkdownBlock;
   from: Id;
   in_reply_to?: (Id | null);
   kind: "message";
@@ -2709,7 +2852,7 @@ export type MessageBody = {
   bytes: number;
   complete?: boolean;
   message: string;
-  text: string;
+  text: MarkdownBlock;
 };
 
 export type MessageProvenance = {
@@ -2792,7 +2935,7 @@ export type MissionId = string;
 export type MissionPresentation = {
   actions: Array<MissionActionOffer>;
   card: ("what-you-can-do" | "nothing-to-do" | null);
-  last_progress: string | null;
+  last_progress: MarkdownInline | null;
   progress: {
   done: number;
   total: number;
@@ -2868,7 +3011,7 @@ export type MissionRunSummary = {
 });
   generation_id?: RunGenerationId;
   id: MissionRunId;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   must_act: MustAct;
   outcome?: (MissionRunOutcome | null);
   phase: string;
@@ -2910,13 +3053,14 @@ export type MissionStep = {
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
   completed_at?: number | null;
-  constraints?: Array<string>;
+  constraints?: Array<MarkdownInline>;
   eta?: MissionStepEta;
-  goals?: Array<string>;
+  executions?: Array<StepExecution>;
+  goals?: Array<MarkdownInline>;
   history_complete?: boolean;
   id: Id;
   keep_open?: boolean;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   loop_max_rounds?: number | null;
   loop_reason?: string | null;
   loop_round?: number | null;
@@ -3065,6 +3209,8 @@ export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | strin
 
 export type NoticeActor = string;
 
+export type NoticeAgent = string;
+
 export type NoticeClaimId = string;
 
 export type NoticeCreated = {
@@ -3103,6 +3249,31 @@ export type NoticeDelivery = ({
   state: "suppressed";
   surface: "tray" | "speech" | "push" | "log";
 });
+
+export type NoticeDigestActions = {
+  "work.override": NoticeDigestOverride;
+};
+
+export type NoticeDigestDefaultAnswer = {
+  id: string;
+  label: string;
+};
+
+export type NoticeDigestOverride = {
+  episode: string;
+  target_id: string;
+};
+
+export type NoticeDigestRow = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  requester_id: string;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: string;
+  title: string;
+};
 
 export type NoticeDismissParameters = {
   notice_id: NoticeId;
@@ -3144,8 +3315,6 @@ export type NoticePolicy = {
   revision: Revision;
 };
 
-export type NoticeRuntime = string;
-
 export type NoticeSeenParameters = {
   notice_id: NoticeId;
 };
@@ -3163,7 +3332,7 @@ export type NoticeSnapshot = {
   policy: NoticePolicy;
   producer: NoticeActor;
   revision: Revision;
-  runtime: NoticeRuntime;
+  runtime: string;
   schema_version: 1;
   seen_at: (NoticeTimestamp | null);
   snoozed_until: (NoticeTimestamp | null);
@@ -3178,9 +3347,14 @@ export type NoticeSnoozeParameters = {
 };
 
 export type NoticeSource = {
-  agent?: NoticeRuntime;
+  agent?: NoticeAgent;
+  covered_through?: NoticeTimestamp;
   cwd?: string;
+  digest?: Array<NoticeDigestRow>;
+  digest_count?: string;
+  digest_document?: string;
   host: string;
+  owner_claim?: string;
   pty?: string;
   repo?: string;
 };
@@ -3446,11 +3620,39 @@ export type PersonAskParameters = {
   title: string;
 };
 
+export type PersonAvailabilities = {
+  people: Array<PersonAvailability>;
+};
+
+export type PersonAvailability = {
+  deadline_clock: AvailabilityDeadlineClock;
+  deadline_clock_since: (Timestamp | null);
+  deadline_clock_until: (Timestamp | null);
+  interruptions: AvailabilityInterruptions;
+  interruptions_until: (Timestamp | null);
+  person: string;
+  presence: (AvailabilityPresence | null);
+  presence_observed_at: (Timestamp | null);
+  status: AvailabilityStatus;
+  status_source: AvailabilityStatusSource;
+  status_until: (Timestamp | null);
+};
+
 export type PersonId = string;
 
 export type PersonOptionNote = {
   id: string;
   text: string;
+};
+
+export type PersonOverrideParameters = {
+  answer: {
+  id: string;
+  text?: string;
+};
+  episode: string;
+  summary?: string;
+  target_id: Id;
 };
 
 export type PersonPairedSession = {
@@ -3477,7 +3679,18 @@ export type PersonPairingBegin = {
   fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
-  scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
+  scopes?: Array<
+  "read.projections"
+  | "write.client-diagnostics"
+  | "write.availability"
+  | "write.presence"
+  | "write.notes"
+  | "read.glasses"
+  | "control.glasses"
+  | "terminal.read"
+  | "control.attention"
+  | "control.launches"
+>;
 };
 
 export type PersonStepParameters = {
@@ -3492,7 +3705,7 @@ export type PersonUpdate = {
   about: Id;
   speech?: string;
   subjects?: Array<RequestSubject>;
-  summary?: string;
+  summary?: MarkdownBlock;
   type: "update";
   version: 1;
 };
@@ -3542,6 +3755,17 @@ export type PlannerConfig = {
   provider: "codex" | "claude" | "pi" | "omp" | "opencode";
 };
 
+export type PresenceReport = {
+  last_input_at?: Timestamp;
+  observed_at: Timestamp;
+  state: "active" | "inactive" | "locked" | "sleeping";
+};
+
+export type PresenceReportResult = {
+  availability: PersonAvailability;
+  report_again_at: (Timestamp | null);
+};
+
 export type PresentationActor = {
   agent?: AgentId;
   kind: "person" | "agent" | "st" | "nobody";
@@ -3556,7 +3780,7 @@ export type PrivateNotesAction = {
 
 export type PrivateNotesData = {
   fence: PrivateNotesFence;
-  markdown: string;
+  markdown: MarkdownBlock;
   uri: PrivateNotesUri;
 };
 
@@ -3824,7 +4048,9 @@ export type Runtime = ResourceHeader & {
   | "unreachable"
 ;
   terminal_access?: {
-
+  input: "granted" | "ungranted" | "unavailable";
+  read: "granted" | "ungranted" | "unavailable";
+  resize: "granted" | "ungranted" | "unavailable";
 } | null;
   terminal_id?: (Id | null);
   terminal_sequence?: number | null;
@@ -3964,7 +4190,7 @@ export type SloRow = {
   remaining_percent: number | null;
   resets_at_unix_ms?: number | null;
   runs_out_at_unix_ms?: number;
-  status: "met" | "missed" | "no-data" | "stale";
+  status: ("met" | "missed" | "no-data" | "stale" | string);
   target: string;
   tone?: string;
   window: string;
@@ -4059,6 +4285,38 @@ export type StatusTransition = {
   state: string | null;
 };
 
+export type StepExecution = {
+  agent: string;
+  attempt: number;
+  declared_model: string | null;
+  duration_ms: number | null;
+  ended_at_unix_ms: number | null;
+  exit_evidence: string | null;
+  fallback: boolean | null;
+  id: string;
+  incarnation_id: string | null;
+  invocation_id?: string;
+  observed_models: Array<string>;
+  started_at_unix_ms: number;
+  status: string | null;
+  step_subject: string;
+  trace_id: string | null;
+  usage: (StepExecutionUsage | null);
+};
+
+export type StepExecutionUsage = {
+  cache_write_1h_tokens: number;
+  cache_write_tokens: number;
+  cached_tokens: number;
+  cost_microusd: number;
+  input_tokens: number;
+  output_tokens: number;
+  reported_cost_microusd: number;
+  total_tokens: number;
+  unpriced_responses?: number;
+  unpriced_tokens: number;
+};
+
 export type StepRunId = string;
 
 export type StreamSync = {
@@ -4079,17 +4337,17 @@ export type StructuredRequest = {
   answers?: Array<RequestAnswerOption>;
   attachments?: Array<Attachment>;
   custom?: boolean;
-  question: string;
-  reasons?: Array<string>;
+  question: MarkdownBlock;
+  reasons?: Array<MarkdownInline>;
   recommendation?: {
   answer: string;
   reason: string;
 };
   subjects?: Array<RequestSubject>;
-  summary?: string;
+  summary?: MarkdownBlock;
   type: "decision" | "choice" | "feedback";
   version: 1;
-  why_person: string;
+  why_person: MarkdownInline;
 };
 
 export type SubagentSummary = {
@@ -4103,7 +4361,7 @@ export type SubagentSummary = {
   name?: string;
   requests?: number;
   status: string;
-  task?: string;
+  task?: MarkdownBlock;
   tokens?: number;
   tool_count?: number;
 };
@@ -4324,7 +4582,7 @@ export type TimelineAskQuestion = {
   description?: string;
   label: string;
 }>;
-  question: string;
+  question: MarkdownBlock;
   recommended?: number;
 };
 
@@ -4346,7 +4604,7 @@ export type TimelineContentBody = {
   blocks?: Array<TimelineBlock>;
   media_type: string;
   message_id?: string;
-  text?: string;
+  text?: MarkdownBlock;
 } & (unknown | unknown);
 
 export type TimelineDelta = {
@@ -4418,6 +4676,13 @@ export type TimelinePage = {
   session_id: Id;
 };
 
+export type TimelineProviderQuota = {
+  quantity: number;
+  unit: TimelineProviderQuotaUnit;
+};
+
+export type TimelineProviderQuotaUnit = "premium_requests";
+
 export type TimelineRecipientRef = string;
 
 export type TimelineRedactionBody = {
@@ -4425,6 +4690,13 @@ export type TimelineRedactionBody = {
   reason: string;
   withheld_bytes: number;
   withheld_items?: number;
+};
+
+export type TimelineResponseCostComponents = {
+  cache_read?: number;
+  cache_write?: number;
+  input?: number;
+  output?: number;
 };
 
 export type TimelineStatus = ("queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | string);
@@ -4464,29 +4736,45 @@ export type TimelineTruncationBody = {
 };
 
 export type TimelineUsageBody = {
+  account?: string;
+  api?: string;
   attribution: {
   agent_id: Id;
+  attempt?: number;
+  execution_id?: string;
   generation_id?: string | null;
+  invocation_id?: string;
   mission_run_id?: string | null;
   step_id?: string | null;
 };
   blocks?: Array<TimelineBlock>;
+  cache_write_1h_tokens?: number;
   cache_write_tokens?: number;
   cached_tokens?: number;
   compactions?: number;
+  completed_at_unix_ms?: number;
   context_used_percent?: number;
   context_used_tokens?: number;
   context_window_tokens?: number;
   cost?: number;
+  cost_components?: TimelineResponseCostComponents;
   currency?: string;
   driver: string;
+  duration_ms?: number;
   input_tokens?: number;
   last_compaction_ms?: number;
   last_compaction_trigger?: "manual" | "auto" | "threshold" | "overflow" | "idle" | "unknown";
   model?: string;
   output_tokens?: number;
+  provider?: string;
+  provider_quota?: TimelineProviderQuota;
+  reasoning_tokens?: number;
+  response_id?: string;
   semantics: "context_occupancy" | "session_cumulative" | "response";
+  started_at_unix_ms?: number;
+  stop_reason?: string;
   total_tokens?: number;
+  ttft_ms?: number;
   turn_id?: string;
 };
 
@@ -4553,8 +4841,8 @@ export type TimelineViewBash = {
 
 export type TimelineViewCompaction = {
   method?: string;
-  short_summary?: string;
-  summary?: string;
+  short_summary?: MarkdownInline;
+  summary?: MarkdownBlock;
   tokens_after?: number;
   tokens_before?: number;
   type: "compaction";
@@ -4605,7 +4893,7 @@ export type TimelineViewHub = {
   intent?: string;
   is_error?: boolean;
   jobs?: Array<JobSummary>;
-  message?: string;
+  message?: MarkdownBlock;
   name?: string;
   op: string;
   state?: string;
@@ -4618,7 +4906,7 @@ export type TimelineViewHub = {
 
 export type TimelineViewIrc = {
   from: string;
-  message: string;
+  message: MarkdownBlock;
   message_id: string;
   reply_to?: string;
   type: "irc";
@@ -4696,13 +4984,13 @@ export type TimelineViewTask = {
   agents?: Array<SubagentSummary>;
   async?: boolean;
   call_id?: string;
-  context?: string;
+  context?: MarkdownBlock;
   intent?: string;
   is_error?: boolean;
   tasks?: Array<{
   agent?: string;
   name?: string;
-  task: string;
+  task: MarkdownBlock;
 }>;
   tool: string;
   total_ms?: number;
@@ -4790,6 +5078,7 @@ export type UsageContext = {
 export type UsageCredits = {
   budget_microusd: number;
   period_start_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   used_microusd: number;
 };
@@ -4848,6 +5137,7 @@ export type UsagePricing = {
   rates_usd_per_million_tokens?: UsagePricingRates;
   reported_cost_microusd: number;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -4863,12 +5153,15 @@ export type UsageRow = {
   account?: string;
   account_ref?: string;
   agent: Id;
+  attempt?: number;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;
   cached_tokens: number;
   cost_microusd: number;
+  execution_id?: string;
   host?: string;
   input_tokens: number;
+  invocation_id?: string;
   mission_run?: Id;
   model?: string;
   native_session_id?: string;
@@ -4878,6 +5171,7 @@ export type UsageRow = {
   reported_cost_microusd: number;
   step?: Id;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -4897,14 +5191,14 @@ export type UsageSummary = {
 export type Value = unknown;
 
 export type Visualization = {
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   decisions: Array<LaunchDecision>;
   diffs: Array<StructuredDiff>;
   edges: Array<VisualizationEdge>;
   gates: Array<{
 
 }>;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   groups: Array<VisualizationGroup>;
   live_progress: {
 
@@ -4950,9 +5244,9 @@ export type VisualizationGroup = {
 
 export type VisualizationNode = {
   assignment?: unknown;
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   gates?: Array<unknown>;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   id: string;
   kind: string;
   label: string;
@@ -4978,7 +5272,7 @@ export type Work = ResourceHeader & {
   claim_expires_at_unix_ms?: number | null;
   claim_incarnation?: string | null;
   claimant?: (Id | null);
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   definition_id: Revision;
   execution_elapsed_ms?: number;
   execution_started_at_unix_ms?: number | null;
@@ -4995,9 +5289,9 @@ export type Work = ResourceHeader & {
   | null
 ;
   generation_id: Id;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   kind: "work";
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   mission_id?: (Id | null);
   mission_run_id: Id;
   nudged_at_unix_ms?: number | null;
@@ -5014,7 +5308,7 @@ export type Work = ResourceHeader & {
 };
 
 export type WorkLabel = {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;
@@ -5061,11 +5355,14 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.membership.edit'; parameters: ArrangementMembershipEditParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.dismiss'; parameters: AttentionDismissParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.resolve'; parameters: {
   attention_id: Id;
   outcome: string;
   reason?: string;
 }; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.seen'; parameters: AttentionSeenParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.snooze'; parameters: AttentionSnoozeParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
@@ -5215,6 +5512,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.complete'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.done'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.fail'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.override'; parameters: PersonOverrideParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.progress'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.publish-mission'; parameters: {
   mission: {

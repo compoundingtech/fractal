@@ -326,6 +326,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'slo.history': return ['objective/example', {}, options];
             case 'attention-budget': return ['mission/example', undefined, undefined, options];
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
+            case 'auto-resolved.list': return [options];
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': case 'usage-hub.quota': return [options];
             case 'arrangements.list': case 'read-positions.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
@@ -450,6 +451,109 @@ test('notesList reads the typed advisory current notes endpoint', async () => {
     assert.equal(calls[0][0], 'https://example.test/v1/client/capabilities');
     assert.equal(calls[1][0], 'https://example.test/v1/client/notes');
     assert.equal(calls[1][1].headers.Authorization, 'Bearer test-credential');
+});
+
+test('auto-resolved read and override preserve exact episode and retry identity', async () => {
+    const read = require('../../../docs/st3/client-v0/fixtures/auto-resolved.json');
+    const calls = [];
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(read);
+        },
+    });
+    assert.deepEqual(await client.autoResolvedList(), read);
+    const input = {
+        id: 'action/person-override:claim/example:ship',
+        idempotency_key: 'person-override:claim/example:ship',
+        fence: { snapshot_id: 'snapshot/example', subject_revisions: {} },
+        parameters: { target_id: 'step-run/example', episode: 'claim/example', answer: { id: 'ship' } },
+    };
+    await client.workOverride(input);
+    const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
+    assert.equal(sent[0][0], 'https://example.test/v1/client/auto-resolved');
+    assert.equal(sent[1][0], 'https://example.test/v1/client/actions');
+    assert.deepEqual(JSON.parse(sent[1][1].body), { api_version: 'st3.client.v0', type: 'work.override', ...input });
+});
+
+test('availability reads select a person and writes send the session person nothing but the change', async () => {
+    const read = require('../../../docs/st3/client-v0/fixtures/person-availability.json');
+    const written = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json');
+    const set = require('../../../docs/st3/client-v0/fixtures/availability-set.json');
+    const report = require('../../../docs/st3/client-v0/fixtures/presence-report.json');
+    const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json');
+    const calls = [];
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(init.method === 'GET' ? read : init.method === 'POST' ? reported : written);
+        },
+    });
+    assert.deepEqual(await client.availabilityList(), read);
+    assert.deepEqual(await client.availabilityList('person/ada'), read);
+    assert.deepEqual(await client.availabilitySet(set), written);
+    assert.deepEqual(await client.presenceReport(report), reported);
+    const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
+    assert.deepEqual(sent.map(([url, init]) => [init.method, url]), [
+        ['GET', 'https://example.test/v1/client/availability'],
+        ['GET', 'https://example.test/v1/client/availability?person=person%2Fada'],
+        ['PUT', 'https://example.test/v1/client/availability'],
+        ['POST', 'https://example.test/v1/client/presence'],
+    ]);
+    assert.deepEqual(JSON.parse(sent[2][1].body), set);
+    assert.deepEqual(JSON.parse(sent[3][1].body), report);
+    assert.equal(sent[3][1].headers.Authorization, 'Bearer test-credential');
+});
+
+test('availabilityHistory sends its range and an older daemon is unsupported', async () => {
+    const fixture = require('../../../docs/st3/client-v0/fixtures/availability-history.json');
+    const requests = [];
+    let old = false;
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
+        const url = String(input);
+        requests.push(url);
+        if (new URL(url).pathname === '/v1/client/capabilities') return response(capabilityFixture);
+        return old ? new Response(null, { status: 404 }) : response(fixture);
+    }});
+    const range = { from: '2026-11-12T09:00:00Z', to: '2026-11-12T11:00:00Z', bucket_seconds: 3600 };
+    assert.deepEqual(await client.availabilityHistory({ ...range, person: 'person/ada' }), fixture);
+    old = true;
+    await assert.rejects(client.availabilityHistory(range), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/availability/history'), [
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600&person=person%2Fada',
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600',
+    ]);
+});
+
+test('notesSet sends only the text and expiry and a clear as null', async () => {
+    const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json');
+    const set = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
+    const calls = [];
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(written);
+        },
+    });
+    assert.deepEqual(await client.notesSet(set), written);
+    assert.deepEqual(await client.notesSet({ text: null }), written);
+    const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
+    assert.deepEqual(sent.map(([url, init]) => [init.method, url]), [
+        ['PUT', 'https://example.test/v1/client/notes'],
+        ['PUT', 'https://example.test/v1/client/notes'],
+    ]);
+    assert.deepEqual(JSON.parse(sent[0][1].body), set);
+    assert.deepEqual(JSON.parse(sent[1][1].body), { text: null });
+    assert.equal(sent[0][1].headers.Authorization, 'Bearer test-credential');
 });
 
 const validTraceparent = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01';

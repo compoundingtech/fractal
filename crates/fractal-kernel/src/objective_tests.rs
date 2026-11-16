@@ -1,6 +1,7 @@
 use super::*;
 
 const SHIPPED: &str = /* sqlite-large-value: allow-for-now lv-ha01213f3c4b5 owner=fractal_kernel::objective_tests TODO=trace-statement-and-value-representation */ include_str!("../../../slo/objectives.kdl");
+const FRACTAL_CI: &str = /* sqlite-large-value: allow-for-now lv-h44b5714bd710 owner=fractal_kernel::objective_tests TODO=trace-statement-and-value-representation */ include_str!("../../../slo/fractal-ci.kdl");
 
 fn one(text: &str) -> Result<Objective, FractalError> {
     parse_document(&format!("version 2\n{text}")).map(|mut objectives| objectives.remove(0))
@@ -28,13 +29,13 @@ const INTERVAL: &str = r#"objective "ops/change-rollout" {
 #[test]
 fn the_shipped_objectives_parse_and_none_is_declarable() {
     let objectives = parse_document(SHIPPED).unwrap();
-    assert_eq!(objectives.len(), 21);
+    assert_eq!(objectives.len(), 18);
     assert!(objectives.iter().all(|objective| !objective.declarable()));
-    let merge = objectives.iter().find(|objective| objective.name == "merge-latency").unwrap();
-    assert_eq!(merge.indicator, Indicator::CiDuration { series: "ci/merge-queue".into() });
+    let statement = objectives.iter().find(|objective| objective.name == "sql-statement").unwrap();
+    assert_eq!(statement.indicator, Indicator::Statement);
     assert_eq!(
-        merge.targets.iter().map(|target| (target.percentile(), target.within_ms())).collect::<Vec<_>>(),
-        [(Some(50), Some(600_000)), (Some(95), Some(600_000))],
+        statement.targets.iter().map(|target| (target.stat.as_str(), target.within_ms())).collect::<Vec<_>>(),
+        [("p99", Some(10)), ("max", Some(100))],
     );
     let read = objectives.iter().find(|objective| objective.name == "person-read").unwrap();
     assert_eq!(read.target("p99", true).and_then(Target::within_ms), Some(300));
@@ -72,6 +73,82 @@ fn the_expect_kind_may_also_start_the_sample() {
         interval.kinds(),
         ["custom.acme.change-merged", "custom.acme.change-applied", "custom.acme.change-abandoned", "custom.acme.change-paused", "custom.acme.change-resumed"]
     );
+}
+
+fn only(field: &str, values: &[&str]) -> Only {
+    Only { field: field.into(), values: values.iter().map(|value| (*value).to_owned()).collect() }
+}
+
+const RUN: &str = r#"objective "ci/merge-latency" {
+  about "A merge group's run, from created to completed"
+  indicator "interval" {
+    subject-prefix "github-workflow-run/acme/repo/"
+    start "github.workflow-run" at="created_at"
+    stop "github.workflow-run" at="completed_at"
+    only "event" "merge_group"
+    only "attempt" "1" "2"
+  }
+  window "1d"
+  target "p95" within="10m"
+}"#;
+
+#[test]
+fn one_claim_may_be_the_whole_sample_and_only_keeps_the_matching_ones() {
+    let objective = one(RUN).unwrap();
+    let Indicator::Interval(interval) = &objective.indicator else { panic!() };
+    assert_eq!(interval.start, Event { kind: "github.workflow-run".into(), at: Some("created_at".into()) });
+    assert_eq!(interval.stop, (Event { kind: "github.workflow-run".into(), at: Some("completed_at".into()) }, None));
+    assert_eq!(interval.kinds(), ["github.workflow-run"], "one kind, read once");
+    assert_eq!(interval.only, [only("event", &["merge_group"]), only("attempt", &["1", "2"])]);
+    let refused = |replace: &str, with: &str| {
+        assert!(RUN.contains(replace), "{replace}");
+        one(&RUN.replace(replace, with)).unwrap_err().message
+    };
+    for (message, says) in [
+        (refused("at=\"completed_at\"", "at=\"created_at\""), "different `at=` fields"),
+        (refused(" at=\"completed_at\"", ""), "different `at=` fields"),
+        (refused(" at=\"created_at\"", ""), "different `at=` fields"),
+        (refused("at=\"completed_at\"", "at=\"completed_at\" member=\"host\""), "takes no `expect` or `member=`"),
+        (
+            refused(
+                "    stop \"github.workflow-run\" at=\"completed_at\"\n",
+                "    expect \"github.workflow-run\" set=\"hosts\" at=\"created_at\"\n    stop \"github.workflow-run\" member=\"host\" at=\"completed_at\"\n",
+            ),
+            "takes no `expect` or `member=`",
+        ),
+        (refused("only \"attempt\" \"1\" \"2\"", "only \"event\" \"pull_request\""), "`only \"event\"` is repeated"),
+        (refused("only \"attempt\" \"1\" \"2\"", "only \"attempt\""), "`only` needs a field and at least one value"),
+        (refused("only \"attempt\" \"1\" \"2\"", "only \"attempt\" \"\""), "`only` needs a field and at least one value"),
+        (refused("only \"attempt\" \"1\" \"2\"", "only \"attempt\" 1"), "`only` needs a field and at least one value"),
+    ] {
+        assert!(message.contains(says), "{says:?} not in {message:?}");
+    }
+}
+
+#[test]
+fn the_fractal_ci_objectives_are_declarable_over_workflow_run_claims() {
+    let objectives = parse_document(FRACTAL_CI).unwrap();
+    assert_eq!(
+        objectives.iter().map(|objective| objective.name.as_str()).collect::<Vec<_>>(),
+        ["fractal/merge-latency", "fractal/ci-critical-path", "fractal/flakes"]
+    );
+    assert!(objectives.iter().all(Objective::declarable));
+    let run = |at: &str| Event { kind: "github.workflow-run".into(), at: Some(at.into()) };
+    for (objective, start, event) in [(&objectives[0], "created_at", "merge_group"), (&objectives[1], "started_at", "pull_request")] {
+        let Indicator::Interval(interval) = &objective.indicator else { panic!("{} is an interval", objective.name) };
+        assert_eq!(interval.subject_prefix, "github-workflow-run/compoundingtech/fractal/");
+        assert_eq!((&interval.start, &interval.stop), (&run(start), &(run("completed_at"), None)));
+        assert_eq!(interval.kinds(), ["github.workflow-run"]);
+        assert_eq!(
+            interval.only,
+            [only("workflow", &["Workspace CI"]), only("event", &[event]), only("conclusion", &["success"]), only("attempt", &["1"])]
+        );
+    }
+    let Indicator::Count(count) = &objectives[2].indicator else { panic!("flakes is a count") };
+    assert_eq!((count.event.as_str(), count.at.as_str()), ("github.workflow-run", "completed_at"));
+    assert_eq!(count.only, [only("workflow", &["Workspace CI"])]);
+    assert_eq!(count.excludes, [Exclude { field: "flakes".into(), values: vec!["0".into()] }]);
+    assert_eq!(objectives[2].target("per-hour", false).map(|target| target.bound), Some(Bound::Max(0.0)));
 }
 
 #[test]

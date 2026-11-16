@@ -1461,25 +1461,30 @@ impl SpendProducer {
         if self.recorded.contains(id) {
             return;
         }
-        let leaf = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
+        let leaf = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64);
         let reasoning = leaf("/reasoning");
-        let output = leaf("/output").saturating_add(reasoning);
+        let output = leaf("/output").zip(reasoning).map(|(output, reasoning)| output.saturating_add(reasoning));
         let (input, reads, writes) = (leaf("/input"), leaf("/cache/read"), leaf("/cache/write"));
         let mut body = json!({
             "semantics": "response",
             "model": info.get("modelID").and_then(Value::as_str),
             "provider": info.get("providerID").and_then(Value::as_str),
+            "stop_reason": info.get("finish").and_then(Value::as_str),
+            "started_at_unix_ms": info.pointer("/time/created").and_then(Value::as_u64),
+            "completed_at_unix_ms": info.pointer("/time/completed").and_then(Value::as_u64),
             "input_tokens": input,
             "output_tokens": output,
             "reasoning_tokens": reasoning,
             "cached_tokens": reads,
             "cache_write_tokens": writes,
-            "total_tokens": input.saturating_add(output).saturating_add(reads).saturating_add(writes),
+            "total_tokens": leaf("/total").or_else(|| input.zip(output).zip(reads).zip(writes).map(
+                |(((input, output), reads), writes)| input.saturating_add(output).saturating_add(reads).saturating_add(writes)
+            )),
         });
         if let Some(cost) = info
             .get("cost")
             .and_then(Value::as_f64)
-            .filter(|cost| cost.is_finite() && *cost > 0.0)
+            .filter(|cost| cost.is_finite() && *cost >= 0.0)
         {
             body["cost"] = json!(cost);
             body["currency"] = json!("USD");
@@ -3499,6 +3504,36 @@ mod tests {
         assert_eq!(usage[0]["cache_write_tokens"], 40);
         assert_eq!(usage[0]["total_tokens"], 377);
         assert_eq!(usage[0]["cost"], 0.004);
+        assert_eq!(usage[0]["provider"], "provider-example");
+        assert_eq!(usage[0]["started_at_unix_ms"], 1);
+        assert_eq!(usage[0]["completed_at_unix_ms"], 2);
+        assert!(usage[0].get("response_id").is_none());
+        assert!(usage[0].get("api").is_none());
+        assert!(usage[0].get("duration_ms").is_none());
+        assert!(usage[0].get("ttft_ms").is_none());
         assert_eq!(record.incarnation_id, "incarnation-1");
+    }
+
+    #[test]
+    fn spend_keeps_unknown_buckets_and_observed_zero_cost_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut spend = SpendProducer::new(directory.path(), "incarnation-1");
+        spend.apply(&json!({"type":"message.updated","properties":{"info":{
+            "id":"response-unknown", "role":"assistant", "finish":"stop",
+            "time":{"completed":2}, "cost":0, "tokens":{"input":1,"output":2}
+        }}}));
+        let record = crate::harness_timeline::read(&crate::harness_timeline::timeline_path(
+            directory.path(),
+        )).unwrap();
+        let body = &record.operations.iter().find(|op| op.entry_type == "usage").unwrap().body;
+        for key in ["model", "provider", "started_at_unix_ms", "output_tokens", "reasoning_tokens",
+            "cached_tokens", "cache_write_tokens", "total_tokens"]
+        {
+            assert!(body.get(key).is_none(), "{key} must remain unknown");
+        }
+        assert_eq!(body["input_tokens"], 1);
+        assert_eq!(body["stop_reason"], "stop");
+        assert_eq!(body["cost"], 0.0);
+        assert_eq!(body["currency"], "USD");
     }
 }

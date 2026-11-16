@@ -295,6 +295,118 @@ final class FractalClientTests: XCTestCase {
         XCTAssertTrue(empty.notes.isEmpty)
     }
 
+    func testDirectiveNoteSetFixturesDecodeAndEncodeAClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let set = try JSONDecoder().decode(DirectiveNoteSet.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set.json")))
+        XCTAssertEqual(set.expiresAt, "2026-11-16T09:00:00Z")
+        let result = try JSONDecoder().decode(Envelope<DirectiveNoteSetResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set-result.json")))
+        XCTAssertEqual(result.value.note?.text, set.text)
+        let cleared = try JSONDecoder().decode(DirectiveNoteSetResult.self, from: Data(#"{"note":null}"#.utf8))
+        XCTAssertNil(cleared.note)
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DirectiveNoteSet(text: nil))) as? NSDictionary
+        XCTAssertEqual(clear, ["text": NSNull()] as NSDictionary)
+    }
+
+    func testAutoResolvedFixtureAndOverrideParameters() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixture = root.appendingPathComponent("docs/st3/client-v0/fixtures/auto-resolved.json")
+        let rows = try JSONDecoder().decode(Envelope<AutoResolvedAsks>.self, from: Data(contentsOf: fixture))
+        XCTAssertTrue(rows.value.complete)
+        XCTAssertEqual(rows.value.items[0].defaultAnswer?.id, "hold")
+        XCTAssertEqual(rows.value.items[0].actionParameters?["work.override"]?.episode, "claim/example")
+        let input = PersonOverrideParameters(targetID: "step-run/example", episode: "claim/example", answer: PersonOverrideAnswer(id: "ship"))
+        let wire = try JSONSerialization.jsonObject(with: JSONEncoder().encode(input)) as? NSDictionary
+        XCTAssertEqual(wire, ["target_id": "step-run/example", "episode": "claim/example", "answer": ["id": "ship"]] as NSDictionary)
+    }
+
+    func testAvailabilityFixturesDecodeBothViewsAndEncodeAStatusClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let read = try JSONDecoder().decode(Envelope<PersonAvailabilities>.self, from: Data(contentsOf: fixtures.appendingPathComponent("person-availability.json")))
+        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery", "person/blair"])
+        XCTAssertEqual(read.value.people[0].statusSource, .override)
+        XCTAssertNil(read.value.people[0].presence)
+        XCTAssertEqual(read.value.people[1].deadlineClock, .holdRoutine)
+        XCTAssertEqual(read.value.people[1].deadlineClockUntil, "2026-11-12T17:00:00Z")
+        XCTAssertEqual(read.value.people[2].status, .available)
+        XCTAssertEqual(read.value.people[2].statusSource, .unreported)
+        let own = try JSONDecoder().decode(Envelope<PersonAvailability>.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set-result.json")))
+        XCTAssertEqual(own.value.presence, .present)
+        let set = try JSONDecoder().decode(AvailabilitySet.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set.json")))
+        XCTAssertEqual(set.deadlineClock?.value, "run")
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AvailabilitySet(status: AvailabilityStatusChange(value: nil)))) as? NSDictionary
+        XCTAssertEqual(clear, ["status": ["value": NSNull()]] as NSDictionary)
+        let report = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "active", lastInputAt: "2026-11-12T09:57:30Z", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(report, try JSONSerialization.jsonObject(with: Data(contentsOf: fixtures.appendingPathComponent("presence-report.json"))) as? NSDictionary)
+        let locked = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "locked", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(locked, ["state": "locked", "observed_at": "2026-11-12T09:58:00Z"] as NSDictionary)
+        let reported = try JSONDecoder().decode(Envelope<PresenceReportResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("presence-report-result.json")))
+        XCTAssertEqual(reported.value.availability.presence, .present)
+        XCTAssertEqual(reported.value.reportAgainAt, "2026-11-12T10:07:30Z")
+    }
+
+    func testAvailabilityWordsANewerDaemonAddsDecodeAsUnknownAndReencode() throws {
+        let row = #"{"person":"person/ada","status":"busy","status_source":"calendar","status_until":null,"presence":"in-call","presence_observed_at":null,"interruptions":"priority","interruptions_until":null,"deadline_clock":"hold-weekend","deadline_clock_since":null,"deadline_clock_until":null}"#
+        let future = try JSONDecoder().decode(PersonAvailability.self, from: Data(row.utf8))
+        XCTAssertEqual(future.status, .unknown("busy"))
+        XCTAssertEqual(future.statusSource, .unknown("calendar"))
+        XCTAssertEqual(future.presence, .unknown("in-call"))
+        XCTAssertEqual(future.interruptions, .unknown("priority"))
+        XCTAssertEqual(future.deadlineClock, .unknown("hold-weekend"))
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(future.deadlineClock), as: UTF8.self), #""hold-weekend""#)
+        XCTAssertEqual(AvailabilityDeadlineClock(word: "hold-all"), .holdAll)
+        XCTAssertEqual(AvailabilityPresence.unreported.word, "unreported")
+    }
+
+    func testAvailabilityHistoryFixtureDecodesMillisecondsPerAxis() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixture = root.appendingPathComponent("docs/st3/client-v0/fixtures/availability-history.json")
+        let history = try JSONDecoder().decode(Envelope<AvailabilityHistory>.self, from: Data(contentsOf: fixture)).value
+        XCTAssertEqual(history.person, "person/ada")
+        XCTAssertEqual([history.bucketSeconds, history.buckets.count], [3600, 2])
+        let last = try XCTUnwrap(history.buckets.last)
+        XCTAssertEqual(last.start, "2026-11-12T10:00:00.000Z")
+        XCTAssertEqual([last.coveredMS, last.statusSource.override, last.deadlineClock.holdRoutine, last.interruptions.urgent], [1_800_000, 1_200_000, 1_200_000, 1_800_000])
+        XCTAssertEqual(last.presence?.present, 1_800_000)
+        for bucket in history.buckets {
+            XCTAssertEqual(bucket.status.available + bucket.status.away, bucket.coveredMS)
+            XCTAssertEqual(bucket.deadlineClock.run + bucket.deadlineClock.holdRoutine + bucket.deadlineClock.holdAll, bucket.coveredMS)
+        }
+        let wire = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any]
+        let reencoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(history)) as? NSDictionary
+        XCTAssertEqual(reencoded, wire?["value"] as? NSDictionary)
+    }
+
+    func testAvailabilityHistorySendsItsRangeAndAnOlderDaemonIsUnsupported() async throws {
+        let url = URL(string: "https://history-\(UUID().uuidString.lowercased()).example/")!
+        let capture = TraceRequestCapture()
+        TraceHTTPRegistry.shared.register(capture, host: url.host!)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraceHTTPProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            TraceHTTPRegistry.shared.remove(host: url.host!)
+        }
+        let client = FractalClient(fabricLoopbackURL: url, session: session)
+        do {
+            _ = try await client.availabilityHistory(person: "person/ada", from: "2026-11-12T09:00:00Z", to: "2026-11-12T11:00:00Z", bucketSeconds: 3600)
+            XCTFail("an older daemon has no availability history")
+        } catch let error as ErrorEnvelope {
+            XCTAssertEqual(error.code, .unsupportedCapability)
+        }
+        let request = try XCTUnwrap(capture.requests.first { $0.url?.path == "/v1/client/availability/history" })
+        XCTAssertEqual(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "from", value: "2026-11-12T09:00:00Z"), URLQueryItem(name: "to", value: "2026-11-12T11:00:00Z"),
+            URLQueryItem(name: "bucket_seconds", value: "3600"), URLQueryItem(name: "person", value: "person/ada"),
+        ])
+    }
+
     func testCreationActionFixtures() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -961,16 +1073,18 @@ private final class TraceHTTPProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        // An older daemon: no availability history route, so Axum's empty 404.
+        let missing = request.url?.path == "/v1/client/availability/history"
         guard let capture = TraceHTTPRegistry.shared.capture(for: request),
               let url = request.url,
-              let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+              let response = HTTPURLResponse(url: url, statusCode: missing ? 404 : 200, httpVersion: nil,
                   headerFields: ["Content-Type": "application/json"]) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
         capture.append(request)
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: TraceTestFixtures.capabilities)
+        client?.urlProtocol(self, didLoad: missing ? Data() : TraceTestFixtures.capabilities)
         client?.urlProtocolDidFinishLoading(self)
     }
 

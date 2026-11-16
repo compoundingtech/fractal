@@ -4,11 +4,12 @@
 // Regenerate: cargo run -p fractal-client-codegen; verify: cargo run -p fractal-client-codegen -- --check
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 import { DateTime, Duration, Schema, SchemaTransformation } from "effect"
-import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, isLosslessInstant, LosslessTimestamp, losslessFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
+import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, isLosslessInstant, LosslessTimestamp, losslessFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE, markdownBlockSchema, markdownInlineSchema } from "./SchemaSupport.generated.ts"
 import type { Brand, Option, Redacted } from "effect"
 import type { SubjectRef, UnknownCase } from "./SchemaSupport.generated.ts"
 export { API_VERSION, containsUnknownCase, decodeUnknownSync, decodeUnknownEffect } from "./SchemaSupport.generated.ts"
 export type { SubjectRef, UnknownCase, DecodeMode } from "./SchemaSupport.generated.ts"
+export type { MarkdownBlock, MarkdownInline } from "./markdown-text.ts"
 
 /** Opaque per-subject revision; compare for equality, echo in fences. */
 export const Revision = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(256)).pipe(Schema.brand("st3/Revision")).annotate({ identifier: "Revision", description: "Opaque per-subject revision; compare for equality, echo in fences." }))()
@@ -79,6 +80,11 @@ export const ArrangementPerson = /*#__PURE__*/ (() => Schema.String.check(Schema
 export type ArrangementPerson = typeof ArrangementPerson.Type
 export type ArrangementPersonEncoded = typeof ArrangementPerson.Encoded
 
+/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
+export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
+export type Timestamp = typeof Timestamp.Type
+export type TimestampEncoded = typeof Timestamp.Encoded
+
 export const Attachment = /*#__PURE__*/ (() => Schema.Struct({
   "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
   "media_type": Schema.Literals(["image/png","image/jpeg","image/gif","image/webp"]),
@@ -132,16 +138,16 @@ export const StructuredRequest = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment).check(Schema.isMaxLength(4))).annotate({ description: "Images to look at, read with the blob route and the ask's step as the carrier (message=step-run/…)." }),
   /** A choice also takes an answer in the person's own words. */
   "custom": optionalKey(Schema.Boolean).annotate({ description: "A choice also takes an answer in the person's own words." }),
-  "question": Schema.String.check(Schema.isMinCodePoints(1)),
-  "reasons": optionalKey(Schema.Array(Schema.String).check(Schema.isMaxLength(8))),
+  "question": markdownBlockSchema(Schema.String.check(Schema.isMinCodePoints(1))),
+  "reasons": optionalKey(Schema.Array(markdownInlineSchema(Schema.String)).check(Schema.isMaxLength(8))),
   /** Absent means no recommendation. */
   "recommendation": optionalKey(Schema.Struct({ "answer": Schema.String, "reason": Schema.String })).annotate({ description: "Absent means no recommendation." }),
   "subjects": optionalKey(Schema.Array(RequestSubject).check(Schema.isMaxLength(12))),
-  "summary": optionalKey(Schema.String),
+  "summary": optionalKey(markdownBlockSchema(Schema.String)),
   "type": Schema.Literals(["decision","choice","feedback"]),
   "version": Schema.Literal(1),
   /** Why only this person can answer. */
-  "why_person": Schema.String.check(Schema.isMinCodePoints(1)).annotate({ description: "Why only this person can answer." })
+  "why_person": markdownInlineSchema(Schema.String.check(Schema.isMinCodePoints(1))).annotate({ description: "Why only this person can answer." })
 }).annotate({ identifier: "StructuredRequest", description: "A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options; feedback asks for text." }))()
 export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
@@ -163,11 +169,6 @@ export type PrivateNotesUriEncoded = typeof PrivateNotesUri.Encoded
 export const ReadPositionConversation = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/[^\\s]+$", "u"))).check(Schema.isMaxCodePoints(512)).annotate({ identifier: "ReadPositionConversation", description: "The conversation a read position belongs to: an agent (`agent/...`) or a saved session (`session/...`). At most 512 UTF-8 bytes." }))()
 export type ReadPositionConversation = typeof ReadPositionConversation.Type
 export type ReadPositionConversationEncoded = typeof ReadPositionConversation.Encoded
-
-/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
-export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
-export type Timestamp = typeof Timestamp.Type
-export type TimestampEncoded = typeof Timestamp.Encoded
 
 export const HarnessResolvedAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "positions": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(63))).check(Schema.isMaxLength(64)).check(Schema.isUnique()),
@@ -262,7 +263,7 @@ export type StepRunId = typeof StepRunId.Type
 export type StepRunIdEncoded = typeof StepRunId.Encoded
 
 export const AgentPresentationNow = /*#__PURE__*/ (() => Schema.Struct({
-  "goal": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "goal": Schema.OptionFromOptionalNullOr(markdownInlineSchema(Schema.String), NULL_NONE),
   "holder_down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   /** mission › path, with the mission named without its mission/ prefix. */
   "label": Schema.String.annotate({ description: "mission › path, with the mission named without its mission/ prefix." }),
@@ -572,7 +573,7 @@ export type WorkState = typeof WorkState.Type
 export type WorkStateEncoded = typeof WorkState.Encoded
 
 export const WorkLabel = /*#__PURE__*/ (() => Schema.Struct({
-  "goal": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "goal": Schema.OptionFromOptionalNullOr(markdownInlineSchema(Schema.String), NULL_NONE),
   /** Set on a seat's current work when the seat is `down`: the step is claimed by a holder with no session, and its progress and activity predate that. */
   "holder_down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Set on a seat's current work when the seat is `down`: the step is claimed by a holder with no session, and its progress and activity predate that." }),
   "id": Id,
@@ -696,6 +697,7 @@ export const AgentMessageDay = /*#__PURE__*/ (() => Schema.Struct({
   "low_percent": Schema.OptionFromOptionalNullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   "messages": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "usage_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
@@ -1299,7 +1301,7 @@ export type AssistantSummaryRequestEncoded = typeof AssistantSummaryRequest.Enco
 export const AttentionBlocked = /*#__PURE__*/ (() => Schema.Struct({
   "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   /** What that step is for. */
-  "goal": Schema.String.annotate({ description: "What that step is for." }),
+  "goal": markdownInlineSchema(Schema.String).annotate({ description: "What that step is for." }),
   /** That step's name within its mission. */
   "step": Schema.String.annotate({ description: "That step's name within its mission." }),
   /** The step run that asked and waits for the answer. */
@@ -1356,7 +1358,7 @@ export const AttentionLaunchPreview = /*#__PURE__*/ (() => Schema.Struct({
   "agents": Schema.Array(AttentionLaunchAgent).annotate({ description: "The agents its steps name, each once." }),
   /** How many steps stop for a person. */
   "asks_you": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "How many steps stop for a person." }),
-  "goals": Schema.Array(Schema.String),
+  "goals": Schema.Array(markdownInlineSchema(Schema.String)),
   /** In display order, without finally steps. */
   "steps": Schema.Array(AttentionLaunchStep).annotate({ description: "In display order, without finally steps." }),
   /** The variant previewed: the launch's newest. */
@@ -1419,7 +1421,7 @@ export const AttentionRevision = /*#__PURE__*/ (() => Schema.Struct({
   "from_revision": Schema.String.annotate({ description: "The revision the run runs now." }),
   /** The mission's own changed fields, then by step path the steps added, removed and changed. */
   "lines": Schema.Array(AttentionRevisionLine).check(Schema.isMaxLength(200)).annotate({ description: "The mission's own changed fields, then by step path the steps added, removed and changed." }),
-  "reason": Schema.String,
+  "reason": markdownInlineSchema(Schema.String),
   /** The candidate revision. */
   "to_revision": Schema.String.annotate({ description: "The candidate revision." }),
   /** Whether there were more than 200 lines. */
@@ -1479,8 +1481,8 @@ export const LaunchPreview = /*#__PURE__*/ (() => Schema.Struct({
   "agents": Schema.Array(Schema.Struct({ "harness": optionalKey(Schema.Unknown), "host": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "id": Schema.String, "worktree": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) })),
   "diagnostics_count": Schema.Int,
   "gates": Schema.Struct({ "automated": Schema.Int, "human": Schema.Int }),
-  "goal": Schema.String,
-  "request_excerpt": Schema.String,
+  "goal": markdownInlineSchema(Schema.String),
+  "request_excerpt": markdownBlockSchema(Schema.String),
   "steps": Schema.Array(Schema.Struct({ "assignee": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "depends": Schema.Array(Schema.String), "path": Schema.String, "title": Schema.String }))
 }).annotate({ identifier: "LaunchPreview" }))()
 export type LaunchPreview = typeof LaunchPreview.Type
@@ -1493,7 +1495,7 @@ export const PersonUpdate = /*#__PURE__*/ (() => Schema.Struct({
   /** Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it. */
   "speech": optionalKey(Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(300))).annotate({ description: "Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it." }),
   "subjects": optionalKey(Schema.Array(RequestSubject).check(Schema.isMaxLength(12))),
-  "summary": optionalKey(Schema.String),
+  "summary": optionalKey(markdownBlockSchema(Schema.String)),
   "type": Schema.Literal("update"),
   "version": Schema.Literal(1)
 }).annotate({ identifier: "PersonUpdate", description: "Information an agent brings a person who asked for it. Nothing waits on it." }))()
@@ -1529,7 +1531,7 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "harness-prompt",
   "model-drift"
 ]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
-  "because": optionalKey(Schema.String),
+  "because": optionalKey(markdownInlineSchema(Schema.String)),
   /** The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask. */
   "blocked": optionalKey(AttentionBlocked),
   /** The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it. */
@@ -1541,7 +1543,7 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   /** When a person-step ask resolves by itself if nobody answers it. Absent on an update and on daemons that predate deadlines. */
   "deadline_at": optionalKey(Timestamp),
   "default_answer": optionalKey(AskDefaultAnswer),
-  "detail": Schema.String,
+  "detail": markdownBlockSchema(Schema.String),
   "episode": optionalKey(Schema.String),
   "fix": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   "id": Id,
@@ -1563,6 +1565,10 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "requester_id": optionalKey(Id),
   "review_mode": optionalKey(Schema.Literals(["approve","feedback"])),
   "revision": Revision,
+  /** When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls. */
+  "seen_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls." }),
+  /** Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls. */
+  "snoozed_until": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls." }),
   "source_id": Id,
   "source_kind": optionalKey(Schema.String),
   "state": Schema.Literals(["open","resolved"]),
@@ -1573,6 +1579,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   /** Information the person asked for. It asks nothing: reading it (work.done with answer id read) clears it. */
   "update": optionalKey(PersonUpdate),
   "updated_at": Timestamp,
+  /** Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent. */
+  "urgent": optionalKey(Schema.Boolean).annotate({ description: "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." }),
   "variant_id": optionalKey(Id),
   "what": optionalKey(Schema.String)
 }).annotate({ identifier: "Attention" }))()
@@ -1610,6 +1618,147 @@ export const AttentionBudgetReport = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "AttentionBudgetReport" }))()
 export type AttentionBudgetReport = typeof AttentionBudgetReport.Type
 export type AttentionBudgetReportEncoded = typeof AttentionBudgetReport.Encoded
+
+export const NoticeDigestOverride = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Schema.String.check(Schema.isMinCodePoints(1)),
+  "target_id": Schema.String.check(Schema.isMinCodePoints(1))
+}).annotate({ identifier: "NoticeDigestOverride" }))()
+export type NoticeDigestOverride = typeof NoticeDigestOverride.Type
+export type NoticeDigestOverrideEncoded = typeof NoticeDigestOverride.Encoded
+
+export const NoticeDigestActions = /*#__PURE__*/ (() => Schema.Struct({
+  "work.override": NoticeDigestOverride
+}).annotate({ identifier: "NoticeDigestActions" }))()
+export type NoticeDigestActions = typeof NoticeDigestActions.Type
+export type NoticeDigestActionsEncoded = typeof NoticeDigestActions.Encoded
+
+export const NoticeDigestDefaultAnswer = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String.check(Schema.isMinCodePoints(1)),
+  "label": Schema.String.check(Schema.isMinCodePoints(1))
+}).annotate({ identifier: "NoticeDigestDefaultAnswer" }))()
+export type NoticeDigestDefaultAnswer = typeof NoticeDigestDefaultAnswer.Type
+export type NoticeDigestDefaultAnswerEncoded = typeof NoticeDigestDefaultAnswer.Encoded
+
+/** RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission. */
+export const NoticeTimestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$", "u"))).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isLosslessInstant).pipe(Schema.decodeTo(LosslessTimestamp, losslessFromIso)).annotate({ identifier: "NoticeTimestamp", description: "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission." }))()
+export type NoticeTimestamp = typeof NoticeTimestamp.Type
+export type NoticeTimestampEncoded = typeof NoticeTimestamp.Encoded
+
+export const AutoResolvedAsk = /*#__PURE__*/ (() => Schema.Struct({
+  "action_parameters": optionalKey(NoticeDigestActions),
+  "default_answer": optionalKey(NoticeDigestDefaultAnswer),
+  "episode": Schema.String,
+  "request": optionalKey(StructuredRequest),
+  "requester_id": Id,
+  "resolution_id": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
+  "resolved_at": NoticeTimestamp,
+  "target_id": Id,
+  "title": Schema.String
+}).annotate({ identifier: "AutoResolvedAsk" }))()
+export type AutoResolvedAsk = typeof AutoResolvedAsk.Type
+export type AutoResolvedAskEncoded = typeof AutoResolvedAsk.Encoded
+
+export const AutoResolvedAsks = /*#__PURE__*/ (() => Schema.Struct({
+  "complete": Schema.Boolean,
+  "items": Schema.Array(AutoResolvedAsk).check(Schema.isMaxLength(128))
+}).annotate({ identifier: "AutoResolvedAsks" }))()
+export type AutoResolvedAsks = typeof AutoResolvedAsks.Type
+export type AutoResolvedAsksEncoded = typeof AutoResolvedAsks.Encoded
+
+/** A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown. */
+export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","hold-routine","hold-all"]).annotate({ identifier: "AvailabilityDeadlineClock", description: "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown." }))()
+export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type
+export type AvailabilityDeadlineClockEncoded = typeof AvailabilityDeadlineClock.Encoded
+
+/** Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words. */
+export const AvailabilityDeadlineClockDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "hold-all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "hold-routine": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "run": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityDeadlineClockDurations", description: "Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words." }))()
+export type AvailabilityDeadlineClockDurations = typeof AvailabilityDeadlineClockDurations.Type
+export type AvailabilityDeadlineClockDurationsEncoded = typeof AvailabilityDeadlineClockDurations.Encoded
+
+/** Milliseconds of each interruptions setting during a history bucket. */
+export const AvailabilityInterruptionsDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "none": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "urgent": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityInterruptionsDurations", description: "Milliseconds of each interruptions setting during a history bucket." }))()
+export type AvailabilityInterruptionsDurations = typeof AvailabilityInterruptionsDurations.Type
+export type AvailabilityInterruptionsDurationsEncoded = typeof AvailabilityInterruptionsDurations.Encoded
+
+/** Milliseconds of each derived presence during a history bucket. */
+export const AvailabilityPresenceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "idle": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "locked": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "present": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityPresenceDurations", description: "Milliseconds of each derived presence during a history bucket." }))()
+export type AvailabilityPresenceDurations = typeof AvailabilityPresenceDurations.Type
+export type AvailabilityPresenceDurationsEncoded = typeof AvailabilityPresenceDurations.Encoded
+
+/** Milliseconds spent in each status during a history bucket. */
+export const AvailabilityStatusDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "available": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "away": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusDurations", description: "Milliseconds spent in each status during a history bucket." }))()
+export type AvailabilityStatusDurations = typeof AvailabilityStatusDurations.Type
+export type AvailabilityStatusDurationsEncoded = typeof AvailabilityStatusDurations.Encoded
+
+/** Milliseconds the status came from each source during a history bucket. */
+export const AvailabilityStatusSourceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "override": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "presence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusSourceDurations", description: "Milliseconds the status came from each source during a history bucket." }))()
+export type AvailabilityStatusSourceDurations = typeof AvailabilityStatusSourceDurations.Type
+export type AvailabilityStatusSourceDurationsEncoded = typeof AvailabilityStatusSourceDurations.Encoded
+
+/** One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range. */
+export const AvailabilityHistoryBucket = /*#__PURE__*/ (() => Schema.Struct({
+  "covered_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "deadline_clock": AvailabilityDeadlineClockDurations,
+  "interruptions": AvailabilityInterruptionsDurations,
+  /** Null for anyone but the person. */
+  "presence": Schema.OptionFromNullOr(AvailabilityPresenceDurations).annotate({ description: "Null for anyone but the person." }),
+  "start": Timestamp,
+  "status": AvailabilityStatusDurations,
+  "status_source": AvailabilityStatusSourceDurations
+}).annotate({ identifier: "AvailabilityHistoryBucket", description: "One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range." }))()
+export type AvailabilityHistoryBucket = typeof AvailabilityHistoryBucket.Type
+export type AvailabilityHistoryBucketEncoded = typeof AvailabilityHistoryBucket.Encoded
+
+/** A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available). */
+export const AvailabilityHistory = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "buckets": Schema.Array(AvailabilityHistoryBucket).check(Schema.isMaxLength(2016)),
+  "from": Timestamp,
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "to": Timestamp
+}).annotate({ identifier: "AvailabilityHistory", description: "A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available)." }))()
+export type AvailabilityHistory = typeof AvailabilityHistory.Type
+export type AvailabilityHistoryEncoded = typeof AvailabilityHistory.Encoded
+
+/** Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown. */
+export const AvailabilityInterruptions = /*#__PURE__*/ (() => openEnum(["all","urgent","none"]).annotate({ identifier: "AvailabilityInterruptions", description: "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown." }))()
+export type AvailabilityInterruptions = typeof AvailabilityInterruptions.Type
+export type AvailabilityInterruptionsEncoded = typeof AvailabilityInterruptions.Encoded
+
+/** Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown. */
+export const AvailabilityPresence = /*#__PURE__*/ (() => openEnum(["present","idle","locked","unreported"]).annotate({ identifier: "AvailabilityPresence", description: "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown." }))()
+export type AvailabilityPresence = typeof AvailabilityPresence.Type
+export type AvailabilityPresenceEncoded = typeof AvailabilityPresence.Encoded
+
+/** A person's effective status. Readers retain future values as Unknown. */
+export const AvailabilityStatus = /*#__PURE__*/ (() => openEnum(["available","away"]).annotate({ identifier: "AvailabilityStatus", description: "A person's effective status. Readers retain future values as Unknown." }))()
+export type AvailabilityStatus = typeof AvailabilityStatus.Type
+export type AvailabilityStatusEncoded = typeof AvailabilityStatus.Encoded
+
+/** Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown. */
+export const AvailabilityStatusSource = /*#__PURE__*/ (() => openEnum(["override","presence","unreported"]).annotate({ identifier: "AvailabilityStatusSource", description: "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown." }))()
+export type AvailabilityStatusSource = typeof AvailabilityStatusSource.Type
+export type AvailabilityStatusSourceEncoded = typeof AvailabilityStatusSource.Encoded
 
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */
@@ -1805,6 +1954,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "private-notes-indeterminate",
   "invalid-answer",
   "not-answerable",
+  "attention-dismiss-unsupported",
   "internal"
 ]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
@@ -2084,13 +2234,13 @@ export type DecisionResponseEncoded = typeof DecisionResponse.Encoded
 
 export const LaunchDecision = /*#__PURE__*/ (() => Schema.Struct({
   "decision_type": Schema.Literals(["boolean","single-choice","multiple-choice","rank"]),
-  "explanation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "explanation": Schema.OptionFromOptionalNullOr(markdownBlockSchema(Schema.String), NULL_NONE),
   "id": Id,
   "kind": Schema.Literal("launch-decision"),
   "launch_id": Id,
   "operational": optionalKey(Operational),
   "options": Schema.Array(DecisionOption).check(Schema.isMaxLength(20)),
-  "question": Schema.String,
+  "question": markdownBlockSchema(Schema.String),
   "requested_at": Timestamp,
   "response": Schema.OptionFromOptionalNullOr(DecisionResponse, NULL_NONE),
   "revision": Revision,
@@ -2127,9 +2277,9 @@ export type VisualizationGroupEncoded = typeof VisualizationGroup.Encoded
 
 export const VisualizationNode = /*#__PURE__*/ (() => Schema.Struct({
   "assignment": optionalKey(Schema.Unknown),
-  "constraints": Schema.Array(Schema.String),
+  "constraints": Schema.Array(markdownInlineSchema(Schema.String)),
   "gates": optionalKey(Schema.Array(Schema.Unknown)),
-  "goals": Schema.Array(Schema.String),
+  "goals": Schema.Array(markdownInlineSchema(Schema.String)),
   "id": Schema.String,
   "kind": Schema.String,
   "label": Schema.String,
@@ -2145,12 +2295,12 @@ export type VisualizationNode = typeof VisualizationNode.Type
 export type VisualizationNodeEncoded = typeof VisualizationNode.Encoded
 
 export const Visualization = /*#__PURE__*/ (() => Schema.Struct({
-  "constraints": Schema.Array(Schema.String),
+  "constraints": Schema.Array(markdownInlineSchema(Schema.String)),
   "decisions": Schema.Array(LaunchDecision),
   "diffs": Schema.Array(StructuredDiff),
   "edges": Schema.Array(VisualizationEdge),
   "gates": Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
-  "goals": Schema.Array(Schema.String),
+  "goals": Schema.Array(markdownInlineSchema(Schema.String)),
   "groups": Schema.Array(VisualizationGroup),
   "live_progress": Schema.Record(Schema.String, Schema.Unknown),
   "mission": optionalKey(Schema.String),
@@ -2290,7 +2440,7 @@ export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "The length in UTF-8 bytes of the whole text, with body_ref." }),
   /** Present when content is only the start of a longer message; read the whole text with message-body.get. */
   "body_ref": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u")))).annotate({ description: "Present when content is only the start of a longer message; read the whole text with message-body.get." }),
-  "content": Schema.String,
+  "content": markdownBlockSchema(Schema.String),
   "from": Id,
   "id": Id,
   "in_reply_to": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
@@ -2387,7 +2537,7 @@ export type MissionStuckEncoded = typeof MissionStuck.Encoded
 export const MissionPresentation = /*#__PURE__*/ (() => Schema.Struct({
   "actions": Schema.Array(MissionActionOffer),
   "card": Schema.OptionFromNullOr(Schema.Literals(["what-you-can-do","nothing-to-do"])),
-  "last_progress": Schema.OptionFromNullOr(Schema.String),
+  "last_progress": Schema.OptionFromNullOr(markdownInlineSchema(Schema.String)),
   "progress": Schema.Struct({ "done": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
   "queued_behind": Schema.OptionFromNullOr(MissionQueuedBehind),
   /** When it completed, failed or was cancelled. */
@@ -2554,6 +2704,48 @@ export const MissionWake = /*#__PURE__*/ (() => Schema.Struct({
 export type MissionWake = typeof MissionWake.Type
 export type MissionWakeEncoded = typeof MissionWake.Encoded
 
+export const StepExecutionUsage = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "StepExecutionUsage" }))()
+export type StepExecutionUsage = typeof StepExecutionUsage.Type
+export type StepExecutionUsageEncoded = typeof StepExecutionUsage.Encoded
+
+export const StepExecution = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": Schema.String,
+  "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  /** Declaration captured at claim time, never the seat's current declaration. */
+  "declared_model": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Declaration captured at claim time, never the seat's current declaration." }),
+  "duration_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "ended_at_unix_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Runtime observation claim ID retaining exit evidence for this incarnation. */
+  "exit_evidence": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Runtime observation claim ID retaining exit evidence for this incarnation." }),
+  /** Explicit fallback evidence; model mismatch alone does not establish fallback. */
+  "fallback": Schema.OptionFromNullOr(Schema.Boolean).annotate({ description: "Explicit fallback evidence; model mismatch alone does not establish fallback." }),
+  /** Durable work.claimed claim ID; invocation identity, not the logical attempt. */
+  "id": Schema.String.annotate({ description: "Durable work.claimed claim ID; invocation identity, not the logical attempt." }),
+  "incarnation_id": Schema.OptionFromNullOr(Schema.String),
+  /** Exact durable launch/turn receipt identity. Absent means unknown. */
+  "invocation_id": optionalKey(Schema.String).annotate({ description: "Exact durable launch/turn receipt identity. Absent means unknown." }),
+  "observed_models": Schema.Array(Schema.String),
+  "started_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "status": Schema.OptionFromNullOr(Schema.String),
+  "step_subject": Schema.String,
+  /** Actual trace correlation when recorded; unknown without tracing evidence. */
+  "trace_id": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Actual trace correlation when recorded; unknown without tracing evidence." }),
+  "usage": Schema.OptionFromNullOr(StepExecutionUsage)
+}).annotate({ identifier: "StepExecution" }))()
+export type StepExecution = typeof StepExecution.Type
+export type StepExecutionEncoded = typeof StepExecution.Encoded
+
 export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "agentless": optionalKey(Schema.Boolean),
   "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
@@ -2566,15 +2758,17 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
   /** Authoritative terminal transition of the selected attempt, in Unix milliseconds. */
   "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Authoritative terminal transition of the selected attempt, in Unix milliseconds." }),
-  "constraints": optionalKey(Schema.Array(Schema.String)),
+  "constraints": optionalKey(Schema.Array(markdownInlineSchema(Schema.String))),
   "eta": optionalKey(MissionStepEta),
-  "goals": optionalKey(Schema.Array(Schema.String)),
+  /** Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons. */
+  "executions": optionalKey(Schema.Array(StepExecution)).annotate({ description: "Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons." }),
+  "goals": optionalKey(Schema.Array(markdownInlineSchema(Schema.String))),
   /** Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history. */
   "history_complete": optionalKey(Schema.Boolean).annotate({ description: "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." }),
   "id": Id,
   /** st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons. */
   "keep_open": optionalKey(Schema.Boolean).annotate({ description: "st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons." }),
-  "last_progress": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "last_progress": Schema.OptionFromOptionalNullOr(markdownInlineSchema(Schema.String), NULL_NONE),
   "loop_max_rounds": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   "loop_reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   /** Current round of this step's loop, enriched on mission detail reads. */
@@ -2625,7 +2819,7 @@ export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
 "remaining_low_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "p25 remaining duration in milliseconds." }) }), NULL_NONE).annotate({ description: "Remaining wall duration excluding person-held time, from completed runs under the current definition hash. Null for finished runs or a remaining step without samples; older daemons omit it." }),
   "generation_id": optionalKey(RunGenerationId),
   "id": MissionRunId,
-  "last_progress": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "last_progress": Schema.OptionFromOptionalNullOr(markdownInlineSchema(Schema.String), NULL_NONE),
   "must_act": MustAct,
   /** The outcome a person or an authorized agent set after the run finished. */
   "outcome": Schema.OptionFromOptionalNullOr(MissionRunOutcome, NULL_NONE).annotate({ description: "The outcome a person or an authorized agent set after the run finished." }),
@@ -2876,6 +3070,7 @@ export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 export const UsageCredits = /*#__PURE__*/ (() => Schema.Struct({
   "budget_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "period_start_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "used_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsageCredits", description: "An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free." }))()
@@ -2939,6 +3134,7 @@ export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
   "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
   "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
 export type UsagePricing = typeof UsagePricing.Type
@@ -2949,12 +3145,17 @@ export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
   /** The declared account this row's spend is read against, when one claims its label. Absent on older servers. */
   "account_ref": optionalKey(Schema.String).annotate({ description: "The declared account this row's spend is read against, when one claims its label. Absent on older servers." }),
   "agent": Id,
+  "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** Immutable work.claimed accounting key, when known. */
+  "execution_id": optionalKey(Schema.String).annotate({ description: "Immutable work.claimed accounting key, when known." }),
   "host": optionalKey(Schema.String),
   "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** Exact durable launch/turn receipt identity. Absent means unknown. */
+  "invocation_id": optionalKey(Schema.String).annotate({ description: "Exact durable launch/turn receipt identity. Absent means unknown." }),
   "mission_run": optionalKey(Id),
   "model": optionalKey(Schema.String),
   "native_session_id": optionalKey(Schema.String),
@@ -2964,6 +3165,7 @@ export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
   "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "step": optionalKey(Id),
   "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsageRow" }))()
 export type UsageRow = typeof UsageRow.Type
@@ -3065,7 +3267,7 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "claim_expires_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
   "claim_incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "claimant": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
-  "constraints": Schema.Array(Schema.String),
+  "constraints": Schema.Array(markdownInlineSchema(Schema.String)),
   "definition_id": Revision,
   "execution_elapsed_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))),
   "execution_started_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
@@ -3082,10 +3284,10 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "program"
 ]), NULL_NONE),
   "generation_id": Id,
-  "goals": Schema.Array(Schema.String),
+  "goals": Schema.Array(markdownInlineSchema(Schema.String)),
   "id": Id,
   "kind": Schema.Literal("work"),
-  "last_progress": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "last_progress": Schema.OptionFromOptionalNullOr(markdownInlineSchema(Schema.String), NULL_NONE),
   /** The mission this work's run belongs to. */
   "mission_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE).annotate({ description: "The mission this work's run belongs to." }),
   "mission_run_id": Id,
@@ -3213,7 +3415,7 @@ export const TimelineAskQuestion = /*#__PURE__*/ (() => Schema.Struct({
   "id": Schema.String,
   "multi": Schema.Boolean,
   "options": Schema.Array(Schema.Struct({ "description": optionalKey(Schema.String), "label": Schema.String })),
-  "question": Schema.String,
+  "question": markdownBlockSchema(Schema.String),
   "recommended": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
 }).annotate({ identifier: "TimelineAskQuestion" }))()
 export type TimelineAskQuestion = typeof TimelineAskQuestion.Type
@@ -3276,8 +3478,8 @@ export type TimelineViewBashEncoded = typeof TimelineViewBash.Encoded
 /** On a status block; summary is bounded with an owner continuation. */
 export const TimelineViewCompaction = /*#__PURE__*/ (() => Schema.Struct({
   "method": optionalKey(Schema.String),
-  "short_summary": optionalKey(Schema.String),
-  "summary": optionalKey(Schema.String),
+  "short_summary": optionalKey(markdownInlineSchema(Schema.String)),
+  "summary": optionalKey(markdownBlockSchema(Schema.String)),
   "tokens_after": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "tokens_before": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "type": Schema.Literal("compaction")
@@ -3357,7 +3559,7 @@ export const TimelineViewHub = /*#__PURE__*/ (() => Schema.Struct({
   "intent": optionalKey(Schema.String),
   "is_error": optionalKey(Schema.Boolean),
   "jobs": optionalKey(Schema.Array(JobSummary)),
-  "message": optionalKey(Schema.String),
+  "message": optionalKey(markdownBlockSchema(Schema.String)),
   "name": optionalKey(Schema.String),
   "op": Schema.String,
   "state": optionalKey(Schema.String),
@@ -3373,7 +3575,7 @@ export type TimelineViewHubEncoded = typeof TimelineViewHub.Encoded
 /** Block kind `irc` from a custom_message irc:incoming record. */
 export const TimelineViewIrc = /*#__PURE__*/ (() => Schema.Struct({
   "from": Schema.String,
-  "message": Schema.String,
+  "message": markdownBlockSchema(Schema.String),
   "message_id": Schema.String,
   "reply_to": optionalKey(Schema.String),
   "type": Schema.Literal("irc")
@@ -3482,7 +3684,7 @@ export const SubagentSummary = /*#__PURE__*/ (() => Schema.Struct({
   "name": optionalKey(Schema.String),
   "requests": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "status": Schema.String,
-  "task": optionalKey(Schema.String),
+  "task": optionalKey(markdownBlockSchema(Schema.String)),
   "tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "tool_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
 }).annotate({ identifier: "SubagentSummary", description: "One subagent of a task tool output. name is the OMP name (id when no separate name exists), agent is the type, task is the full assignment. conversation.session_id opens the readable child transcript." }))()
@@ -3494,10 +3696,10 @@ export const TimelineViewTask = /*#__PURE__*/ (() => Schema.Struct({
   "agents": optionalKey(Schema.Array(SubagentSummary)),
   "async": optionalKey(Schema.Boolean),
   "call_id": optionalKey(Schema.String),
-  "context": optionalKey(Schema.String),
+  "context": optionalKey(markdownBlockSchema(Schema.String)),
   "intent": optionalKey(Schema.String),
   "is_error": optionalKey(Schema.Boolean),
-  "tasks": optionalKey(Schema.Array(Schema.Struct({ "agent": optionalKey(Schema.String), "name": optionalKey(Schema.String), "task": Schema.String }))),
+  "tasks": optionalKey(Schema.Array(Schema.Struct({ "agent": optionalKey(Schema.String), "name": optionalKey(Schema.String), "task": markdownBlockSchema(Schema.String) }))),
   "tool": Schema.String,
   "total_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "type": Schema.Literal("task")
@@ -3580,15 +3782,15 @@ export const TimelineView = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "call_id": optionalKey(Schema.String), "case": optionalKey(Schema.Boolean), "engine": Schema.Literals(["grep","glob","web"]), "file_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "file_limit_reached": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "gitignore": optionalKey(Schema.Boolean), "hidden": optionalKey(Schema.Boolean), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "match_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "path": optionalKey(Schema.String), "pattern": optionalKey(Schema.String), "per_file_limit_reached": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "query": optionalKey(Schema.String), "skip": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "tool": Schema.String, "truncated": optionalKey(Schema.Boolean), "type": Schema.Literal("search"), "warning": optionalKey(Schema.String), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "call_id": optionalKey(Schema.String), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "items": optionalKey(Schema.Array(TimelineTodoItem)), "op": optionalKey(Schema.String), "phase": optionalKey(Schema.String), "phases": optionalKey(Schema.Array(Schema.Struct({ "items": Schema.Array(TimelineTodoItem), "name": Schema.String }))), "task": optionalKey(Schema.String), "tool": Schema.String, "type": Schema.Literal("todo"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "answers": optionalKey(Schema.Array(TimelineAskAnswer)), "call_id": optionalKey(Schema.String), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "questions": optionalKey(Schema.Array(TimelineAskQuestion)), "tool": Schema.String, "type": Schema.Literal("ask"), "agents": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "agents": optionalKey(Schema.Array(SubagentSummary)), "async": optionalKey(Schema.Boolean), "call_id": optionalKey(Schema.String), "context": optionalKey(Schema.String), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "tasks": optionalKey(Schema.Array(Schema.Struct({ "agent": optionalKey(Schema.String), "name": optionalKey(Schema.String), "task": Schema.String }))), "tool": Schema.String, "total_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "type": Schema.Literal("task"), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "call_id": optionalKey(Schema.String), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "jobs": optionalKey(Schema.Array(JobSummary)), "message": optionalKey(Schema.String), "name": optionalKey(Schema.String), "op": Schema.String, "state": optionalKey(Schema.String), "target": optionalKey(Schema.String), "timed_out": optionalKey(Schema.Boolean), "timeout_s": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "tool": Schema.String, "type": Schema.Literal("hub"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "agents": optionalKey(Schema.Array(SubagentSummary)), "async": optionalKey(Schema.Boolean), "call_id": optionalKey(Schema.String), "context": optionalKey(markdownBlockSchema(Schema.String)), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "tasks": optionalKey(Schema.Array(Schema.Struct({ "agent": optionalKey(Schema.String), "name": optionalKey(Schema.String), "task": markdownBlockSchema(Schema.String) }))), "tool": Schema.String, "total_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "type": Schema.Literal("task"), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "call_id": optionalKey(Schema.String), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "jobs": optionalKey(Schema.Array(JobSummary)), "message": optionalKey(markdownBlockSchema(Schema.String)), "name": optionalKey(Schema.String), "op": Schema.String, "state": optionalKey(Schema.String), "target": optionalKey(Schema.String), "timed_out": optionalKey(Schema.Boolean), "timeout_s": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "tool": Schema.String, "type": Schema.Literal("hub"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "code": optionalKey(Schema.String), "code_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "intent": optionalKey(Schema.String), "language": Schema.String, "reset": optionalKey(Schema.Boolean), "timeout_s": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "title": optionalKey(Schema.String), "tool": Schema.String, "type": Schema.Literal("eval"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "call_id": optionalKey(Schema.String), "intent": optionalKey(Schema.String), "is_error": optionalKey(Schema.Boolean), "name": optionalKey(Schema.String), "tool": Schema.String, "type": Schema.Literal("generic"), "wall_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "from": Schema.String, "message": Schema.String, "message_id": Schema.String, "reply_to": optionalKey(Schema.String), "type": Schema.Literal("irc"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "from": Schema.String, "message": markdownBlockSchema(Schema.String), "message_id": Schema.String, "reply_to": optionalKey(Schema.String), "type": Schema.Literal("irc"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "jobs": Schema.Array(JobSummary), "type": Schema.Literal("job"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ /** Native skill arguments, any JSON */
 "args": optionalKey(Schema.Unknown).annotate({ description: "Native skill arguments, any JSON" }), "name": Schema.String, "path": optionalKey(Schema.String), "type": Schema.Literal("skill"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "method": optionalKey(Schema.String), "short_summary": optionalKey(Schema.String), "summary": optionalKey(Schema.String), "tokens_after": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "tokens_before": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "type": Schema.Literal("compaction"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "method": optionalKey(Schema.String), "short_summary": optionalKey(markdownInlineSchema(Schema.String)), "summary": optionalKey(markdownBlockSchema(Schema.String)), "tokens_after": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "tokens_before": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "type": Schema.Literal("compaction"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "model": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "api": optionalKey(Schema.String), "error_id": optionalKey(Schema.Int), "is_error": Schema.Boolean, "label": Schema.String, "message": Schema.String, "model": optionalKey(Schema.String), /** Exact native assistant stopReason, errorMessage, errorStatus, errorId and retryRecovery diagnostics, including arbitrary structured/null and future values. */
 "native": optionalKey(Schema.Record(Schema.String, Schema.Unknown)).annotate({ description: "Exact native assistant stopReason, errorMessage, errorStatus, errorId and retryRecovery diagnostics, including arbitrary structured/null and future values." }), "presentation": Schema.Literals(["full","compact-recovered","none"]), "provider": optionalKey(Schema.String), "retry": optionalKey(Schema.Struct({ "attempt": optionalKey(Schema.Int), "kind": optionalKey(Schema.String), "note": optionalKey(Schema.String), "recovered_at": optionalKey(Timestamp), "recovery": optionalKey(Schema.String), "status": optionalKey(Schema.String), "superseded_by": optionalKey(Schema.Struct({ "model": optionalKey(Schema.String), "provider": optionalKey(Schema.String), "response_id": optionalKey(Schema.String), "timestamp": optionalKey(Schema.Int) })) })), "status": Schema.Literals(["failed","recovered","superseded"]), "stop_reason": optionalKey(Schema.String), "type": Schema.Literal("assistant_error"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "fallback": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "role": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "fallback": optionalKey(Schema.Boolean), "model": Schema.String, "role": optionalKey(Schema.String), "type": Schema.Literal("model_change"), "agents": Schema.optionalKey(Schema.Never), "answers": Schema.optionalKey(Schema.Never), "api": Schema.optionalKey(Schema.Never), "args": Schema.optionalKey(Schema.Never), "async": Schema.optionalKey(Schema.Never), "attribution": Schema.optionalKey(Schema.Never), "background": Schema.optionalKey(Schema.Never), "bytes": Schema.optionalKey(Schema.Never), "call_id": Schema.optionalKey(Schema.Never), "case": Schema.optionalKey(Schema.Never), "code": Schema.optionalKey(Schema.Never), "code_bytes": Schema.optionalKey(Schema.Never), "command": Schema.optionalKey(Schema.Never), "configured": Schema.optionalKey(Schema.Never), "content": Schema.optionalKey(Schema.Never), "context": Schema.optionalKey(Schema.Never), "cwd": Schema.optionalKey(Schema.Never), "details": Schema.optionalKey(Schema.Never), "diff": Schema.optionalKey(Schema.Never), "engine": Schema.optionalKey(Schema.Never), "env_keys": Schema.optionalKey(Schema.Never), "error_id": Schema.optionalKey(Schema.Never), "exit_code": Schema.optionalKey(Schema.Never), "file_count": Schema.optionalKey(Schema.Never), "file_limit_reached": Schema.optionalKey(Schema.Never), "first_changed_line": Schema.optionalKey(Schema.Never), "from": Schema.optionalKey(Schema.Never), "gitignore": Schema.optionalKey(Schema.Never), "hidden": Schema.optionalKey(Schema.Never), "input_bytes": Schema.optionalKey(Schema.Never), "intent": Schema.optionalKey(Schema.Never), "is_error": Schema.optionalKey(Schema.Never), "items": Schema.optionalKey(Schema.Never), "jobs": Schema.optionalKey(Schema.Never), "kind": Schema.optionalKey(Schema.Never), "label": Schema.optionalKey(Schema.Never), "language": Schema.optionalKey(Schema.Never), "level": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "line_count": Schema.optionalKey(Schema.Never), "match_count": Schema.optionalKey(Schema.Never), "message": Schema.optionalKey(Schema.Never), "message_id": Schema.optionalKey(Schema.Never), "method": Schema.optionalKey(Schema.Never), "name": Schema.optionalKey(Schema.Never), "native": Schema.optionalKey(Schema.Never), "op": Schema.optionalKey(Schema.Never), "ops": Schema.optionalKey(Schema.Never), "path": Schema.optionalKey(Schema.Never), "pattern": Schema.optionalKey(Schema.Never), "per_file_limit_reached": Schema.optionalKey(Schema.Never), "phase": Schema.optionalKey(Schema.Never), "phases": Schema.optionalKey(Schema.Never), "presentation": Schema.optionalKey(Schema.Never), "previous": Schema.optionalKey(Schema.Never), "provider": Schema.optionalKey(Schema.Never), "query": Schema.optionalKey(Schema.Never), "questions": Schema.optionalKey(Schema.Never), "range": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "reply_to": Schema.optionalKey(Schema.Never), "reset": Schema.optionalKey(Schema.Never), "retry": Schema.optionalKey(Schema.Never), "short_summary": Schema.optionalKey(Schema.Never), "skip": Schema.optionalKey(Schema.Never), "source": Schema.optionalKey(Schema.Never), "started_at": Schema.optionalKey(Schema.Never), "state": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "stop_reason": Schema.optionalKey(Schema.Never), "summary": Schema.optionalKey(Schema.Never), "target": Schema.optionalKey(Schema.Never), "task": Schema.optionalKey(Schema.Never), "tasks": Schema.optionalKey(Schema.Never), "timed_out": Schema.optionalKey(Schema.Never), "timeout_s": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never), "tokens_after": Schema.optionalKey(Schema.Never), "tokens_before": Schema.optionalKey(Schema.Never), "tool": Schema.optionalKey(Schema.Never), "total_ms": Schema.optionalKey(Schema.Never), "truncated": Schema.optionalKey(Schema.Never), "wall_ms": Schema.optionalKey(Schema.Never), "warning": Schema.optionalKey(Schema.Never) }),
@@ -3630,7 +3832,7 @@ export const TimelineContentBody = /*#__PURE__*/ (() => Schema.Struct({
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
   "media_type": Schema.String,
   "message_id": optionalKey(Schema.String),
-  "text": optionalKey(Schema.String)
+  "text": optionalKey(markdownBlockSchema(Schema.String))
 }).check(Schema.makeFilter((o: object) => ("text" in o) || ("attachment_id" in o), { expected: "fields [\"text\"] or [\"attachment_id\"]" })).annotate({ identifier: "TimelineContentBody" }))()
 export type TimelineContentBody = typeof TimelineContentBody.Type
 export type TimelineContentBodyEncoded = typeof TimelineContentBody.Encoded
@@ -3753,11 +3955,34 @@ export const TimelineTruncationBody = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelineTruncationBody = typeof TimelineTruncationBody.Type
 export type TimelineTruncationBodyEncoded = typeof TimelineTruncationBody.Encoded
 
+export const TimelineProviderQuotaUnit = /*#__PURE__*/ (() => Schema.Literals(["premium_requests"]).annotate({ identifier: "TimelineProviderQuotaUnit" }))()
+export type TimelineProviderQuotaUnit = typeof TimelineProviderQuotaUnit.Type
+export type TimelineProviderQuotaUnitEncoded = typeof TimelineProviderQuotaUnit.Encoded
+
+/** Provider quota consumption, separate from token counts and money. The enclosing response provider identifies the quota authority. */
+export const TimelineProviderQuota = /*#__PURE__*/ (() => Schema.Struct({
+  "quantity": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unit": TimelineProviderQuotaUnit
+}).annotate({ identifier: "TimelineProviderQuota", description: "Provider quota consumption, separate from token counts and money. The enclosing response provider identifies the quota authority." }))()
+export type TimelineProviderQuota = typeof TimelineProviderQuota.Type
+export type TimelineProviderQuotaEncoded = typeof TimelineProviderQuota.Encoded
+
+/** Harness-reported USD components, not additional spend. The existing usage cost field is the reported total. Missing components are unknown, not zero; never derive a reported total from a partial object. */
+export const TimelineResponseCostComponents = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_read": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "cache_write": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "input": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "output": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "TimelineResponseCostComponents", description: "Harness-reported USD components, not additional spend. The existing usage cost field is the reported total. Missing components are unknown, not zero; never derive a reported total from a partial object." }))()
+export type TimelineResponseCostComponents = typeof TimelineResponseCostComponents.Type
+export type TimelineResponseCostComponentsEncoded = typeof TimelineResponseCostComponents.Encoded
+
+/** Response evidence is one terminal model response, not an invocation total. Optional absent fields mean unknown or unsupported, never zero. Actual response model/provider/API must not be inferred from the requested model. Reasoning and one-hour cache writes are subsets, not additive buckets. */
 export const TimelineUsageBody = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "currency": optionalKey(Schema.String), "driver": Schema.String, "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "semantics": Schema.Literal("context_occupancy"), "total_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) }).check(Schema.makeFilter((o: object) => ("context_used_tokens" in o) || ("context_window_tokens" in o) || ("context_used_percent" in o) || ("compactions" in o), { expected: "fields [\"context_used_tokens\"] or [\"context_window_tokens\"] or [\"context_used_percent\"] or [\"compactions\"]" })),
-  Schema.Struct({ "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "currency": optionalKey(Schema.String), "driver": Schema.String, "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "semantics": Schema.Literal("session_cumulative"), "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "turn_id": optionalKey(Schema.String) }),
-  Schema.Struct({ "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "currency": optionalKey(Schema.String), "driver": Schema.String, "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "semantics": Schema.Literal("response"), "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "turn_id": optionalKey(Schema.String) })
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("semantics")).annotate({ identifier: "TimelineUsageBody" }))()
+  Schema.Struct({ "account": optionalKey(Schema.String), "api": optionalKey(Schema.String), "attribution": Schema.Struct({ "agent_id": Id, "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "execution_id": optionalKey(Schema.String), "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "invocation_id": optionalKey(Schema.String), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_1h_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "completed_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "cost_components": optionalKey(TimelineResponseCostComponents), "currency": optionalKey(Schema.String), "driver": Schema.String, "duration_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "provider": optionalKey(Schema.String), "provider_quota": optionalKey(TimelineProviderQuota), "reasoning_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "response_id": optionalKey(Schema.String), "semantics": Schema.Literal("context_occupancy"), "started_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "stop_reason": optionalKey(Schema.String), "total_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "ttft_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) }).check(Schema.makeFilter((o: object) => ("context_used_tokens" in o) || ("context_window_tokens" in o) || ("context_used_percent" in o) || ("compactions" in o), { expected: "fields [\"context_used_tokens\"] or [\"context_window_tokens\"] or [\"context_used_percent\"] or [\"compactions\"]" })),
+  Schema.Struct({ "account": optionalKey(Schema.String), "api": optionalKey(Schema.String), "attribution": Schema.Struct({ "agent_id": Id, "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "execution_id": optionalKey(Schema.String), "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "invocation_id": optionalKey(Schema.String), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_1h_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "completed_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "cost_components": optionalKey(TimelineResponseCostComponents), "currency": optionalKey(Schema.String), "driver": Schema.String, "duration_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "provider": optionalKey(Schema.String), "provider_quota": optionalKey(TimelineProviderQuota), "reasoning_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "response_id": optionalKey(Schema.String), "semantics": Schema.Literal("session_cumulative"), "started_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "stop_reason": optionalKey(Schema.String), "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "ttft_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) }),
+  Schema.Struct({ "account": optionalKey(Schema.String), "api": optionalKey(Schema.String), "attribution": Schema.Struct({ "agent_id": Id, "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "execution_id": optionalKey(Schema.String), "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "invocation_id": optionalKey(Schema.String), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_1h_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "completed_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "cost_components": optionalKey(TimelineResponseCostComponents), "currency": optionalKey(Schema.String), "driver": Schema.String, "duration_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "provider": optionalKey(Schema.String), "provider_quota": optionalKey(TimelineProviderQuota), "reasoning_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "response_id": optionalKey(Schema.String), "semantics": Schema.Literal("response"), "started_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "stop_reason": optionalKey(Schema.String), "total_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "ttft_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("semantics")).annotate({ identifier: "TimelineUsageBody", description: "Response evidence is one terminal model response, not an invocation total. Optional absent fields mean unknown or unsupported, never zero. Actual response model/provider/API must not be inferred from the requested model. Reasoning and one-hour cache writes are subsets, not additive buckets." }))()
 export type TimelineUsageBody = typeof TimelineUsageBody.Type
 export type TimelineUsageBodyEncoded = typeof TimelineUsageBody.Encoded
 
@@ -4317,6 +4542,30 @@ export const Page = /*#__PURE__*/ (() => Schema.Struct({
 export type Page = typeof Page.Type
 export type PageEncoded = typeof Page.Encoded
 
+/** A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person. */
+export const PersonAvailability = /*#__PURE__*/ (() => Schema.Struct({
+  "deadline_clock": AvailabilityDeadlineClock,
+  "deadline_clock_since": Schema.OptionFromNullOr(Timestamp),
+  "deadline_clock_until": Schema.OptionFromNullOr(Timestamp),
+  "interruptions": AvailabilityInterruptions,
+  "interruptions_until": Schema.OptionFromNullOr(Timestamp),
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "presence": Schema.OptionFromNullOr(AvailabilityPresence),
+  "presence_observed_at": Schema.OptionFromNullOr(Timestamp),
+  /** The override while one is in force; otherwise `available` while some device is present or no device has reported, `away` while devices report but none is present. */
+  "status": AvailabilityStatus,
+  "status_source": AvailabilityStatusSource,
+  "status_until": Schema.OptionFromNullOr(Timestamp)
+}).annotate({ identifier: "PersonAvailability", description: "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person." }))()
+export type PersonAvailability = typeof PersonAvailability.Type
+export type PersonAvailabilityEncoded = typeof PersonAvailability.Encoded
+
+export const PersonAvailabilities = /*#__PURE__*/ (() => Schema.Struct({
+  "people": Schema.Array(PersonAvailability)
+}).annotate({ identifier: "PersonAvailabilities" }))()
+export type PersonAvailabilities = typeof PersonAvailabilities.Type
+export type PersonAvailabilitiesEncoded = typeof PersonAvailabilities.Encoded
+
 export const PrivateNotesAction = /*#__PURE__*/ (() => Schema.Struct({
   /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
   "fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": PrivateNotesFence, "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }),
@@ -4327,7 +4576,7 @@ export type PrivateNotesActionEncoded = typeof PrivateNotesAction.Encoded
 
 export const PrivateNotesData = /*#__PURE__*/ (() => Schema.Struct({
   "fence": PrivateNotesFence,
-  "markdown": Schema.String,
+  "markdown": markdownBlockSchema(Schema.String),
   "uri": PrivateNotesUri
 }).annotate({ identifier: "PrivateNotesData" }))()
 export type PrivateNotesData = typeof PrivateNotesData.Type
@@ -4482,7 +4731,8 @@ export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
   "resets_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   /** When the allowance runs out at that rate, present only when that is before it resets. */
   "runs_out_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "When the allowance runs out at that rate, present only when that is before it resets." }),
-  "status": Schema.Literals(["met","missed","no-data","stale"]),
+  /** met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown. */
+  "status": openEnum(["met","missed","no-data","stale"]).annotate({ description: "met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown." }),
   "target": Schema.String,
   /** How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule. */
   "tone": optionalKey(Schema.String).annotate({ description: "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." }),
@@ -4696,7 +4946,7 @@ export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
   /** False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent. */
   "complete": optionalKey(Schema.Boolean).annotate({ description: "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }),
   "message": Schema.String,
-  "text": Schema.String
+  "text": markdownBlockSchema(Schema.String)
 }).annotate({ identifier: "MessageBody" }))()
 export type MessageBody = typeof MessageBody.Type
 export type MessageBodyEncoded = typeof MessageBody.Encoded

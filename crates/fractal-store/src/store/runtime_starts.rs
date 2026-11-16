@@ -275,5 +275,7 @@ pub fn retain_runtime_start_producer_closed_tx(
         params![id, serde_json::to_string(&result)?],
     )?;
     release_evidence(tx, id)?;
+    super::invocation_receipts::append_native_receipt_tx(tx, origin, id, &operation.subject,
+        &operation.body, super::invocation_receipts::InvocationPhase::ProducerClosed, Some(&result))?;
     Ok(())
 }

@@ -1297,6 +1297,12 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
             let mut environment = member.environment.clone();
             let operation = environment.remove("ST3_START_OPERATION").unwrap();
             assert_eq!(member.tags.get("st3.start-operation"), Some(&operation));
+            // Each physical launch carries its own invocation identity and propagated
+            // W3C trace context; both are per-launch facts, not declaration facts.
+            assert!(environment.remove(fractal_schema::invocation::ENV)
+                .is_some_and(|invocation| invocation.starts_with("invocation/")));
+            assert!(environment.remove("TRACEPARENT").is_some_and(|parent| !parent.is_empty()));
+            environment.remove("TRACESTATE");
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             assert_eq!(
                 environment.get("FRACTAL_LAUNCH_DESIRED_TOKEN"),
@@ -1316,6 +1322,11 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     assert_ne!(
         starts[0].environment["ST3_START_OPERATION"], starts[1].environment["ST3_START_OPERATION"],
         "each physical launch must retain its own operation identity"
+    );
+    assert_ne!(
+        starts[0].environment[fractal_schema::invocation::ENV],
+            starts[1].environment[fractal_schema::invocation::ENV],
+        "each physical launch must carry its own invocation identity"
     );
     assert_eq!(environments[0], environments[1]);
     // Once started again, the seat is the run's own: a restarted daemon keeps it running.

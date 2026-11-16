@@ -705,6 +705,42 @@ mod tests {
         assert!(rows[0]["presentation"].get("prompt").is_none());
     }
 
+    /// A host hold placed by a run that has since ended is still a card on its owner's Now:
+    /// the published list presents it as `stopped` · `request`, raised by its owner.
+    #[test]
+    fn a_published_host_hold_is_a_stopped_card_on_now() {
+        use crate::store::host_holds::PlaceHostHold;
+        let store = Store::open_memory("node").unwrap();
+        store.start_attention_list_refresher().unwrap();
+        let hold = store
+            .place_host_hold(
+                "person/operator",
+                &PlaceHostHold {
+                    actor: "person/operator".into(),
+                    host: "node".into(),
+                    reason: "investigate".into(),
+                    operations: vec!["activation".into()],
+                    originating_run: Some("mission-run/terminal".into()),
+                    receipt: Some("receipt/activation".into()),
+                },
+            )
+            .unwrap();
+        refresh_attention_list(&store).unwrap();
+        let (_, publication) = store.newest_attention_list();
+        let publication = publication.unwrap();
+        let row = publication
+            .rows
+            .iter()
+            .find(|row| row["attention_kind"] == "host-hold")
+            .expect("the hold is published");
+        assert_eq!(row["source_id"], hold.id);
+        let presentation = &row["presentation"];
+        assert_eq!(presentation["tier"], "stopped");
+        assert_eq!(presentation["kind"], "request");
+        assert_eq!(presentation["raised_by"]["id"], "person/operator");
+        assert!(presentation["agent"].is_null(), "chat reaches the chief of staff");
+    }
+
     /// A seat's conversation changes no claim attention reads. The refresher follows each
     /// card's transcript from before it reads it, so a call or result written at any moment
     /// after that read, even before the read is published, wakes it; it then presents the

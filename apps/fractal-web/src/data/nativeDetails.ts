@@ -198,7 +198,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   // Unpriced tokens are not expressible in kit coverage; the amount keeps unavailable attribution coverage.
   const cost = rows.reduce((sum, item) => sum + item.cost_microusd, 0) / 1_000_000
   // API period groups expose latest native ID, not their incarnation or binding history.
-  const nativeCoverage: TraceCoverage = { _tag: 'Unavailable', reason: rows.some(item => item.unpriced_tokens > 0) ? 'not-covered' : 'not-attributed' }
+  const nativeCoverage: TraceCoverage = { _tag: 'Unavailable', reason: rows.some(item => item.unpriced_tokens > 0 || (item.unpriced_responses ?? 0) > 0) ? 'not-covered' : 'not-attributed' }
   const unsupported = unknown<number>('This session does not report spend including subagents.')
   const timing = row === undefined ? {} : nativeDetailsTiming({ row, session, snapshotCreatedAt: sessionFeed._tag === 'Observed' ? sessionFeed.snapshotCreatedAt : undefined, now })
   const timingDetail = timing.detail ?? (sessionFeed._tag === 'Unavailable' ? sessionFeed.reason === 'unauthorized' ? credentialExpiredMessage : sessionFeed.detail : undefined)

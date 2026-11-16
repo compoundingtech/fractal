@@ -198,17 +198,48 @@ daemon restart; missing assets/person do not disable the API listeners.
 
 ## Opt-in tailnet publisher
 
-`apps/fractal-web/server/main.mts` remains a separate, opt-in publisher for one
-person; the daemon does not start it. The example uses loopback port `7411`, separate
-from the daemon's local browser port `7410`. `tailscale serve` publishes this
-publisher over HTTPS on the tailnet. The server injects one paired
-bearer into every admitted request, so admission is the whole authorization. With a full-control
-pairing, any script running in the app holds that person's full Fractal authority. A request must
-carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for tailnet users. Any
-browser `Origin` must be exactly the published origin, and upgrades and unsafe methods must
-carry one. An Origin-less read is refused when the browser's `Sec-Fetch-Site` says another site sent it. Never publish it with Funnel, which carries no tailnet identity. Anything else that
-can reach the loopback port could claim a login, so run it only on a host where every local
-user is already trusted with that person's Fractal.
+`apps/fractal-web/server/main.mts` is a separate, opt-in loopback publisher; the
+daemon does not start it. Use port `7411`, separate from the local browser port
+`7410`. The published-surface filter is the only legitimate caller: it strips
+every inbound `tailscale-*` header and re-emits `tailscale-user-login` for
+untagged nodes, or `tailscale-node-tags` for tagged nodes (comma-separated ACL
+tags including the `tag:` prefix), plus `tailscale-node-name`. Never expose the
+listener directly: local processes can forge these headers. The publisher drops
+all `tailscale-*` headers before forwarding HTTP or WebSocket requests to the daemon.
+
+Admission requires an exact configured login OR an exact configured tag. Both
+identity headers present is ambiguous and always refused, even if one is allowed.
+The decision retains the identity's kind (`login` or `tag`) and matching value;
+the info log records kind plus tag value or a stable SHA-256 hash of the login,
+never the person's email. Tags never become person logins. Host and Origin checks
+are identical for both: canonical or listener Host, exact published browser
+Origin, mandatory Origin for upgrades and unsafe methods. Origin-less GET/HEAD
+also require absent, `same-origin`, or `none` Sec-Fetch-Site.
+
+Tagged readers receive preview access only: GET/HEAD and the
+`/v1/client/collections/stream` read WebSocket. Pairing, non-read HTTP and all
+other upgrades are refused. Tags always use their dedicated
+`WF_TAG_AUTHORIZATION_FILE`, never the person's `WF_ST_AUTHORIZATION_FILE` bearer
+or a browser cookie's paired or limited-scope grant. The tag grant must contain
+**`read.*` scopes only**, such as `read.arrangements`, `read.glasses` and
+`read.projections`: no write, control, pairing or `terminal.*` scopes, including
+`terminal.read`. The publisher refuses startup if tags are enabled without a
+valid private tag credential file, or if it holds the person credential.
+
+Before creating the listener, the publisher authenticates with the tag credential
+and reads `GET /v1/client/capabilities`. The daemon advertises every scope with
+its granted/ungranted state (route: `crates/fractal-api-core/src/api.rs:661`;
+handler: `:2777-2802`; scope catalog and advertisement:
+`crates/fractal-api-core/src/api/client_v0.rs:321-341,661-670`). Startup fails for
+authentication/transport/invalid-response errors, absent read grants, or any
+granted write/control/pairing/terminal scope. Non-scope feature capabilities,
+such as `collections`, are not grant scopes.
+
+The daemon enforces frame authorization with that read-only credential; the
+publisher tunnels frames without parsing them. Browser pairing remains
+login-only. `adopt-browser-pairing` revokes only the person's preview credential;
+tagged readers keep their own independently revocable grant. There is no
+fallback to the person credential or a browser grant.
 
 ```sh
 pnpm --dir apps/fractal-web build            # writes dist/web, including build-identity.json
@@ -252,17 +283,23 @@ installer record alone does not prove that the daemon restarted with those asset
 The settings:
 
 - `WF_ST_GATEWAY` names Fractal's paired client gateway socket, never the privileged `fractal.sock`.
-- `WF_ST_AUTHORIZATION_FILE` holds the paired device's bearer. The composer needs a full-control pairing.
-  The host refuses to start unless the file belongs to its user and nobody else can read it.
+- `WF_ST_AUTHORIZATION_FILE` holds the person's preview bearer.
+- `WF_TAG_AUTHORIZATION_FILE` holds a different, dedicated read-only tag-reader bearer;
+  required when `WF_TAILNET_TAGS` is nonempty. Both credential files must belong to
+  the publisher user and be readable by nobody else (`chmod 600`).
+- `WF_TAILNET_LOGINS` is a required comma-separated person-login allowlist.
+- `WF_TAILNET_TAGS` is an optional comma-separated tag allowlist, for example `tag:dev-host`.
+  Values must include `tag:`; unset or empty admits no tags.
 - `WF_DIST` defaults to `dist/web`.
 - `WF_HOST` must be a loopback address.
 - `WF_PORT` is required; use `7411` to keep it separate from the daemon's local browser port.
 - `WF_DEPLOYMENT_ID` defaults to the published host.
 
-Before relying on a published endpoint, prove that `tailscale serve` replaces a forged login. A request
-to the published HTTPS address carrying `Tailscale-User-Login: <an allowed login>` from a tailnet
-user who is not on the list must still get `403`. Also check that `tailscale funnel status` shows
-nothing for the port.
+Before relying on a published endpoint, prove that the ingress strips a forged
+login and forged tag header: an unknown user or unknown tagged node must still
+receive `403` when sending either allowed identity. Direct `tailscale serve`
+does not supply this tagged-node header contract; use an identity-stripping
+filter that does. Never publish with Funnel, which carries no tailnet identity.
 
 The build records `rev`, `dirty`, `commitTs` and `buildTs` from git. The bundle embeds them, and
 the host serves them at `/build-identity.json`. That response names the exact commit that is
@@ -804,3 +841,68 @@ For the stale-fence negative control, replace the SDK retry's `readTerminalRunti
 with `Effect.succeed(observation)`: the stale-attach test must fail because no fresh runtime
 is read and the replacement terminal cannot be subscribed.
 
+
+## Fractal web availability
+
+The Settings dialog's **Availability** section shows the paired person's own effective
+availability and directive note, as `GET /v1/client/availability` (without a person, so the
+session person's own row with its presence) and `GET /v1/client/notes` return them. Status
+names its source: set by the person, with its end, or following presence, with the folded
+presence and its age. When no device has reported for a day (`status_source: unreported`) the
+status reads Available and says that no device is reporting, so agents ask as usual; it never
+reads as away. Interruptions and the deadline clock show their bounds; `urgent` interruptions
+let through only asks with priority `critical`, and a `hold-routine` clock says that those
+urgent asks keep running. A response word this build does not know shows as itself.
+The note shows its text and expiry, or that there is none.
+
+Availability is not a followed collection, so the section reads it when Settings opens, when
+the page regains focus or becomes visible, and when the connection returns; a later answer
+replaces an earlier one only if it was requested later. Fixture sources have no availability
+port, and a replay page drops the live source's port, so neither shows the section. A refused
+read explains itself: a rejected credential asks for pairing again, a missing grant says that
+reading was not granted, and a session that is no person says so.
+
+Below the summary the person sets or clears each axis and the note. **Changes last** bounds the
+next change: until changed, 30 minutes, 1 hour, 2 hours, tomorrow at 9:00 local time (the next
+calendar day, even before 9:00 today), or a custom local time that must lie in the future. The
+presets count from the source's clock. Status is Available, Away or **Follow presence** (a
+null status, which clears the override); interruptions are all asks, urgent asks only, or none;
+the deadline clock runs, holds routine asks, or holds every ask. Following presence, all asks
+and a running clock are the defaults and carry no end. **Save note** sets the note with the
+chosen end as its expiry; **Clear note** removes it. Writes go one at a time. Each write
+(`PUT /v1/client/availability`, `PUT /v1/client/notes`) shows the state Fractal answers with,
+never a local guess, and drops any read requested before it. A read requested while the write
+was in flight (focus, visibility or reconnection) may have been answered before or after the
+write took effect, so neither it nor the write's answer is shown: the section reads again and the
+editor stays pending until that read lands. A refused write keeps the summary and explains itself:
+a pairing without the `write.availability` or `write.notes` scope must be paired again.
+
+The page reports the browser's raw presence state for as long as it lives
+(`POST /v1/client/presence`; the daemon assigns the pairing as the source and derives presence
+from the state). It starts only once the capabilities say the session may: `write.presence` is
+granted and the session actor is a person. A capabilities read that fails counts as no grant
+until the page loads again. The state is `active` while any tab of the app is visible and
+focused, and `inactive` when every tab is hidden or blurred; a browser cannot see a locked
+screen or sleep, so it never reports `locked` or `sleeping`. `last_input_at` is the newest input
+(pointer, key, wheel or touch, or switching to a tab) in any tab. The page applies no idle
+threshold and sends no heartbeat: it reports every change of the state, again at the answer's
+`report_again_at` with the newest input, and, after a null `report_again_at`, on the first newer
+input while `active`. Input arriving during a report is reconciled after its answer, so a null
+deadline cannot strand newer input; reports never overlap. Regaining focus counts as input even
+when a brief blur never became an inactive report. A drop to `inactive` waits a second, so a tab
+switch, which blurs one tab before focusing the next, stays `active`. A failed report is sent
+again after a minute, then after two, four and eight, and then every fifteen minutes until one
+succeeds, which resets the wait. A refused report (403: no `write.presence` grant or no person; 404: a daemon without the
+route) stops reporting in every tab and releases the reporter role, so a tab loaded later, for
+example after pairing again, takes it up. A replay reports nothing.
+
+Every tab of the browser shares the pairing and so the one presence source, so exactly one tab
+reports. The reporter is whichever tab holds the `fractal.presence` Web Lock. The tabs tell each
+other their visibility, focus and input times over the `fractal.presence` `BroadcastChannel`,
+input at most every five seconds, so an untouched window never calls the person away while
+they work in another. A tab that closes or navigates (`pagehide`) says goodbye and releases the
+lock; the browser also releases it when a tab dies. The next tab in line takes the role,
+reports at once, and asks the others for their state, forgetting the previous holder and any
+tab that does not answer within a second. A tab restored from the back-forward cache asks again
+and queues for the role. Without Web Locks every tab reports on its own, each the browser
+state it hears.

@@ -321,6 +321,9 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -343,6 +346,9 @@ const ACTIONS: &[&str] = &[
     "arrangement.membership.edit",
     "read-position.advance",
     "attention.resolve",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -364,6 +370,7 @@ const ACTIONS: &[&str] = &[
     "custom.reply",
     "prompt.respond",
     "work.done",
+    "work.override",
     "work.cancel-ask",
     "work.claim",
     "work.renew",
@@ -406,6 +413,9 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "arrangement.edit",
     "arrangement.membership.edit",
     "read-position.advance",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -424,6 +434,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "session.import",
     "work.ask",
     "work.done",
+    "work.override",
     "work.cancel-ask",
     "work.claim",
     "work.renew",
@@ -4616,7 +4627,7 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
     ) {
         return Some("control.runtimes");
     }
-    if matches!(action, "work.done" | "custom.reply" | "prompt.respond") {
+    if matches!(action, "work.done" | "work.override" | "custom.reply" | "prompt.respond") {
         return Some("control.attention");
     }
     Some(match action.split_once('.')?.0 {

@@ -287,6 +287,7 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
     let completed = json!({
         "run": child.as_str(),
         "status": "completed",
+        "executions": [],
         "products": {
             (format!("resource/{child}/published")): {"kind": "custom.st3.program-test", "head": "h1"},
         },
@@ -413,7 +414,8 @@ fn children_are_cancelled_with_their_run_or_their_step_and_a_retry_starts_a_new_
     assert_eq!(error["run"], attempt_two.as_str());
     assert_eq!(error["status"], "failed");
     assert!(error["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{error}");
-    assert_eq!(error.as_object().unwrap().len(), 4, "{error}");
+    assert_eq!(error["executions"], json!([]), "the unclaimed child has no executions");
+    assert_eq!(error.as_object().unwrap().len(), 5, "{error}");
 }
 
 #[test]
@@ -579,8 +581,8 @@ fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
     fixture.until("uncaught cancellation ends the run", || fixture.run_status(&parent.run) == "failed");
     let cancelled = json!({"_tag": "AskCancelled", "ask": withdrawn});
     assert_eq!(fixture.result(&parent.step, "withdrawn", 1), Some(("failed".into(), cancelled.clone())));
-    // Failed program exits retain the typed error as the step's reason; only successful
-    // program exits write RESULT_KEY.
+    // The typed program exit is durable as well as retained in the step's reason.
+    assert_eq!(fixture.result(&parent.step, RESULT_KEY, 1), Some(("failed".into(), cancelled.clone())));
     let failed = fixture.store.step_run(&parent.step).unwrap().unwrap();
     assert_eq!(failed.status, "failed");
     assert_eq!(serde_json::from_str::<Value>(failed.blocked_reason.as_deref().unwrap()).unwrap(), cancelled);

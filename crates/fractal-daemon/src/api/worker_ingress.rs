@@ -41,8 +41,29 @@ pub fn worker_observer(pid: Option<u32>) -> anyhow::Result<Observe> {
             let generation = fractal_runtime::PeerProcessIdentity::capture_pid(pid)?;
             Ok(Arc::new(move || { generation.validate()?; Ok(generation.pid()) }))
         }
-        None => Ok(Arc::new(crate::service::replication_worker_pid)),
+        None => Ok(pin_supervised(crate::service::replication_worker_pid)),
     }
+}
+
+/// A supervisor replaces its worker only after that process ends, so one observation answers
+/// for as long as the observed generation validates. Requests then cost a process-table read
+/// instead of service-manager commands; the lock admits one re-observation at a time.
+fn pin_supervised(observe: impl Fn() -> anyhow::Result<u32> + Send + Sync + 'static) -> Observe {
+    let pinned = std::sync::Mutex::new(None::<fractal_runtime::PeerProcessIdentity>);
+    Arc::new(move || {
+        let mut pinned = pinned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(worker) = pinned.as_ref().filter(|worker| worker.validate().is_ok()) {
+            return Ok(worker.pid());
+        }
+        *pinned = None;
+        let pid = observe()?;
+        let worker = fractal_runtime::PeerProcessIdentity::capture_pid(pid)?;
+        // The observed worker may end and its PID be reused before the capture; the supervisor
+        // must still name that PID once the captured generation exists.
+        anyhow::ensure!(observe()? == pid, "the supervisor replaced the worker during observation");
+        *pinned = Some(worker);
+        Ok(pid)
+    })
 }
 
 /// Observe by default; explicit enforcement refuses before body decoding.
@@ -98,6 +119,56 @@ mod tests {
         assert!(!worker_route("/v1/internal/fleet/invites"));
         assert!(worker_route("/v1/internal/seat-snapshot"));
         assert!(worker_route(crate::peer::CLIENT_READ_FORWARD_PATH));
+    }
+
+    #[test]
+    fn supervised_worker_is_observed_once_per_generation() {
+        let mut first = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let mut second = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let named = Arc::new(AtomicU32::new(first.id()));
+        let observations = Arc::new(AtomicU32::new(0));
+        let observe = pin_supervised({
+            let (named, observations) = (named.clone(), observations.clone());
+            move || {
+                observations.fetch_add(1, Ordering::SeqCst);
+                match named.load(Ordering::SeqCst) { 0 => anyhow::bail!("supervisor unavailable"), pid => Ok(pid) }
+            }
+        });
+        let worker = process(first.id());
+        for _ in 0..3 {
+            assert!(authorize(Some(&worker), &*observe).is_ok());
+        }
+        assert!(authorize(Some(&process(second.id())), &*observe).is_err());
+        // One observation names the worker, one reconfirms it after the capture.
+        assert_eq!(observations.load(Ordering::SeqCst), 2);
+
+        // The supervisor names a successor only once its predecessor has ended.
+        named.store(second.id(), Ordering::SeqCst);
+        first.kill().unwrap();
+        first.wait().unwrap();
+        assert!(authorize(Some(&process(second.id())), &*observe).is_ok());
+        assert_eq!(observations.load(Ordering::SeqCst), 4);
+
+        named.store(0, Ordering::SeqCst);
+        second.kill().unwrap();
+        second.wait().unwrap();
+        assert!(observe().is_err());
+        assert!(observe().is_err());
+        assert_eq!(observations.load(Ordering::SeqCst), 6, "a failed observation pins nothing");
+    }
+
+    #[test]
+    fn supervised_worker_replaced_during_observation_is_not_pinned() {
+        let mut first = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let mut second = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let names = std::sync::Mutex::new(vec![second.id(), second.id(), second.id(), first.id()]);
+        let observe = pin_supervised(move || Ok(names.lock().unwrap().pop().unwrap()));
+        assert!(authorize(Some(&process(first.id())), &*observe).is_err());
+        assert!(authorize(Some(&process(second.id())), &*observe).is_ok());
+        first.kill().unwrap();
+        first.wait().unwrap();
+        second.kill().unwrap();
+        second.wait().unwrap();
     }
 
     #[tokio::test]

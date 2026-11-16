@@ -10,6 +10,12 @@ runtime](mission-graph-runtime.md) (runs, generations, steps, revisions) and the
 registry](schema.md). The preview API it executes is in `docs/site/concepts/steps.md` and
 `docs/site/guides/missions-in-practice.md` (Effect variant).
 
+[Native mission effects](effects.md) bind outward actions to stable author keys,
+not program attempts. Their unresolved fence survives restart and lease churn;
+inspect it with `fractal effects status` and use an authenticated person's
+explicit resolution rather than replaying the provider action.
+
+
 ## Why
 
 A static mission graph cannot branch on a step's value, pass values between steps, or know which
@@ -36,7 +42,7 @@ Taken by the owner on 2026-11-10:
 | D2 | Steps act as `mission-run/RUN` with the authority the revision declares, intersected with the starter's authority. | §3 |
 | D3 | A program revision is its bundle's sha256. | §4 |
 | D4 | The journal is the registered `program.step` claim on the program's step run. | §5 |
-| D5 | A serialized section is a child run of a mission with `concurrent-runs max=1`, not a native lane. | §7 |
+| D5 | A serialized workflow remains a linked child run; physical executor exclusivity is a host-native resource lane, not mission population or an ordered graph lane. | §7, [resources](resources.md) |
 | D6 | The data DSL compiles into programs: one execution model. | §9 |
 | D7 | The program API is the `Fractal` namespace of the `fractal` package, built on Effect's `effect/workflow`: `Fractal.step` is an `Activity`, `Fractal.ask` a `DurableDeferred`, the daemon is the `WorkflowEngine` and its journal is native claims. Mission inputs and outputs are Effect Schemas. | §11 |
 
@@ -174,6 +180,74 @@ without either cannot run program steps. Cancellation is eager: every evaluation
 engine which of the run's program attempts left their step (ended, failed, timed out, retried,
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
+
+#### Native retries and resource retirement
+
+The outer step's native `retry` policy has these KDL fields:
+
+| Field | Meaning |
+|---|---|
+| `attempts 4` | Total attempts, including the first; an integer from 1 through 100. Defaults to 1. |
+| `backoff "2m"` | Existing uniform retry delay; defaults to zero. |
+| `delays "2m" "10m" "30m"` | Positive per-retry durations, overriding `backoff`; the final entry repeats when more retries remain. |
+| `within "2h"` | Optional positive whole-policy window from the first attempt's start, not a per-attempt timeout. The window need not cover the sum of scheduled delays: a pending retry that becomes due after the window expires fails finally without starting another attempt, including after a daemon restart. |
+| `on "HostUnavailable" "SlotLost"` | Allowlist of `_tag` values from the durable failed program result. An absent list preserves the legacy any-failure policy. |
+
+The stored `RetrySpec` names these fields `attempts`, `backoff_ms`, `schedule_ms`,
+`window_ms`, and `on_error_tags`. Empty schedules/tag lists and an absent window are
+omitted from serialization, preserving existing revision hashes and canonical KDL
+for policies that use only `attempts` and `backoff`.
+
+Classification uses the current attempt's durable final program result, not arbitrary
+inner-step failures or error-message text. With `on`, a missing or unlisted result
+`_tag` is final; an engine failure with no durable failed program result (for example,
+a host dying before reporting its exit) remains retryable. Attempts and `within`
+still bound those engine failures. The tag names are program-defined, not a closed
+engine enum. `within` limits admission of another attempt; it neither interrupts
+an already running attempt nor replaces the step's per-attempt timeout.
+
+For example, this policy permits four total attempts, with delays of two, ten,
+and thirty minutes, within two hours of the first start:
+
+```kdl
+retry {
+  attempts 4
+  delays "2m" "10m" "30m"
+  within "2h"
+  on "HostUnavailable" "SlotLost"
+}
+```
+
+Retry is retire-then-readmit, not overlapping replacement. Before attempt N+1
+can acquire resource-lane membership, attempt N's program termination must be
+confirmed and its owned lane memberships, lane-run resources, and groups must
+finish retirement. A failed or incomplete retirement blocks admission; reaching
+the retry's due time is necessary but is not proof that the previous attempt
+released its resources. Re-admission receives the new attempt's ownership identity,
+so stale cleanup cannot retire the successor's resources.
+
+The policy window continues to run while retirement is pending. Its deadline wakes
+the blocked retry even if no child exits and no custody event arrives. A retry whose
+window expires during that wait fails finally instead of starting, even when the
+old scope finishes retirement at the same wake. A pending or uncertain retirement
+sets the step to `blocked`, with a reason visible in `missions show` naming the
+operator recovery path: cancel the mission run, or release/recover the retained
+resource custody. A persistent retirement wait also raises the standard reconcile
+fault in operator attention; successful retirement, window expiry, or leaving the
+active run closes that fault.
+
+External `flock` tickets are kernel-held locks owned by the effect process (and
+any descendants retaining its file descriptor), not native resource-lane memberships.
+They are released by process exit/closing the last lock descriptor. Scheduling a
+retry or retiring a native lane does not itself release a live process's ticket;
+effect-process termination must finish before the next attempt can rely on release.
+
+`fractal missions show <run>` displays each configured step retry policy, its current
+attempt/total attempts, and `next due unix ms` while a retry has a persisted due time.
+`--json` exposes the same policy as `steps[].retry` (using the stored field names
+above), the current `steps[].attempt`, and `steps[].not_before_unix_ms` for the
+scheduled retry. Default policies are omitted. A due retry can still be waiting
+for retirement or another admission fence.
 
 For publication supersession, sending `cancel` is not sufficient to admit the replacement.
 The engine waits for that host's matching `cancelled` acknowledgement (or host exit), then
@@ -446,8 +520,30 @@ again and the start is retried then. When the child ends, the program receives:
 A worker turn, `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission,
 input, product })))`, is a child run of `mission` with `input`. Its value is the child's product
 `resource/RUN/PRODUCT`, decoded with `success`; the worker mission declares the agent, goal and
-product (for example a run-scoped one-shot reviewer `agent/${ST_MISSION_RUN}/reviewer`, so
-independence holds as in LandingMission).
+product. For an independent turn, use a distinct run-owned subject such as
+`agent/${ST_MISSION_RUN}/worker` and `fresh-context` on its assigned step; optionally use `one-shot`
+to retire it on exit. `Fractal.Worker.layer` does not fork the program caller's conversation,
+mailbox or handoff into the child. A standing worker selected by the child retains its own
+mailbox, and `one-shot` alone does not request a fresh session. See
+[step context isolation](mission-graph-runtime.md#step-syntax).
+
+Worker turns can request `Fractal.step({ id, success, execution: true })` to return
+`{ value, executions }` instead of the decoded product alone. `value` remains domain data;
+`executions` contains the child's claim-backed agent invocations, across its steps and attempts.
+The child result and `ChildFailed` also carry `executions`, so failed execution can still report
+spend. Older journal entries omit it: `undefined` means unknown, not zero. Mission output
+schemas must allow an absent `executions` key when replaying those entries. Replay returns the
+journaled execution snapshot without consulting a seat's current model or running the child again.
+Each execution identifies its work claim, step, attempt, actor and harness incarnation, with the
+declared model captured at claim time, observed models, nullable fallback evidence, response token
+and micro-USD totals, timing, trace correlation and an incarnation-matched runtime exit receipt.
+No usage observation is `usage: null`, not a zero-token observation. Either `unpriced_tokens`
+or `unpriced_responses` distinguishes unknown price from free execution: responses without a
+reported total still carry the response counter without inventing tokens. Exit evidence recorded after the child result was journaled is
+available on mission detail reads, not retroactively inserted into the replayed snapshot.
+An effect-form step is not an agent invocation; it retains its ordinary typed result and journal
+duration. A process that fails before claiming work has runtime evidence but no claim-backed
+execution record. These generic records do not contain domain decisions, review bindings or consent.
 
 **Asks.** `Fractal.ask({ id, for, title, request, deadline, default })` opens a native person ask on
 the program step, with `work ask --step` semantics: the same structured requests, deadlines and
@@ -485,17 +581,23 @@ lost race) cancels it the same way.
 
 Two concurrent landings must not publish one host at once (R09).
 
-| | Native lane around publish | **Child run of `factory/publish`, `concurrent-runs max=1`** |
-|---|---|---|
-| Native semantics | a lane needs an owning run that works its front entry | a capacity-full child start waits; already native |
-| Visibility | lane entries | a run per publication, with its own journal |
-| Cancel | leave the lane | cascades from the landing run |
-| Coalescing | the owner can skip superseded heads | a queued publish for an older head finds the host at or past it and is a no-op |
-| Cost | lane bookkeeping (0.03 s) plus an owner | child run start (no agent: one reconciler pass) |
+The original D5 choice rejected an ordered graph lane around publication: such a lane needs an
+owning run to work its front entry. Keep the linked child workflow and its journal (§6). Its
+`concurrent-runs max=1` remains a workflow population constraint; it cannot serialize different
+missions on the same physical executor.
 
-Choice: a child run. It needs no standing owner and reuses §6: a publication whose start finds the
-publish mission's one run active waits, journaled as `started` without a `child`, and starts in the
-evaluation the active run's end triggers.
+The refined boundary is [host-native resource admission](resources.md). A program acquires
+`Fractal.resources.lane(name, { host, maxMembers: 1, ... })` in an Effect scope, then uses
+`lane.run(id, mission, input)` for a linked publication or `lane.exec(id, argv, options)` for a finite
+command. The child’s actual execution roots inherit the membership. One execution-host writer
+grants admission, enforces host holds and shared fit, and retains custody until exact-generation
+whole-tree retirement. The data DSL’s step `lane` lowers to these same native operations.
+
+This is not an ordered graph queue, a lane worker, or a journal-replayed semaphore grant.
+Acquisition validates live authority on replay; cancellation still cascades through linked runs
+and awaits native retirement. Target-host mutation fencing is a separate boundary: retain the
+existing target hold bridge until its mutation adapter checks target hold revisions and activation
+generation. Executor-local serialization alone does not authorize a remote activation.
 
 ### 8. Visibility and stall detection
 
@@ -572,10 +674,24 @@ named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `Chil
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
 mission `input`, `missions start` checks the inputs against it, and the program receives the decoded
 value. The success value is encoded with `intent.output` and journaled under the reserved key
-`$result`; a typed failure is encoded with its `_tag` and fields and fails the step with it.
+`$result`; a typed failure is encoded with its `_tag` and fields, journaled under the same key as
+a failed result, and fails the step with it. Retry classification reads this attempt's durable
+failure rather than an inner effect's possibly caught error.
 
 A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
 program to the same wait.
+
+In a lane-bound run, `Fractal.command` inherits the native membership and uses command keys scoped
+to its durable activity (`resource.command/<activity-key>`, then `#2`, `#3`, … for same-fiber
+repeats). Outside an activity the scope is `program`. A second fiber using the same command scope
+is a defect, even after the first command completes: concurrent arrival order is not replay
+identity. Put concurrent commands in distinct `Fractal.step({ id }, …)` activities, or use
+`lane.exec(id, argv, options)` with distinct explicit ids. Non-lane commands continue to use the
+ordinary host spawn path.
+Native adoption also binds each key to a digest of its argv and command options (including cwd
+and caller environment) before physical preparation. Replaying that key with a changed payload
+is refused rather than adopting another command's execution or starting a replacement. Attempt
+credentials and trace context remain authoritative runtime environment, not caller identity.
 
 **Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
 bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun

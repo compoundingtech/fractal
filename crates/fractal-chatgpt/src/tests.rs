@@ -43,13 +43,14 @@ fn adapter_accepts_only_paired_gateway_socket_names() {
 }
 
 #[test]
-fn discovery_has_exactly_thirteen_closed_tools_and_correct_hints() {
+fn discovery_has_exactly_fourteen_closed_tools_and_correct_hints() {
     let expected = [
         (ALERTS_LIST, true, false, false),
         (ALERT_GET, true, false, false),
         (ALERT_ANSWER, false, true, false),
         (MISSIONS_LIST, true, false, false),
         (AGENTS_LIST, true, false, false),
+        (AVAILABILITY_GET, true, false, false),
         (CONVERSATIONS_LIST, true, false, false),
         (CONVERSATION_DETAIL, true, false, false),
         (CONVERSATION_TIMELINE, true, false, false),
@@ -116,6 +117,7 @@ fn validation_accepts_every_published_tool_contract() {
         assert!(validate_arguments(name, &json!({"limit":1,"cursor":"opaque","max_response_bytes":16384})).is_ok());
     }
     assert!(validate_arguments(ALERT_GET, &json!({"alert_id":"attention/test"})).is_ok());
+    assert!(validate_arguments(AVAILABILITY_GET, &json!({})).is_ok());
     assert!(validate_arguments(CONVERSATION_READ, &json!({"agent_id":"agent/example-reader","session_id":"session/a",
         "reference":"opaque","revision":"claim/a","start":0,"end":1,"max_response_bytes":1})).is_ok());
     assert!(validate_arguments(MESSAGE_SEND, &send_arguments()).is_ok());
@@ -222,6 +224,9 @@ fn validation_rejects_unknown_tools_nonobjects_extra_missing_and_wrong_types() {
         (ALERTS_LIST, json!({"max_response_bytes":16385})),
         (ALERT_GET, json!({})),
         (ALERT_GET, json!({"alert_id":null})),
+        (AVAILABILITY_GET, json!({"limit":1})),
+        (AVAILABILITY_GET, json!({"person":"person/ada"})),
+        (AVAILABILITY_GET, json!({"max_response_bytes":"4096"})),
         (ALERT_GET, json!({"alert_id":3})),
         (ALERT_ANSWER, json!({"action_id":"a"})),
         (CONVERSATION_READ, json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":-1,"end":3})),
@@ -261,6 +266,7 @@ fn validation_rejects_open_or_untyped_nested_fences() {
 
 fn bounded_read_cases() -> Vec<(&'static str, &'static str, Value)> {
     vec![
+        (AVAILABILITY_GET, "availability", json!({"max_response_bytes":16384})),
         (CONVERSATIONS_LIST, "conversations", json!({"cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
         (CONVERSATION_DETAIL, "conversation-detail", json!({"agent_id":"agent/example-reader","max_response_bytes":16384})),
         (CONVERSATION_TIMELINE, "conversation-timeline", json!({"agent_id":"agent/example-reader","session_id":"session/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
@@ -350,7 +356,7 @@ async fn bounded_reads_dispatch_exact_get_routes_queries_and_bearer_and_preserve
 }
 
 #[tokio::test]
-async fn deprecated_aliases_dispatch_identically_for_all_thirteen_tools() {
+async fn deprecated_aliases_dispatch_identically_for_all_fourteen_tools() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -378,7 +384,7 @@ async fn deprecated_aliases_dispatch_identically_for_all_thirteen_tools() {
             (ALERT_ANSWER, write_arguments(ALERT_ANSWER)),
             (MESSAGE_SEND, write_arguments(MESSAGE_SEND)),
         ]);
-        assert_eq!(cases.len(), 13);
+        assert_eq!(cases.len(), 14);
         for (name, args) in cases {
             let alias = format!("st_{}", name.strip_prefix("fractal_").unwrap());
             assert_eq!(call(&adapter, &alias, &args).await.unwrap(),
@@ -407,7 +413,7 @@ async fn http_tools_list_advertises_only_canonical_names() {
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
     let result: Value = serde_json::from_slice(&bytes).unwrap();
     let published = result["result"]["tools"].as_array().unwrap();
-    assert_eq!(published.len(), 13);
+    assert_eq!(published.len(), 14);
     for (tool, (name, _, _)) in published.iter().zip(TOOLS) {
         assert_eq!(tool["name"], *name);
         assert!(name.starts_with("fractal_"));
@@ -649,8 +655,11 @@ fn chatgpt_discovery_matches_main_golden() {
     // tools: tool_definitions(), ..Default::default() }) to a capture file.
     // Run `cargo test -p fractal-chatgpt capture_main_chatgpt_tools_golden`,
     // copy those bytes here, then discard the temporary test.
+    // Adding fractal_availability_get inserted its definition after
+    // fractal_agents_list; the other entries are unchanged. Its description
+    // later gained the note-truncation sentences, edited in place.
     // Adding fractal_slo_list and fractal_slo_history appended their two
-    // definitions the same way; the first eleven entries are unchanged.
+    // definitions at the end.
     let result = ListToolsResult {
         tools: tool_definitions(Profile::ChatGpt),
         ..Default::default()
@@ -678,13 +687,14 @@ fn profiles_pin_server_identity_and_cross_profile_annotations() {
 }
 
 #[test]
-fn all_thirteen_mcp_output_schemas_pin_envelopes_and_value_contracts() {
+fn all_fourteen_mcp_output_schemas_pin_envelopes_and_value_contracts() {
     let expected = [
         (ALERTS_LIST, Some("page"), vec!["kind","items","page"]),
         (ALERT_GET, None, vec!["id","episode","kind","title","detail","request"]),
         (ALERT_ANSWER, Some("action-result"), vec!["kind","action_id","status"]),
         (MISSIONS_LIST, Some("page"), vec!["kind","items","page"]),
         (AGENTS_LIST, Some("page"), vec!["kind","items","page"]),
+        (AVAILABILITY_GET, Some("person-availability"), vec!["kind","availability","directive_note","directive_note_truncated"]),
         (CONVERSATIONS_LIST, Some("page"), vec!["kind","items","page"]),
         (CONVERSATION_DETAIL, Some("conversation-detail"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
         (CONVERSATION_TIMELINE, Some("conversation-timeline"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
@@ -758,7 +768,7 @@ fn legacy_call_bytes_and_mcp_structured_text_mirrors_are_pinned() {
 }
 
 #[tokio::test]
-async fn mcp_dispatches_all_thirteen_tools_over_only_the_existing_gateway_routes() {
+async fn mcp_dispatches_all_fourteen_tools_over_only_the_existing_gateway_routes() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("st3-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -787,6 +797,7 @@ async fn mcp_dispatches_all_thirteen_tools_over_only_the_existing_gateway_routes
             "fence":{"snapshot_id":"snapshot/example"},"alert_id":"alert/example","episode":"claim/example","option":"yes","summary":"Approved"})),
         (MISSIONS_LIST,"missions-rich",json!({})),
         (AGENTS_LIST,"agents-rich",json!({"agent_id":"agent/example-reader"})),
+        (AVAILABILITY_GET,"availability",json!({})),
         (CONVERSATIONS_LIST,"conversations",json!({})),
         (CONVERSATION_DETAIL,"conversation-detail",json!({"agent_id":"agent/example-reader"})),
         (CONVERSATION_TIMELINE,"conversation-timeline",json!({"agent_id":"agent/example-reader","session_id":"session/example"})),
@@ -892,6 +903,29 @@ async fn mcp_telemetry_has_no_chatgpt_wording() {
     let text = logs.text();
     assert!(text.contains("MCP tool call finished"), "{text}");
     assert!(!text.contains("ChatGPT"), "{text}");
+}
+
+#[test]
+fn availability_tool_tells_assistants_when_to_park_and_pins_the_closed_value() {
+    let tool = serde_json::to_value(tool_definitions(Profile::Mcp).into_iter()
+        .find(|tool| tool.name == AVAILABILITY_GET).unwrap()).unwrap();
+    let description = tool["description"].as_str().unwrap();
+    for phrase in ["away", "interruptions is none", "park blocking asks", "hold-routine", "directive_note", "unreported",
+        "directive_note_truncated", "max_response_bytes (up to 16384)"] {
+        assert!(description.contains(phrase), "{phrase}: {description}");
+    }
+    assert_eq!(tool["inputSchema"]["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["max_response_bytes"]);
+    let value = &tool["outputSchema"]["oneOf"][0]["properties"]["value"];
+    let availability = &value["properties"]["availability"];
+    assert_eq!(availability["properties"]["status"], json!({"enum":["available","away"]}));
+    assert_eq!(availability["properties"]["status_source"], json!({"enum":["override","presence","unreported"]}));
+    assert_eq!(availability["properties"]["presence"], json!({"type":"null"}), "assistants never see raw presence");
+    assert_eq!(availability["properties"]["presence_observed_at"], json!({"type":"null"}));
+    assert_eq!(availability["properties"]["interruptions"], json!({"enum":["all","urgent","none"]}));
+    assert_eq!(availability["properties"]["deadline_clock"], json!({"enum":["run","hold-routine","hold-all"]}));
+    assert_eq!(availability["required"].as_array().unwrap().len(), 11);
+    assert_eq!(value["properties"]["directive_note"]["type"], json!(["object","null"]));
+    assert_eq!(value["properties"]["directive_note_truncated"], json!({"type":"boolean"}));
 }
 
 #[tokio::test]

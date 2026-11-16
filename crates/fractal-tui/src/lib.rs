@@ -707,6 +707,45 @@ async fn act_on_card(
     };
     Ok(format!("{}: {}", action_label(action), result.value.kind))
 }
+
+/// The action id, idempotency key and parameters of the person's own answer to an ask that
+/// resolved by itself. Both ids are fixed by the episode and the answer, as on every client, so a
+/// retry replays the same action rather than asking twice. `text` is the changes an answer that
+/// requests them carries; st refuses such an answer without them.
+pub(crate) fn override_request(
+    target_id: &str,
+    episode: &str,
+    answer: &str,
+    text: Option<&str>,
+) -> (String, String, fractal_client::PersonOverrideParameters) {
+    let key = format!("person-override:{episode}:{answer}");
+    (
+        format!("action/{key}"),
+        key,
+        fractal_client::PersonOverrideParameters {
+            target_id: target_id.to_owned(),
+            episode: episode.to_owned(),
+            answer: fractal_client::PersonOverrideAnswer { id: answer.to_owned(), text: text.map(str::to_owned) },
+            summary: None,
+        },
+    )
+}
+
+/// Replace the default an ask resolved with by the person's own answer (`work.override`). The
+/// episode is the fence: st refuses an override once the ask's window closed or it was answered.
+pub(crate) async fn override_ask(
+    client: &Client,
+    target_id: &str,
+    episode: &str,
+    answer: &str,
+    text: Option<&str>,
+    label: &str,
+) -> Result<String> {
+    let fence = Fence { snapshot_id: client.capabilities().await?.snapshot.id, ..Fence::default() };
+    let (id, idem, parameters) = override_request(target_id, episode, answer, text);
+    client.work_override(id, idem, fence, parameters).await?;
+    Ok(format!("Answered “{label}” instead of the default"))
+}
 async fn send_terminal_key(
     client: &Client,
     terminal_id: &str,
@@ -1566,11 +1605,11 @@ mod tests {
     }
 
     /// st in this process, running a release whose one step waits on person/avery's approval.
-    struct WaitingGate {
+    pub(crate) struct WaitingGate {
         _root: tempfile::TempDir,
         store: Arc<fractal_daemon::store::Store>,
         reconciler: fractal_daemon::reconcile::Reconciler<NoRuntime>,
-        client: Client,
+        pub(crate) client: Client,
         step: String,
         server: tokio::task::JoinHandle<()>,
         state: fractal_daemon::api::AppState,
@@ -1578,7 +1617,7 @@ mod tests {
     }
 
     impl WaitingGate {
-        async fn start() -> Self {
+        pub(crate) async fn start() -> Self {
             let gate = Self::serve(
                 r#"version 2
 mission "release" state="ready" {
@@ -1735,7 +1774,7 @@ mission "release" state="ready" {
         }
 
         /// The person's card for the gate, as Fractal TUI lists it.
-        async fn card(&self) -> Option<fractal_client::Attention> {
+        pub(crate) async fn card(&self) -> Option<fractal_client::Attention> {
             self.client
                 .attention_list(None, Some(50), false)
                 .await

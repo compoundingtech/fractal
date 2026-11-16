@@ -102,10 +102,10 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
     },
     "NoticeClaimId": {"type": "string", "x-st-brand": "NoticeClaimId", "pattern": "^[0-9a-f]{64}$"},
-    "NoticeId": {"type": "string", "x-st-brand": "NoticeId", "pattern": "^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "NoticeSourceId": {"type": "string", "x-st-brand": "NoticeSourceId", "pattern": "^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "NoticeActor": {"type": "string", "x-st-ref": ["agent", "person"], "pattern": "^(?:agent|person)/[^\\s]+$"},
-    "NoticeRuntime": {"type": "string", "x-st-ref": "agent", "pattern": "^(?:agent)/[^\\s]+$"},
+    "NoticeId": {"type": "string", "x-st-brand": "NoticeId", "pattern": "^custom/attention/snapshot/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$"},
+    "NoticeSourceId": {"type": "string", "x-st-brand": "NoticeSourceId", "pattern": "^custom/attention/source/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$"},
+    "NoticeActor": {"type": "string", "x-st-brand": "NoticeActor", "pattern": "^(?:(?:agent|person)/[^\\s]+|daemon/runtime)$"},
+    "NoticeAgent": {"type": "string", "x-st-ref": "agent", "pattern": "^(?:agent)/[^\\s]+$"},
     "NoticePerson": {"type": "string", "x-st-ref": "person", "pattern": "^(?:person)/[^\\s]+$"},
     "NoticeLink": {
       "type": "object", "additionalProperties": false, "required": ["label", "url"],
@@ -115,14 +115,46 @@
       }
     },
     "NoticeSource": {
-      "description": "Execution-context provenance; repository and cwd are informational, never authenticated sender evidence.",
+      "description": "Execution-context provenance and optional native daemon digest details; repository and cwd are informational, never authenticated sender evidence.",
       "type": "object", "additionalProperties": false, "required": ["host"],
       "properties": {
         "host": {"type": "string", "x-st-ref": "host", "pattern": "^(?:host)/[^\\s]+$"},
-        "agent": {"$ref": "#/$defs/NoticeRuntime"},
+        "digest": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/NoticeDigestRow"}},
+        "digest_document": {"description": "Immutable native document root of a reverse-linked JSONL fragment chain. Each document contains data and an optional previous exact document reference. Concatenate data in chain creation order, then decode one lossless digest row per line.", "type": "string", "pattern": "^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}$"},
+        "digest_count": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)$"},
+        "covered_through": {"$ref": "#/$defs/NoticeTimestamp"},
+        "owner_claim": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "agent": {"$ref": "#/$defs/NoticeAgent"},
         "repo": {"type": "string"},
         "pty": {"type": "string", "x-st-ref": "pty", "pattern": "^(?:pty)/[^\\s]+$"},
         "cwd": {"type": "string"}
+      }
+    },
+    "NoticeDigestOverride": {
+      "type": "object", "additionalProperties": false, "required": ["target_id", "episode"],
+      "properties": {"target_id": {"type": "string", "minLength": 1}, "episode": {"type": "string", "minLength": 1}}
+    },
+    "NoticeDigestActions": {
+      "type": "object", "additionalProperties": false, "required": ["work.override"],
+      "properties": {"work.override": {"$ref": "#/$defs/NoticeDigestOverride"}}
+    },
+    "NoticeDigestDefaultAnswer": {
+      "type": "object", "additionalProperties": false, "required": ["id", "label"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}}
+    },
+    "NoticeDigestRow": {
+      "description": "An automatically resolved ask. Override parameters are omitted after the seven-day override window; absent optional fields are never null.",
+      "type": "object", "additionalProperties": false,
+      "required": ["title", "requester_id", "resolved_at", "target_id", "episode", "resolution_id"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "requester_id": {"type": "string", "minLength": 1},
+        "default_answer": {"$ref": "#/$defs/NoticeDigestDefaultAnswer"},
+        "resolved_at": {"$ref": "#/$defs/NoticeTimestamp"},
+        "target_id": {"type": "string", "minLength": 1},
+        "episode": {"type": "string", "minLength": 1},
+        "resolution_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "action_parameters": {"$ref": "#/$defs/NoticeDigestActions"}
       }
     },
     "NoticeCreated": {
@@ -203,7 +235,7 @@
         "source_id": {"$ref": "#/$defs/NoticeSourceId"},
         "creation_claims": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/NoticeClaimId"}},
         "basis_claim": {"$ref": "#/$defs/NoticeClaimId"}, "source_revision": {"$ref": "#/$defs/Revision"},
-        "producer": {"$ref": "#/$defs/NoticeActor"}, "runtime": {"$ref": "#/$defs/NoticeRuntime"},
+        "producer": {"$ref": "#/$defs/NoticeActor"}, "runtime": {"type": "string", "x-st-ref": "host", "pattern": "^(?:host)/[^\\s]+$"},
         "input": {"$ref": "#/$defs/NoticeCreated"}, "policy": {"$ref": "#/$defs/NoticePolicy"},
         "delivery": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/NoticeDelivery"}},
         "integrity": {"$ref": "#/$defs/NoticeIntegrity"},
@@ -429,6 +461,166 @@
     "DirectiveNotes": {
       "type": "object", "additionalProperties": false, "required": ["notes"],
       "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/DirectiveNote"}}}
+    },
+    "AutoResolvedAsk": {
+      "type": "object", "additionalProperties": false,
+      "required": ["resolution_id", "title", "requester_id", "resolved_at", "target_id", "episode"],
+      "properties": {
+        "resolution_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "title": {"type": "string"},
+        "requester_id": {"$ref": "#/$defs/Id"},
+        "resolved_at": {"$ref": "#/$defs/NoticeTimestamp"},
+        "target_id": {"$ref": "#/$defs/Id"},
+        "episode": {"type": "string"},
+        "default_answer": {"$ref": "#/$defs/NoticeDigestDefaultAnswer"},
+        "request": {"$ref": "#/$defs/StructuredRequest"},
+        "action_parameters": {"$ref": "#/$defs/NoticeDigestActions"}
+      }
+    },
+    "AutoResolvedAsks": {
+      "type": "object", "additionalProperties": false, "required": ["items", "complete"],
+      "properties": {
+        "items": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/AutoResolvedAsk"}},
+        "complete": {"type": "boolean"}
+      }
+    },
+    "DirectiveNoteSet": {
+      "description": "Set or clear the session person's own directive note. `text` is required; null clears the note. The person always comes from the session.",
+      "type": "object", "additionalProperties": false, "required": ["text"],
+      "properties": {
+        "text": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 4096, "description": "At most 4096 UTF-8 bytes; whitespace-only text is refused."}, {"type": "null"}]},
+        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "DirectiveNoteSetResult": {
+      "description": "The person's current note after the write; null once cleared or already expired.",
+      "type": "object", "additionalProperties": false, "required": ["note"],
+      "properties": {"note": {"oneOf": [{"$ref": "#/$defs/DirectiveNote"}, {"type": "null"}]}}
+    },
+    "AvailabilityStatus": {"anyOf": [{"enum": ["available", "away"]}, {"type": "string"}], "description": "A person's effective status. Readers retain future values as Unknown."},
+    "AvailabilityStatusSource": {"anyOf": [{"enum": ["override", "presence", "unreported"]}, {"type": "string"}], "description": "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown."},
+    "AvailabilityPresence": {"anyOf": [{"enum": ["present", "idle", "locked", "unreported"]}, {"type": "string"}], "description": "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown."},
+    "AvailabilityInterruptions": {"anyOf": [{"enum": ["all", "urgent", "none"]}, {"type": "string"}], "description": "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown."},
+    "AvailabilityDeadlineClock": {"anyOf": [{"enum": ["run", "hold-routine", "hold-all"]}, {"type": "string"}], "description": "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown."},
+    "PersonAvailability": {
+      "description": "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person.",
+      "type": "object", "additionalProperties": false,
+      "required": ["person", "status", "status_source", "status_until", "presence", "presence_observed_at", "interruptions", "interruptions_until", "deadline_clock", "deadline_clock_since", "deadline_clock_until"],
+      "properties": {
+        "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "status": {"$ref": "#/$defs/AvailabilityStatus", "description": "The override while one is in force; otherwise `available` while some device is present or no device has reported, `away` while devices report but none is present."},
+        "status_source": {"$ref": "#/$defs/AvailabilityStatusSource"},
+        "status_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "presence": {"oneOf": [{"$ref": "#/$defs/AvailabilityPresence"}, {"type": "null"}]},
+        "presence_observed_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "interruptions": {"$ref": "#/$defs/AvailabilityInterruptions"},
+        "interruptions_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "deadline_clock": {"$ref": "#/$defs/AvailabilityDeadlineClock"},
+        "deadline_clock_since": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "deadline_clock_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "PersonAvailabilities": {
+      "type": "object", "additionalProperties": false, "required": ["people"],
+      "properties": {"people": {"type": "array", "items": {"$ref": "#/$defs/PersonAvailability"}}}
+    },
+    "AvailabilityStatusChange": {
+      "description": "`value` null clears the override, so presence derives status again; a clear takes no `until`.",
+      "type": "object", "additionalProperties": false, "required": ["value"],
+      "properties": {
+        "value": {"oneOf": [{"enum": ["available", "away"]}, {"type": "null"}]},
+        "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "AvailabilityInterruptionsChange": {
+      "type": "object", "additionalProperties": false, "required": ["value"],
+      "properties": {
+        "value": {"enum": ["all", "urgent", "none"]},
+        "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "AvailabilityDeadlineClockChange": {
+      "type": "object", "additionalProperties": false, "required": ["value"],
+      "properties": {
+        "value": {"enum": ["run", "hold-routine", "hold-all"]},
+        "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "AvailabilitySet": {
+      "description": "Changes to the session person's own availability; the daemon refuses a set that names no axis. An absent axis is unchanged; an `until` must be in the future. The person always comes from the session.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "status": {"$ref": "#/$defs/AvailabilityStatusChange"},
+        "interruptions": {"$ref": "#/$defs/AvailabilityInterruptionsChange"},
+        "deadline_clock": {"$ref": "#/$defs/AvailabilityDeadlineClockChange"}
+      }
+    },
+    "PresenceReport": {
+      "description": "One device's raw state for the session person, sent on every state change. The device applies no thresholds: the daemon derives presence the same way for every device (an `active` device is present until 10 minutes after `last_input_at`, then idle; `inactive` is idle; `locked` and `sleeping` are locked) and counts a device's newest state for 24 hours. The daemon assigns the source: the pairing grant, or this member for local callers. `observed_at` must be within the last 15 minutes and at most 2 minutes ahead; `last_input_at`, when sent, no later than `observed_at`.",
+      "type": "object", "additionalProperties": false, "required": ["state", "observed_at"],
+      "properties": {
+        "state": {"enum": ["active", "inactive", "locked", "sleeping"], "description": "`active`: unlocked and in front of the person, with the last input deciding idleness; `inactive`: running but not in front of the person (backgrounded, hidden, display asleep); `locked`; `sleeping`."},
+        "last_input_at": {"$ref": "#/$defs/Timestamp", "description": "When the person last gave this device input. Absent, an `active` report counts from `observed_at`."},
+        "observed_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "PresenceReportResult": {
+      "description": "The session person's availability after a presence report, and when this device should report again although its state has not changed.",
+      "type": "object", "additionalProperties": false, "required": ["availability", "report_again_at"],
+      "properties": {
+        "availability": {"$ref": "#/$defs/PersonAvailability"},
+        "report_again_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}], "description": "While the device is present: the instant it turns idle unless it has newer input, so it reports then with its current `last_input_at`. Null: report on the next state change, or on the next input after an idle stretch. Reporting more often is harmless; the daemon records only transitions."}
+      }
+    },
+    "AvailabilityStatusDurations": {
+      "description": "Milliseconds spent in each status during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["available", "away"],
+      "properties": {"available": {"type": "integer", "minimum": 0}, "away": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityStatusSourceDurations": {
+      "description": "Milliseconds the status came from each source during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["override", "presence", "unreported"],
+      "properties": {"override": {"type": "integer", "minimum": 0}, "presence": {"type": "integer", "minimum": 0}, "unreported": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityPresenceDurations": {
+      "description": "Milliseconds of each derived presence during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["present", "idle", "locked", "unreported"],
+      "properties": {"present": {"type": "integer", "minimum": 0}, "idle": {"type": "integer", "minimum": 0}, "locked": {"type": "integer", "minimum": 0}, "unreported": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityInterruptionsDurations": {
+      "description": "Milliseconds of each interruptions setting during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["all", "urgent", "none"],
+      "properties": {"all": {"type": "integer", "minimum": 0}, "urgent": {"type": "integer", "minimum": 0}, "none": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityDeadlineClockDurations": {
+      "description": "Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words.",
+      "type": "object", "additionalProperties": false, "required": ["run", "hold-routine", "hold-all"],
+      "properties": {"run": {"type": "integer", "minimum": 0}, "hold-routine": {"type": "integer", "minimum": 0}, "hold-all": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityHistoryBucket": {
+      "description": "One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range.",
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "covered_ms", "status", "status_source", "presence", "interruptions", "deadline_clock"],
+      "properties": {
+        "start": {"$ref": "#/$defs/Timestamp"},
+        "covered_ms": {"type": "integer", "minimum": 1},
+        "status": {"$ref": "#/$defs/AvailabilityStatusDurations"},
+        "status_source": {"$ref": "#/$defs/AvailabilityStatusSourceDurations"},
+        "presence": {"oneOf": [{"$ref": "#/$defs/AvailabilityPresenceDurations"}, {"type": "null"}], "description": "Null for anyone but the person."},
+        "interruptions": {"$ref": "#/$defs/AvailabilityInterruptionsDurations"},
+        "deadline_clock": {"$ref": "#/$defs/AvailabilityDeadlineClockDurations"}
+      }
+    },
+    "AvailabilityHistory": {
+      "description": "A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available).",
+      "type": "object", "additionalProperties": false, "required": ["person", "from", "to", "bucket_seconds", "buckets"],
+      "properties": {
+        "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "from": {"$ref": "#/$defs/Timestamp"},
+        "to": {"$ref": "#/$defs/Timestamp"},
+        "bucket_seconds": {"type": "integer", "minimum": 1},
+        "buckets": {"type": "array", "maxItems": 2016, "items": {"$ref": "#/$defs/AvailabilityHistoryBucket"}}
+      }
     },
     "ObservationLatency": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "count", "over_target", "max_ms", "buckets"], "properties": {"target": {"enum": ["ios-open-to-live", "ios-connect", "ios-message-ack", "ios-conversation-open", "ios-terminal-open", "ios-recover"]}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "latency"}, "count": {"type": "integer", "minimum": 1, "maximum": 1000000}, "over_target": {"type": "integer", "minimum": 0, "maximum": 1000000}, "max_ms": {"type": "integer", "minimum": 0, "maximum": 3600000}, "buckets": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0, "maximum": 3670015}, {"type": "integer", "minimum": 1, "maximum": 1000000}], "minItems": 2, "maxItems": 2}}}},
     "ObservationLiveShare": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "foreground_ms", "live_ms"], "properties": {"target": {"const": "ios-live-share"}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "live-share"}, "foreground_ms": {"type": "integer", "minimum": 1, "maximum": 60000}, "live_ms": {"type": "integer", "minimum": 0, "maximum": 60000}}},
@@ -674,6 +866,7 @@
       "private-notes-indeterminate",
       "invalid-answer",
       "not-answerable",
+      "attention-dismiss-unsupported",
       "internal"
     ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
@@ -742,6 +935,11 @@
     "ReadPosition": {"description": "One person's read position in one conversation: the time of the newest prose they have seen there, on any device or host. Forward-only: hosts keep the largest value, ties by canonical claim key. `id` is `read-position/person/NAME/<conversation>`; `revision` is the winning claim.", "allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "owner", "conversation", "at"], "properties": {"kind": {"const": "read-position"}, "owner": {"$ref": "#/$defs/ArrangementPerson"}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp"}}}]},
     "ReadPositionPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "read-positions"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/ReadPosition"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
     "ReadPositionAdvanceParameters": {"type": "object", "additionalProperties": false, "required": ["owner", "conversation", "at"], "properties": {"owner": {"$ref": "#/$defs/ArrangementPerson", "description": "The session's own person."}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp", "description": "The newest prose time seen; an `at` not beyond the stored position completes without a claim."}}},
+    "AttentionControlId": {"description": "An open attention row's id: `attention/` and 32 lowercase hex digits.", "type": "string", "pattern": "^attention/[0-9a-f]{32}$"},
+    "AttentionSeenParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}}},
+    "AttentionSnoozeParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id", "until"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}], "description": "When the row comes back: a future instant, or null to bring it back now. A snooze never moves a deadline."}}},
+    "AttentionDismissParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "text": {"type": "string", "maxLength": 8000, "description": "An ask only: why, sent to the asker with the dismissal."}}},
+    "AttentionControlState": {"description": "attention.seen and attention.snooze: the row's controls after the action, whether or not it appended a claim.", "type": "object", "additionalProperties": false, "required": ["attention_id", "seen_at", "snoozed_until"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "seen_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}, "snoozed_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}}},
     "Id": { "x-st-ref": "*", "description": "Subject reference `family/rest`.", "type": "string", "pattern": "^[a-z][a-z0-9-]*/[^\\s]+$" },
     "Timestamp": { "x-st-codec": "timestamp", "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.", "examples": ["2026-10-01T10:00:00.000Z"], "type": "string", "format": "date-time" },
     "Cursor": { "x-st-brand": "Cursor", "description": "Opaque, snapshot-bound page/event cursor.", "type": "string", "minLength": 8, "maxLength": 2048 },
@@ -787,7 +985,7 @@
     },
     "PrivateNotesData": {
       "type": "object", "additionalProperties": false, "required": ["uri", "markdown", "fence"],
-      "properties": { "uri": { "$ref": "#/$defs/PrivateNotesUri" }, "markdown": { "type": "string" }, "fence": { "$ref": "#/$defs/PrivateNotesFence" } }
+      "properties": { "uri": { "$ref": "#/$defs/PrivateNotesUri" }, "markdown": { "x-st-text": "markdown-block", "type": "string" }, "fence": { "$ref": "#/$defs/PrivateNotesFence" } }
     },
     "PrivateNotesAction": {
       "type": "object", "additionalProperties": false, "required": ["id", "fence"],
@@ -992,6 +1190,12 @@
         "value": {
           "oneOf": [
             { "$ref": "#/$defs/DirectiveNotes" },
+            { "$ref": "#/$defs/AutoResolvedAsks" },
+            { "$ref": "#/$defs/PersonAvailabilities" },
+            { "$ref": "#/$defs/DirectiveNoteSetResult" },
+            { "$ref": "#/$defs/PersonAvailability" },
+            { "$ref": "#/$defs/PresenceReportResult" },
+            { "$ref": "#/$defs/AvailabilityHistory" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/PrivateNotesSubject" },
             { "$ref": "#/$defs/DocumentContent" },
@@ -1174,6 +1378,7 @@
             "source_id": { "$ref": "#/$defs/Id" },
             "person_id": { "$ref": "#/$defs/Id" },
             "alert": { "type": "boolean", "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." },
+            "urgent": { "type": "boolean", "description": "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
@@ -1183,7 +1388,7 @@
             "preview_token": { "type": ["string", "null"] },
             "preview": { "oneOf": [{ "$ref": "#/$defs/LaunchPreview" }, { "type": "null" }] },
             "what": { "type": "string" },
-            "because": { "type": "string" },
+            "because": { "x-st-text": "markdown-inline", "type": "string" },
             "fix": { "type": "object" },
             "review_mode": { "enum": ["approve", "feedback"] },
             "mission_id": { "$ref": "#/$defs/Id" },
@@ -1192,13 +1397,15 @@
             "blocked": { "$ref": "#/$defs/AttentionBlocked", "description": "The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask." },
             "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons." },
             "title": { "type": "string" },
-            "detail": { "type": "string" },
+            "detail": { "x-st-text": "markdown-block", "type": "string" },
             "priority": { "enum": ["critical", "high", "normal", "low"] },
             "state": { "enum": ["open", "resolved"] },
             "requested_at": { "$ref": "#/$defs/Timestamp" },
             "deadline_at": { "$ref": "#/$defs/Timestamp", "description": "When a person-step ask resolves by itself if nobody answers it. Absent on an update and on daemons that predate deadlines." },
             "default_answer": { "$ref": "#/$defs/AskDefaultAnswer" },
             "targets": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
+            "seen_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls." },
+            "snoozed_until": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls." },
             "target_states": { "type": "array", "items": { "$ref": "#/$defs/AttentionTargetState" } },
             "actions": { "type": "array", "items": { "type": "string", "enum": [
               "custom.reply",
@@ -1224,7 +1431,7 @@
       "properties": {
         "step_run_id": { "$ref": "#/$defs/Id", "description": "The step run that asked and waits for the answer." },
         "step": { "type": "string", "description": "That step's name within its mission." },
-        "goal": { "type": "string", "description": "What that step is for." },
+        "goal": { "x-st-text": "markdown-inline", "type": "string", "description": "What that step is for." },
         "attempt": { "type": "integer", "minimum": 0 }
       }
     },
@@ -1312,7 +1519,7 @@
             "from": { "$ref": "#/$defs/Id" },
             "to": { "$ref": "#/$defs/Id" },
             "title": { "type": ["string", "null"] },
-            "content": { "type": "string" },
+            "content": { "x-st-text": "markdown-block", "type": "string" },
             "state": { "enum": ["sent", "delivered", "read", "closed", "expired"] },
             "sent_at": { "$ref": "#/$defs/Timestamp" },
             "session_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
@@ -1336,7 +1543,7 @@
       "properties": {
         "message": { "type": "string" },
         "bytes": { "type": "integer", "minimum": 0 },
-        "text": { "type": "string" },
+        "text": { "x-st-text": "markdown-block", "type": "string" },
         "complete": { "type": "boolean", "description": "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }
       }
     },
@@ -1404,12 +1611,12 @@
       "additionalProperties": false,
       "required": ["goal", "steps", "agents", "gates", "diagnostics_count", "request_excerpt"],
       "properties": {
-        "goal": { "type": "string" },
+        "goal": { "x-st-text": "markdown-inline", "type": "string" },
         "steps": { "type": "array", "items": { "type": "object", "required": ["path", "title", "depends"], "properties": { "path": { "type": "string" }, "title": { "type": "string" }, "assignee": { "type": ["string", "null"] }, "depends": { "type": "array", "items": { "type": "string" } } } } },
         "agents": { "type": "array", "items": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" }, "harness": {}, "host": { "type": ["string", "null"] }, "worktree": { "type": ["string", "null"] } } } },
         "gates": { "type": "object", "required": ["human", "automated"], "properties": { "human": { "type": "integer" }, "automated": { "type": "integer" } } },
         "diagnostics_count": { "type": "integer" },
-        "request_excerpt": { "type": "string" }
+        "request_excerpt": { "x-st-text": "markdown-block", "type": "string" }
       }
     },
     "LaunchVariant": {
@@ -1475,8 +1682,8 @@
             }
           }
         },
-        "goals": { "type": "array", "items": { "type": "string" } },
-        "constraints": { "type": "array", "items": { "type": "string" } },
+        "goals": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
+        "constraints": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
         "gates": { "type": "array", "items": { "type": "object" } },
         "resources": { "type": "array", "items": { "type": "object" } },
         "decisions": { "type": "array", "items": { "$ref": "#/$defs/LaunchDecision" } },
@@ -1494,8 +1701,8 @@
         "kind": { "type": "string" },
         "label": { "type": "string" },
         "path": { "type": "string" },
-        "goals": { "type": "array", "items": { "type": "string" } },
-        "constraints": { "type": "array", "items": { "type": "string" } },
+        "goals": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
+        "constraints": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
         "assignment": {},
         "timeout_ms": { "type": ["integer", "null"] },
         "retry": { "type": "object" },
@@ -1546,13 +1753,13 @@
           "properties": {
             "kind": { "const": "launch-decision" },
             "launch_id": { "$ref": "#/$defs/Id" },
-            "question": { "type": "string" },
+            "question": { "x-st-text": "markdown-block", "type": "string" },
             "state": { "enum": ["open", "answered", "withdrawn"] },
             "requested_at": { "$ref": "#/$defs/Timestamp" },
             "decision_type": { "enum": ["boolean", "single-choice", "multiple-choice", "rank"] },
             "options": { "type": "array", "items": { "$ref": "#/$defs/DecisionOption" }, "maxItems": 20 },
             "response": { "oneOf": [{ "$ref": "#/$defs/DecisionResponse" }, { "type": "null" }] },
-            "explanation": { "type": ["string", "null"] }
+            "explanation": { "x-st-text": "markdown-block", "type": ["string", "null"] }
           }
         }
       ]
@@ -1653,7 +1860,7 @@
         "current": { "type": "string" },
         "window": { "type": "string" },
         "remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100, "description": "What is left of the error budget or allowance; null when nothing was measured." },
-        "status": { "enum": ["met", "missed", "no-data", "stale"] },
+        "status": { "anyOf": [{ "enum": ["met", "missed", "no-data", "stale"] }, { "type": "string" }], "description": "met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown." },
         "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
         "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
         "tone": { "type": "string", "description": "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." },
@@ -1716,6 +1923,7 @@
         "budget_microusd": { "type": "integer", "minimum": 0 },
         "used_microusd": { "type": "integer", "minimum": 0 },
         "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "period_start_ms": { "type": "integer", "minimum": 0 }
       }
     },
@@ -1744,6 +1952,7 @@
         "high_microusd": { "type": "integer", "minimum": 0 },
         "usage_cost_microusd": { "type": "integer", "minimum": 0 },
         "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "low_percent": { "type": ["number", "null"], "minimum": 0 },
         "high_percent": { "type": ["number", "null"], "minimum": 0 }
       }
@@ -1801,6 +2010,9 @@
         "agent": { "$ref": "#/$defs/Id" },
         "mission_run": { "$ref": "#/$defs/Id" },
         "step": { "$ref": "#/$defs/Id" },
+        "execution_id": { "type": "string", "description": "Immutable work.claimed accounting key, when known." },
+        "invocation_id": { "type": "string", "description": "Exact durable launch/turn receipt identity. Absent means unknown." },
+        "attempt": { "type": "integer", "minimum": 0 },
         "model": { "type": "string" },
         "account": { "type": "string" },
         "account_ref": { "type": "string", "description": "The declared account this row's spend is read against, when one claims its label. Absent on older servers." },
@@ -1816,7 +2028,8 @@
         "cached_tokens": { "type": "integer", "minimum": 0 },
         "cost_microusd": { "type": "integer", "minimum": 0 },
         "reported_cost_microusd": { "type": "integer", "minimum": 0 },
-        "unpriced_tokens": { "type": "integer", "minimum": 0 }
+        "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 }
       }
     },
     "UsagePricingRates": {
@@ -1869,6 +2082,7 @@
         "unpriced_tokens"
       ],
       "properties": {
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "price_table_id": {
           "type": "string"
         },
@@ -2001,7 +2215,7 @@
           ]
         },
         "outcome": { "oneOf": [{ "$ref": "#/$defs/MissionRunOutcome" }, { "type": "null" }], "description": "The outcome a person or an authorized agent set after the run finished." },
-        "last_progress": { "type": ["string", "null"] },
+        "last_progress": { "x-st-text": "markdown-inline", "type": ["string", "null"] },
         "blocker": { "type": ["object", "null"] },
         "after": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
         "deadline": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
@@ -2058,7 +2272,7 @@
         "card": { "oneOf": [{ "enum": ["what-you-can-do", "nothing-to-do"] }, { "type": "null" }] },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/MissionActionOffer" } },
         "progress": { "type": "object", "required": ["done", "total"], "properties": { "done": { "type": "integer", "minimum": 0 }, "total": { "type": "integer", "minimum": 0 } } },
-        "last_progress": { "type": ["string", "null"] },
+        "last_progress": { "x-st-text": "markdown-inline", "type": ["string", "null"] },
         "settled_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When it completed, failed or was cancelled." }
       }
     },
@@ -2153,12 +2367,12 @@
         "agentless": { "type": "boolean" },
         "keep_open": { "type": "boolean", "description": "st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons." },
         "since": { "$ref": "#/$defs/Timestamp" },
-        "last_progress": { "type": ["string", "null"] },
+        "last_progress": { "x-st-text": "markdown-inline", "type": ["string", "null"] },
         "progress_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." },
         "blocked_reason": { "type": ["string", "null"] },
         "blockers": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
-        "goals": { "type": "array", "items": { "type": "string" } },
-        "constraints": { "type": "array", "items": { "type": "string" } },
+        "goals": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
+        "constraints": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
         "loop_round": { "type": ["integer", "null"], "minimum": 0, "description": "Current round of this step's loop, enriched on mission detail reads." },
         "loop_max_rounds": { "type": ["integer", "null"], "minimum": 0 },
         "loop_reason": { "type": ["string", "null"] },
@@ -2169,10 +2383,49 @@
         "claim_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
         "nudged_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When st last nudged this held step's holder for idling with nothing set to wake it." },
         "attempts": { "type": "array", "items": { "$ref": "#/$defs/MissionStepAttempt" }, "description": "Mission detail only, on the runs it enriches (open runs, the latest finished run and a `?run=` run): each attempt of this step, oldest first, folded from its lifecycle claims. Absent elsewhere and on older daemons, which is not proof of one attempt." },
+        "executions": { "type": "array", "items": { "$ref": "#/$defs/StepExecution" }, "description": "Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons." },
         "waits": { "type": "array", "items": { "$ref": "#/$defs/MissionStepWait" }, "description": "Mission detail only, like attempts: the intervals this step waited, by start." },
         "transitions": { "type": "array", "items": { "$ref": "#/$defs/MissionStepTransition" }, "description": "Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first." },
         "history_complete": { "type": "boolean", "description": "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." },
         "eta": { "$ref": "#/$defs/MissionStepEta" }
+      }
+    },
+    "StepExecution": {
+      "type": "object",
+      "required": ["id", "step_subject", "attempt", "agent", "incarnation_id", "declared_model", "observed_models", "fallback", "started_at_unix_ms", "ended_at_unix_ms", "duration_ms", "status", "trace_id", "exit_evidence", "usage"],
+      "properties": {
+        "invocation_id": { "type": "string", "description": "Exact durable launch/turn receipt identity. Absent means unknown." },
+        "id": { "type": "string", "description": "Durable work.claimed claim ID; invocation identity, not the logical attempt." },
+        "step_subject": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "agent": { "type": "string" },
+        "incarnation_id": { "type": ["string", "null"] },
+        "declared_model": { "type": ["string", "null"], "description": "Declaration captured at claim time, never the seat's current declaration." },
+        "observed_models": { "type": "array", "items": { "type": "string" } },
+        "fallback": { "type": ["boolean", "null"], "description": "Explicit fallback evidence; model mismatch alone does not establish fallback." },
+        "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "ended_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "status": { "type": ["string", "null"] },
+        "trace_id": { "type": ["string", "null"], "description": "Actual trace correlation when recorded; unknown without tracing evidence." },
+        "exit_evidence": { "type": ["string", "null"], "description": "Runtime observation claim ID retaining exit evidence for this incarnation." },
+        "usage": { "oneOf": [{ "$ref": "#/$defs/StepExecutionUsage" }, { "type": "null" }] }
+      }
+    },
+    "StepExecutionUsage": {
+      "type": "object",
+      "required": ["input_tokens", "output_tokens", "cache_write_tokens", "cache_write_1h_tokens", "cached_tokens", "total_tokens", "cost_microusd", "reported_cost_microusd", "unpriced_tokens"],
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "cache_write_tokens": { "type": "integer", "minimum": 0 },
+        "cache_write_1h_tokens": { "type": "integer", "minimum": 0 },
+        "cached_tokens": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 },
+        "cost_microusd": { "type": "integer", "minimum": 0 },
+        "reported_cost_microusd": { "type": "integer", "minimum": 0 },
+        "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 }
       }
     },
     "MissionStepProgram": {
@@ -2321,7 +2574,7 @@
           "type": "object",
           "required": ["since"],
           "properties": {
-            "goal": { "type": ["string", "null"] },
+            "goal": { "x-st-text": "markdown-inline", "type": ["string", "null"] },
             "since": { "$ref": "#/$defs/Timestamp", "description": "When it took the step." },
             "holder_down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] }
           }
@@ -2359,7 +2612,7 @@
       "properties": {
         "from_revision": { "type": "string", "description": "The revision the run runs now." },
         "to_revision": { "type": "string", "description": "The candidate revision." },
-        "reason": { "type": "string" },
+        "reason": { "x-st-text": "markdown-inline", "type": "string" },
         "lines": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/AttentionRevisionLine" }, "description": "The mission's own changed fields, then by step path the steps added, removed and changed." },
         "truncated": { "type": "boolean", "description": "Whether there were more than 200 lines." }
       }
@@ -2378,7 +2631,7 @@
       "required": ["variant", "goals", "steps", "agents", "asks_you"],
       "properties": {
         "variant": { "type": "string", "description": "The variant previewed: the launch's newest." },
-        "goals": { "type": "array", "items": { "type": "string" } },
+        "goals": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
         "steps": { "type": "array", "items": { "$ref": "#/$defs/AttentionLaunchStep" }, "description": "In display order, without finally steps." },
         "agents": { "type": "array", "items": { "$ref": "#/$defs/AttentionLaunchAgent" }, "description": "The agents its steps name, each once." },
         "asks_you": { "type": "integer", "minimum": 0, "description": "How many steps stop for a person." }
@@ -2475,7 +2728,7 @@
         "mission_run_id": { "$ref": "#/$defs/MissionRunId" },
         "path": { "type": "string" },
         "title": { "type": ["string", "null"] },
-        "goal": { "type": ["string", "null"] },
+        "goal": { "x-st-text": "markdown-inline", "type": ["string", "null"] },
         "state": { "$ref": "#/$defs/WorkState" },
         "since": { "$ref": "#/$defs/Timestamp" },
         "holder_down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Set on a seat's current work when the seat is `down`: the step is claimed by a holder with no session, and its progress and activity predate that." }
@@ -2508,7 +2761,7 @@
             "path": { "type": "string" },
             "title": { "type": ["string", "null"] },
             "assigned_to": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
-            "last_progress": { "type": ["string", "null"] },
+            "last_progress": { "x-st-text": "markdown-inline", "type": ["string", "null"] },
             "progress_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." },
             "state": { "$ref": "#/$defs/WorkState" },
             "attempt": { "type": "integer", "minimum": 0 },
@@ -2525,8 +2778,8 @@
             "timeout_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "duration-ms" },
             "blocked_reason": { "type": ["string", "null"] },
             "blockers": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
-            "goals": { "type": "array", "items": { "type": "string" } },
-            "constraints": { "type": "array", "items": { "type": "string" } }
+            "goals": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } },
+            "constraints": { "type": "array", "items": { "x-st-text": "markdown-inline", "type": "string" } }
             ,"person_answers": { "type": "array", "items": { "$ref": "#/$defs/PersonAnswerRecord" }, "description": "Responses to the asks this attempt made, or a person ask's own response." }
             ,"usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] }
           }
@@ -3424,14 +3677,14 @@
     "TimelineViewSearch": {"type": "object", "additionalProperties": false, "required": ["type", "tool", "engine"], "properties": {"type": {"const": "search"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "engine": {"enum": ["grep", "glob", "web"]}, "pattern": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "case": {"type": "boolean"}, "hidden": {"type": "boolean"}, "gitignore": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 0}, "skip": {"type": "integer", "minimum": 0}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}, "match_count": {"type": "integer", "minimum": 0}, "file_count": {"type": "integer", "minimum": 0}, "truncated": {"type": "boolean"}, "file_limit_reached": {"type": "integer", "minimum": 0}, "per_file_limit_reached": {"type": "integer", "minimum": 0}, "warning": {"type": "string"}}},
     "TimelineViewTodo": {"type": "object", "additionalProperties": false, "required": ["type", "tool"], "description": "tool_call fields: op, items, phase, task; tool_output fields: phases.", "properties": {"type": {"const": "todo"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "op": {"type": "string"}, "items": {"type": "array", "items": {"$ref": "#/$defs/TimelineTodoItem"}}, "phase": {"type": "string"}, "task": {"type": "string"}, "phases": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name", "items"], "properties": {"name": {"type": "string"}, "items": {"type": "array", "items": {"$ref": "#/$defs/TimelineTodoItem"}}}}}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}}},
     "TimelineViewAsk": {"type": "object", "additionalProperties": false, "required": ["type", "tool"], "description": "tool_call fields: questions; tool_output fields: answers.", "properties": {"type": {"const": "ask"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "questions": {"type": "array", "items": {"$ref": "#/$defs/TimelineAskQuestion"}}, "answers": {"type": "array", "items": {"$ref": "#/$defs/TimelineAskAnswer"}}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}}},
-    "TimelineViewTask": {"type": "object", "additionalProperties": false, "required": ["type", "tool"], "description": "tool_call fields: context, tasks; tool_output fields: async, total_ms, agents.", "properties": {"type": {"const": "task"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "context": {"type": "string"}, "tasks": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["task"], "properties": {"name": {"type": "string"}, "agent": {"type": "string"}, "task": {"type": "string"}}}}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}, "async": {"type": "boolean"}, "total_ms": {"type": "integer", "minimum": 0}, "agents": {"type": "array", "items": {"$ref": "#/$defs/SubagentSummary"}}}},
-    "TimelineViewHub": {"type": "object", "additionalProperties": false, "required": ["type", "tool", "op"], "description": "tool_call fields: op, name, target, message, timeout_s; tool_output fields: timed_out, jobs, state.", "properties": {"type": {"const": "hub"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "op": {"type": "string"}, "name": {"type": "string"}, "target": {"type": "string"}, "message": {"type": "string"}, "timeout_s": {"type": "integer", "minimum": 0}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}, "timed_out": {"type": "boolean"}, "jobs": {"type": "array", "items": {"$ref": "#/$defs/JobSummary"}}, "state": {"type": "string"}}},
+    "TimelineViewTask": {"type": "object", "additionalProperties": false, "required": ["type", "tool"], "description": "tool_call fields: context, tasks; tool_output fields: async, total_ms, agents.", "properties": {"type": {"const": "task"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "context": { "x-st-text": "markdown-block","type": "string"}, "tasks": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["task"], "properties": {"name": {"type": "string"}, "agent": {"type": "string"}, "task": { "x-st-text": "markdown-block","type": "string"}}}}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}, "async": {"type": "boolean"}, "total_ms": {"type": "integer", "minimum": 0}, "agents": {"type": "array", "items": {"$ref": "#/$defs/SubagentSummary"}}}},
+    "TimelineViewHub": {"type": "object", "additionalProperties": false, "required": ["type", "tool", "op"], "description": "tool_call fields: op, name, target, message, timeout_s; tool_output fields: timed_out, jobs, state.", "properties": {"type": {"const": "hub"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "op": {"type": "string"}, "name": {"type": "string"}, "target": {"type": "string"}, "message": { "x-st-text": "markdown-block","type": "string"}, "timeout_s": {"type": "integer", "minimum": 0}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}, "timed_out": {"type": "boolean"}, "jobs": {"type": "array", "items": {"$ref": "#/$defs/JobSummary"}}, "state": {"type": "string"}}},
     "TimelineViewEval": {"type": "object", "additionalProperties": false, "required": ["type", "tool", "language", "code_bytes"], "properties": {"type": {"const": "eval"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "language": {"type": "string"}, "title": {"type": "string"}, "code_bytes": {"type": "integer", "minimum": 0}, "code": {"type": "string"}, "timeout_s": {"type": "integer", "minimum": 0}, "reset": {"type": "boolean"}}},
     "TimelineViewGeneric": {"type": "object", "additionalProperties": false, "required": ["type", "tool"], "description": "Any other tool: tool_call field name; tool_output fields is_error, wall_ms.", "properties": {"type": {"const": "generic"}, "tool": {"type": "string"}, "intent": {"type": "string"}, "name": {"type": "string"}, "call_id": {"type": "string"}, "is_error": {"type": "boolean"}, "wall_ms": {"type": "integer", "minimum": 0}}},
-    "TimelineViewIrc": {"type": "object", "additionalProperties": false, "required": ["type", "from", "message", "message_id"], "description": "Block kind `irc` from a custom_message irc:incoming record.", "properties": {"type": {"const": "irc"}, "from": {"type": "string"}, "message": {"type": "string"}, "reply_to": {"type": "string"}, "message_id": {"type": "string"}}},
+    "TimelineViewIrc": {"type": "object", "additionalProperties": false, "required": ["type", "from", "message", "message_id"], "description": "Block kind `irc` from a custom_message irc:incoming record.", "properties": {"type": {"const": "irc"}, "from": {"type": "string"}, "message": { "x-st-text": "markdown-block","type": "string"}, "reply_to": {"type": "string"}, "message_id": {"type": "string"}}},
     "TimelineViewJob": {"type": "object", "additionalProperties": false, "required": ["type", "jobs"], "description": "Block kind `job` from launch-completion (details.jobs) and async-result records.", "properties": {"type": {"const": "job"}, "jobs": {"type": "array", "items": {"$ref": "#/$defs/JobSummary"}}}},
     "TimelineViewSkill": {"type": "object", "additionalProperties": false, "required": ["type", "name"], "properties": {"type": {"const": "skill"}, "name": {"type": "string"}, "path": {"type": "string"}, "args": {"description": "Native skill arguments, any JSON"}}},
-    "TimelineViewCompaction": {"type": "object", "additionalProperties": false, "required": ["type"], "description": "On a status block; summary is bounded with an owner continuation.", "properties": {"type": {"const": "compaction"}, "method": {"type": "string"}, "tokens_before": {"type": "integer", "minimum": 0}, "tokens_after": {"type": "integer", "minimum": 0}, "short_summary": {"type": "string"}, "summary": {"type": "string"}}},
+    "TimelineViewCompaction": {"type": "object", "additionalProperties": false, "required": ["type"], "description": "On a status block; summary is bounded with an owner continuation.", "properties": {"type": {"const": "compaction"}, "method": {"type": "string"}, "tokens_before": {"type": "integer", "minimum": 0}, "tokens_after": {"type": "integer", "minimum": 0}, "short_summary": { "x-st-text": "markdown-inline","type": "string"}, "summary": { "x-st-text": "markdown-block","type": "string"}}},
     "TimelineViewAssistantError": {
       "type": "object", "additionalProperties": false,
       "required": ["type", "status", "presentation", "is_error", "label", "message"],
@@ -3470,9 +3723,9 @@
     "TimelineViewSessionExit": {"type": "object", "additionalProperties": false, "required": ["type", "kind", "reason"], "properties": {"type": {"const": "session_exit"}, "kind": {"type": "string"}, "reason": {"type": "string"}}},
     "TimelineViewToolStart": {"type": "object", "additionalProperties": false, "required": ["type", "call_id", "tool", "started_at"], "description": "On an internal-visibility `status` block; renderers attach it to the call row and do not draw it alone.", "properties": {"type": {"const": "tool_start"}, "call_id": {"type": "string"}, "tool": {"type": "string"}, "started_at": {"$ref": "#/$defs/Timestamp"}}},
     "TimelineTodoItem": {"type": "object", "additionalProperties": false, "required": ["content", "status"], "properties": {"content": {"type": "string"}, "status": {"type": "string"}}},
-    "TimelineAskQuestion": {"type": "object", "additionalProperties": false, "required": ["id", "question", "options", "multi"], "properties": {"id": {"type": "string"}, "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["label"], "properties": {"label": {"type": "string"}, "description": {"type": "string"}}}}, "multi": {"type": "boolean"}, "recommended": {"type": "integer", "minimum": 0}}},
+    "TimelineAskQuestion": {"type": "object", "additionalProperties": false, "required": ["id", "question", "options", "multi"], "properties": {"id": {"type": "string"}, "question": { "x-st-text": "markdown-block","type": "string"}, "options": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["label"], "properties": {"label": {"type": "string"}, "description": {"type": "string"}}}}, "multi": {"type": "boolean"}, "recommended": {"type": "integer", "minimum": 0}}},
     "TimelineAskAnswer": {"type": "object", "additionalProperties": false, "required": ["question", "selected"], "properties": {"question": {"type": "string"}, "selected": {"type": "array", "items": {"type": "string"}}, "custom": {"type": "string"}, "note": {"type": "string"}}},
-    "SubagentSummary": {"type": "object", "additionalProperties": false, "required": ["id", "status"], "description": "One subagent of a task tool output. name is the OMP name (id when no separate name exists), agent is the type, task is the full assignment. conversation.session_id opens the readable child transcript.", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "agent": {"type": "string"}, "status": {"type": "string"}, "task": {"type": "string"}, "duration_ms": {"type": "integer", "minimum": 0}, "tokens": {"type": "integer", "minimum": 0}, "cost_usd": {"type": "number", "minimum": 0}, "requests": {"type": "integer", "minimum": 0}, "tool_count": {"type": "integer", "minimum": 0}, "conversation": {"type": "object", "additionalProperties": false, "required": ["session_id"], "properties": {"session_id": {"$ref": "#/$defs/Id"}}}}},
+    "SubagentSummary": {"type": "object", "additionalProperties": false, "required": ["id", "status"], "description": "One subagent of a task tool output. name is the OMP name (id when no separate name exists), agent is the type, task is the full assignment. conversation.session_id opens the readable child transcript.", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "agent": {"type": "string"}, "status": {"type": "string"}, "task": { "x-st-text": "markdown-block","type": "string"}, "duration_ms": {"type": "integer", "minimum": 0}, "tokens": {"type": "integer", "minimum": 0}, "cost_usd": {"type": "number", "minimum": 0}, "requests": {"type": "integer", "minimum": 0}, "tool_count": {"type": "integer", "minimum": 0}, "conversation": {"type": "object", "additionalProperties": false, "required": ["session_id"], "properties": {"session_id": {"$ref": "#/$defs/Id"}}}}},
     "JobSummary": {"type": "object", "additionalProperties": false, "required": ["id", "state"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "type": {"type": "string"}, "state": {"type": "string"}, "exit_code": {"type": "integer"}, "started_at": {"$ref": "#/$defs/Timestamp"}, "ended_at": {"$ref": "#/$defs/Timestamp"}, "duration_ms": {"type": "integer", "minimum": 0}, "output_bytes": {"type": "integer", "minimum": 0}}},
     "ConversationHeaderField": {"type": "object", "additionalProperties": false, "required": ["value", "source", "as_of"], "description": "One conversation header field: its latest value, where it came from and when.", "properties": {"value": {"description": "Field value, any JSON; see each ConversationHeader property for its shape"}, "source": {"enum": ["register", "transcript"], "description": "register: live latest-wins value; transcript: derived from the fold window"}, "as_of": {"$ref": "#/$defs/Timestamp"}}},
     "ConversationHeader": {"type": "object", "description": "Optional conversation header on timeline pages and delta responses (conversation-blocks.v1). A field is absent when neither source has it; `working` comes only from the register and the register wins over the transcript once live.", "properties": {"model": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: model id string"}, "context": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: {tokens: integer|null, window: integer|null}"}, "cost": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: {usd: number, window: true when the fold window is truncated}"}, "todos": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: [{phase, items: [TimelineTodoItem]}]"}, "jobs": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: [JobSummary], latest state per job id, keeping non-terminal ones"}, "subagents": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: [SubagentSummary], task outputs whose status is not terminal"}, "ask": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: {call_id, questions: [TimelineAskQuestion]} or null for the last ask call without a matching result"}, "working": {"$ref": "#/$defs/ConversationHeaderField", "description": "value: boolean"}}},
@@ -3529,12 +3782,72 @@
         "device": { "type": "string", "description": "The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label." }
       }
     },
-    "TimelineContentBody": {"type": "object", "additionalProperties": false, "required": ["media_type"], "properties": {"media_type": {"type": "string"}, "message_id": {"type": "string"}, "text": {"type": "string"}, "attachment_id": {"$ref": "#/$defs/Id"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "anyOf": [{"required": ["text"]}, {"required": ["attachment_id"]}]},
+    "TimelineContentBody": {"type": "object", "additionalProperties": false, "required": ["media_type"], "properties": {"media_type": {"type": "string"}, "message_id": {"type": "string"}, "text": { "x-st-text": "markdown-block","type": "string"}, "attachment_id": {"$ref": "#/$defs/Id"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "anyOf": [{"required": ["text"]}, {"required": ["attachment_id"]}]},
     "TimelineToolCallBody": {"type": "object", "additionalProperties": false, "required": ["call_id", "name", "arguments"], "properties": {"call_id": {"type": "string"}, "name": {"type": "string"}, "arguments": {}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineToolResultBody": {"type": "object", "additionalProperties": false, "required": ["call_id", "status", "media_type", "content"], "properties": {"call_id": {"type": "string"}, "status": {"enum": ["success", "error"]}, "media_type": {"type": "string"}, "content": {}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineStatusBody": {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"$ref": "#/$defs/TimelineStatus"}, "detail": {"type": "string"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineErrorBody": {"type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "details"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "retryable": {"type": "boolean"}, "details": {"type": "object"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
-    "TimelineUsageBody": {"type": "object", "additionalProperties": false, "required": ["semantics", "driver", "attribution"], "properties": {"semantics": {"enum": ["context_occupancy", "session_cumulative", "response"]}, "driver": {"type": "string"}, "model": {"type": "string"}, "input_tokens": {"type": "integer", "minimum": 0}, "output_tokens": {"type": "integer", "minimum": 0}, "cached_tokens": {"type": "integer", "minimum": 0}, "cache_write_tokens": {"type": "integer", "minimum": 0}, "turn_id": {"type": "string"}, "total_tokens": {"type": "integer", "minimum": 0}, "context_used_tokens": {"type": "integer", "minimum": 0}, "context_window_tokens": {"type": "integer", "minimum": 0}, "context_used_percent": {"type": "number", "minimum": 0}, "compactions": {"type": "integer", "minimum": 0}, "last_compaction_ms": {"type": "integer", "minimum": 0}, "last_compaction_trigger": {"enum": ["manual", "auto", "threshold", "overflow", "idle", "unknown"]}, "cost": {"type": "number", "minimum": 0}, "currency": {"type": "string"}, "attribution": {"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "mission_run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}}}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "allOf": [{"if": {"properties": {"semantics": {"const": "context_occupancy"}}}, "then": {"anyOf": [{"required": ["context_used_tokens"]}, {"required": ["context_window_tokens"]}, {"required": ["context_used_percent"]}, {"required": ["compactions"]}]}}, {"if": {"properties": {"semantics": {"enum": ["session_cumulative", "response"]}}}, "then": {"required": ["total_tokens"]}}]},
+    "TimelineResponseCostComponents": {
+      "description": "Harness-reported USD components, not additional spend. The existing usage cost field is the reported total. Missing components are unknown, not zero; never derive a reported total from a partial object.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "input": {"type": "number", "minimum": 0},
+        "output": {"type": "number", "minimum": 0},
+        "cache_read": {"type": "number", "minimum": 0},
+        "cache_write": {"type": "number", "minimum": 0}
+      }
+    },
+    "TimelineProviderQuotaUnit": {"enum": ["premium_requests"]},
+    "TimelineProviderQuota": {
+      "description": "Provider quota consumption, separate from token counts and money. The enclosing response provider identifies the quota authority.",
+      "type": "object", "additionalProperties": false, "required": ["unit", "quantity"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/TimelineProviderQuotaUnit"},
+        "quantity": {"type": "number", "minimum": 0}
+      }
+    },
+    "GoldenResponseEvidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/TimelineUsageBody" }
+    },
+    "TimelineUsageBody": {
+      "description": "Response evidence is one terminal model response, not an invocation total. Optional absent fields mean unknown or unsupported, never zero. Actual response model/provider/API must not be inferred from the requested model. Reasoning and one-hour cache writes are subsets, not additive buckets.",
+      "type": "object", "additionalProperties": false, "required": ["semantics", "driver", "attribution"],
+      "properties": {
+        "semantics": {"enum": ["context_occupancy", "session_cumulative", "response"]},
+        "driver": {"type": "string"}, "model": {"type": "string"},
+        "provider": {"type": "string"}, "account": {"type": "string"},
+        "response_id": {"type": "string"}, "api": {"type": "string"}, "stop_reason": {"type": "string"},
+        "started_at_unix_ms": {"type": "integer", "minimum": 0},
+        "completed_at_unix_ms": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "number", "minimum": 0},
+        "ttft_ms": {"type": "number", "minimum": 0},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "cached_tokens": {"type": "integer", "minimum": 0},
+        "cache_write_tokens": {"type": "integer", "minimum": 0},
+        "cache_write_1h_tokens": {"type": "integer", "minimum": 0},
+        "reasoning_tokens": {"type": "integer", "minimum": 0},
+        "turn_id": {"type": "string"},
+        "total_tokens": {"type": "integer", "minimum": 0},
+        "context_used_tokens": {"type": "integer", "minimum": 0},
+        "context_window_tokens": {"type": "integer", "minimum": 0},
+        "context_used_percent": {"type": "number", "minimum": 0},
+        "compactions": {"type": "integer", "minimum": 0},
+        "last_compaction_ms": {"type": "integer", "minimum": 0},
+        "last_compaction_trigger": {"enum": ["manual", "auto", "threshold", "overflow", "idle", "unknown"]},
+        "cost": {"type": "number", "minimum": 0},
+        "cost_components": {"$ref": "#/$defs/TimelineResponseCostComponents"},
+        "currency": {"type": "string"},
+        "provider_quota": {"$ref": "#/$defs/TimelineProviderQuota"},
+        "attribution": {"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "mission_run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}, "execution_id": {"type": "string"}, "invocation_id": {"type": "string"}, "attempt": {"type": "integer", "minimum": 0}}},
+        "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"semantics": {"const": "context_occupancy"}}}, "then": {"anyOf": [{"required": ["context_used_tokens"]}, {"required": ["context_window_tokens"]}, {"required": ["context_used_percent"]}, {"required": ["compactions"]}]}},
+        {"if": {"properties": {"semantics": {"const": "session_cumulative"}}}, "then": {"required": ["total_tokens"]}}
+      ]
+    },
     "TimelineRedactionBody": {"type": "object", "additionalProperties": false, "required": ["reason", "withheld_bytes"], "properties": {"reason": {"type": "string"}, "withheld_bytes": {"type": "integer", "minimum": 0}, "withheld_items": {"type": "integer", "minimum": 0}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineTruncationBody": {"type": "object", "additionalProperties": false, "required": ["reason", "omitted_from_sequence", "omitted_to_sequence"], "properties": {"reason": {"type": "string"}, "omitted_from_sequence": {"type": "integer", "minimum": 0}, "omitted_to_sequence": {"type": "integer", "minimum": 0}, "continuation_cursor": {"$ref": "#/$defs/Cursor"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelinePage": {
@@ -3647,6 +3960,9 @@
             "private-notes.write",
             "prompt.respond",
             "attention.resolve",
+            "attention.seen",
+            "attention.snooze",
+            "attention.dismiss",
             "review.approve",
             "review.reject",
             "review.request-changes",
@@ -3666,6 +3982,7 @@
             "session.import",
             "work.ask",
             "work.done",
+            "work.override",
             "work.cancel-ask",
             "work.claim",
             "work.renew",
@@ -3727,16 +4044,28 @@
       "type": "object", "additionalProperties": false, "required": ["target_id", "summary", "episode"],
       "properties": {"target_id": {"$ref": "#/$defs/Id"}, "summary": {"type": "string", "minLength": 1}, "episode": {"type": "string"}, "evidence": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "answer": {"$ref": "#/$defs/PersonAnswerInput"}}
     },
+    "PersonOverrideParameters": {
+      "type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"],
+      "properties": {
+        "target_id": {"$ref": "#/$defs/Id"},
+        "episode": {"type": "string"},
+        "summary": {"type": "string", "minLength": 1},
+        "answer": {
+          "type": "object", "additionalProperties": false, "required": ["id"],
+          "properties": {"id": {"type": "string", "minLength": 1}, "text": {"type": "string"}}
+        }
+      }
+    },
     "StructuredRequest": {
       "type": "object", "additionalProperties": false, "required": ["version", "type", "question", "why_person"],
       "description": "A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options; feedback asks for text.",
       "properties": {
         "version": {"const": 1},
         "type": {"enum": ["decision", "choice", "feedback"]},
-        "question": {"type": "string", "minLength": 1},
-        "why_person": {"type": "string", "minLength": 1, "description": "Why only this person can answer."},
-        "summary": {"type": "string"},
-        "reasons": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
+        "question": { "x-st-text": "markdown-block","type": "string", "minLength": 1},
+        "why_person": { "x-st-text": "markdown-inline","type": "string", "minLength": 1, "description": "Why only this person can answer."},
+        "summary": { "x-st-text": "markdown-block","type": "string"},
+        "reasons": {"type": "array", "maxItems": 8, "items": { "x-st-text": "markdown-inline","type": "string"}},
         "recommendation": {"type": "object", "additionalProperties": false, "required": ["answer", "reason"], "properties": {"answer": {"type": "string"}, "reason": {"type": "string"}}, "description": "Absent means no recommendation."},
         "subjects": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/RequestSubject"}},
         "answers": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/RequestAnswerOption"}},
@@ -3751,7 +4080,7 @@
         "version": {"const": 1},
         "type": {"const": "update"},
         "about": {"$ref": "#/$defs/Id", "description": "Where the person asked: their mission run or step run, or their message to the agent."},
-        "summary": {"type": "string"},
+        "summary": { "x-st-text": "markdown-block","type": "string"},
         "speech": {"type": "string", "minLength": 1, "maxLength": 300, "description": "Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it."},
         "subjects": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/RequestSubject"}}
       }
@@ -3864,6 +4193,7 @@
         {"properties": {"type": {"const": "terminal.end"}, "parameters": {"$ref": "#/$defs/TargetParameters"}}},
         {"properties": {"type": {"const": "work.ask"}, "parameters": {"$ref": "#/$defs/PersonAskParameters"}}},
         {"properties": {"type": {"enum": ["work.done", "work.cancel-ask"]}, "parameters": {"$ref": "#/$defs/PersonStepParameters"}}},
+        {"properties": {"type": {"const": "work.override"}, "parameters": {"$ref": "#/$defs/PersonOverrideParameters"}}},
         {
           "properties": {
             "type": { "const": "attention.resolve" },
@@ -3873,6 +4203,9 @@
             }
           }
         },
+        {"properties": {"type": {"const": "attention.seen"}, "parameters": {"$ref": "#/$defs/AttentionSeenParameters"}}},
+        {"properties": {"type": {"const": "attention.snooze"}, "parameters": {"$ref": "#/$defs/AttentionSnoozeParameters"}}},
+        {"properties": {"type": {"const": "attention.dismiss"}, "parameters": {"$ref": "#/$defs/AttentionDismissParameters"}}},
         { "properties": { "type": { "enum": ["review.approve", "review.reject", "review.request-changes"] }, "parameters": { "$ref": "#/$defs/TargetParameters" } } },
         {
           "properties": {
@@ -4107,6 +4440,7 @@
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
         "membership_revision": { "$ref": "#/$defs/Revision" },
+        "attention_control": { "$ref": "#/$defs/AttentionControlState" },
         "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." }
       }
     },
@@ -4122,7 +4456,8 @@
       "read.assistant.slo",
       "write.assistant.messages",
       "write.assistant.custom-reply",
-      "write.assistant.answers"
+      "write.assistant.answers",
+      "read.assistant.availability"
     ] },
     "AssistantMinimalReadMode": { "enum": ["approval-once", "caller-bound-allow"] },
     "AssistantGrant": {
@@ -4493,7 +4828,18 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
-          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
+          "items": { "type": "string", "enum": [
+            "read.projections",
+            "write.client-diagnostics",
+            "write.availability",
+            "write.presence",
+            "write.notes",
+            "read.glasses",
+            "control.glasses",
+            "terminal.read",
+            "control.attention",
+            "control.launches"
+          ] }
         }
       }
     },

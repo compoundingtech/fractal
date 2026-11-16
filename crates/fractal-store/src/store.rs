@@ -16,12 +16,17 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
+pub mod host_holds;
+pub mod resource_membership;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
+pub mod mission_run_query;
+pub mod step_executions;
 mod mission_supersession;
 pub mod seats;
 pub mod helper_launchers;
@@ -33,6 +38,10 @@ pub mod accountable_tests;
 pub mod custom;
 pub mod model_drift;
 mod notice_authority;
+pub mod ask_digest;
+pub mod auto_resolved;
+mod ask_digest_cache;
+mod ask_digest_payload;
 mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
@@ -58,6 +67,7 @@ mod rename_proof;
 mod rename_proof_tests;
 #[cfg(test)]
 mod observation_trim_tests;
+pub mod availability;
 pub mod directive_notes;
 mod declared_admission;
 mod agent_charter;
@@ -65,6 +75,7 @@ pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
 pub mod read_positions;
+pub mod attention_controls;
 pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
@@ -86,6 +97,8 @@ pub mod mailbox_changes;
 pub mod mailbox_lease;
 #[cfg(test)]
 pub mod message_send_tests;
+#[cfg(test)]
+mod operation_conflict_tests;
 // Qualification only: no production caller or Source registration.
 #[cfg(test)]
 pub mod message_point_qualification;
@@ -241,6 +254,8 @@ pub mod accounts;
 pub mod declared_objectives;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
+pub mod invocation_receipts;
+pub mod turn_invocations;
 pub mod roster_admission;
 
 pub mod adhoc_work;
@@ -372,6 +387,7 @@ mod run_eta_review_tests;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
+pub mod input_history;
 pub mod coordination;
 pub mod agent_view;
 pub mod conversation_reads;
@@ -593,7 +609,7 @@ impl UsageFold {
             }
             Some("response_rollup") => {
                 let group = self.spend.entry(claim_incarnation.to_owned()).or_default();
-                let key = ["model", "account", "owner_run", "owner_step", "host"]
+                let key = ["model", "account", "owner_run", "owner_step", "host", "execution_id"]
                     .iter()
                     .map(|key| fields.get(*key).and_then(Value::as_str).unwrap_or(""))
                     .collect::<Vec<_>>()
@@ -630,6 +646,7 @@ impl UsageFold {
                                     .and_then(Value::as_u64)
                                     .unwrap_or(0)
                                     == 0
+                                    && fields.get("unpriced_responses").and_then(Value::as_u64).unwrap_or(0) == 0
                             }),
                     },
                 );
@@ -721,7 +738,7 @@ impl UsageFold {
                             unknown_cost = true;
                         }
                         summary.currency.get_or_insert_with(|| "USD".into());
-                    } else if rollup.total > 0 {
+                    } else {
                         unknown_cost = true;
                     }
                 }
@@ -820,7 +837,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1ae4f9ad11c9 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h709be0a6fbc5 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -969,6 +986,12 @@ WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT N
 -- of other kinds plan as they did.
 CREATE INDEX IF NOT EXISTS claims_runtime_subject_index ON claims(subject, store_index)
 WHERE kind='runtime.observed';
+CREATE INDEX IF NOT EXISTS claims_execution_actor_index
+ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), CAST(accepted_at_unix_ms AS INTEGER))
+WHERE kind='work.claimed';
+CREATE INDEX IF NOT EXISTS claims_execution_usage_index
+ON claims(subject, json_extract(body, '$.fields.execution_id'), store_index)
+WHERE kind='harness.usage';
 -- An already-open raw stream revalidates the original paired actor, never a full graph scan.
 CREATE INDEX IF NOT EXISTS claims_client_pairing_actor_index
 ON claims(json_extract(body, '$.fields.session_actor'))
@@ -1275,6 +1298,12 @@ ON mission_runs(root_run_id, created_at_unix_ms, id);
 -- OPEN_MISSION_RUN, which queries repeat so the planner uses this index.
 CREATE INDEX IF NOT EXISTS mission_runs_open_index ON mission_runs(created_at_unix_ms, id)
 WHERE status NOT IN ('completed','failed','cancelled');
+-- Scope this partial index to explicit mission-key range readers. Without the
+-- domain term, unrelated open-run queue reads can choose its differently ordered scan.
+DROP INDEX IF EXISTS mission_runs_open_mission_page_index;
+CREATE INDEX IF NOT EXISTS mission_runs_open_mission_prefix_index
+ON mission_runs(mission_id, created_at_unix_ms DESC, id DESC)
+WHERE mission_id>='' AND status NOT IN ('completed','failed','cancelled');
 
 CREATE TABLE IF NOT EXISTS mission_run_deadlines (
     run_id TEXT PRIMARY KEY REFERENCES mission_runs(id),
@@ -1491,6 +1520,24 @@ CREATE TABLE IF NOT EXISTS local_usage_spend (
     unpriced_tokens INTEGER NOT NULL DEFAULT 0,
     observed_at_unix_ms INTEGER NOT NULL,
     PRIMARY KEY(subject, incarnation_id, model, account, owner_run, owner_step, host)
+);
+-- Exact invocation partitions start here; older already-replicated aggregate series remain intact.
+CREATE TABLE IF NOT EXISTS local_step_execution_spend (
+    execution_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    account TEXT NOT NULL,
+    host TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_microusd INTEGER NOT NULL DEFAULT 0,
+    reported_cost_microusd INTEGER NOT NULL DEFAULT 0,
+    unpriced_tokens INTEGER NOT NULL DEFAULT 0,
+    observed_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY(execution_id, model, account, host)
 );
 -- Provenance shares the existing cumulative spend slot; individual responses remain local.
 CREATE TABLE IF NOT EXISTS local_usage_provenance (
@@ -2372,6 +2419,8 @@ pub struct Store {
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
+    resource_observations: std::sync::OnceLock<std::sync::Mutex<resource_membership::Observations>>,
+    resource_clocks: std::sync::OnceLock<std::sync::Mutex<resource_membership::Clocks>>,
     usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
@@ -2867,6 +2916,9 @@ impl Store {
 
     fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
+        resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2877,6 +2929,8 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            resource_observations: Default::default(),
+            resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2892,6 +2946,9 @@ impl Store {
         let fractal = Arc::new(FractalRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
+        resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2901,6 +2958,8 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            resource_observations: Default::default(),
+            resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2922,10 +2981,15 @@ impl Store {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
+        host_holds::create_schema(&graph.connection.write())?;
+        resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            resource_observations: Default::default(),
+            resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -3617,7 +3681,6 @@ impl Store {
                 }
                 validate_documents(transaction, &intent.document_refs)?;
                 attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
-                notice_authority::refuse_second_holder(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -5562,7 +5625,9 @@ impl Store {
                 || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
-                    "SELECT subject, actor, kind IN ('work.claimed','work.progress')
+                    "SELECT subject, actor, kind IN ('work.claimed','work.progress'),
+                            kind='owned-set.revised' OR json_extract(body,'$.owned_set') IS NOT NULL
+                                OR json_extract(body,'$._operation.id') IS NOT NULL
                      FROM claims WHERE store_index>?1 AND store_index<=?2",
                 )?;
                 let mut changed = HashSet::new();
@@ -5571,10 +5636,13 @@ impl Store {
                 // authored claims. Keep those input generations distinct.
                 let mut changed_subjects = HashSet::new();
                 let mut runtime_work_actors = HashSet::new();
+                let mut indirect_runtime_inputs = false;
                 for row in statement.query_map(params![cache.through, store_index], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                        row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
                 })? {
-                    let (subject, actor, work_activity) = row?;
+                    let (subject, actor, work_activity, indirect) = row?;
+                    indirect_runtime_inputs |= indirect;
                     if work_activity && let Some(actor) = &actor {
                         runtime_work_actors.insert(actor.clone());
                     }
@@ -5583,6 +5651,13 @@ impl Store {
                     changed.extend(actor);
                 }
                 drop(statement);
+                if indirect_runtime_inputs {
+                    // Receipt-selected declarations and operation authority can change
+                    // earlier runtime subjects without a claim naming those subjects.
+                    let runtimes = self.runtime_list_changes(cache.through, store_index)?;
+                    changed.extend(runtimes.iter().cloned());
+                    changed_subjects.extend(runtimes);
+                }
                 let stale = |subject: &String, owners: &[String]| {
                     changed.contains(subject) || owners.iter().any(|owner| changed.contains(owner))
                 };
@@ -5814,20 +5889,31 @@ impl Store {
         self.status_for_subject_names_at(subjects, index, history, claims)
     }
 
+    const GENERIC_RESERVED_SUBJECTS_SQL: &str =
+        "SELECT selected.value FROM json_each(?1) selected WHERE EXISTS (
+         SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='custom.attention' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='custom.attention.' AND kind<'custom.attention/' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='attention.notice' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='attention.notice-' AND kind<'attention.notice.' AND store_index<=?2)";
+
     pub fn generic_status_subject_names_at(
         &self, mut subjects: BTreeSet<String>, index: u64,
     ) -> Result<BTreeSet<String>> {
         subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
         if subjects.is_empty() { return Ok(subjects); }
         let connection = self.readers.get();
-        let mut query = connection.prepare_cached(
-            "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
-             JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2",
-        )?;
+        // Probe only the reserved namespace in the existing (subject, kind, index)
+        // index. Enumerating DISTINCT kinds reads every runtime observation and
+        // builds a temporary btree even when none of the subjects is reserved.
+        // Separate UNION arms keep each exact/prefix probe independently indexed.
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc18b868e178d owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::GENERIC_RESERVED_SUBJECTS_SQL)?;
         for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
-            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
-            let (subject,kind) = row?;
-            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+            row.get::<_,String>(0))? {
+            subjects.remove(&row?);
         }
         Ok(subjects)
     }
@@ -7037,7 +7123,9 @@ impl Store {
         let connection = self.readers.get();
         connection
             .prepare_cached(
-                "SELECT requested.value, desired.claim_id,CASE WHEN requested.value GLOB 'agent/*' OR requested.value GLOB 'mission/*' THEN COALESCE(h.unavailable,
+                "SELECT requested.value, desired.claim_id,CASE WHEN requested.value GLOB 'agent/*' OR requested.value GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'
+                    AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
+                         OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || requested.value, 'operation-conflict-naming-name:' || names.identity)))),h.unavailable,
                     (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=COALESCE(names.identity,requested.value) AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
@@ -7750,6 +7838,8 @@ impl Store {
                 | "arrangement.edited"
                 | "ordered-membership.edited"
                 | "read-position.advanced"
+                | "person.attention-seen"
+                | "person.attention-snoozed"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -9037,7 +9127,9 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
     let row = connection
         .prepare_cached(
             "SELECT d.kind, d.revision, d.claim_id, d.body, d.member, d.owner_run, d.owner_generation,
-                 CASE WHEN requested.identity GLOB 'agent/*' OR requested.identity GLOB 'mission/*' THEN COALESCE(h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                 CASE WHEN requested.identity GLOB 'agent/*' OR requested.identity GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'
+                    AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
+                         OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || ?1, 'operation-conflict-naming-name:' || requested.identity)))),h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
              FROM (SELECT COALESCE((SELECT identity FROM identity_names WHERE name=?1),?1) AS identity) requested
@@ -9126,6 +9218,23 @@ fn canonical_desired_row_at(
     subject: &str,
     at_index: u64,
 ) -> Result<Option<DesiredRow>> {
+    canonical_desired_row_at_cut(connection, subject, at_index, None)
+}
+
+fn canonical_desired_row_at_claim(
+    connection: &Connection,
+    subject: &str,
+    claim: &str,
+) -> Result<Option<DesiredRow>> {
+    canonical_desired_row_at_cut(connection, subject, i64::MAX as u64, Some(claim))
+}
+
+fn canonical_desired_row_at_cut(
+    connection: &Connection,
+    subject: &str,
+    at_index: u64,
+    claim: Option<&str>,
+) -> Result<Option<DesiredRow>> {
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7ab5e25ccad4 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT id, body, predecessors FROM claims
          WHERE subject=?1 AND kind='intent.desired' AND store_index<=?2
@@ -9137,7 +9246,7 @@ fn canonical_desired_row_at(
            )
          ORDER BY CANONICAL_ASC(claims)",
     )))?;
-    let rows = statement
+    let mut rows = statement
         .query_map(params![subject, at_index], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -9146,6 +9255,18 @@ fn canonical_desired_row_at(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(claim) = claim {
+        let cut = canonical::claim_key(connection, claim)?;
+        let mut end = rows.len();
+        for (index, (id, _, _)) in rows.iter().enumerate() {
+            if canonical::claim_key(connection, id)? > cut {
+                end = index;
+                break;
+            }
+        }
+        rows.truncate(end);
+        return select_desired_row(rows);
+    }
     retirements::overlay_row(
         connection,
         subject,
@@ -9996,14 +10117,13 @@ pub fn insert_local_observation_tx(
             .and_then(Value::as_str)
             == Some("response")
     {
-        let desired: Option<(Option<String>, Option<String>, Option<String>)> = transaction
-            .query_row(
-                "SELECT owner_run, owner_generation, owner_step FROM desired WHERE subject=?1",
-                [&input.subject],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(internal)?;
+        // Identity-only responses retain their joins without becoming zero-cost spend.
+        let has_accounting = input.fields.get("body").is_some_and(|usage| {
+            ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "total_tokens"]
+                .iter().any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+                || usage.get("cost").and_then(Value::as_f64)
+                    .is_some_and(|cost| cost.is_finite() && cost >= 0.0)
+        });
         let incarnation = input
             .fields
             .get("incarnation_id")
@@ -10017,33 +10137,24 @@ pub fn insert_local_observation_tx(
             .get("observed_at_unix_ms")
             .and_then(Value::as_u64)
             .map_or(observed_at, |at| (at as u128).min(observed_at));
-        let active_step: Option<(String, String, String)> = transaction
-            .query_row(
-                "SELECT subject, 'mission-run/' || run_id, 'run-generation/' || generation_id
-                 FROM step_runs WHERE lease_owner=?1 AND lease_incarnation=?2
-                   AND CAST(lease_expires_at_unix_ms AS INTEGER)>?3
-                   AND COALESCE(CAST(activated_at_unix_ms AS INTEGER), 0)<=?3
-                   AND status IN ('claimed', 'working', 'submitted')
-                 ORDER BY updated_at_unix_ms DESC LIMIT 1",
-                params![input.subject, incarnation, responded_at as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
+        let execution = step_executions::response_execution(transaction, &input.subject, incarnation, responded_at)
             .map_err(internal)?;
-        let owner_run = active_step
-            .as_ref()
-            .map(|item| item.1.as_str())
-            .or_else(|| desired.as_ref().and_then(|item| item.0.as_deref()))
-            .unwrap_or("");
-        let owner_step = active_step
-            .as_ref()
-            .map(|item| item.0.as_str())
-            .or_else(|| desired.as_ref().and_then(|item| item.2.as_deref()))
-            .unwrap_or("");
-        let owner_generation = active_step
-            .as_ref()
-            .map(|item| item.2.as_str())
-            .or_else(|| desired.as_ref().and_then(|item| item.1.as_deref()));
+        let execution_owner: Option<(String, String)> = if let Some((_, step)) = &execution {
+            transaction.query_row(
+                "SELECT 'mission-run/' || run_id, 'run-generation/' || generation_id FROM step_runs WHERE subject=?1",
+                [step], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(internal)?
+        } else { None };
+        let invocation = step_executions::response_invocation(transaction, &input.subject, incarnation,
+            execution.as_ref().map(|item| item.0.as_str())).map_err(internal)?;
+        let owner_attempt: Option<u32> = if let Some((id, _)) = &execution {
+            transaction.query_row("SELECT json_extract(body,'$.fields.attempt') FROM claims WHERE id=?1",
+                [id], |row| row.get(0)).optional().map_err(internal)?.flatten()
+        } else { None };
+        // Launch lineage identifies the process, not whichever work it later performed.
+        let owner_run = execution_owner.as_ref().map(|item| item.0.as_str()).unwrap_or("");
+        let owner_step = execution.as_ref().map(|item| item.1.as_str()).unwrap_or("");
+        let owner_generation = execution_owner.as_ref().map(|item| item.1.as_str());
         let usage = &input.fields["body"];
         let model = usage
             .get("model")
@@ -10064,17 +10175,30 @@ pub fn insert_local_observation_tx(
             .and_then(Value::as_f64)
             .filter(|cost| cost.is_finite() && *cost >= 0.0)
             .map(|cost| (cost * 1_000_000.0).round() as u64);
-        let estimated_cost = crate::pricing::cost_microusd(
-            model,
-            crate::pricing::Tokens {
-                input: input_tokens,
-                output: output_tokens,
-                cache_read: cached_tokens,
-                cache_write: cache_write_tokens,
-                cache_write_1h: cache_write_1h_tokens,
-            },
-        );
+        // Rate-card pricing requires observed disjoint buckets. An absent bucket
+        // is not zero; an unknown cache-write TTL is not a five-minute write.
+        let complete_tokens = ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens"]
+            .iter()
+            .all(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+            && (cache_write_tokens == 0
+                || usage.get("cache_write_1h_tokens").and_then(Value::as_u64).is_some());
+        let estimated_cost = if complete_tokens {
+            crate::pricing::cost_microusd(
+                model,
+                crate::pricing::Tokens {
+                    input: input_tokens,
+                    output: output_tokens,
+                    cache_read: cached_tokens,
+                    cache_write: cache_write_tokens,
+                    cache_write_1h: cache_write_1h_tokens,
+                },
+            )
+        } else {
+            None
+        };
         let cost_microusd = reported_cost.or(estimated_cost).unwrap_or(0);
+        // Count responses separately: missing totals must never masquerade as a known free bill.
+        let unpriced_responses = u64::from(reported_cost.or(estimated_cost).is_none());
         let unpriced_tokens = if reported_cost.or(estimated_cost).is_some() {
             0
         } else {
@@ -10086,9 +10210,21 @@ pub fn insert_local_observation_tx(
             "generation_id": owner_generation,
             "step_id": if owner_step.is_empty() { None } else { Some(owner_step) },
         });
+        // New evidence fields are optional, not nullable defaults. A relay must not
+        // invent them when an older owner omitted them.
+        if let Some((execution, _)) = &execution {
+            body["fields"]["attribution"]["execution_id"] = json!(execution);
+        }
+        if let Some(invocation) = &invocation {
+            body["fields"]["attribution"]["invocation_id"] = json!(invocation.invocation_id);
+        }
+        if let Some(attempt) = owner_attempt {
+            body["fields"]["attribution"]["attempt"] = json!(attempt);
+        }
         body["fields"]["host"] = Value::String(origin.to_owned());
         // What st charged this response, so the OpenTelemetry history carries the same cost
         // the graph's totals do.
+        if has_accounting {
         body["fields"]["spend"] = json!({
             "cost_microusd": cost_microusd,
             "basis": if reported_cost.is_some() {
@@ -10100,13 +10236,14 @@ pub fn insert_local_observation_tx(
             },
             "pricing": crate::pricing::PRICING_REVISION,
         });
+        }
         let source_id = input
             .fields
             .get("source_id")
             .and_then(Value::as_str)
             .or_else(|| input.fields.get("entry_id").and_then(Value::as_str))
             .unwrap_or("");
-        let new_response = responded_at
+        let new_response = has_accounting && responded_at
             >= observed_at.saturating_sub(USAGE_RESPONSE_HORIZON_MS)
             && transaction
                 .execute(
@@ -10117,6 +10254,12 @@ pub fn insert_local_observation_tx(
                 .map_err(internal)?
                 != 0;
         if new_response {
+            if let Some((execution_id, _)) = &execution {
+                step_executions::accumulate_response(transaction, execution_id, model, account, origin,
+                    [input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cached_tokens,
+                     total_tokens, cost_microusd, reported_cost.unwrap_or(0), unpriced_tokens],
+                    observed_at).map_err(internal)?;
+            } else {
             transaction.execute(
                 /* sqlite-large-value: allow-for-now lv-h3509d7d81e3a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_usage_spend(subject, incarnation_id, model, account, owner_run, owner_step, host,
                     input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cached_tokens,
@@ -10138,6 +10281,7 @@ pub fn insert_local_observation_tx(
                     total_tokens, cost_microusd, reported_cost.unwrap_or(0), unpriced_tokens,
                     observed_at as i64],
             ).map_err(internal)?;
+            }
             // Keep each distinct price/source/effective-rate combination cumulative. A later
             // table revision or long-context response must not relabel earlier spend.
             let mut key_fields = BTreeMap::from([
@@ -10148,6 +10292,9 @@ pub fn insert_local_observation_tx(
                 ("owner_step".into(), json!(owner_step)),
                 ("host".into(), json!(origin)),
             ]);
+            if let Some((execution_id, _)) = &execution {
+                key_fields.insert("execution_id".into(), json!(execution_id));
+            }
             if !account.is_empty() {
                 key_fields.insert("account".into(), json!(account));
             }
@@ -10181,7 +10328,7 @@ pub fn insert_local_observation_tx(
             if reported_cost.is_none() {
                 entry["price_table_id"] = json!(crate::pricing::PRICE_TABLE_ID);
                 entry["price_table_version"] = json!(crate::pricing::price_table_version());
-                if let Some(rates) = crate::pricing::applied_rates(model, tokens) {
+                if complete_tokens && let Some(rates) = crate::pricing::applied_rates(model, tokens) {
                     let mut rates = serde_json::to_value(rates).map_err(internal)?;
                     rates.as_object_mut().unwrap().remove("long_context");
                     entry["rates_usd_per_million_tokens"] = rates;
@@ -10203,6 +10350,7 @@ pub fn insert_local_observation_tx(
                 cost_microusd,
                 reported_cost.unwrap_or(0),
                 unpriced_tokens,
+                unpriced_responses,
             ]) {
                 entry[name] = json!(entry[name].as_u64().unwrap_or(0).saturating_add(value));
             }
@@ -10554,7 +10702,7 @@ pub fn usage_native_session(
     Ok(previous.flatten().filter(|id| !id.trim().is_empty()))
 }
 
-pub const USAGE_BUCKETS: [&str; 9] = [
+pub const USAGE_BUCKETS: [&str; 10] = [
     "total_tokens",
     "input_tokens",
     "output_tokens",
@@ -10564,6 +10712,7 @@ pub const USAGE_BUCKETS: [&str; 9] = [
     "cost_microusd",
     "reported_cost_microusd",
     "unpriced_tokens",
+    "unpriced_responses",
 ];
 
 pub fn pricing_identity(entry: &Value) -> String {
@@ -10581,7 +10730,7 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
         // Each rollup key is its own cumulative series. Sharing one slot per incarnation would
         // let a pending rollup of the next step or account replace the previous one's final
         // totals before they replicated.
-        return json!([
+        let mut slot = json!([
             fields.get("incarnation_id"),
             fields.get("semantics"),
             fields.get("model"),
@@ -10589,8 +10738,12 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
             fields.get("owner_run"),
             fields.get("owner_step"),
             fields.get("host"),
-        ])
-        .to_string();
+        ]);
+        // Preserve existing slot bytes for older aggregate series and their held readings.
+        if let Some(execution) = fields.get("execution_id").filter(|value| value.is_string()) {
+            slot.as_array_mut().expect("usage slot is an array").push(execution.clone());
+        }
+        return slot.to_string();
     }
     json!([fields.get("incarnation_id"), fields.get("semantics")]).to_string()
 }
@@ -11213,7 +11366,7 @@ fn migrate_occurrence_creation_projections_tx(transaction: &Transaction<'_>) -> 
         }
     }
     for root in roots {
-        rebuild_run_tree_tx(transaction, &root).map_err(anyhow::Error::new)?;
+        settle_run_refold_result(rebuild_run_tree_tx(transaction, &root)).map_err(anyhow::Error::new)?;
     }
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h03f8f0e09c2c owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('occurrence_creation_projection_rules','1')",
@@ -11259,9 +11412,9 @@ fn migrate_work_extension_projections_tx(transaction: &Transaction<'_>) -> Resul
         return Ok(0);
     }
     let (roots, _) = work_extension_roots_tx(transaction)?;
-    let rebuilt = roots.len();
+    let mut rebuilt = 0;
     for root in roots {
-        rebuild_run_tree_tx(transaction, &root).map_err(anyhow::Error::new)?;
+        rebuilt += usize::from(settle_run_refold_result(rebuild_run_tree_tx(transaction, &root)).map_err(anyhow::Error::new)?);
     }
     if !work_extension_roots_tx(transaction)?.1 {
         mark_work_extensions_projected_tx(transaction)?;
@@ -11288,7 +11441,9 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
 
 fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<String>) -> Result<()> {
     holds::rebuilt(claim_ids.len());
-    for id in claim_ids {
+    holds::fold_progress(0, claim_ids.len());
+    let total = claim_ids.len();
+    for (position, id) in claim_ids.into_iter().enumerate() {
         let claim = claim_by_id_tx(transaction, &id)?
             .context("a planning claim disappeared during replay")?;
         // A claim admission accepted but this projection cannot read, such as one from a faulty
@@ -11298,6 +11453,7 @@ fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<Stri
                 FractalError::new("unprojectable-planning-claim", format!("{error:#}"))
             })
         })?;
+        holds::fold_progress(position + 1, total);
     }
     Ok(())
 }
@@ -11437,7 +11593,9 @@ pub fn rebuild_planning_session_tx(transaction: &Transaction<'_>, session: &str)
     )?;
     let claim_ids = statement
         .query_map([format!("planning-session/{session}")], |row| row.get::<_, String>(0))?
+        .take(if CONFLICT_REFOLD.get() { OPERATION_CONFLICT_REFOLD_CLAIMS + 1 } else { usize::MAX })
         .collect::<Result<Vec<_>, _>>()?;
+    check_conflict_refold_size(claim_ids.len()).map_err(anyhow::Error::new)?;
     drop(statement);
     // Only this session's claims are decided again, so only their quarantine is forgotten.
     for id in &claim_ids {
@@ -11914,6 +12072,8 @@ fn replicated_work_validation_fields<'a>(
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::read_positions::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::attention_controls::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::availability::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
@@ -11976,6 +12136,7 @@ fn replicated_work_validation_fields<'a>(
         body,
         record.accepted_at_unix_ms,
     )?;
+    invocation_receipts::record_diagnostic_tx(transaction, origin, &record)?;
     Ok(record)
 }
 
@@ -11992,7 +12153,13 @@ pub fn append_receipt_claim_tx(
     key: &str,
 ) -> Result<ClaimRecord> {
     let mut body = body.clone();
+    if kind == "work.claimed" {
+        step_executions::snapshot_claim(transaction, actor, &mut body)?;
+    }
     smallclaims::store::idempotency::attach(&mut body, key)?;
+    let turn = if kind == "work.claimed" {
+        turn_invocations::bind_claim_tx(transaction, origin, subject, actor, &mut body)?
+    } else { None };
     let record = append_claim_tx(
         transaction,
         origin,
@@ -12004,6 +12171,10 @@ pub fn append_receipt_claim_tx(
         forced_batch,
     )?;
     register_operation_tx(transaction, &record)?;
+    if let Some(turn) = turn {
+        turn_invocations::record_claim_tx(transaction, origin, &record, turn)?;
+    }
+    turn_invocations::record_terminal_tx(transaction, origin, &record)?;
     Ok(record)
 }
 
@@ -16623,6 +16794,10 @@ pub fn classify_replicated_claim_with_registry(
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::attention_controls::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::availability::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::usage_limits::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
@@ -17106,6 +17281,8 @@ pub fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
+    let root = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.unwrap_or_else(|| top.to_owned());
+    require_healthy_run_refold_tx(transaction, &root)?;
     #[cfg(any(test, feature = "test-support"))]
     let _rebuild = rebuild_observer::note_rebuild("run-part", top, false);
     struct RebuildTiming(std::time::Instant);
@@ -17319,6 +17496,7 @@ fn claims_in_replay_order_tx(
     for subject in subjects {
         for claim in by_subject.query_map([subject], row).map_err(internal)? {
             found.push(claim.map_err(internal)?);
+            check_conflict_refold_size(found.len())?;
         }
     }
     let mut by_range = transaction
@@ -17333,6 +17511,7 @@ fn claims_in_replay_order_tx(
             .map_err(internal)?
         {
             found.push(claim.map_err(internal)?);
+            check_conflict_refold_size(found.len())?;
         }
     }
     found.sort_by(|left, right| left.1.cmp(&right.1));
@@ -17344,6 +17523,7 @@ fn claims_in_replay_order_tx(
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
 pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), FractalError> {
+    require_healthy_run_refold_tx(transaction, root)?;
     #[cfg(any(test, feature = "test-support"))]
     let _rebuild = rebuild_observer::note_rebuild("run-tree", root, false);
     #[cfg(any(test, feature = "test-support"))]
@@ -17452,8 +17632,10 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
         .map_err(internal)?
         .execute(/* sqlite-large-value: allow-for-now lv-h090e8ca62948 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [String::from_utf8(claim_ids).map_err(internal)?])
         .map_err(internal)?;
+    holds::fold_progress(0, claims.len() * 3);
     for pass in 0..3 {
-        for claim in &claims {
+        for (position, claim) in claims.iter().enumerate() {
+            holds::fold_progress(pass * claims.len() + position + 1, claims.len() * 3);
             let included = match pass {
                 0 => claim.kind == "mission-run.created",
                 1 => {
@@ -17551,7 +17733,8 @@ fn rebuild_base_aggregate_tx(
         Some(&[kind]),
     )?;
     holds::rebuilt(claims.len());
-    for claim in &claims {
+    holds::fold_progress(0, claims.len());
+    for (position, claim) in claims.iter().enumerate() {
         project_claim_isolated_tx(transaction, "projection:base", claim, || {
             match claim.kind.as_str() {
                 "intent.desired" => {
@@ -17563,6 +17746,7 @@ fn rebuild_base_aggregate_tx(
                 _ => select_replicated_mission(transaction, claim, claim.store_index),
             }
         })?;
+        holds::fold_progress(position + 1, claims.len());
     }
     if let Aggregate::Desired(subject) = aggregate {
         retirements::project_subject(transaction, subject)?;
@@ -17589,6 +17773,98 @@ fn incremental_claim_error(error: FractalError, claim: &ClaimRecord, stage: &'st
         None => error,
     }
 }
+// A conflict receipt may repair one small subject, never silently borrow the writer for an
+// arbitrarily large history. 4096 covers sixteen normal projection pages; larger histories
+// retain their previous projection and an explicit degraded diagnostic.
+const OPERATION_CONFLICT_REFOLD_CLAIMS: usize = 4096;
+thread_local! {
+    static CONFLICT_REFOLD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn check_conflict_refold_size(claims: usize) -> Result<(), FractalError> {
+    if claims > OPERATION_CONFLICT_REFOLD_CLAIMS && CONFLICT_REFOLD.get() {
+        return Err(FractalError::new("operation-conflict-refold-limit",
+            "affected projection exceeds the bounded operation-conflict refold"));
+    }
+    Ok(())
+}
+
+struct OperationConflictDiagnostic {
+    error: FractalError,
+    // Full operation and subject identities; never derive a durable key from display context.
+    health_key: String,
+}
+
+fn refold_after_operation_conflict(
+    transaction: &Transaction<'_>,
+    diagnostics: &mut [OperationConflictDiagnostic],
+    affected: &[usize],
+    project: impl FnOnce() -> Result<(), FractalError>,
+) -> Result<(), FractalError> {
+    if affected.is_empty() { return project(); }
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h58880ffb5371 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "SAVEPOINT operation_conflict_refold").map_err(internal)?;
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) { CONFLICT_REFOLD.set(self.0); }
+    }
+    let _reset = Reset(CONFLICT_REFOLD.replace(true));
+    match project() {
+        Ok(()) => {
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h53bf80630f0f owner=fractal_store::store TODO=trace-statement-and-value-representation */ "RELEASE operation_conflict_refold").map_err(internal)?;
+            for &index in affected {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-he57da1ef4545 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='indeterminate',error_code='operation-conflict',error_message=?1 WHERE aggregate=?2",
+                    params![serde_json::to_string(&diagnostics[index].error.details).map_err(internal)?,
+                        diagnostics[index].health_key],
+                ).map_err(internal)?;
+            }
+            Ok(())
+        },
+        Err(error) => {
+            transaction.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-hc33c6f16bf1d owner=fractal_store::store TODO=trace-statement-and-value-representation */ "ROLLBACK TO operation_conflict_refold; RELEASE operation_conflict_refold",
+            ).map_err(internal)?;
+            for &index in affected {
+                let diagnostic = &mut diagnostics[index];
+                diagnostic.error.details.insert("projection_degraded".into(), json!(true));
+                diagnostic.error.details.insert("refold_error_code".into(), json!(error.code));
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h3b9353d94be0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale', error_code=?1, error_message=?2
+                     WHERE aggregate=?3",
+                    params![error.code, json!({"conflict":diagnostic.error.details,"repair_error":error.message}).to_string(),
+                        diagnostic.health_key],
+                ).map_err(internal)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_conflict_degraded_tx(connection: &Connection, root: &str) -> Result<bool, FractalError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+        [format!("operation-conflict-run:{root}")], |row| row.get(0),
+    ).map_err(internal)
+}
+
+fn require_healthy_run_refold_tx(connection: &Connection, root: &str) -> Result<(), FractalError> {
+    if run_conflict_degraded_tx(connection, root)? {
+        return Err(FractalError::new("operation-conflict-run-degraded",
+            "run projection requires explicit full repair before another rebuild")
+            .with_detail("projection_subject", format!("mission-run/{root}")));
+    }
+    Ok(())
+}
+
+// Excluded runs keep their durable health marker, but must not strand shared queues
+// or startup migrations. Only the explicit degraded-run boundary is skippable.
+fn settle_run_refold_result(result: Result<(), FractalError>) -> Result<bool, FractalError> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if error.code == "operation-conflict-run-degraded" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 
 /// Retain the guard reason for the always-on log at the actual fallback boundary.
 fn replay_needed(reason: &'static str) -> IncrementalProjection {
@@ -17606,7 +17882,31 @@ pub fn try_project_all_simple_replication_tx(
         origin,
         current_index_tx(transaction).map_err(internal)?,
     )
-    .map(|decision| decision == IncrementalProjection::Projected)
+    .map(|decision| matches!(decision, IncrementalProjection::Projected | IncrementalProjection::ProjectedWithContext { .. }))
+}
+
+// A whole-log replay is unsafe while this log contains conflicting operations. Keep the
+// independent replay requirement visible, but let bounded receipt move past it. Repair is
+// explicit: receipt must not repeatedly strand unrelated claims behind an unhealthy graph.
+fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, require_discovery: bool, reason: &str) -> Result<bool, FractalError> {
+    let conflict: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    // Receipt requires proof for the entire admitted replay range, not merely this chunk.
+    // An interrupted generation rescan can lie below an already-advanced graph frontier.
+    let unproven = require_discovery && !smallclaims::store::operation_conflict_discovery_valid(
+        tx, current_index_tx(tx).map_err(internal)?,
+    ).map_err(internal)?;
+    if conflict || unproven {
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-ha8b524108446 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+             VALUES ('projection:deferred-replay','stale','operation-conflict-replay-deferred',?1,?2)
+             ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![reason, now_ms().to_string()],
+        ).map_err(internal)?;
+    }
+    Ok(conflict || unproven)
 }
 
 // Pending rebuilds are projection state, committed with the chunk that skips their claims.
@@ -17654,11 +17954,12 @@ fn normalize_pending_run_tx(transaction: &Transaction<'_>, aggregate: Aggregate)
 
 fn rebuild_pending_run_tx(transaction: &Transaction<'_>, aggregate: &Aggregate) -> Result<(), FractalError> {
     let effective = normalize_pending_run_tx(transaction, aggregate.clone())?;
-    match &effective {
-        Aggregate::RunTree(root) => holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root))?,
-        Aggregate::RunPart(top) => holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top))?,
+    let result = match &effective {
+        Aggregate::RunTree(root) => holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
+        Aggregate::RunPart(top) => holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top)),
         _ => return Err(FractalError::new("invalid-pending-rebuild", "pending rebuild is not a run aggregate")),
-    }
+    };
+    settle_run_refold_result(result)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h8a1016207aaf owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(aggregate)?])
         .map_err(internal)?;
     if let Aggregate::RunTree(root) = &effective {
@@ -17788,7 +18089,8 @@ pub fn try_project_simple_replication_tx(
     origin: &str,
     through: u64,
 ) -> Result<IncrementalProjection, FractalError> {
-    try_project_simple_replication_inner_tx(transaction, origin, through, false)
+    // Direct callers retain their replay decisions; receipt requires reader discovery.
+    try_project_simple_replication_inner_tx(transaction, origin, through, false, false)
 }
 
 /// A standalone ask is projected atomically by its local writer. Unrelated claims'
@@ -17835,6 +18137,7 @@ fn try_project_simple_replication_inner_tx(
     origin: &str,
     through: u64,
     defer_runs: bool,
+    require_discovery: bool,
 ) -> Result<IncrementalProjection, FractalError> {
     let health: Option<(String, u64, Option<String>)> = transaction
         .query_row(
@@ -17844,13 +18147,15 @@ fn try_project_simple_replication_inner_tx(
         )
         .optional()
         .map_err(internal)?;
-    let Some((status, frontier, error_code)) = health else {
-        return Ok(replay_needed("missing-health"));
+    let (status, frontier, error_code) = match health {
+        Some(health) => health,
+        None if defer_replay_for_operation_conflict(transaction, require_discovery, "missing-health")? => ("healthy".to_owned(), 0, None),
+        None => return Ok(replay_needed("missing-health")),
     };
     if status != "healthy"
         && !(status == "stale" && error_code.as_deref() == Some("pending-projection-work")
             && projection_work_pending_tx(transaction)?)
-    {
+        && !defer_replay_for_operation_conflict(transaction, require_discovery, "unhealthy-projection")? {
         return Ok(replay_needed("unhealthy-projection"));
     }
     if frontier > current_index_tx(transaction).map_err(internal)? {
@@ -17966,6 +18271,7 @@ fn try_project_simple_replication_inner_tx(
             mark_dirty(&mut dirty, part, "local claim");
         }
     }
+    let mut unsupported_conflict_subjects = BTreeSet::new();
     for claim in &claims {
         let local_ask_applied = local_standalone_ask_applied_tx(transaction, claim, origin)
             .map_err(|error| incremental_claim_error(error, claim, "local-ask-projection"))?;
@@ -17999,6 +18305,7 @@ fn try_project_simple_replication_inner_tx(
                     | "work.person-asked"
                     | "work.person-reassigned"
                     | "work.person-done"
+                    | "work.person-override"
                     | "work.person-cancelled"
                     | "doc.bound"
                     | "mission.published"
@@ -18030,6 +18337,26 @@ fn try_project_simple_replication_inner_tx(
             } else {
                 "non-incremental-kind"
             };
+            if reason == "non-incremental-kind"
+                && let Some((operation_id, digest)) = operation_parts(&claim.body) {
+                let conflict: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1
+                        AND (request_digest<>?2 OR state='conflict'))
+                     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+                        WHERE json_extract(body,'$._operation.id')=?1
+                          AND json_extract(body,'$._operation.request_digest')<>?2
+                          AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))",
+                    params![operation_id, digest], |row| row.get(0),
+                ).map_err(internal)?;
+                if conflict {
+                    unsupported_conflict_subjects.insert(claim.subject.clone());
+                    continue;
+                }
+            }
+            if defer_replay_for_operation_conflict(transaction, require_discovery, reason)? {
+                unsupported_conflict_subjects.insert(claim.subject.clone());
+                continue;
+            }
             crate::profile::note(&format!("replay: {reason}"));
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason,
@@ -18045,7 +18372,7 @@ fn try_project_simple_replication_inner_tx(
         // before its ask, or a later local update, has the same result as canonical replay.
         if matches!(
             claim.kind.as_str(),
-            "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-cancelled"
+            "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-override" | "work.person-cancelled"
         ) && !local_ask_applied && let Some(aggregate) = aggregate_of_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
         {
@@ -18215,10 +18542,14 @@ fn try_project_simple_replication_inner_tx(
             }
         }
     }
-    // Event-only claims and message sends reconcile ambiguous receipts from that
-    // operation's indexed history, using the full replay's reducer. Structural
-    // kinds retain the full replay guard for ambiguous IDs.
+    // Registry conflicts use the same keyed reducer as replay. Graph effects still fold all
+    // claims in canonical order, independently of which request the registry names.
+    let mut conflict_diagnostics = Vec::new();
+    let mut aggregate_conflicts = BTreeMap::<Aggregate, Vec<usize>>::new();
+    let mut planning_conflicts = BTreeMap::<String, Vec<usize>>::new();
     let mut reconciled_operations = BTreeSet::new();
+    let mut naming_conflict = None;
+    let mut naming_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
@@ -18235,21 +18566,18 @@ fn try_project_simple_replication_inner_tx(
         if repaired {
             continue;
         }
+        let mut current = operation_tx(transaction, operation_id).map_err(|error| {
+            incremental_claim_error(internal(error), claim, "operation-registry")
+        })?;
+        // The graph-neutral inline path precedes bounded graph repair. A mixed operation
+        // still needs its graph effects repaired even when this incoming claim is neutral.
         let graph_neutral = !replay_projects_kind(&claim.kind);
         if graph_neutral && reconciled_operations.contains(operation_id) {
             continue;
         }
-        let stored_operation = operation_tx(transaction, operation_id).map_err(|error| {
-            incremental_claim_error(internal(error), claim, "operation-registry")
-        })?;
-        let conflict = stored_operation.as_ref().is_some_and(|(digest, _, state)| {
-            digest.as_str() != request_digest || state != "active"
-        });
-        // A checkpoint can leave only tombstones, with no operations row. Before
-        // folding either case, inspect only this operation's indexed history:
-        // a structural claim sharing the key needs its projections replayed too.
-        if conflict || (graph_neutral && stored_operation.is_none()) {
-            let neutral_history = graph_neutral && (|| -> rusqlite::Result<bool> {
+        if graph_neutral && current.as_ref().is_none_or(|(digest, _, state)|
+            digest != request_digest || state != "active") {
+            let neutral_history = (|| -> rusqlite::Result<bool> {
                 let mut statement = transaction.prepare_cached(
                     "SELECT kind FROM claims INDEXED BY claims_operation_index
                      WHERE json_extract(body, '$._operation.id')=?1
@@ -18263,14 +18591,10 @@ fn try_project_simple_replication_inner_tx(
                     let kind = kind.as_str().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(0, kind.data_type(), Box::new(error))
                     })?;
-                    if replay_projects_kind(kind) {
-                        return Ok(false);
-                    }
+                    if replay_projects_kind(kind) { return Ok(false); }
                 }
                 Ok(true)
-            })().map_err(|error| {
-                incremental_claim_error(internal(error), claim, "operation-registry")
-            })?;
+            })().map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
             if neutral_history {
                 repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
                     incremental_claim_error(internal(error), claim, "operation-registry")
@@ -18278,22 +18602,87 @@ fn try_project_simple_replication_inner_tx(
                 reconciled_operations.insert(operation_id.to_owned());
                 continue;
             }
-            let (stored_digest, state) = stored_operation.as_ref()
-                .map(|(digest, _, state)| (digest.as_str(), state.as_str()))
-                .unwrap_or(("", "missing"));
-            crate::profile::note("replay: operation-conflict");
-            return Ok(IncrementalProjection::ReplayWithContext {
-                reason: "operation-conflict",
-                details: incremental_claim_error(FractalError::new("operation-conflict",
-                    "operation digest differs or registry state is not active"), claim,
-                    "operation-registry").with_detail("projection_error", format!(
-                        "operation registry refuses incoming claim: digest_matches={}; stored state {}", stored_digest == request_digest, state.chars().take(32).collect::<String>()
-                    )).details,
-            });
+        }
+        if current.is_none() {
+            register_operation_tx(transaction, claim).map_err(internal)?;
+            current = operation_tx(transaction, operation_id).map_err(internal)?;
+            if current.as_ref().is_none_or(|(_, _, state)| state == "active") {
+                continue;
+            }
+            // A checkpoint-only receipt supplies the conflicting predecessor, not the
+            // newly retained claim the registry now necessarily names.
+            let previous: String = transaction.query_row(
+                "SELECT id FROM checkpoint_claims WHERE operation_id=?1 AND request_digest<>?2
+                   AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
+                 ORDER BY request_digest,id LIMIT 1", params![operation_id, request_digest], |row| row.get(0),
+            ).map_err(internal)?;
+            if let Some((_, canonical, _)) = &mut current { *canonical = previous; }
+        }
+        if let Some((stored_digest, previous_claim_id, state)) = current
+            && (stored_digest != request_digest || state != "active")
+        {
+            holds::stage("operation-conflict", || -> anyhow::Result<()> {
+                let replaced: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
+                    [&previous_claim_id], |row| row.get(0),
+                )?;
+                if replaced {
+                    // Explicit record repair can remove the row's summarized receipt.
+                    repair_operations_tx(transaction, &[operation_id.to_owned()])?;
+                } else {
+                    register_operation_tx(transaction, claim)?;
+                }
+                Ok(())
+            }).map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
+            let canonical_claim_id = operation_tx(transaction, operation_id)
+                .map_err(internal)?.map(|(_, id, _)| id);
+            let mut diagnostic = incremental_claim_error(
+                FractalError::new("operation-conflict", "conflicting operation reconciled canonically without replay"),
+                claim, "operation-registry",
+            ).with_detail("previous_claim_id", previous_claim_id)
+             .with_detail("canonical_claim_id", canonical_claim_id);
+            if unsupported_conflict_subjects.contains(&claim.subject) {
+                diagnostic.details.insert("projection_degraded".into(), json!(true));
+                diagnostic.details.insert("refold_error_code".into(), json!("operation-conflict-no-bounded-refold"));
+            }
+            let health_key = format!("projection:operation-conflict:{}", json!([operation_id, claim.subject]));
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hdacd188e0574 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(aggregate) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
+                    error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms
+                 WHERE projection_health.status<>'stale'",
+                params![health_key,
+                    if unsupported_conflict_subjects.contains(&claim.subject) { "stale" } else { "indeterminate" },
+                    if unsupported_conflict_subjects.contains(&claim.subject) { "operation-conflict-no-bounded-refold" } else { "operation-conflict" },
+                    serde_json::to_string(&diagnostic.details).map_err(internal)?, now_ms().to_string()],
+            ).map_err(internal)?;
+            let index = conflict_diagnostics.len();
+            if identities::operation_touches_naming(transaction, operation_id).map_err(internal)? {
+                naming_conflict = Some(index);
+                naming_operations.insert(operation_id.to_owned());
+            }
+            if let Some(session) = claim.subject.strip_prefix("planning-session/") {
+                planning_conflicts.entry(session.to_owned()).or_default().push(index);
+            } else if replay_projects_kind(&claim.kind)
+                && !unsupported_conflict_subjects.contains(&claim.subject)
+                && let Some(aggregate) = aggregate_of_tx(transaction, claim)? {
+                aggregate_conflicts.entry(aggregate.clone()).or_default().push(index);
+                mark_dirty(&mut dirty, aggregate, "operation conflict canonical refold");
+            }
+            conflict_diagnostics.push(OperationConflictDiagnostic { error: diagnostic, health_key });
+            continue;
         }
         register_operation_tx(transaction, claim).map_err(|error| {
             incremental_claim_error(internal(error), claim, "operation-registry")
         })?;
+    }
+    if let Some(index) = naming_conflict
+        && !identities::refold_operation_conflict(transaction, &conflict_diagnostics[index].error.details, &naming_operations)
+            .map_err(internal)? {
+        let details = &mut conflict_diagnostics[index].error.details;
+        details.insert("projection_degraded".into(), json!(true));
+        details.insert("refold_error_code".into(), json!("operation-conflict-naming-refold-limit"));
     }
     let mut latest_work_by_subject = BTreeMap::new();
     for claim in &work_claims {
@@ -18337,6 +18726,12 @@ fn try_project_simple_replication_inner_tx(
     }
     for part in covered_parts {
         dirty.remove(&part);
+        if let Aggregate::RunPart(top) = &part
+            && let Some(root) = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?
+            && let Some(affected) = aggregate_conflicts.remove(&part)
+        {
+            aggregate_conflicts.entry(Aggregate::RunTree(root)).or_default().extend(affected);
+        }
     }
     for claim in &claims {
         insert_event(
@@ -18359,6 +18754,9 @@ fn try_project_simple_replication_inner_tx(
     // A claim is left to its aggregate's rebuild when that aggregate is dirty, and left waiting
     // when it is about a run tree that nothing has created yet.
     let mut in_dirty = |claim: &ClaimRecord| -> Result<bool, FractalError> {
+        if unsupported_conflict_subjects.contains(&claim.subject) {
+            return Ok(true);
+        }
         if Store::simple_replication_kind(&claim.kind) && !claim.kind.starts_with("work.") {
             return Ok(false);
         }
@@ -18450,7 +18848,10 @@ fn try_project_simple_replication_inner_tx(
         .partition(|aggregate| matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)));
     for aggregate in bases {
         holds::stage("rebuild-base", || {
-            rebuild_base_aggregate_tx(transaction, aggregate)
+            refold_after_operation_conflict(transaction, &mut conflict_diagnostics,
+                aggregate_conflicts.get(aggregate).map_or(&[], Vec::as_slice), || {
+                rebuild_base_aggregate_tx(transaction, aggregate)
+            })
         })
         .map_err(|error| {
             let subject = match aggregate {
@@ -18469,7 +18870,16 @@ fn try_project_simple_replication_inner_tx(
             .map_err(internal)?;
     }
     for aggregate in trees {
-        if defer_runs {
+        let run_root = match aggregate {
+            Aggregate::RunTree(root) => root.clone(),
+            Aggregate::RunPart(top) => run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.unwrap_or_else(|| top.clone()),
+            _ => unreachable!("run aggregates partitioned above"),
+        };
+        // A later ordinary claim cannot bypass an earlier receipt's failed bounded fold.
+        if run_conflict_degraded_tx(transaction, &run_root)? { continue; }
+        // Conflict diagnostics and the savepoint/cap belong to this receipt, not the
+        // generic final-drain queue. Fold those runs bounded here; defer ordinary work.
+        if defer_runs && !aggregate_conflicts.contains_key(aggregate) {
             let value = serde_json::to_string(aggregate).map_err(internal)?;
             transaction.execute(/* sqlite-large-value: allow-for-now lv-h9138a3691eef owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
                 params![pending_run_rebuild_key(aggregate)?, value]).map_err(internal)?;
@@ -18477,11 +18887,17 @@ fn try_project_simple_replication_inner_tx(
         }
         let (rebuilt, root) = match aggregate {
             Aggregate::RunTree(root) => (
-                holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
+                holds::stage("rebuild-tree", || refold_after_operation_conflict(
+                    transaction, &mut conflict_diagnostics,
+                    aggregate_conflicts.get(aggregate).map_or(&[], Vec::as_slice),
+                    || rebuild_run_tree_tx(transaction, root))),
                 root,
             ),
             Aggregate::RunPart(top) => (
-                holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top)),
+                holds::stage("rebuild-part", || refold_after_operation_conflict(
+                    transaction, &mut conflict_diagnostics,
+                    aggregate_conflicts.get(aggregate).map_or(&[], Vec::as_slice),
+                    || rebuild_run_part_tx(transaction, top))),
                 top,
             ),
             _ => continue,
@@ -18491,6 +18907,13 @@ fn try_project_simple_replication_inner_tx(
                 .with_detail("projection_stage", "run-tree-rebuild")
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
+        if aggregate_conflicts.get(aggregate).is_some_and(|affected| affected.iter().any(|&index|
+            conflict_diagnostics[index].error.details.get("projection_degraded").and_then(Value::as_bool) == Some(true))) {
+            // A tree rebuild covers every part: fence the owning root even when one part
+            // failed, so local drains and later chunks cannot widen around its bound.
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h26d5c1ee3d02 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                params![format!("operation-conflict-run:{run_root}"), "1"]).map_err(internal)?;
+        }
     }
     if !defer_runs {
         transaction.execute(/* sqlite-large-value: allow-for-now lv-hec593db44a4b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
@@ -18499,8 +18922,16 @@ fn try_project_simple_replication_inner_tx(
     match planning_sessions {
         Some(sessions) => {
             for session in sessions {
+                if unsupported_conflict_subjects.contains(&format!("planning-session/{session}")) {
+                    continue;
+                }
                 holds::stage("rebuild-planning-session", || {
-                    rebuild_planning_session_tx(transaction, session)
+                    refold_after_operation_conflict(transaction, &mut conflict_diagnostics,
+                        planning_conflicts.get(session).map_or(&[], Vec::as_slice), || {
+                        rebuild_planning_session_tx(transaction, session).map_err(|error| {
+                            error.downcast::<FractalError>().unwrap_or_else(internal)
+                        })
+                    })
                 })
                 .map_err(|error| {
                     internal(error)
@@ -18509,12 +18940,37 @@ fn try_project_simple_replication_inner_tx(
                 })?;
             }
         }
+        None if !unsupported_conflict_subjects.is_empty() => {},
         None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
-    owned_sets::project_tx(transaction)
+    // A later receipt must not implicitly repair a set excluded by an earlier chunk.
+    let mut excluded = transaction.prepare(
+        "SELECT aggregate FROM projection_health INDEXED BY projection_health_degraded_operation_subject WHERE status='stale'
+         AND error_code='operation-conflict-no-bounded-refold'
+         AND aggregate GLOB 'projection:operation-conflict:*'",
+    ).map_err(internal)?;
+    for key in excluded.query_map([], |row| row.get::<_, String>(0)).map_err(internal)? {
+        let key = key.map_err(internal)?;
+        if let Some(identity) = key.strip_prefix("projection:operation-conflict:")
+            && let Ok((_, subject)) = serde_json::from_str::<(String, String)>(identity) {
+            unsupported_conflict_subjects.insert(subject);
+        }
+    }
+    drop(excluded);
+    owned_sets::project_excluding_tx(transaction, &unsupported_conflict_subjects)
         .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
-    Ok(IncrementalProjection::Projected)
+    // Prefer a degraded subject's identifiers over an unrelated later event-only conflict.
+    let diagnostic = conflict_diagnostics.iter().rposition(|diagnostic|
+        diagnostic.error.details.get("projection_degraded").and_then(Value::as_bool) == Some(true))
+        .or_else(|| conflict_diagnostics.len().checked_sub(1));
+    Ok(match diagnostic {
+        Some(index) => {
+            let diagnostic = conflict_diagnostics.swap_remove(index).error;
+            IncrementalProjection::ProjectedWithContext { code: diagnostic.code, details: diagnostic.details }
+        },
+        None => IncrementalProjection::Projected,
+    })
 }
 
 /// The graph tables a replay derives from claims alone, children before the tables their
@@ -18553,6 +19009,9 @@ fn replay_graph_from_nothing_with_progress_tx(
         })
     };
     stage("full-replay/clear");
+    // This transaction is an authorized full repair. Rollback restores the markers if
+    // any reducer fails; only its successful commit permits ordinary run rebuilds again.
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf04badb6d7a2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB 'operation-conflict-run:*'", []).map_err(internal)?;
     for table in REPLAYED_GRAPH_TABLES {
         transaction
             .execute(&format!(/* sqlite-large-value: allow-for-now lv-h7a51a72fe942 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])
@@ -18746,6 +19205,10 @@ pub fn project_claim_isolated_tx(
             transaction
                 .execute_batch(/* sqlite-large-value: allow-for-now lv-h0dbb3a5ec63d owner=fractal_store::store TODO=trace-statement-and-value-representation */ "ROLLBACK TO project_claim; RELEASE project_claim")
                 .map_err(internal)?;
+            // A bounded aggregate refold must be atomic, not a partial replay with holes.
+            if CONFLICT_REFOLD.get() {
+                return Err(error);
+            }
             transaction
                 .execute(
                     /* sqlite-large-value: allow-for-now lv-ha5591425e84e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, error_code, error_message, updated_at_unix_ms)
@@ -18936,7 +19399,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-override','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -19244,6 +19707,17 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    // The durable effect subject, not the last work-state reason, owns this fence.
+    // Check before every step/work projection, including person waits and retries.
+    if claim.subject.starts_with("step-run/")
+        && effects::step_has_unresolved_effect_tx(transaction, &claim.subject).map_err(internal)?
+    {
+        transaction.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h4550e7b9ce6d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE step_runs SET status='blocked', blocked_reason='effect-unresolved' WHERE subject=?1",
+        ).map_err(internal)?.execute(/* sqlite-large-value: allow-for-now lv-h1f1e37b98c1e owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&claim.subject]).map_err(internal)?;
+        return Ok(());
+    }
     if person_work::project(transaction, claim)? {
         return Ok(());
     }
@@ -19316,10 +19790,36 @@ pub fn project_mission_run_update(
             )
             .optional()
             .map_err(internal)?;
+        // A newly converged ambiguity can invalidate a previous success. Only a
+        // daemon hold backed by a current-generation unresolved effect may reopen it.
+        let mut effect_resolution_hold = false;
+        if status == "blocked" && phase == "normal"
+            && fields.get("reason").and_then(Value::as_str) == Some("effect-unresolved")
+            && claim.actor.as_deref() == Some("daemon/runtime")
+        {
+            for effect in claim.body["evidence"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if effects::effect_is_unresolved_tx(transaction, effect).map_err(internal)?
+                    && transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mission_runs m JOIN step_runs s
+                         ON s.run_id=m.id AND s.generation_id=m.current_generation_id
+                         JOIN claims c ON c.subject=?2 AND c.kind='effect.unresolved'
+                           AND json_extract(c.body,'$.fields.bound_step_run')=s.subject
+                         WHERE m.id=?1)",
+                        params![run_id, effect], |row| row.get::<_, bool>(0),
+                    ).map_err(internal)?
+                {
+                    effect_resolution_hold = true;
+                    break;
+                }
+            }
+        }
+        let reopening_effect = effect_resolution_hold && current.as_ref().is_some_and(
+            |(status, phase)| is_terminal_run_state(status) || phase == "terminal",
+        );
         if current.is_some_and(|(current_status, current_phase)| {
             (is_terminal_run_state(&current_status) || current_phase == "terminal")
                 && !(is_terminal_run_state(status) || phase == "terminal")
-        }) {
+        }) && !effect_resolution_hold {
             return Ok(());
         }
         transaction
@@ -19328,6 +19828,14 @@ pub fn project_mission_run_update(
                 /* sqlite-large-value: allow-for-now lv-he4b8f413eb73 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, status, phase, claim.accepted_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
+        if reopening_effect {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-he1edfe7bd7b2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE run_generations SET status='running', updated_at_unix_ms=?2
+                 WHERE id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
+                params![run_id, claim.accepted_at_unix_ms.to_string()],
+            ).map_err(internal)?;
+        }
         if phase == "normal"
             && fields.get("previous_phase").and_then(Value::as_str) == Some("supersession-waiting")
         {
@@ -21008,50 +21516,49 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
         .nth(1)
         .map(|id| format!("run-generation/{id}"))
         .unwrap_or_default();
-    Ok(StepRunView {
-        subject,
-        run: format!("mission-run/{}", row.get::<_, String>(1)?),
-        generation,
-        step: row.get(2)?,
-        fresh_context: false,
-        queue: None,
-        queue_position: None,
-        definition_hash: row.get(3)?,
-        status: row.get(4)?,
-        attempt: row.get::<_, u32>(5)?,
-        assigned_to: row.get(6)?,
-        available_to: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-        agentless: row.get(8)?,
-        title: row.get(9)?,
-        goals: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
-        constraints: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or_default(),
-        under: Vec::new(),
-        worker_reported: row.get::<_, bool>(11)?,
-        claimant: row.get(12)?,
-        claim_incarnation: row.get(13)?,
-        submitted_incarnation: None,
-        claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
-        carried_claimant: None,
-        execution_started_at_unix_ms: None,
-        execution_paused_until_unix_ms: None,
-        execution_waited_ms: 0,
-        execution_elapsed_ms: 0,
-        timeout_ms: None,
-        timeout_extension_ms: 0,
-        ready_age_ms: None,
-        wake: None,
-        progress_summary: None,
-        progress_at_unix_ms: None,
-        completion_summary: None,
-        readiness_epoch: row.get(19)?,
-        blocked_reason: row.get(15)?,
-        blockers: Vec::new(),
-        not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
-        nudged_at_unix_ms: None,
-        created_at_unix_ms: created.parse().unwrap_or(0),
-        updated_at_unix_ms: updated.parse().unwrap_or(0),
-        person_answers: Vec::new(),
-    })
+    Ok(StepRunView { executions: None, effects: Vec::new(), subject,
+    run: format!("mission-run/{}", row.get::<_, String>(1)?),
+    generation,
+    step: row.get(2)?,
+    fresh_context: false,
+    queue: None,
+    queue_position: None,
+    definition_hash: row.get(3)?,
+    status: row.get(4)?,
+    attempt: row.get::<_, u32>(5)?,
+    retry: None,
+    assigned_to: row.get(6)?,
+    available_to: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+    agentless: row.get(8)?,
+    title: row.get(9)?,
+    goals: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
+    constraints: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or_default(),
+    under: Vec::new(),
+    worker_reported: row.get::<_, bool>(11)?,
+    claimant: row.get(12)?,
+    claim_incarnation: row.get(13)?,
+    submitted_incarnation: None,
+    claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
+    carried_claimant: None,
+    execution_started_at_unix_ms: None,
+    execution_paused_until_unix_ms: None,
+    execution_waited_ms: 0,
+    execution_elapsed_ms: 0,
+    timeout_ms: None,
+    timeout_extension_ms: 0,
+    ready_age_ms: None,
+    wake: None,
+    progress_summary: None,
+    progress_at_unix_ms: None,
+    completion_summary: None,
+    readiness_epoch: row.get(19)?,
+    blocked_reason: row.get(15)?,
+    blockers: Vec::new(),
+    not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
+    nudged_at_unix_ms: None,
+    created_at_unix_ms: created.parse().unwrap_or(0),
+    updated_at_unix_ms: updated.parse().unwrap_or(0),
+    person_answers: Vec::new(), })
 }
 
 /// What `work extend` has added to one step attempt's execution budget as of `snapshot_unix_ms`.
@@ -21341,6 +21848,7 @@ fn apply_step_definition(view: &mut StepRunView, mission: &MissionSpec) {
         view.queue_position = step.queue_position;
         view.timeout_ms = step.timeout_ms;
         view.fresh_context = step.fresh_context;
+        view.retry = (step.retry != crate::model::RetrySpec::default()).then(|| step.retry.clone());
     }
 }
 
@@ -22285,6 +22793,12 @@ pub fn apply_effective_step_state_with_owner(
         view.claim_expires_at_unix_ms = None;
         return Ok(());
     }
+    // Lease expiry is not authority to retry an unresolved external effect.
+    if effects::step_has_unresolved_effect_tx(connection, &view.subject)? {
+        view.status = "blocked".into();
+        view.blocked_reason = Some("effect-unresolved".into());
+        return Ok(());
+    }
     if step_claim_expired(view, snapshot_unix_ms) {
         view.status = "ready".into();
         view.blocked_reason = Some("the worker lease expired".into());
@@ -23143,6 +23657,7 @@ pub fn mission_run_view_and_definition_tx(
     let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
         if presentation {
+            step.effects = effects::effect_views_for_step_tx(connection, &step.subject)?;
             enrich_step_queue_with(connection, step, now_ms(), &mut definitions, history)?;
         } else {
             let snapshot_unix_ms = now_ms();
@@ -24263,7 +24778,7 @@ pub fn append_claim_with_commit_context(
             {
                 return Ok((existing, false));
             }
-            let mut stored_fields = custom::prepare(transaction, input)?;
+            let mut stored_fields = custom::prepare(transaction, &graph.origin, input)?;
             if let Some(fields) = normalize_resource_observation(transaction, input)? {
                 stored_fields = Some(fields);
             }
@@ -24442,6 +24957,10 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::read_positions::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::attention_controls::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::availability::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::usage_limits::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;

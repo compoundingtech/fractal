@@ -58,6 +58,7 @@ pub mod private_notes;
 pub mod quota;
 mod usage_hub;
 pub mod read_positions;
+pub mod attention_controls;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -189,6 +190,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
+        .route("/v1/client/mission-runs", get(mission_runs_by_prefix))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
         .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
@@ -235,6 +237,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(assistant::pin_read_trust))
         .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(assistant::update_policy))
         .route("/v1/client/assistant/summary", get(assistant::read_projection))
+        .route("/v1/client/assistant/availability", get(assistant::read_projection))
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
@@ -3038,6 +3041,9 @@ pub async fn publication_definition(
 const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -3430,6 +3436,13 @@ fn mission_resources_filtered(
                     } else {
                         BTreeMap::new()
                     };
+                    let executions = if selected_id.is_some() {
+                        run.steps.iter().map(|step| {
+                            Ok((step.subject.as_str(), store.step_executions(&step.subject)?))
+                        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?
+                    } else {
+                        BTreeMap::new()
+                    };
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()
@@ -3486,6 +3499,9 @@ fn mission_resources_filtered(
                                     value["waits"] = json!(history.waits);
                                     value["transitions"] = json!(history.transitions);
                                     value["history_complete"] = json!(history.complete);
+                                }
+                                if let Some(executions) = executions.get(step.subject.as_str()) {
+                                    value["executions"] = json!(executions);
                                 }
                                 // Detail reads that enrich the run (`Store::mission_run`) carry
                                 // its program steps' journals.
@@ -4243,6 +4259,43 @@ pub async fn missions(
         sync: client_sync_notice(&state),
         replicated: None,
     };
+    Ok((Extension(snapshot), Json(page)))
+}
+
+#[derive(Deserialize)]
+pub struct MissionRunsQuery {
+    mission_prefix: String,
+    #[serde(default)]
+    active: bool,
+    limit: Option<usize>,
+}
+
+/// Prefix-indexed automation read, deliberately independent of the fleet tree.
+/// Response middleware frames the page under `value` with its pinned read snapshot.
+pub async fn mission_runs_by_prefix(
+    State(state): State<AppState>,
+    Extension(_snapshot): Extension<ClientSnapshot>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<MissionRunsQuery>,
+) -> Result<(Extension<ClientSnapshot>, Json<crate::store::mission_run_query::MissionRunsPage>), ApiError> {
+    require_scope(&session, "read.projections")?;
+    if !(1..=500).contains(&query.limit.unwrap_or(100)) {
+        return Err(ApiError::bad(FractalError::new(
+            "validation-failed", "run limit must be 1 through 500",
+        )));
+    }
+    let store = state.store.clone();
+    let (snapshot, page) = super::blocking_store(move || {
+        store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&state, index);
+            let page = store.mission_runs_by_prefix(
+                &query.mission_prefix,
+                query.active,
+                query.limit.unwrap_or(100),
+            )?;
+            Ok((snapshot, page))
+        })
+    }).await?;
     Ok((Extension(snapshot), Json(page)))
 }
 
@@ -8370,6 +8423,7 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    priority: None,
                     deadline_ms: p
                         .get("deadline_ms")
                         .map(|deadline| {
@@ -8400,6 +8454,23 @@ async fn dispatch_action(
                     request: p.get("request").cloned(),
                 })
                 .map_err(ApiError::bad)?;
+            signal_changed(state);
+            Ok(vec![result.subject])
+        }
+        "work.override" => {
+            let result = state.store.override_person_step(&PersonStepResponse {
+                delegation: None,
+                subject: parameter_string(p, "target_id")?,
+                actor: authority_actor.clone(),
+                summary: p.get("summary").map(|_| parameter_string(p, "summary")).transpose()?.unwrap_or_default(),
+                evidence: Vec::new(),
+                episode: Some(parameter_string(p, "episode")?),
+                idempotency_key: request.idempotency_key.clone(),
+                answer: Some(serde_json::from_value(p.get("answer").cloned().ok_or_else(|| validation("answer is required"))?)
+                    .map_err(|_| validation("answer requires a named id and optional text"))?),
+            }).map_err(|error| {
+                if error.code == "forbidden" { forbidden(error.message) } else { ApiError::bad(error) }
+            })?;
             signal_changed(state);
             Ok(vec![result.subject])
         }
@@ -8466,35 +8537,36 @@ async fn dispatch_action(
             let result = accept_message_receipt_with_upload_owner(
                 state,
                 MessageSendRequest {
-                    idempotency_key: request.idempotency_key.clone(),
-                    // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if let Some(authorization) = session.assistant_write.as_ref() {
-                        authorization.principal().into()
-                    } else {
-                        authority_actor.clone()
-                    },
-                    to,
-                    // An attachment may travel alone; text is then optional.
-                    content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
-                        p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
-                    } else {
-                        parameter_string(p, "content")?
-                    },
-                    title: p.get("title").and_then(Value::as_str).map(str::to_owned),
-                    in_reply_to: p
-                        .get("in_reply_to")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    tags: message_send_tags(p)?,
-                    attachments: p
-                        .get("attachments")
-                        .cloned()
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|_| {
-                            validation("attachments are `{blob, media_type, name?}` records")
-                        })?
-                        .unwrap_or_default(),
+                owner: None,
+                idempotency_key: request.idempotency_key.clone(),
+                // Owner authority permits the operation, but is never the assistant's sender.
+                from: if let Some(authorization) = session.assistant_write.as_ref() {
+                    authorization.principal().into()
+                } else {
+                    authority_actor.clone()
+                },
+                to,
+                // An attachment may travel alone; text is then optional.
+                content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
+                    p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
+                } else {
+                    parameter_string(p, "content")?
+                },
+                title: p.get("title").and_then(Value::as_str).map(str::to_owned),
+                in_reply_to: p
+                    .get("in_reply_to")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                tags: message_send_tags(p)?,
+                attachments: p
+                    .get("attachments")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| {
+                        validation("attachments are `{blob, media_type, name?}` records")
+                    })?
+                    .unwrap_or_default(),
                 },
                 session_id,
                 p.get("signature")
@@ -9862,6 +9934,11 @@ async fn action_inner(
     } else {
         None
     };
+    let attention_control = if matches!(request.action_type.as_str(), "attention.seen" | "attention.snooze" | "attention.dismiss") {
+        Some(attention_controls::control(&state, &session, &request).await?)
+    } else {
+        None
+    };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
     }
@@ -9876,6 +9953,8 @@ async fn action_inner(
         vec![claim.subject.clone()]
     } else if let Some(advanced) = &read_position {
         vec![advanced.id.clone()]
+    } else if let Some(controlled) = &attention_control {
+        controlled.affected.clone()
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
@@ -9890,6 +9969,10 @@ async fn action_inner(
     if let Some(advanced) = &read_position {
         // The stored position after the merge, whether or not this advance appended a claim.
         result["read_position_at"] = json!(advanced.at);
+    }
+    if let Some(controls) = attention_control.and_then(|controlled| controlled.state) {
+        // The row's controls after the action, whether or not it appended a claim.
+        result["attention_control"] = controls;
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -10289,6 +10372,83 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt as _;
     use std::sync::Barrier;
+
+    #[tokio::test]
+    async fn mission_runs_prefix_read_requires_scope_and_bounds_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = || ClientSession::for_tests_scoped("person/operator", "person/operator", &["read.projections"]);
+        let query = |limit| MissionRunsQuery { mission_prefix: "roll/".into(), active: true, limit };
+        let (Extension(snapshot), Json(response)) = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session()), Query(query(None)),
+        ).await.unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), json!({"runs": [], "truncated": false}));
+        assert_eq!(snapshot.store_index, state.store.index().unwrap());
+        for limit in [0, 501] {
+            let error = mission_runs_by_prefix(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session()), Query(query(Some(limit))),
+            ).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        let error = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(ClientSession::for_tests_scoped("person/operator", "person/operator", &[])),
+            Query(query(None)),
+        ).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mission_runs_http_envelope_uses_the_pinned_snapshot() {
+        use axum::middleware::{self, Next};
+        use tower::ServiceExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let admitted = new_client_snapshot(&state);
+        state.store.append_claim(&ClaimInput {
+            subject: "custom/test/mission-runs-envelope".into(),
+            kind: "custom.test.marker".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let pinned_index = state.store.index().unwrap();
+        assert!(pinned_index > admitted.store_index);
+        let context = super::super::response_body::Context {
+            state: state.clone(), client_request: true, local_only_response: false,
+            request_id: "request/mission-runs-envelope".into(),
+            client_snapshot: Some(admitted.clone()), server: None, roster: false,
+        };
+        let app = Router::new()
+            .route("/v1/client/mission-runs", get(mission_runs_by_prefix))
+            .layer(Extension(ClientSession::for_tests_scoped(
+                "person/operator", "person/operator", &["read.projections"],
+            )))
+            .layer(Extension(admitted))
+            .layer(middleware::from_fn(move |request: Request<Body>, next: Next| {
+                let context = context.clone();
+                async move { context.wrap(next.run(request).await).await }
+            }))
+            .with_state(state.clone());
+        let response = app.oneshot(Request::builder()
+            .uri("/v1/client/mission-runs?mission_prefix=roll%2F&active=true")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["value"], json!({"runs": [], "truncated": false}));
+        assert_eq!(response["snapshot"]["store_index"], pinned_index);
+        assert_eq!(response["snapshot"]["host_id"], client_host_id(&state.node));
+        assert_eq!(response["request_id"], "request/mission-runs-envelope");
+        assert!(response["snapshot"]["created_at"].is_string());
+        assert!(response["value"].get("snapshot").is_none());
+        assert!(response["value"].get("value").is_none());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn published_runtimes_refresher_publishes_after_commits() {
@@ -13573,7 +13733,7 @@ mission "differential" state="ready" {
     }
 
     #[tokio::test]
-    async fn diagnostics_scope_is_in_default_device_and_full_control_pairing() {
+    async fn device_write_scopes_are_in_default_device_and_full_control_pairing() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let app = super::super::router(state.clone());
@@ -13594,8 +13754,10 @@ mission "differential" state="ready" {
             ).unwrap();
             let begun = begun.claims.iter().find(|claim|
                 claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
-            assert!(begun.body["fields"]["scopes"].as_array().unwrap()
-                .contains(&json!("write.client-diagnostics")));
+            let scopes = begun.body["fields"]["scopes"].as_array().unwrap();
+            for scope in ["write.client-diagnostics", "write.availability", "write.presence", "write.notes"] {
+                assert!(scopes.contains(&json!(scope)), "{scope}");
+            }
         }
     }
 
@@ -13795,18 +13957,19 @@ mission "differential" state="ready" {
         let sent = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-attachment".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "see image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: vec![crate::model::AttachmentInput {
-                    blob: format!("blob/{hash}"),
-                    media_type: "image/png".into(),
-                    name: Some("paste.png".into()),
-                }],
+            owner: None,
+            idempotency_key: "timeline-attachment".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "see image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: vec![crate::model::AttachmentInput {
+                blob: format!("blob/{hash}"),
+                media_type: "image/png".into(),
+                name: Some("paste.png".into()),
+            }],
             },
             None,
             None,
@@ -13832,14 +13995,15 @@ mission "differential" state="ready" {
         let plain = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-plain".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "no image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "timeline-plain".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "no image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,
@@ -16725,9 +16889,10 @@ subscription "watch/source" {
         let mut changed = claim.clone();
         changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
         assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        // Exact withdrawal must not select a completion using the wall clock.
         state.store.append_client_operation_claim(&ClaimInput {
             subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
-            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            actor:Some("person/alex".into()), fields:BTreeMap::from([("completion_id".into(), json!(claim.id))]),
             evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
         }).unwrap();
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
@@ -20432,14 +20597,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-older".into(),
-                from: client_session.authority_actor.clone(),
-                to: subject.into(),
-                content: "older session message".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-older".into(),
+            from: client_session.authority_actor.clone(),
+            to: subject.into(),
+            content: "older session message".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             Some("session/older-incarnation".into()),
             None,
@@ -20490,14 +20656,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-outgoing".into(),
-                from: subject.into(),
-                to: "agent/session-message-peer".into(),
-                content: "outgoing Fractal message".into(),
-                title: Some("A question".into()),
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-outgoing".into(),
+            from: subject.into(),
+            to: "agent/session-message-peer".into(),
+            content: "outgoing Fractal message".into(),
+            title: Some("A question".into()),
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,

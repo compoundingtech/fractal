@@ -358,6 +358,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
       {
         id: 'program',
         ...timeout,
+        ...(intent.retry === undefined ? {} : { retry: intent.retry }),
         program: {
           bundle,
           sha256,

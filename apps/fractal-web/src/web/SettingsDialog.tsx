@@ -6,6 +6,7 @@ import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, interactionVars as interaction, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { AvailabilityPanel } from '../availability/AvailabilityPanel.tsx'
 import { useConnection, useDataSource } from '../data/react.tsx'
 import { devBarAvailable, toggleDevBar, useDevBarVisible } from '../telemetry/devBarPreference.ts'
 import { deviceAccess, type SettingsBuild } from './settingsModel.ts'
@@ -39,6 +40,7 @@ export const SettingsControl = ({ scheme, onSchemeChange, build }: SettingsContr
                 <ChromeControl icon="x" label="Close settings" edge="trail" onPress={close} />
               </header>
               <div {...stylex.props(styles.body)}>
+                <AvailabilitySection />
                 <Section title="Appearance"><ThemeRow scheme={scheme} onSchemeChange={onSchemeChange} /></Section>
                 <Section title="Keyboard shortcuts"><ShortcutList /></Section>
                 <Section title="Dev tools"><SystemEventsRow /><DevBarRow /></Section>
@@ -57,6 +59,12 @@ const Section = ({ title, children }: { readonly title: string; readonly childre
     <h3 id={id} {...stylex.props(styles.sectionTitle)}>{title}</h3>
     {children}
   </section>
+}
+
+/** Present only where the source reaches a gateway for a person; fixture sources have no port and a replay page drops it. */
+const AvailabilitySection = () => {
+  const port = useDataSource().availability
+  return port === undefined ? null : <Section title="Availability"><AvailabilityPanel port={port} /></Section>
 }
 
 const ThemeRow = ({ scheme, onSchemeChange }: Pick<SettingsControlProps, 'scheme' | 'onSchemeChange'>) => {

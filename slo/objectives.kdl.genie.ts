@@ -210,34 +210,6 @@ export const objectives: readonly (Fractal.ObjectiveInput & { readonly name: str
       { stat: 'growth-mb-per-day', max: 300 },
     ],
   }),
-  // CI, observed outside the daemon: the merge queue and the workspace's checks. A `ci-duration`
-  // target is one percentile of a duration, the row `NAME/pPERCENTILE`. A `ci-count` is the most
-  // events an hour, the row `NAME`. `series` names what feeds it, `ci/NAME`. They are objectives in
-  // `fractal slo` only, not in the request-latency read or `fractal doctor`. Workspace CI's runs,
-  // read by the repository observer that reads main_performance_failures and held in memory, feed
-  // them; other members show no-data.
-  Fractal.objective({
-    name: 'merge-latency',
-    about: "A pull request's time in the merge queue, from entering it to merging",
-    indicator: indicator.ciDuration({ series: 'ci/merge-queue' }),
-    targets: [
-      { stat: 'p50', within: '10m' },
-      { stat: 'p95', within: '10m' },
-    ],
-  }),
-  Fractal.objective({
-    name: 'ci-critical-path',
-    about: "The workspace CI's critical path, from a change to all checks green",
-    indicator: indicator.ciDuration({ series: 'ci/workspace-critical-path' }),
-    targets: [{ stat: 'p95', within: '13m' }],
-  }),
-  Fractal.objective({
-    name: 'flakes',
-    about:
-      'Flaky results: tests nextest passed only on a retry, and merge groups ejected from the queue',
-    indicator: indicator.ciCount({ series: 'ci/flakes' }),
-    targets: [{ stat: 'per-hour', max: 0 }],
-  }),
 ]
 
 export default fractalKdl(objectives.map(Fractal.objectiveNode))

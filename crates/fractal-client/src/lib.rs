@@ -1286,6 +1286,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::ValidationFailed
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
+        | ErrorCode::AttentionDismissUnsupported
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -2232,6 +2233,41 @@ impl Client {
     }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
+    }
+    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {
+        self.get("/v1/client/auto-resolved").await
+    }
+    pub async fn availability_list(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Envelope<PersonAvailabilities>, ClientError> {
+        match person {
+            Some(person) => {
+                self.get(&format!(
+                    "/v1/client/availability?person={}",
+                    percent_encode(person)
+                ))
+                .await
+            }
+            None => self.get("/v1/client/availability").await,
+        }
+    }
+    pub async fn availability_history(
+        &self,
+        person: Option<&str>,
+        from: &str,
+        to: &str,
+        bucket_seconds: u64,
+    ) -> Result<Envelope<AvailabilityHistory>, ClientError> {
+        let person = person
+            .map(|person| format!("&person={}", percent_encode(person)))
+            .unwrap_or_default();
+        self.get(&format!(
+            "/v1/client/availability/history?from={}&to={}&bucket_seconds={bucket_seconds}{person}",
+            percent_encode(from),
+            percent_encode(to)
+        ))
+        .await
     }
     pub async fn custom_subjects_list(
         &self,
@@ -3255,6 +3291,17 @@ impl Client {
                 .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn attention_dismiss(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionDismissParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_dismiss(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -3263,6 +3310,28 @@ impl Client {
         parameters: AttentionResolveParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::attention_resolve(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_seen(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSeenParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_seen(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_snooze(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSnoozeParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_snooze(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3773,6 +3842,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn work_override(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PersonOverrideParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::work_override(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn work_progress(
         &self,
         id: impl Into<String>,
@@ -3842,6 +3922,40 @@ impl Client {
         report: &ObservationReport,
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Set or clear the session person's own availability. Requires `write.availability`;
+    /// agent sessions are refused.
+    pub async fn availability_set(
+        &self,
+        request: &AvailabilitySet,
+    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/availability", Some(body))
+            .await
+    }
+
+    /// Report one device's raw state for the session person, on every state change and again at
+    /// the result's `report_again_at`; the daemon derives presence and assigns the source.
+    /// Requires `write.presence`; agent sessions are refused.
+    pub async fn presence_report(
+        &self,
+        report: &PresenceReport,
+    ) -> Result<Envelope<PresenceReportResult>, ClientError> {
+        self.post("/v1/client/presence", report).await
+    }
+
+    /// Set or clear the session person's own directive note. Requires `write.notes`;
+    /// agent sessions are refused.
+    pub async fn notes_set(
+        &self,
+        request: &DirectiveNoteSet,
+    ) -> Result<Envelope<DirectiveNoteSetResult>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/notes", Some(body))
+            .await
     }
 
     /// Replace this paired device's local-only push registration. No graph receipt.
@@ -4836,22 +4950,23 @@ impl Client {
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
             // These projections have no missing-item 404; an older router may return no envelope.
-            let related_runs = path.starts_with("/v1/client/agent-related-runs/");
-            if status == 404
-                && (related_runs || path.split('?').next() == Some("/v1/client/schedules"))
-            {
+            let unsupported = if path.starts_with("/v1/client/agent-related-runs/") {
+                Some("agent-related-runs.get")
+            } else {
+                match path.split('?').next() {
+                    Some("/v1/client/schedules") => Some("schedules.list"),
+                    Some("/v1/client/availability/history") => Some("availability.history"),
+                    _ => None,
+                }
+            };
+            if let (404, Some(operation)) = (status, unsupported) {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: String::new(),
                     code: ErrorCode::UnsupportedCapability,
                     message: format!(
-                        "this server does not support {}; upgrade the server",
-                        if related_runs {
-                            "agent-related-runs.get"
-                        } else {
-                            "schedules.list"
-                        }
+                        "this server does not support {operation}; upgrade the server"
                     ),
                     retryable: false,
                     retry_after_ms: None,
@@ -5867,6 +5982,7 @@ mod tests {
         for code in [
             ErrorCode::InvalidAnswer,
             ErrorCode::NotAnswerable,
+            ErrorCode::AttentionDismissUnsupported,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
@@ -6507,6 +6623,33 @@ mod tests {
     }
 
     #[test]
+    fn auto_resolved_models_decode_and_override_omits_absent_summary() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/auto-resolved.json"
+        ))
+        .unwrap();
+        let rows: Envelope<AutoResolvedAsks> = serde_json::from_value(wire.clone()).unwrap();
+        assert!(rows.value.complete);
+        assert_eq!(
+            rows.value.items[0].default_answer.as_ref().unwrap().id,
+            "hold"
+        );
+        assert_eq!(serde_json::to_value(rows).unwrap(), wire);
+        let parameters = PersonOverrideParameters {
+            target_id: "step-run/example".into(),
+            episode: "claim/example".into(),
+            answer: PersonOverrideAnswer {
+                id: "ship".into(),
+                text: None,
+            },
+            summary: None,
+        };
+        let wire = serde_json::to_value(parameters).unwrap();
+        assert!(wire.get("summary").is_none());
+        assert!(wire["answer"].get("text").is_none());
+    }
+
+    #[test]
     fn schedule_models_preserve_unknown_fields_and_state_strings() {
         let wire: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/fixtures/schedules-page.json"
@@ -6534,6 +6677,65 @@ mod tests {
             assert_eq!(lines.len(),3);
             assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
             assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
+    }
+
+    #[test]
+    fn availability_history_reads_its_fixture_and_keeps_an_old_server_unsupported() {
+        runtime().block_on(async {
+            let fixture =
+                include_str!("../../../docs/st3/client-v0/fixtures/availability-history.json");
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("history.sock");
+            let server = scripted_server(
+                &socket,
+                vec![(0, 200, fixture.into()), (0, 404, String::new())],
+            );
+            let client = Client::unix_as(&socket, "person/ada");
+            let history = client
+                .availability_history(
+                    Some("person/ada"),
+                    "2026-11-12T09:00:00Z",
+                    "2026-11-12T11:00:00Z",
+                    3600,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (history.value.bucket_seconds, history.value.buckets.len()),
+                (3600, 2)
+            );
+            assert_eq!(
+                history.value.buckets[1].deadline_clock.hold_routine,
+                1_200_000
+            );
+            assert!(matches!(
+                client
+                    .availability_history(
+                        None,
+                        "2026-11-12T09:00:00Z",
+                        "2026-11-12T11:00:00Z",
+                        3600
+                    )
+                    .await,
+                Err(ClientError::Api(ErrorCode::UnsupportedCapability, _, _))
+            ));
+            let lines = server.await.unwrap();
+            assert!(
+                lines[0].starts_with("GET /v1/client/availability/history?from=2026-11-12T09"),
+                "{}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains("&bucket_seconds=3600&person=person/ada HTTP/1.1"),
+                "{}",
+                lines[0]
+            );
+            assert!(
+                lines[1].contains("&bucket_seconds=3600 HTTP/1.1"),
+                "{}",
+                lines[1]
+            );
         });
     }
 

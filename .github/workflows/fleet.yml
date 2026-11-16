@@ -4562,9 +4562,15 @@ jobs:
               "apps/fractal-web/src/changelog/**",
               # The dev-bar build and changes stories render the real segment.
               "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
+              # SettingsDialog and AvailabilityPanel stories render the availability section.
+              "apps/fractal-web/src/availability/AvailabilityEditor.tsx",
+              "apps/fractal-web/src/availability/AvailabilityPanel.tsx",
+              "apps/fractal-web/src/availability/availability.fixtures.ts",
+              "apps/fractal-web/src/availability/availabilityModel.ts",
               "apps/fractal-web/src/embed/**",
               "apps/fractal-web/src/web/AlertDetailsPane.tsx",
               "apps/fractal-web/src/web/AlertFlashBand.tsx",
+              "apps/fractal-web/src/web/AutoResolvedAsks.tsx",
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
               "apps/fractal-web/src/web/missionsTab.ts",
               "apps/fractal-web/src/web/SettingsDialog.tsx",
@@ -4589,6 +4595,7 @@ jobs:
               "apps/fractal-web/src/conversation/alerts/LiveAlertNames.tsx",
               "apps/fractal-web/src/conversation/alerts/PromptAlert.tsx",
               "apps/fractal-web/src/conversation/alerts/useAlertAnswers.ts",
+              "apps/fractal-web/src/conversation/alerts/useAutoResolved.ts",
               "apps/fractal-web/src/conversation/assistantFacts.ts",
               "apps/fractal-web/src/conversation/blocks.ts",
               "apps/fractal-web/src/conversation/fixtures.ts",
@@ -5055,8 +5062,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
-          restore-keys: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.22.2-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.22.2-"
       - name: Enable user namespaces for Buck TypeScript sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Restore the web shell closure

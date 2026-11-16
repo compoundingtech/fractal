@@ -25,8 +25,6 @@ pub struct Targets {
     pub cpu: Cpu,
     pub divergence: Divergence,
     pub database: Database,
-    pub duration: Vec<DurationTarget>,
-    pub count: Vec<CountTarget>,
 }
 
 #[derive(Debug)]
@@ -100,46 +98,6 @@ pub struct Database {
     pub max_growth_mb_per_day: f64,
 }
 
-/// One percentile of a duration observed outside the daemon, such as a CI run: the objective
-/// `NAME/pPERCENTILE`. A name may declare several percentiles, each its own objective.
-#[derive(Debug)]
-pub struct DurationTarget {
-    pub name: String,
-    pub about: String,
-    /// Between 1 and 99: that many of every 100 samples finish within `target_ms`.
-    pub percentile: u64,
-    pub target_ms: u64,
-    /// The series that feeds it, `ci/NAME`.
-    pub path: String,
-}
-
-impl DurationTarget {
-    /// The objective's id: its name and percentile, `merge-latency/p95`.
-    pub fn id(&self) -> String {
-        format!("{}/p{}", self.name, self.percentile)
-    }
-}
-
-/// Events observed outside the daemon, such as flaky CI results, counted per hour: the
-/// objective `NAME`.
-#[derive(Debug)]
-pub struct CountTarget {
-    pub name: String,
-    pub about: String,
-    pub max_per_hour: u64,
-    /// The series that feeds it, `ci/NAME`.
-    pub path: String,
-}
-
-/// Whether `path` names a series observed in CI: `ci/` and lowercase words joined by `-` or `/`.
-fn is_ci_path(path: &str) -> bool {
-    path.strip_prefix("ci/").is_some_and(|rest| {
-        rest.split('/').all(|part| {
-            !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
-    })
-}
-
 impl Latency {
     /// The target a sample served here (`remote` false) or from another machine misses past.
     pub fn target(&self, remote: bool) -> Duration {
@@ -186,8 +144,6 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
     let mut cpu = None;
     let mut divergence = None;
     let mut database = None;
-    let mut duration = Vec::new();
-    let mut count = Vec::new();
     for objective in objectives {
         let name = objective.name.as_str();
         ensure!(!name.contains('/'), "objective {name} is not one segment: only a declared objective has a namespace");
@@ -250,23 +206,6 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
                 let value = Divergence { about, max_open: whole(max("open")?, "open maximum")? };
                 one(&mut divergence, "divergence", "projection-divergence", name, value)?;
             }
-            Indicator::CiDuration { series } => {
-                for target in &objective.targets {
-                    duration.push(DurationTarget {
-                        name: name.to_owned(),
-                        about: about.clone(),
-                        percentile: target.percentile().with_context(|| format!("objective {name}'s target {} is no percentile", target.stat))?,
-                        target_ms: target.within_ms().with_context(|| format!("objective {name}'s target {} has no duration", target.stat))?,
-                        path: series.clone(),
-                    });
-                }
-            }
-            Indicator::CiCount { series } => count.push(CountTarget {
-                name: name.to_owned(),
-                about,
-                max_per_hour: whole(max("per-hour")?, "per-hour maximum")?,
-                path: series.clone(),
-            }),
             Indicator::Interval(_) | Indicator::Count(_) => {
                 bail!("objective {name} is an interval or count over claims: Fractal ships none; a fleet declares one with `fractal apply`")
             }
@@ -282,8 +221,6 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
         cpu: cpu.with_context(|| missing("cpu"))?,
         divergence: divergence.with_context(|| missing("divergence"))?,
         database: database.with_context(|| missing("database"))?,
-        duration,
-        count,
     })
 }
 
@@ -354,32 +291,6 @@ fn check(targets: &Targets) -> Result<()> {
             .all(|value| value.is_finite() && *value > 0.0),
         "the database targets are not positive sizes"
     );
-    // A CI series feeds one name's targets: a duration's percentiles share it, nothing else does.
-    let mut series = std::collections::BTreeMap::new();
-    for duration in &targets.duration {
-        let id = duration.id();
-        ensure!(
-            (1..=99).contains(&duration.percentile),
-            "target {id}'s percentile is not between 1 and 99"
-        );
-        ensure!(duration.target_ms > 0, "target {id} has no duration");
-        ensure!(names.insert(id.clone()), "target {id} is named twice");
-        ensure!(is_ci_path(&duration.path), "path {:?} is not a CI series", duration.path);
-        ensure!(
-            *series.entry(duration.path.as_str()).or_insert(duration.name.as_str()) == duration.name,
-            "path {:?} has two targets",
-            duration.path
-        );
-    }
-    for count in &targets.count {
-        ensure!(names.insert(count.name.clone()), "target {} is named twice", count.name);
-        ensure!(is_ci_path(&count.path), "path {:?} is not a CI series", count.path);
-        ensure!(
-            series.insert(count.path.as_str(), count.name.as_str()).is_none(),
-            "path {:?} has two targets",
-            count.path
-        );
-    }
     Ok(())
 }
 
@@ -924,7 +835,7 @@ mod tests {
     #[test]
     fn the_built_in_objectives_file_is_valid_and_names_the_mission_targets() {
         let targets = parse(SOURCE).unwrap();
-        assert_eq!(shipped().len(), 21);
+        assert_eq!(shipped().len(), 18);
         assert!(shipped().iter().all(|objective| !objective.declarable()));
         let read = targets.for_path("GET /v1/client/agents").unwrap();
         assert_eq!((read.p99_ms, read.remote_p99_ms), (300, Some(300)));
@@ -973,23 +884,6 @@ mod tests {
         );
         assert_eq!((targets.database.max_live_gb, targets.database.max_growth_mb_per_day), (8.0, 300.0));
         assert!(targets.for_path("GET /v1/health").is_none());
-        let durations = targets
-            .duration
-            .iter()
-            .map(|d| (d.id(), d.target_ms, d.path.as_str()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            durations,
-            [
-                ("merge-latency/p50".to_owned(), 600_000, "ci/merge-queue"),
-                ("merge-latency/p95".to_owned(), 600_000, "ci/merge-queue"),
-                ("ci-critical-path/p95".to_owned(), 780_000, "ci/workspace-critical-path"),
-            ]
-        );
-        let flakes = &targets.count[0];
-        assert_eq!((flakes.name.as_str(), flakes.max_per_hour, flakes.path.as_str()), ("flakes", 0, "ci/flakes"));
-        // A CI series is not a daemon path: no request counts toward it.
-        assert!(targets.for_path("ci/merge-queue").is_none());
     }
 
     #[test]
@@ -1131,40 +1025,12 @@ mod tests {
         // Each statement, transaction, writer-hold, CPU, database and divergence objective is
         // the one of its name; the shipped ones are one segment, and none is an interval.
         assert!(error(&SOURCE.replace("objective \"database\"", "objective \"store-size\"")).contains("named store-size, not database"));
-        assert!(error(&SOURCE.replace("objective \"flakes\"", "objective \"ci/flakes\"")).contains("not one segment"));
+        assert!(error(&SOURCE.replace("objective \"database\"", "objective \"ops/database\"")).contains("not one segment"));
+        assert!(error(&SOURCE.replace("objective \"database\"", "objective \"write-ack\"")).contains("declared twice"));
         let interval = format!(
             "{SOURCE}\nobjective \"change-rollout\" {{\n  about \"x\"\n  indicator \"interval\" {{\n    subject-prefix \"custom/acme/change/\"\n    start \"custom.acme.change-ready\"\n    stop \"custom.acme.change-applied\"\n  }}\n  window \"7d\"\n  target \"p95\" within=\"5m\"\n}}\n"
         );
         assert!(error(&interval).contains("is an interval"), "{}", error(&interval));
-    }
-
-    #[test]
-    fn ci_durations_and_counts_are_checked() {
-        for percentile in ["p0", "p100", "p250", "p-5"] {
-            let text = SOURCE.replacen("target \"p95\" within=\"13m\"", &format!("target \"{percentile}\" within=\"13m\""), 1);
-            assert!(error(&text).contains("no target"), "{percentile}");
-        }
-        assert!(parse(&SOURCE.replacen("target \"p95\" within=\"13m\"", "target \"p95\" within=\"0ms\"", 1)).is_err());
-        for to in ["max=-1", "max=0.5", "max=0 min-per-hour=0"] {
-            assert!(parse(&SOURCE.replace("target \"per-hour\" max=0", &format!("target \"per-hour\" {to}"))).is_err(), "{to}");
-        }
-        for series in ["GET /v1/flakes", "ci/Flakes", "ci/"] {
-            assert!(error(&SOURCE.replace("\"ci/flakes\"", &format!("\"{series}\""))).contains("is not `ci/`"), "{series}");
-        }
-        // The same percentile twice is one target repeated.
-        let again = SOURCE.replace("  target \"p95\" within=\"10m\"\n", "  target \"p95\" within=\"10m\"\n  target \"p95\" within=\"9m\"\n");
-        assert!(error(&again).contains("repeats target"));
-        // Another name may not take a series that feeds one already.
-        let other = format!(
-            "{SOURCE}\nobjective \"other\" {{\n  about \"x\"\n  indicator \"ci-duration\" {{\n    series \"ci/merge-queue\"\n  }}\n  target \"p95\" within=\"10m\"\n}}\n"
-        );
-        assert!(error(&other).contains("two targets"));
-        let count = format!(
-            "{SOURCE}\nobjective \"other\" {{\n  about \"x\"\n  indicator \"ci-count\" {{\n    series \"ci/merge-queue\"\n  }}\n  target \"per-hour\" max=1\n}}\n"
-        );
-        assert!(error(&count).contains("two targets"));
-        let named = SOURCE.replace("objective \"flakes\"", "objective \"write-ack\"");
-        assert!(error(&named).contains("declared twice"));
     }
 
     #[test]

@@ -325,6 +325,12 @@ fn rust_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
+        } else if id == "auto-resolved.list" {
+            writeln!(out, "    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {{ self.get(\"/v1/client/auto-resolved\").await }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    pub async fn availability_history(&self, person: Option<&str>, from: &str, to: &str, bucket_seconds: u64) -> Result<Envelope<AvailabilityHistory>, ClientError> {{ let person = person.map(|person| format!(\"&person={{}}\", percent_encode(person))).unwrap_or_default(); self.get(&format!(\"/v1/client/availability/history?from={{}}&to={{}}&bucket_seconds={{bucket_seconds}}{{person}}\", percent_encode(from), percent_encode(to))).await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -561,6 +567,12 @@ fn swift_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
+        } else if id == "auto-resolved.list" {
+            writeln!(out, "    public func autoResolvedList() async throws -> Envelope<AutoResolvedAsks> {{ try await get(\"v1/client/auto-resolved\") }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    public func availabilityHistory(person: String? = nil, from: String, to: String, bucketSeconds: Int) async throws -> Envelope<AvailabilityHistory> {{ var query = [URLQueryItem(name: \"from\", value: from), URLQueryItem(name: \"to\", value: to), URLQueryItem(name: \"bucket_seconds\", value: String(bucketSeconds))]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; return try await get(\"v1/client/availability/history\", query: query) }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -723,12 +735,14 @@ fn rust_field(name: &str) -> String {
         "loop" => "loop_spec".into(),
         "ref" => "reference".into(),
         "kdlLines" => "kdl_lines".into(),
-        other => other.into(),
+        "override" => "r#override".into(),
+        // A wire word used as a key, such as `hold-routine`.
+        other => other.replace('-', "_"),
     }
 }
 
 fn lower_camel_snake(value: &str) -> String {
-    let mut parts = value.split('_');
+    let mut parts = value.split(['_', '.', '-']);
     let mut out = parts.next().unwrap_or_default().to_owned();
     for part in parts {
         if matches!(part, "id" | "url" | "ms") {
@@ -884,6 +898,23 @@ fn validate_surfaces(
         "Capability",
         "DirectiveNote",
         "DirectiveNotes",
+        "PersonAvailability",
+        "PersonAvailabilities",
+        "AvailabilityStatusChange",
+        "AvailabilityInterruptionsChange",
+        "AvailabilityDeadlineClockChange",
+        "AvailabilitySet",
+        "PresenceReport",
+        "PresenceReportResult",
+        "AvailabilityHistory",
+        "AvailabilityHistoryBucket",
+        "AvailabilityStatusDurations",
+        "AvailabilityStatusSourceDurations",
+        "AvailabilityPresenceDurations",
+        "AvailabilityInterruptionsDurations",
+        "AvailabilityDeadlineClockDurations",
+        "DirectiveNoteSet",
+        "DirectiveNoteSetResult",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
@@ -1039,6 +1070,10 @@ fn validate_surfaces(
         "ReadPosition",
         "ReadPositionPage",
         "ReadPositionAdvanceParameters",
+        "AttentionSeenParameters",
+        "AttentionSnoozeParameters",
+        "AttentionDismissParameters",
+        "AttentionControlState",
     ] {
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
@@ -1117,6 +1152,9 @@ fn validate_surfaces(
         "pub async fn harness_questions(",
         "pub async fn harness_question(",
         "pub async fn push_register",
+        "pub async fn availability_set(",
+        "pub async fn presence_report(",
+        "pub async fn notes_set(",
         "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
@@ -1141,6 +1179,9 @@ fn validate_surfaces(
         "func events(",
         "func observationsReport(",
         "func pushRegister(",
+        "func availabilitySet(",
+        "func presenceReport(",
+        "func notesSet(",
         "func pushUnregister(",
         "func beginPairing(",
         "func completePairing(",
@@ -1471,11 +1512,17 @@ fn ts_type(value: &Value) -> Result<String> {
     if let Some(types) = value.get("type").and_then(Value::as_array) {
         return Ok(types
             .iter()
-            .map(|kind| ts_type(&serde_json::json!({"type": kind})))
+            .map(|kind| {
+                let mut member = value.clone();
+                member["type"] = kind.clone();
+                ts_type(&member)
+            })
             .collect::<Result<Vec<_>>>()?
             .join(" | "));
     }
     let base = match value.get("type").and_then(Value::as_str) {
+        Some("string") if value.get("x-st-text").and_then(Value::as_str) == Some("markdown-block") => "MarkdownBlock".into(),
+        Some("string") if value.get("x-st-text").and_then(Value::as_str) == Some("markdown-inline") => "MarkdownInline".into(),
         Some("string") => "string".into(),
         Some("integer" | "number") => "number".into(),
         Some("boolean") => "boolean".into(),
@@ -1515,7 +1562,13 @@ fn ts_object(value: &Value) -> Result<String> {
             } else {
                 "?"
             };
-            fields.push(format!("  {name}{optional}: {};", ts_type(definition)?));
+            // A wire word used as a key, such as `hold-routine`, is no identifier: quote it.
+            let identifier = name.chars().enumerate().all(|(index, character)| {
+                character.is_ascii_alphabetic() || matches!(character, '_' | '$')
+                    || (index > 0 && character.is_ascii_digit())
+            });
+            let key = if identifier { name.clone() } else { serde_json::to_string(name)? };
+            fields.push(format!("  {key}{optional}: {};", ts_type(definition)?));
         }
     }
     // `{}` accepts arbitrary properties in TypeScript; closed empty args must not.
@@ -1614,7 +1667,7 @@ fn ts_closed_union(definition: &Value, defs: &serde_json::Map<String, Value>) ->
 fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-    let mut out = "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n".to_owned();
+    let mut out = "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nimport type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';\nexport type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n".to_owned();
     for constant in constants {
         writeln!(
             out,
@@ -1778,6 +1831,12 @@ fn typescript_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
+        } else if id == "auto-resolved.list" {
+            writeln!(out, "    async autoResolvedList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AutoResolvedAsks>> {{ return this.get('/v1/client/auto-resolved', undefined, requestOptions); }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    async availabilityHistory(options: {{ from: string; to: string; bucket_seconds: number; person?: string }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AvailabilityHistory>> {{ return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -2052,6 +2111,23 @@ mod tests {
         assert!(rendered.contains("kind: string"));
         assert!(rendered.contains("person_id?: never"));
         assert!(rendered.contains(" & "));
+    }
+
+    #[test]
+    fn typescript_nullable_markdown_keeps_text_metadata() {
+        for (annotation, expected) in [
+            ("markdown-block", "MarkdownBlock | null"),
+            ("markdown-inline", "MarkdownInline | null"),
+        ] {
+            let schema = serde_json::json!({
+                "type": ["string", "null"], "x-st-text": annotation
+            });
+            assert_eq!(ts_type(&schema).unwrap(), expected);
+        }
+        let schema = serde_json::json!({
+            "type": ["array", "null"], "items": { "type": "integer" }
+        });
+        assert_eq!(ts_type(&schema).unwrap(), "Array<number> | null");
     }
 
     fn temporary_output(name: &str) -> PathBuf {

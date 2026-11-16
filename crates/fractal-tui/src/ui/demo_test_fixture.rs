@@ -61,7 +61,7 @@ pub fn world() -> World {
         "This codex process was found running on lark, but Fractal cannot tell which session file it writes, so there is no conversation to show. Start it through fractal to see it here.",
     )));
     World {
-        inventory_supported: None, inventory_partial: Vec::new(),
+        inventory_supported: None, inventory_partial: Vec::new(), at: chrono::Utc::now().fixed_offset(),
         person: s("person/robin"),
         host: s("lark"),
         link: Link::Live,
@@ -74,6 +74,7 @@ pub fn world() -> World {
         active_missions: None,
         inbox_alerts: None,
         attention: Load::Ready(attention()),
+        auto_resolved: Load::Ready(AutoResolvedList { items: Vec::new(), complete: true }),
         agents: Load::Ready(agents()),
         missions: Load::Ready(missions()),
         machines: Load::Ready(machines()),
@@ -341,6 +342,9 @@ fn usage() -> Vec<fractal_client::UsageRow> {
         agent: s(agent),
         mission_run: run.map(s),
         step: step.map(s),
+        execution_id: None,
+        invocation_id: None,
+        attempt: None,
         model: Some(s(model)),
         account: Some(s(if model.starts_with("gpt") {
             "openai"
@@ -361,6 +365,7 @@ fn usage() -> Vec<fractal_client::UsageRow> {
         cost_microusd: cost,
         reported_cost_microusd: 0,
         unpriced_tokens: 0,
+        unpriced_responses: 0,
     };
     let atlas = Some("mission-run/fleet/atlas/store-move/2026-10-01");
     let release = Some("mission-run/fleet/release/weekly/2026-10-01");
@@ -433,6 +438,8 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: s("attention/1"),
             tier: Tier::Stopped,
             title: s("Approve the atlas store cut-over"),
@@ -470,6 +477,8 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: s("attention/2"),
             tier: Tier::Stopped,
             title: s("Feedback on the new pricing page"),
@@ -502,6 +511,8 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: s("attention/3"),
             tier: Tier::Today,
             title: s("Launch harbor/nightly-audit"),
@@ -568,6 +579,8 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: s("attention/4"),
             tier: Tier::Alert,
             title: s("Release Captain keeps restarting"),
@@ -594,6 +607,8 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: s("attention/5"),
             tier: Tier::Today,
             title: s("Add an audit step to the rekey mission"),
@@ -625,6 +640,8 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: s("attention/6"),
             tier: Tier::Later,
             title: s("Weekly usage is up 18%"),

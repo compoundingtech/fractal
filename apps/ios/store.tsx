@@ -1,11 +1,13 @@
+import { markdownSource } from '../../clients/typescript/fractal-client/markdown-text';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { AppState, unstable_batchedUpdates } from 'react-native';
+import { AppState, unstable_batchedUpdates, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
+import { overrideRefusal, overrideRequest, overrideRetryable, singleOverride, type OverrideAnswer } from './autoResolved';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type AutoResolvedAsk, type AvailabilitySet, type Capabilities, type ConversationSearch, type DirectiveNote, type Glass, type Launch, type LaunchVariant, type Mission, type PersonAvailability, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
@@ -42,6 +44,8 @@ import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
 import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
+import { ownAvailability, servesAvailability, writeRefusal } from './availability';
+import { PresenceReporter } from './presence';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -74,6 +78,8 @@ const PUSH_KEY = 'st3.push.enabled';
 // which an older app build reads.
 const OBSERVATIONS_KEY = 'st3.observations';
 const CARRIER_KEY = 'st3.carrier', FABRIC_TARGET_KEY = 'st3.fabric.target', FABRIC_MEMBERS_KEY = 'st3.fabric.members', FABRIC_FALLBACK_KEY = 'st3.fabric.fallback';
+const NO_AVAILABILITY = { person: null, note: null, issue: '' };
+const NO_AUTO_RESOLVED: { items: AutoResolvedAsk[]; complete: boolean; issue: string } = { items: [], complete: true, issue: '' };
 
 /** An error as a person reads it: Fractal's errors in plain words (the SDK's plainError). */
 export function errorText(error: unknown): string {
@@ -146,6 +152,17 @@ function useAppStore(proof?: FabricProfile) {
   const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
   capsRef.current = caps;
+  const [availability, setAvailability] = useState<{ person: PersonAvailability | null; note: DirectiveNote | null; issue: string }>(NO_AVAILABILITY);
+  const [autoResolved, setAutoResolved] = useState(NO_AUTO_RESOLVED);
+  // Episodes with an override in flight: the ref refuses a second send at once, the state redraws the rows.
+  const overriding = useRef(new Set<string>());
+  const [overridePending, setOverridePending] = useState<ReadonlySet<string>>(new Set());
+  // The person's last input, for presence: a touch anywhere in the app (the root view's capture only
+  // records its time) or the app coming forward. `presence` is the live connection's reporter.
+  const lastInput = useRef<number | null>(foreground.current.active ? Date.now() : null);
+  const presence = useRef<PresenceReporter | null>(null);
+  useEffect(() => foreground.current.subscribe(active => { if (active) lastInput.current = Date.now(); }), []);
+  const noteInput = useCallback(() => { lastInput.current = Date.now(); presence.current?.input(); }, []);
   const [status, setStatus] = useState<Status>('setup');
   const [hasSynced, setHasSynced] = useState(false);
   // The page `sync` notice (this host lacks records a peer holds): the socket's frames carry none, so a
@@ -514,7 +531,7 @@ function useAppStore(proof?: FabricProfile) {
     draftsOwner.current = '';
     if (!proofRef.current) void localDrafts.clear();
     setGlasses([]); setGlassesIssue(''); setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]); setSidebarResources([]); setSidebarResourcesIssue(''); sidebarResourcesRead.current = null;
-    setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null);
+    setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null); setAvailability(NO_AVAILABILITY);
   }
   async function clearCachedProjection() { cacheGeneration.current++; clearCaches(); if (!proof) await AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
 
@@ -537,6 +554,72 @@ function useAppStore(proof?: FabricProfile) {
     if (!client || status !== 'online' || proofRef.current) return;
     return watchSync(async () => (await client.attentionList({ limit: 1 })).value.sync ?? null, (value, stale) => { setSync(value); setSyncStale(stale); });
   }, [client, status]);
+
+  // Availability is not on the collections socket: it is read each time a connection goes live (opening,
+  // returning to the foreground, reconnecting) and on pull to refresh, and a write's answer replaces it.
+  const availabilityRead = useRef(0);
+  const availabilityWriting = useRef<Capabilities | null>(null);
+  const readAvailability = useCallback(async () => {
+    if (!client || status !== 'online' || !caps || !servesAvailability(caps)) { ++availabilityRead.current; setAvailability(NO_AVAILABILITY); return; }
+    if (availabilityWriting.current === caps) return;
+    const read = ++availabilityRead.current;
+    try {
+      const [people, notes] = await Promise.all([client.availabilityList(), client.notesList()]);
+      if (availabilityRead.current === read && capsRef.current === caps) setAvailability({ ...ownAvailability(people.value.people, notes.value.notes), issue: '' });
+    } catch (e) { if (availabilityRead.current === read && capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
+  }, [client, status, caps]);
+  useEffect(() => { void readAvailability(); }, [readAvailability]);
+  // The person's asks Fractal resolved by their deadline are a read, not a collection: read when a
+  // connection goes live, when the app comes forward, when Now comes into view, when the attention list
+  // changes (an ask that auto-resolves leaves it) and after an override is accepted. Never on a timer.
+  // Only a person session reads its own; a member that does not serve the read has none to show.
+  const autoResolvedRead = useRef(0);
+  const readAutoResolved = useCallback(async () => {
+    const read = ++autoResolvedRead.current;
+    if (proof || !client || status !== 'online' || !caps?.session_actor.startsWith('person/')) { setAutoResolved(NO_AUTO_RESOLVED); return; }
+    try {
+      const { items, complete } = (await client.autoResolvedList()).value;
+      if (autoResolvedRead.current === read && capsRef.current === caps) setAutoResolved({ items, complete, issue: '' });
+    } catch (e) {
+      if (autoResolvedRead.current !== read || capsRef.current !== caps) return;
+      if (e instanceof ClientError && e.status === 404) setAutoResolved(NO_AUTO_RESOLVED);
+      else setAutoResolved(previous => ({ ...previous, issue: `Could not read auto-resolved asks: ${errorText(e)}` }));
+    }
+  }, [proof, client, status, caps]);
+  useEffect(() => { void readAutoResolved(); }, [readAutoResolved]);
+  useEffect(() => foreground.current.subscribe(active => { if (active) void readAutoResolved(); }), [readAutoResolved]);
+  // Which items wait and which were closed: the membership, not every revision of an item.
+  const attentionShape = useMemo(() => data.attention.map(item => item.closedElsewhere ? `${item.id}!` : item.id).join('\n'), [data.attention]);
+  const attentionShapeSeen = useRef(attentionShape);
+  useEffect(() => {
+    if (attentionShapeSeen.current === attentionShape) return;
+    attentionShapeSeen.current = attentionShape;
+    void readAutoResolved();
+  }, [attentionShape, readAutoResolved]);
+  // While a connection is live and its pairing may report presence, this phone reports its raw state
+  // (see presence.ts); each answer's availability replaces what Now shows, fenced against edits.
+  useEffect(() => {
+    if (proof || !client || status !== 'online' || !caps?.session_actor.startsWith('person/') || !caps.capabilities.some(capability => capability.id === 'write.presence' && capability.state === 'granted')) return;
+    const reporter = new PresenceReporter({
+      report: async report => {
+        const generation = availabilityRead.current;
+        const startedBetweenWrites = !availabilityWriting.current;
+        const result = (await client.presenceReport(report)).value;
+        // A presence answer carries the person as the server sees it, which may predate an edit in
+        // flight or just finished: it applies only if both request and answer fall between writes,
+        // at the same read generation, on the same connection, so an editor's answer always wins.
+        if (startedBetweenWrites && capsRef.current === caps && !availabilityWriting.current && availabilityRead.current === generation) setAvailability(previous => ({ ...previous, person: result.availability }));
+        return result;
+      },
+      lastInput: () => lastInput.current,
+      after: (run, ms) => { const timer = setTimeout(run, ms); return () => clearTimeout(timer); }, now: Date.now,
+    });
+    presence.current = reporter;
+    const gate = foreground.current;
+    if (gate.active) reporter.foreground(true);
+    const leave = gate.subscribe(active => reporter.foreground(active));
+    return () => { leave(); reporter.stop(); if (presence.current === reporter) presence.current = null; };
+  }, [proof, client, status, caps]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
@@ -745,7 +828,7 @@ function useAppStore(proof?: FabricProfile) {
     return () => { for (const stop of stops) stop(); };
   }, [feed, inventoryGranted]);
 
-  /** A fence on a snapshot read just now: one read seconds ago has nearly always moved on a busy host. */
+  /** A fresh same-host snapshot for initial reads and retries; subject revisions stay exact. */
   async function fence(revisions: Record<string, string> = {}) {
     if (!client) throw new Error('Still connecting; try again in a moment.');
     const capability = await client.capabilities();
@@ -753,12 +836,24 @@ function useAppStore(proof?: FabricProfile) {
   }
   /**
    * Run an action, trying again (with a fresh fence each time) while Fractal refused it only because it
-   * raced a busy store, as `retryable` says.
+   * raced a busy store, as `retryable` says. `refusal` words what stops it.
    */
-  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied): Promise<boolean> {
+  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied, refusal: (error: unknown) => string = errorText): Promise<boolean> {
     if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
     setBusy(true);
-    try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+    try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(refusal(e)); return false; } finally { setBusy(false); }
+  }
+  async function runAvailabilityWrite(write: () => Promise<Partial<Pick<typeof availability, 'person' | 'note'>>>): Promise<boolean> {
+    if (!caps || capsRef.current !== caps || availabilityWriting.current) return false;
+    const writeCaps = caps;
+    const writeGeneration = ++availabilityRead.current;
+    availabilityWriting.current = writeCaps;
+    try {
+      return await runAction(async () => {
+        const changed = await write();
+        if (capsRef.current === writeCaps && availabilityRead.current === writeGeneration) setAvailability(previous => ({ ...previous, ...changed, issue: '' }));
+      }, [], notApplied, writeRefusal);
+    } finally { availabilityWriting.current = null; }
   }
 
   /**
@@ -1065,11 +1160,12 @@ function useAppStore(proof?: FabricProfile) {
       setBusy(true);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
       let qualityAccepted = false;
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
       try {
         // An answer that landed is an answer, however the reply came back (Cos, 2026-10-10: the app
         // said it failed for a decision that was recorded, and Nathan answered it again).
         const outcome = await submitAnswer({
-          build: async () => { const id = actionId(); return { id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id, episode: item.episode || item.revision, summary, ...(typed ? { answer: typed } : {}) } }; },
+          build: async () => { const id = actionId(); return { id, idempotency_key: id, fence: await fences(), parameters: { target_id: item.source_id, episode: item.episode || item.revision, summary, ...(typed ? { answer: typed } : {}) } }; },
           send: request => client.workDone(request),
           stillWaiting: async () => {
             try { const current = (await client.attentionGet(item.id)).value; return current.kind !== 'attention' || current.state === 'open'; }
@@ -1089,11 +1185,35 @@ function useAppStore(proof?: FabricProfile) {
       acted.current.add(id);
       setData(previous => ({ ...previous, attention: previous.attention.filter(item => item.id !== id) }));
     },
+    /**
+     * Replace the default an ask was resolved with by one of its other named answers. The episode is the
+     * fence, so the snapshot fence carries no revisions; the action ID and key are the same on every try.
+     * Accepted or refused, the auto-resolved list is read again: the row leaves once Fractal says so.
+     */
+    async override(ask: AutoResolvedAsk, answer: OverrideAnswer) {
+      if (!client) return false;
+      return singleOverride(overriding.current, ask.episode, async () => {
+        const done = await runAction(async () => client.workOverride(overrideRequest(ask, answer, await fence())), [], overrideRetryable, overrideRefusal);
+        await readAutoResolved();
+        return done;
+      }, () => setOverridePending(new Set(overriding.current)));
+    },
     /** Mark a message read from Home: it leaves the person's attention. */
     async markRead(item: Attention) {
       if (!client) return false;
       acted.current.add(item.id);
-      return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id } }); });
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
+      return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fences(), parameters: { target_id: item.source_id } }); });
+    },
+    /** Change the person's own availability; Fractal answers with all of it. */
+    async changeAvailability(change: AvailabilitySet) {
+      if (!client) return false;
+      return runAvailabilityWrite(async () => ({ person: (await client.availabilitySet(change)).value }));
+    },
+    /** Set the person's directive note until `until` (or until cleared), or clear it with `null`. */
+    async changeNote(text: string | null, until: Date | null = null) {
+      if (!client) return false;
+      return runAvailabilityWrite(async () => ({ note: (await client.notesSet({ text, ...(until ? { expires_at: until.toISOString() } : {}) })).value.note }));
     },
     /**
      * Answer a native prompt from its alert with one of the answers it offers: a question's
@@ -1106,7 +1226,8 @@ function useAppStore(proof?: FabricProfile) {
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
-      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fences(), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
       if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
       return accepted;
     },
@@ -1121,7 +1242,7 @@ function useAppStore(proof?: FabricProfile) {
     async messageBody(message: string): Promise<{ text: string; complete?: boolean }> {
       if (!client || status !== 'online') throw new Error(status === 'online' ? 'not connected' : 'offline');
       const answer = (await client.messageBodyGet(message)).value;
-      return { text: answer.text, complete: answer.complete };
+      return { text: markdownSource(answer.text), complete: answer.complete };
     },
     /** Send Fractal to an agent, as the Fractal terminal UI does: fenced to a fresh snapshot, once more if it moved. */
     async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
@@ -1301,7 +1422,7 @@ function useAppStore(proof?: FabricProfile) {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
@@ -1317,7 +1438,8 @@ export function StoreProvider({ children, proof }: { children: ReactNode; proof?
   const store = useAppStore(proof);
   return <StoreContext.Provider value={store}>
     <DiagnosticsConnection client={store.client} url={store.url} credential={store.credential} enabled={!proof} />
-    {children}
+    {/* Every touch start asks the root first whether it wants the touch; it records the time, for presence, and declines. */}
+    <View style={{ flex: 1 }} onStartShouldSetResponderCapture={() => { store.noteInput(); return false; }}>{children}</View>
   </StoreContext.Provider>;
 }
 export function useStore(): Store {
