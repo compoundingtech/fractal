@@ -11,8 +11,8 @@ import SwiftUI
 /// Every page on the model's navigation stack stays mounted under its entry's identity, so a
 /// page the person goes back to keeps its native view state (its scroll position above all);
 /// a popped page's state goes with it, and a page pushed again starts fresh. Only the shown
-/// page supplies the content inside the fixed screen-height budget. Navigation and arriving
-/// data never resize the live window or move its menu-bar anchor.
+/// page sizes the panel, up to the screen budget. The live window's `PanelWindowFrame`
+/// keeps content-driven size changes attached to the menu bar.
 ///
 /// The swap itself is instant. Only the arriving page moves, sideways (`PageArrival`).
 public struct TrayPanel: View {
@@ -119,8 +119,8 @@ private struct PanelStackEntry: LayoutValueKey {
   static let defaultValue: UUID? = nil
 }
 
-/// Retains covered pages and their native scroll state outside the panel's clip. Every live
-/// page uses the same screen-height budget; unbounded snapshots size to the active page.
+/// Retains covered pages and their native scroll state outside the panel's clip. The active
+/// page supplies the compact content height; a covered page keeps its own viewport.
 private struct PanelStackLayout: Layout {
   let active: UUID
 

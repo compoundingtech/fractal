@@ -17,9 +17,9 @@ collection, but `FractalClient` has no typed attention or availability stream.
   Pages form a stack (the top level, the full inbox, a card opened from it): each
   page still on the stack stays mounted, hidden off to the leading side, so Back
   (or opening it again) returns to it at its exact scroll position, while a page
-  opened after it was popped starts at the top. The live panel reserves its screen-height
-  budget from the first layout; arriving data and navigation never resize its window or
-  detach its top from the menu bar. The swap is instant, and only the arriving
+  opened after it was popped starts at the top. The live panel hugs its content up to the
+  screen budget. One native frame policy keeps the menu-bar top edge pinned while arriving
+  data and navigation resize downward. The swap is instant, and only the arriving
   page slides in sideways, from the trailing side on a push and the leading side
   on Back; with Reduce Motion it fades in. VoiceOver focus moves to the page title
   and back to the row or tile that opened it. Closing the panel returns it to the
@@ -477,15 +477,17 @@ is gone.
 
 ## Scroll and refresh performance Mac gate
 
-`PanelScroll` and `PanelForm` preserve their compact ideal height inside a live page's
-fixed screen-height budget after measured chrome. Only internal content scrolls;
-snapshots without a screen budget still size naturally. AppKit content resizing preserves
-the window's bottom-left origin, so content-driven live window heights are not safe.
-Markdown blocks/inline attributed strings and attachment images use bounded content-keyed caches. Ages share one minute-aligned
-clock. Identical page polls and pruning do not rewrite observable sections; separately
-kept successful-read timestamps preserve accurate subsequent stale errors. Closing the
-panel removes its page observation subscriptions, preserving only a lightweight sized
-placeholder and visibility reporter.
+`PanelScroll` and `PanelForm` preserve their compact ideal height, bounded by the
+screen budget after measured chrome. A persistent `PanelWindowFrame` window accessor owns
+native resizing: AppKit chooses the anchor when positioning the window; synchronous resize
+notifications preserve that top edge instead of AppKit's default bottom-left origin.
+There are no delayed corrections or new resize animations. Short content stays compact,
+and content beyond the budget scrolls internally. Unbounded snapshots still size naturally.
+Markdown blocks/inline attributed strings and attachment images use bounded content-keyed
+caches. Ages share one minute-aligned clock. Identical page polls and pruning do not rewrite
+observable sections; separately kept successful-read timestamps preserve accurate subsequent
+stale errors. Closing the panel removes page observation subscriptions, preserving only its
+lightweight sized placeholder, visibility reporter and window-frame owner.
 
 The menu-bar template has an equality boundary keyed by ask count, urgency, connection
 health and display scale. Poll freshness alone does not rerun its `ImageRenderer`.
@@ -515,10 +517,12 @@ For navigation, build first (`swift build -c release` with the approved
 It also never orders a window front, and records `navigation-probe.json` (phase,
 window height/top, content, viewport, offset) at 300/400/1578 pt. It asserts the menu-bar
 anchor through first-open loading, separately released SLO/availability reads, row arrival
-and removal, every navigation path and refresh. Back restores native scroll state; a fresh
-push starts at the top. Viewports stay bounded, identical polls preserve edge offsets, and
-a 19-row inbox fits without scrolling on the tall screen. Short screens apply `InboxCap`;
-showing every row when all rows and signals fit is intentional.
+and removal, every signal, speech, ask/update route and refresh. Back restores native scroll
+state; a fresh push starts at the top. Page heights match unbounded content capped to the
+screen budget, and a quiet panel stays compact. Native outward wheel events and refreshes
+preserve top/bottom offsets, including fitting content. A 19-row inbox fits without scrolling
+on the tall screen; short screens apply `InboxCap`. Showing every row when all rows and
+signals fit is intentional. An AppKit move establishes a new top anchor for subsequent resizing.
 
 `trace` records Animation Hitches and Time Profiler and exports their data tables.
 The script lists the interaction procedure and strict pass thresholds: every drill-in
