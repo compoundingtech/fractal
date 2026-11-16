@@ -60,6 +60,73 @@ Inline thread read and timeline errors offer an in-place Retry button; a success
 Thread action failures, validation issues, changed read errors and quote selection are explicitly announced to VoiceOver; revoked read access moves focus to the error. Expandable thread rows and the Threads header expose expanded/collapsed values and hints. Embedded composers name their thread in the message and Send labels; Retry names the failed thread or thread list. Standalone composers keep their existing Message thread and Send labels. Thread action hints identify the affected title without changing the visible button text.
 Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
 
+Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
+measured message text stably visible for 500 ms in the focused, foreground view.
+The body must have full width, its trailing end visible, and visible height of at
+least min(actual body height, two rendered lines): a fully visible one-line body
+qualifies, but a clipped one-line body or one line of a longer body does not.
+Visibility, focus, AppState, occlusion and layout changes reset the timer. Owned
+action sheets/modals/menus suspend the lease until dismissal and a fresh full dwell;
+keyboard show/hide also invalidates measured geometry. Collapsed rows,
+background tabs, clipped edges and author labels never count. A mission screen's
+outer scroll view reports its scroll and layout too, so its clipping participates.
+Rerenders such as the shared second tick keep a message's laid-out lines; only new
+layout or the message leaving the timeline replaces them. Natural read history
+remains forward-only and separate from the private unread reminder.
+
+`unreadVisit.ts` owns visit capture and observed-remove intent logic. A reminder
+created or first observed during a visit is sticky until a later visit; automatic
+clear then includes only captured mark IDs whose own anchor was deliberately viewed.
+Manual clear and a new mark supersede all observed IDs, preserving unseen concurrent
+marks. IDs enter only through `Summary.unread_reminder`, never action receipts,
+timestamps or locally generated identifiers. Unavailable anchors keep their reminder;
+pending seek metadata shows no body and cannot activate a badge.
+Explicit Clear reminder is independent of seek, geometry and dwell: it clears only
+known IDs captured from the current authoritative summary, including when its
+anchor is pending, unavailable or offscreen. It never acknowledges natural messages.
+
+`unreadActions.ts` is the typed action boundary; `unreadClient.ts` binds canonical
+generated `threadMarkUnread`, `threadClearUnread`, `threadTimeline({around})`, and
+`threadList({marked_unread:true})`. Store delivery retains the existing bound request,
+fence refresh, receipt shim and original-request retry. A mark or clear whose receipt
+was lost stays held for its thread: a remounted body shows Retry original change for
+that exact request, ahead of a held rename/close/reopen, and new edits wait until it
+is confirmed. Action operation IDs never become reminder mark IDs. Read-only clients
+have no mark controls. Reminders are canonically decoded from the summary; seek
+metadata cannot create a badge.
+The new reminder list, around reads and mark/clear writes require a granted
+`threads-v1 >= 3`. Version 2 keeps the existing thread and natural-read experience
+but hides reminder UI and sends none of the new queries or actions. An already-open
+menu or retained retry also re-checks the negotiated version, exact mark/clear grant
+and current online status before sending. Revocation or going offline preserves
+the original unknown-outcome ledger, request identity and signed fields; restoration
+allows that same request to resolve through legitimate receipt verification. An
+explicit unsupported read reports Upgrade required locally, never a fetch failure.
+Generic `thread-unavailable` seek refusal maps to unavailable, not Pending. Only an
+explicit Pending response can show that state; neither exposes an unrelated body.
+Seeking itself never acknowledges a message.
+
+The owner-wide Marked unread section uses `readMarkedUnread` in `unreadPaging.ts`.
+Empty pages may still have a continuation; only cursor exhaustion permits an empty
+state. Repeated cursors, fetch failures, and the 20-page default bound return typed
+errors (with partial rows), never a misleading empty/complete list. Only rows whose
+summary carries an authoritative reminder are listed; natural unread alone never is.
+Its private reminder marker is distinct from natural unread and does not change the
+count, and the section header adds no count of its own (visually or for VoiceOver).
+Opening a marked row seeks its return anchor. The section sits on Now above Recently
+closed threads and is read on focus and refresh, not followed. A current anchor opens
+the shared thread body on that page (older history continues from it; Open thread
+shows the latest); unavailable and pending anchors show their notice and, with the
+current write grant, an explicit Clear reminder. Visible evidence counts whole
+rendered Markdown lines (up to two, including the last), never paragraph spacing.
+Loading wrappers (detail, Inbox start, expanded rows) start the
+visit entry with the same placement key before the body mounts, so a reminder that
+loads after entry is never captured. Focused node coverage lives beside the visit
+reducer, native lifecycle, client adapter, list UI and paging helper; a mounted shared
+thread body (`threadBodyMount.test.mjs`) covers rerendered line evidence and recovered
+unread deliveries through the store's own delivery code.
+
+
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
 | Piece | Native component | Package |

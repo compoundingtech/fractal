@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { ActionSheetIOS, Alert, Modal, PanResponder, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { PanResponder, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { showOwnedActionSheet, OwnedModal, OwnedAlert as Alert } from '../ownedPresentationNative';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Crypto from 'expo-crypto';
@@ -107,13 +108,13 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
   };
   const move = (row: SidebarResource) => {
     const folders = view.groups.filter(g => g.folder);
-    ActionSheetIOS.showActionSheetWithOptions({ title: `Move ${row.title} to…`, options: [...folders.map(g => g.title), 'Everything else', 'New folder…', 'Cancel'], cancelButtonIndex: folders.length + 2 }, index => {
+    showOwnedActionSheet({ title: `Move ${row.title} to…`, options: [...folders.map(g => g.title), 'Everything else', 'New folder…', 'Cancel'], cancelButtonIndex: folders.length + 2 }, index => {
       if (index >= 0 && index < folders.length) openForm({ kind: 'place', resource: row, folder: folders[index].id.slice(7), title: folders[index].title });
       else if (index === folders.length) openForm({ kind: 'place', resource: row, folder: null, title: 'Everything else' });
       else if (index === folders.length + 1) openForm({ kind: 'new', subject: row.id });
     });
   };
-  const folderMenu = (id: string, title: string) => ActionSheetIOS.showActionSheetWithOptions({ title, options: ['Rename…', 'Delete folder…', 'Cancel'], cancelButtonIndex: 2, destructiveButtonIndex: 1 }, index => {
+  const folderMenu = (id: string, title: string) => showOwnedActionSheet({ title, options: ['Rename…', 'Delete folder…', 'Cancel'], cancelButtonIndex: 2, destructiveButtonIndex: 1 }, index => {
     if (index === 0) openForm({ kind: 'rename', id, title });
     if (index === 1) Alert.alert(`Delete “${title}”?`, 'Its resources return to Everything else.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete folder', style: 'destructive', onPress: () => void submit(() => [{ op: 'folder.delete', id }]) }]);
   });
@@ -178,12 +179,12 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     <Button label="Past sessions" onPress={() => navigation.navigate('History')} />
     {[...sidebarSeen.current.values()].every(resource => resource.kind === 'Machines') && !arrangements.length ? <Note>{hasSynced ? 'Welcome. Use New on Now, then New terminal or New mission to start.' : 'Loading your resources…'}</Note> : null}
   </ScrollView>
-    <Modal visible={!!form} transparent animationType="slide" onRequestClose={() => setForm(null)}><View style={{ flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#0008' }}><View style={{ backgroundColor: theme.mantle, padding: 16 }}>
+    <OwnedModal visible={!!form} transparent animationType="slide" onRequestClose={() => setForm(null)}><View style={{ flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#0008' }}><View style={{ backgroundColor: theme.mantle, padding: 16 }}>
       {issue || error ? <Note tone="fault">{issue || error}</Note> : null}
       {form?.kind === 'place' ? <><T bold>Move {form.resource.title} to {form.title}?</T><Button label="Move" disabled={!editable} onPress={() => void submit(() => placeResource(arrangement, form.resource.id, form.folder)).then(done => { if (done) setForm(null); })} /></> : <><T bold>{form?.kind === 'add' ? `Add to ${form.title}` : form?.kind === 'rename' ? `Rename ${form.title}` : 'New folder'}</T>
       <Field accessibilityLabel={form?.kind === 'add' ? 'Find a resource to add' : 'Folder name'} value={name} onChangeText={setName} autoFocus onSubmitEditing={form?.kind !== 'add' ? () => void makeFolder() : undefined} />
       {form?.kind === 'add' ? <ScrollView style={{ maxHeight: 360 }}>{subjectToFile(name, sidebarSeen.current) ? <ListRow title={`File ${name.trim()}`} onPress={editable ? () => openForm({ kind: 'place', resource: subjectToFile(name, sidebarSeen.current)!, folder: form.id, title: form.title }) : undefined} /> : null}{[...sidebarSeen.current.values()].filter(resource => !resource.missing && !/^(session|pty)\//.test(resource.id) && folderLocation(arrangement, resource.id) !== form.id && sidebarResourceMatches(resource, name)).map(resource => <ListRow key={resource.id} title={resource.title} onPress={editable ? () => openForm({ kind: 'place', resource, folder: form.id, title: form.title }) : undefined} />)}</ScrollView> : <Button label="Save" disabled={!editable || !name.trim()} onPress={() => void makeFolder()} />}</>}
       <Button label="Cancel" onPress={() => setForm(null)} />
-    </View></View></Modal>
+    </View></View></OwnedModal>
   </Screen>;
 }
