@@ -190,6 +190,7 @@ bundled_app_kit_inputs = (
     "apps/fractal-web/src/conversation/alerts/useAlertAnswers.ts",
     "apps/fractal-web/src/conversation/systemRecords.ts",
     "apps/fractal-web/src/conversation/todos/fixtures.ts",
+    "apps/fractal-web/src/data/agentName.ts",
     "apps/fractal-web/src/missions/MissionFeedNotice.tsx",
     "apps/fractal-web/src/missions/SidebarMissionsList.tsx",
     "apps/fractal-web/src/missions/missionTitle.ts",
