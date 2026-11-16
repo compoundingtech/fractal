@@ -25,6 +25,7 @@ use proptest::prelude::*;
 mod huge_part_rebuild_bench;
 mod run_projection_fence_cost;
 mod run_mutation_writer_guard;
+mod client_work_receipt_fence;
 use fractal_delivery::store::shared_missions::*;
 mod run_retry;
 mod mission_supersession;
