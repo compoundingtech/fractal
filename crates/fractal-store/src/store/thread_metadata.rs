@@ -364,7 +364,7 @@ pub(super) fn creation_claim(
     })
 }
 
-fn owned_creation(
+pub(super) fn owned_creation(
     connection: &Connection,
     subject: &str,
     person: &str,
@@ -537,6 +537,7 @@ pub struct Summary {
     pub state: &'static str,
     pub message_count: u64,
     pub unread: bool,
+    pub unread_reminder: Option<fractal_schema::threads::ThreadUnreadReminder>,
 }
 
 /// Read metadata for the authenticated owner. All fields come from one graph snapshot.
@@ -610,6 +611,7 @@ fn summary_conn(
         state,
         message_count,
         unread,
+        unread_reminder: super::thread_reading::reminder_conn(connection, person, subject)?,
     })
 }
 
@@ -624,6 +626,8 @@ pub enum ThreadContext<'a> {
     Inbox { source: &'a str, episode: &'a str },
     Mission(&'a str),
     RecentlyClosed,
+    // COMPILE-ONLY CONTRACT STUB.
+    MarkedUnread,
 }
 
 /// Read one exact conversation, with cursor scope independent of agent incarnation.
@@ -668,6 +672,9 @@ pub fn list_context(
                 None,
             ),
             ThreadContext::RecentlyClosed => return recently_closed(&connection, &person, cursor, limit),
+            ThreadContext::MarkedUnread => return Err(FractalError::new(
+                "unread-store-not-linked", "compile-only stub: root unread store patch is not linked",
+            )),
         };
         let scope = if index == "claims_thread_conversation_index" {
             canonical_hash(&("thread.conversation.v1", &person, &key))
