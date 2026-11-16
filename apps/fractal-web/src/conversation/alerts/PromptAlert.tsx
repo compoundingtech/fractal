@@ -1,3 +1,5 @@
+import { markdownBlock, markdownInline } from '@fractal/client/markdown'
+import { optionalSource } from '@fractal/client/markdown'
 import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { DateTime, Option } from 'effect'
@@ -7,9 +9,10 @@ import { answerLabel, pendingQuestions, promptAlertKey, promptAnswers, promptCal
 import { ago } from '../../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, radiusVars as r, spaceVars as sp, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import { InlineMarkdown, Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { alertFrom } from './alertChoices.ts'
-import { contextOf, useArmed } from './decisionText.ts'
+import { contextOf, firstLine, markdownLine, useArmed } from './decisionText.ts'
 import type { PromptAnswerResult } from './prompt-answer-port.ts'
 import { ANSWERS_PAUSED } from './AnswerAlert.tsx'
 
@@ -76,7 +79,8 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
       : undefined
   const failure = store.failure(alert)
   const from = alertFrom(alert)
-  const { line, overflows } = contextOf(alert.detail ?? '')
+  const detail = optionalSource(alert.detail) ?? ''
+  const { line, overflows } = contextOf(detail)
   const heading = question === undefined ? alert.title : `${question.header ? `${question.header} · ` : ''}${question.question}${question.multiSelect ? ' (choose any)' : ''}`
   const body = question === undefined && shown.length > 0
     ? shown.map((call) => <pre key={call.id} {...stylex.props(styles.call)}>{[call.tool, ...call.lines].join('\n')}</pre>)
@@ -85,13 +89,13 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
   return <DecisionCard
     key={`${asked.id}\u0000${asked.revision}\u0000${step}`}
     density={density}
-    label={context === undefined ? alert.title : `${context}: ${alert.title}`}
+    label={context === undefined ? firstLine(alert.title) : `${context}: ${firstLine(alert.title)}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[...(from === undefined ? [] : [from]), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
-    heading={heading}
-    headingText={heading}
-    {...(line === '' || line === alert.title ? {} : { context: line })}
-    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}>{alert.detail}</div> } : {})}
+    heading={<InlineMarkdown text={markdownInline(heading)} />}
+    headingText={markdownLine(heading)}
+    {...(line === '' || line === markdownLine(alert.title) ? {} : { context: line })}
+    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}><Markdown text={markdownBlock(detail)} /></div> } : {})}
     {...(body === undefined ? {} : { body })}
     options={options}
     mode={question?.multiSelect === true ? 'any' : 'one'}
@@ -114,6 +118,6 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
 }
 
 const styles = stylex.create({
-  detail: { whiteSpace: 'pre-wrap', color: c.fgSoft },
+  detail: { color: c.fgSoft },
   call: { margin: 0, padding: sp.md, borderRadius: r.sm, backgroundColor: c.codeBg, color: c.fg, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading },
 })

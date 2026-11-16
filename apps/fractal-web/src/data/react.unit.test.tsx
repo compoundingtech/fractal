@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import {
   Agent,
   decodeUnknownSync,
@@ -292,11 +293,11 @@ describe('sidebar retained mission feed plumbing', () => {
       render()
       expect(context).toMatchObject({ progress: { _tag: 'Known', done: 2, total: 4 } })
       const card = { ...attention, attention_kind: 'agent-request' as const, state: 'open' as const,
-        actions: ['work.done' as const], conversation_id: native.id, detail: 'Approve the plan?', update: undefined }
+        actions: ['work.done' as const], conversation_id: native.id, detail: markdownBlock('Approve the plan?'), update: undefined }
       registry.set(cards, observed({ value: [card] }))
       render()
       expect(context).toMatchObject({ step: { _tag: 'Waiting', question: 'Approve the plan?' } })
-      registry.set(cards, observed({ value: [{ ...card, detail: 'Approve the revised plan?' }] }))
+      registry.set(cards, observed({ value: [{ ...card, detail: markdownBlock('Approve the revised plan?') }] }))
       render()
       expect(context).toMatchObject({ step: { _tag: 'Waiting', question: 'Approve the revised plan?' } })
       registry.set(cards, observed({ value: [] }))

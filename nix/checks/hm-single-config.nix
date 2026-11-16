@@ -44,7 +44,7 @@ let
             systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
             launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
           };
-          config.services.smalltalk = {
+          config.services.fractal = {
             enable = true;
             person = "person/ada";
             inboxFallbackAgent = "agent/example/inbox";

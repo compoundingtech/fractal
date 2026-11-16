@@ -8517,7 +8517,15 @@ pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bo
     }
 }
 
-async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// Read-only supervisor diagnostics supplied by the daemon's process boundary.
+/// Reading health must never start a service-manager command.
+#[derive(Clone)]
+pub struct SupervisorHealth(pub Arc<dyn Fn() -> Option<Value> + Send + Sync>);
+
+async fn health(
+    State(state): State<AppState>,
+    supervisor: Option<Extension<SupervisorHealth>>,
+) -> Result<Json<Value>, ApiError> {
     let mut health = json!({
         "status": "ready",
         "node": state.node,
@@ -8528,6 +8536,9 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
+    if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
+        health["service_manager"] = supervisor;
+    }
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
     if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)
@@ -8535,7 +8546,21 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
     {
         health["messages_store_index"] = json!(index);
     }
+    apply_systemd_health(&mut health, fractal_runtime::systemd::health());
     Ok(Json(health))
+}
+
+fn apply_systemd_health(health: &mut Value, supervisor: fractal_runtime::systemd::Health) {
+    if let Some(reason) = supervisor.unresponsive {
+        health["status"] = json!("degraded");
+        health["supervisor"] = json!({
+            "status": "unresponsive",
+            "reason": "systemd-unresponsive",
+            "since_unix_ms": reason.since.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis(),
+            "message": reason.message,
+        });
+    }
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {

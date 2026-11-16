@@ -216,6 +216,7 @@ impl FractalRuntime {
         slo_breaches::create_schema(connection)?;
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
+        input_history::create_schema(connection)?;
         client_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
         // After every projection its triggers maintain.
@@ -543,13 +544,17 @@ impl Runtime for FractalRuntime {
         )
     }
 
+    fn operation_claim_is_graph_neutral(&self, kind: &str) -> bool {
+        !replay_projects_kind(kind)
+    }
+
     fn project_incremental(
         &self,
         transaction: &Transaction<'_>,
         origin: &str,
         through: u64,
     ) -> Result<IncrementalProjection, FractalError> {
-        try_project_simple_replication_tx(transaction, origin, through)
+        try_project_simple_replication_inner_tx(transaction, origin, through, false, true)
     }
 
     fn project_incremental_chunk(
@@ -560,7 +565,7 @@ impl Runtime for FractalRuntime {
     ) -> Result<IncrementalProjection, FractalError> {
         #[cfg(any(test, feature = "test-support"))]
         let _role = rebuild_observer::role("receive-pass");
-        try_project_simple_replication_inner_tx(transaction, origin, through, true)
+        try_project_simple_replication_inner_tx(transaction, origin, through, true, true)
     }
 
     fn projection_work_pending(&self, connection: &Connection) -> Result<bool, FractalError> {

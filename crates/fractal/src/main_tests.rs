@@ -544,6 +544,21 @@ fn omp_delivery_readiness_does_not_clear_the_reopened_human_block() {
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 
 #[test]
+fn active_channels_require_handoff_proof_not_an_idle_edge() {
+    for _ in 0..2 {
+        // A fresh channel cannot inherit readiness from a previous process or activity report.
+        let mut state = PiChannelResume::default();
+        assert!(!state.first_idle_seen);
+        state.accept_frame(r#"{"type":"ready","sessionId":"native-example"}"#);
+        state.accept_frame(r#"{"type":"state","state":"active"}"#);
+        assert!(!state.first_idle_seen);
+        state.accept_frame(r#"{"type":"delivery_ready"}"#);
+        assert!(state.first_idle_seen);
+        assert_eq!(state.pending.state.as_ref().unwrap().0, "working");
+    }
+}
+
+#[test]
 fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z")
         .unwrap()

@@ -126,7 +126,7 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
-With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.17.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.17.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.17.0, Node 24.22, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
 
 Before installing from a fresh checkout without devenv, run
 `python3 scripts/prepare-pnpm-source-inputs.py prepare` from the repository
@@ -200,6 +200,22 @@ The delivery worker prepares locked megarepo members and republishes source
 inputs before checking its frozen-install cache. A missing `nix` or a failed
 member/publisher command fails closed as `build_failed` with reason
 `source_inputs_preparation_failed`; the build log contains the failing command.
+
+Delivery passes `--cache-only` to workspace preparation and explicitly sets
+`FRACTAL_NIX_CACHE_ONLY=1` only for the native builder invocation. Both toolchain
+closures must already exist in the store or configured binary caches; local,
+remote and external Nix builders are disabled during delivery. Workspace
+preparation realizes its pinned CLI separately before applying members, so a
+realization failure reports cache unavailability while apply errors retain their
+real diagnostics. Manual developer builds keep build-on-miss behavior when the
+native builder's opt-in is absent. Cargo and Xcode compilation are unchanged.
+
+The main-push-only ARM macOS cache publisher realizes `.#ios-rust-toolchain`
+and uploads its full closure, including substituted paths, to Cachix. The
+credential owner must configure the `FRACTAL_CACHIX_CACHE` repository variable
+and the cache-scoped `CACHIX_AUTH_TOKEN` write secret; without either, publishing
+is skipped. Fleet configuration must separately add this cache to substituters.
+The pinned workspace CLI closure still comes from its existing configured caches.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
 Delivery options and push configuration prefer `FRACTAL_IOS_*` variables, with

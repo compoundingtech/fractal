@@ -1,3 +1,4 @@
+import { markdownSource, optionalSource } from '../../../clients/typescript/fractal-client/markdown-text';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { Alert, Keyboard, KeyboardAvoidingView, Linking, Pressable, ScrollView, SectionList, TextInput, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -167,7 +168,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
         <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
-        {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
+        {item.detail ? <Markdown text={markdownSource(item.detail)} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
         {threadEntry}
         {overridable ? <>
@@ -187,7 +188,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         <T><T bold color={theme[row.color]}>{row.glyph} update</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         <T><T dim>from  </T><T bold color={theme.person}>{from}</T></T>
-        <Markdown text={spaced(cleanMessageText(item.detail || item.update.summary || ''))} color={theme.text} />
+        <Markdown text={spaced(cleanMessageText(optionalSource(item.detail) || optionalSource(item.update.summary) || ''))} color={theme.text} />
         <T dim selectable>about {item.update.about}</T>
         {item.update.subjects?.map((subject, index) => subject.url
           ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
@@ -213,7 +214,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
           <T bold selectable>{row.title}</T>
           <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
           {item.request ? <StructuredRequestView item={item} request={item.request} from={from} onAnswered={() => navigation.goBack()} /> : <>
-            <RequestQuestion text={cleanMessageText(item.detail ?? '')} />
+            <RequestQuestion text={cleanMessageText(optionalSource(item.detail) ?? '')} />
             <T bold color={theme.person}>{from} is waiting on you.</T>
             <RequestAnswers item={item} from={from} onAnswered={() => navigation.goBack()} />
           </>}
@@ -234,8 +235,8 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'
         // A prompt is allowed from its conversation, where the call it asks about is shown.
         ? <AlertBody item={item} from={publisher ? agentName(publisher) : item.source_id} seats={[]} />
-        : item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
-      {item.because ? <T soft>because {item.because}</T> : null}
+        : item.detail ? <Markdown text={markdownSource(item.detail)} color={theme.subtext0} /> : null}
+      {item.because ? <T soft>because {markdownSource(item.because)}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}
       {threadEntry}
       {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}

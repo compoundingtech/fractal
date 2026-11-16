@@ -718,7 +718,7 @@ their sandbox flags and declared-input boundary remain unchanged.
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
-  `fractal-web-pnpm-<os>-pnpm12.17.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  `fractal-web-pnpm-<os>-pnpm12.17.0-node24.22.2-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
@@ -883,7 +883,10 @@ the load averages (exact on a dedicated runner).
 `kit-play-isolation.browser-test.mjs` runs in the same kit-input-gated CI lane before
 the full play matrix. It exercises storage/service-worker/popup isolation, concurrent
 worker independence, retained HTTP asset caching, and failing-story/leaked-state
-negative controls against real Chromium. The matrix receipt retains story/case/worker
+negative controls against real Chromium. The retained-renderer stale-view fixture
+waits for that renderer's matching Web Storage notification before reading its
+snapshot; a write acknowledged by a different renderer is not that boundary.
+The matrix receipt retains story/case/worker
 counts and per-case seconds and adds reset, page-creation, guard, navigation-to-DOM,
 post-DOM readiness, assertion and close timings. The strict lifecycle assertions,
 story-identity checks, matrix size and job timeout are unchanged.
@@ -981,7 +984,7 @@ Calling-thread CPU excludes host descheduling and unrelated Node worker-thread C
 Each report includes all samples and host load averages; load never skips the lane or
 changes its thresholds.
 
-The web shell supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+The web shell supplies pnpm 12.17.0, Node 24.22, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
 mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching

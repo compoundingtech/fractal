@@ -29,6 +29,7 @@ fn command(root: &Path) -> Command {
         .env("XDG_CONFIG_HOME", root.join("home/.config"))
         .env("XDG_STATE_HOME", root.join("home/.local/state"))
         .env("XDG_RUNTIME_DIR", root.join("run"))
+        .env("SYSTEMD_UNIT_PATH", root.join("home/.config/systemd/user"))
         .env("ST3_ENDPOINT", root.join("run/api.sock"))
         .current_dir(root)
         .stdin(Stdio::null());
@@ -331,12 +332,21 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
         std::fs::create_dir_all(&directory).unwrap();
         let systemctl = directory.join("systemctl");
         std::fs::write(&systemctl, r#"#!/bin/sh
-if [ "$2" != show ]; then exit 9; fi
-if [ "$3" = st3.service ]; then
-    printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
-else
-    printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
-fi
+case "$2" in
+list-units)
+    printf '%s\n' '[{"unit":"st3.service","load":"loaded","active":"active","sub":"running"}]'
+    ;;
+show)
+    # Only the actually enumerated unit may reach the property batch.
+    for argument in "$@"; do
+        case "$argument" in
+        *.service) [ "$argument" = st3.service ] || exit 8 ;;
+        esac
+    done
+    printf '%s\n' 'Id=st3.service' 'LoadState=loaded' 'ActiveState=active' 'SubState=running' 'MainPID=0' 'ControlGroup=' ''
+    ;;
+*) exit 9 ;;
+esac
 "#).unwrap();
         std::fs::set_permissions(systemctl, std::fs::Permissions::from_mode(0o700)).unwrap();
         let service = command(root)

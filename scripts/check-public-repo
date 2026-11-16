@@ -67,9 +67,12 @@ mission step operator-one queue-operator bench-operator two source a any other s
 migration-reviewer uninstall sender recipient first-reviewer fleet-tester device
 release-smoke owner eval-attention robin lichen visitor blair demo pat wrong-local-actor probe
 discord- discord-404 discord-606
+another foreign outsider private reader-floor
 """.split())
 # Canonical principal grammar fixture exercises hyphen, underscore and dot together.
 EXAMPLE_PEOPLE.add("operator-2_name.test")
+# This exact generic prose compound is not a principal reference.
+PERSON_PROSE_COMPOUND = "per-" + "person" + "/per-message"
 
 
 def tracked_files():
@@ -99,7 +102,8 @@ def findings(path, content):
             if match.group(1) not in EXAMPLE_HOMES:
                 reasons.append("personal home path")
         for match in PERSON.finditer(line):
-            if match.group(1) not in EXAMPLE_PEOPLE:
+            compound = line[max(0, match.start() - 4):match.end()] == PERSON_PROSE_COMPOUND
+            if match.group(1) not in EXAMPLE_PEOPLE and not compound:
                 reasons.append("unlisted person ID")
         for match in ENCODED_PERSON.finditer(line):
             if match.group(1) not in EXAMPLE_PEOPLE:

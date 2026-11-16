@@ -2638,12 +2638,8 @@ enum ServiceCommand {
     },
     /// Show whether the daemon and replication services are installed and running.
     Status,
-    /// Explain the one-time macOS permissions for service-owned work.
-    Permissions {
-        /// Open the matching System Settings pages on macOS.
-        #[arg(long)]
-        open: bool,
-    },
+    /// Explain the macOS protected-folder boundary for agent work.
+    Permissions,
     /// Restart fractal after configuration or binary changes.
     Restart {
         #[arg(long)]
@@ -9538,7 +9534,7 @@ async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()>
     if args.exec {
         let st = match args.st {
             Some(st) => std::path::absolute(st)?,
-            None => std::env::current_exe().context("find this st executable")?,
+            None => std::env::current_exe().context("find this Fractal executable")?,
         };
         let pty_root = std::path::absolute(
             config
@@ -13799,22 +13795,18 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
                 Ok(())
             }
         }
-        ServiceCommand::Permissions { open } => {
+        ServiceCommand::Permissions => {
             if json_output {
                 let guidance = fractal_daemon::service::permissions_guidance()?;
-                if open {
-                    fractal_daemon::service::open_permissions_settings()?;
-                }
                 print_value(
                     &serde_json::json!({
                         "platform": std::env::consts::OS,
                         "guidance": guidance,
-                        "settings_opened": open && cfg!(target_os = "macos"),
                     }),
                     true,
                 )
             } else {
-                fractal_daemon::service::permissions(open)
+                fractal_daemon::service::permissions()
             }
         }
         ServiceCommand::Restart { config } => {
@@ -18533,10 +18525,10 @@ fn accept_managed_channel_frame(
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
-            "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
+            "state" | "session" | "ready" | "delivery_ready" | "delivered" | "read" | "failed" | "todo" => true,
             "timeline" | "context" | "turn" | "subagent" | "question.open" | "question.closed" => observer.is_some(),
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-            "delivery_ready" | "retry_pending_ask" | "diagnostic" => true,
+            "retry_pending_ask" | "diagnostic" => true,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             _ => false,
         };
@@ -18664,6 +18656,7 @@ struct PiChannelResume {
     #[serde(default)]
     retry_after_ms: BTreeMap<String, u64>,
     failed_diagnostics: BTreeSet<String>,
+    // Historical resume-wire name: either idle or an explicit handoff-ready proof opens delivery.
     first_idle_seen: bool,
     frame_sequence: u64,
     // Reports the daemon has not accepted yet. A restart must not end the channel or lose the
@@ -18739,13 +18732,11 @@ impl PiChannelResume {
                 }
                 true
             }
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
             Some("delivery_ready") => {
-                // Delivery readiness is independent of the reopened picker's human-blocked state.
+                // The extension proved its handoff path is installed, independently of activity.
                 self.first_idle_seen = true;
                 false
             }
-            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             Some("state") => {
                 let Some(state) = frame.get("state").and_then(Value::as_str) else {
                     return false;
