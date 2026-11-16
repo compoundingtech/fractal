@@ -1,10 +1,10 @@
 //! Read-only related requests. An arrow explains history, never a dependency or an answer.
 //!
-//! Only runtime person asks and authored human-step episodes have retained payload readers.
-//! An authorized current origin of another source kind is explicitly marked
-//! `unsupported-source`; this does not claim that the source has no history. If current
-//! source authorization cannot be established, neither its identity nor that marker is
-//! returned. Existing transcript reads and all mutation admission remain unchanged.
+//! Runtime person asks have retained payload readers. Authored epochs without a durable
+//! opening recipient are not authorized, even when the current assignment matches.
+//! Other qualified source kinds are explicitly marked `unsupported-source`: discussion
+//! authority does not imply a history payload reader. Unsupported retained families keep
+//! their existing live-only policy; thread membership alone never grants source access.
 use super::*;
 use serde::{Deserialize, Serialize};
 
@@ -167,16 +167,18 @@ fn read_conn(
         if seed.source_id.starts_with("step-run/")
             && (runtime || seed.episode.starts_with("run-generation/"))
         {
-            if !person_work::authorize_retained_episode(conn, &person, seed)? {
+            if discussion_source::qualify(conn, &person, seed, now_ms())?.is_none() {
                 return Err(unavailable());
             }
             page.source_support = Some(HistorySourceSupport::PersonStep);
         } else {
-            // Non-person-step policy remains source-specific. Only the existing current
-            // resolver can establish permission; historical thread membership is not a grant.
-            inbox_source::resolve(store, conn, &person, &InboxOrigin {
-                source_id: seed.source_id.clone(), episode: seed.episode.clone(),
-            }, now_ms())?;
+            // Retained discussion uses the same exact-opening authority as the writer.
+            // Families with no retained proof retain their existing live-only admission.
+            if discussion_source::qualify(conn, &person, seed, now_ms())?.is_none() {
+                inbox_source::resolve(store, conn, &person, &InboxOrigin {
+                    source_id: seed.source_id.clone(), episode: seed.episode.clone(),
+                }, now_ms())?;
+            }
             page.source_support = Some(HistorySourceSupport::UnsupportedSource);
         }
     }
@@ -186,14 +188,13 @@ fn read_conn(
         if marker.len() > 2048 { return Err(invalid_context_cursor()); }
         let key: SourceEpisode = serde_json::from_str(marker)
             .map_err(|_| invalid_context_cursor())?;
-        if !person_work::authorize_retained_episode(conn, &person, &key)? {
+        if discussion_source::qualify(conn, &person, &key, now_ms())?.is_none() {
             return Err(invalid_context_cursor());
         }
         Ok(key)
     }).transpose()?;
-    // SQL source qualification precedes the visible keyset limit. A denied source cannot
-    // consume lookahead or change pagination metadata. Runtime exact IDs are canonical first
-    // asks, matching person_work::request; authored identity is generation-qualified.
+    // Page membership in bounded chunks, then use the shared qualifier before the visible
+    // limit. Denied openings cannot consume lookahead or alter pagination metadata.
     let sql = canonical_sql(
         "WITH members(source,episode) AS (
            SELECT coalesce(json_extract(body,'$.fields.origin_source'),json_extract(body,'$.fields.origin_ask')),
@@ -207,15 +208,10 @@ fn read_conn(
              AND c.store_index<=?3
              AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=c.id)
          )
-         SELECT DISTINCT m.source,m.episode FROM members m JOIN step_runs s ON s.subject=m.source
-         WHERE s.assignee=?4 AND m.source LIKE 'step-run/%'
-           AND ((EXISTS(SELECT 1 FROM claims asked WHERE asked.subject=m.source AND asked.kind='work.person-asked')
-             AND m.episode=(SELECT request.id FROM claims request WHERE request.subject=m.source
-               AND request.kind='work.person-asked' ORDER BY CANONICAL_ASC(request) LIMIT 1))
-           OR (NOT EXISTS(SELECT 1 FROM claims asked WHERE asked.subject=m.source AND asked.kind='work.person-asked')
-             AND m.episode LIKE 'run-generation/'||s.generation_id||':%'))
-           AND (?5 IS NULL OR (m.source,m.episode)>(?5,?6))
-         ORDER BY m.source,m.episode LIMIT ?7"
+         SELECT DISTINCT m.source,m.episode FROM members m
+         WHERE m.source IS NOT NULL AND m.episode IS NOT NULL
+           AND (?4 IS NULL OR (m.source,m.episode)>(?4,?5))
+         ORDER BY m.source,m.episode LIMIT ?6"
     );
     let mut statement = conn.prepare_cached(&sql).map_err(internal)?;
     let after = after.as_ref();
@@ -223,10 +219,26 @@ fn read_conn(
         Some(key) => is_member(conn, &created, thread, key, cut)?,
         None => true,
     };
-    let mut members = statement.query_map(params![created.id, thread, cut, person,
-        after.map(|key| key.source_id.as_str()), after.map(|key| key.episode.as_str()), limit + 1],
-        |row| Ok(SourceEpisode { source_id: row.get(0)?, episode: row.get(1)? }))
-        .map_err(internal)?.collect::<rusqlite::Result<BTreeSet<_>>>().map_err(internal)?;
+    let mut members = BTreeSet::new();
+    let mut scan_after = after.cloned();
+    let at = now_ms();
+    loop {
+        let candidates = statement.query_map(params![created.id, thread, cut,
+            scan_after.as_ref().map(|key| key.source_id.as_str()),
+            scan_after.as_ref().map(|key| key.episode.as_str()), 256],
+            |row| Ok(SourceEpisode { source_id: row.get(0)?, episode: row.get(1)? }))
+            .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+        let exhausted = candidates.len() < 256;
+        scan_after = candidates.last().cloned();
+        let qualified = discussion_source::qualify_batch(conn, &person, &candidates, at)?;
+        for (key, source) in candidates.into_iter().zip(qualified) {
+            if source.is_some_and(|source| source.item().kind == "person-step") {
+                members.insert(key);
+                if members.len() > limit { break; }
+            }
+        }
+        if exhausted || members.len() > limit { break; }
+    }
 
     // Only a permitted seed can disclose the same source's other exact episodes. The source
     // reader returns a bounded window, not a second event store or cross-thread traversal.
@@ -242,7 +254,7 @@ fn read_conn(
             }
             if key.source_id == seed.source_id
                 && after.is_none_or(|after| &key > after)
-                && person_work::authorize_retained_episode(conn, &person, &key)?
+                && discussion_source::qualify(conn, &person, &key, now_ms())?.is_some()
             {
                 members.insert(key);
             }
@@ -252,7 +264,7 @@ fn read_conn(
     // Revalidate each selected exact key before any content, including lookahead. The reader
     // must not return a different episode as a substitute.
     for key in members {
-        if !person_work::authorize_retained_episode(conn, &person, &key)? { continue; }
+        if discussion_source::qualify(conn, &person, &key, now_ms())?.is_none() { continue; }
         if let Some(item) = read_source(conn, &person, &key, cut)?
             && item.key == key
         {
@@ -285,7 +297,7 @@ fn read_conn(
         ) else { continue; };
         let parent = SourceEpisode { source_id: source.into(), episode: episode.into() };
         if !is_member(conn, &created, thread, &parent, cut)?
-            || !person_work::authorize_retained_episode(conn, &person, &parent)? { continue; }
+            || discussion_source::qualify(conn, &person, &parent, now_ms())?.is_none() { continue; }
         if !primary.contains(&parent) && !page.boundary_items.iter().any(|item| item.key == parent) {
             let Some(row) = read_source(conn, &person, &parent, cut)?.filter(|row| row.key == parent) else { continue; };
             page.boundary_items.push(row);

@@ -7,7 +7,7 @@ use crate::person_request::StructuredRequest;
 
 #[path = "person_work_history.rs"]
 mod history;
-pub use history::{authorize_retained_episode, retained_request_history};
+pub use history::retained_request_history;
 
 #[cfg(test)]
 mod reconcile_candidates_tests;

@@ -604,7 +604,10 @@ fn run_message(
             p.signature.as_ref(),
         )
         .map_err(store_error)?;
-        (p.target_id, message.subject, claim, appended)
+        let thread = claim.subject.clone();
+        let first_message = claim.body["fields"]["first_message"].as_str()
+            .ok_or_else(|| validation("the thread has no first message"))?.to_owned();
+        (thread, first_message, claim, appended)
     } else {
         let p: ReplyParameters = serde_json::from_value(request.parameters.clone())
             .map_err(|error| validation(error.to_string()))?;

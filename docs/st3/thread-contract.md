@@ -48,6 +48,32 @@ and show its full history without reopening it. An explicit predecessor and reas
 a future decision-history view. Existing mission step gates own dependency trees and
 conditional activation.
 
+The typed daemon start/send boundary also accepts retained episodes after resolution.
+One shared, privately constructed `QualifiedDiscussionSource` proves an existing canonical
+opening, its original recipient, and the current recipient. Supported retained sources are
+runtime asks (`work.person-asked`), manifest-defined custom items (creation claim and
+`recipient_field`), human gate reviews (`gate.requested`), and reserved notices with the
+pinned notice creation, registration and owner chain. The notice episode is its source
+creation claim ID, not a snapshot ID. Labels, `about` links and arbitrary
+`custom.attention.*` kinds confer no authority. Reassignment removes retained discussion
+rights. Enrollment, browser/device admission, message scope, rollout and responsible-agent
+checks still apply; a retained source never grants an otherwise refused write.
+
+Authored human steps are not covered: their retained `step-run.state` opening does not
+carry the recipient at opening. Harness prompts, seat login, planning, revision proposals
+and operational faults likewise have no supported retained proof. An unknown, fabricated
+or unsupported retained episode receives the same unavailable error. Phase A history
+uses this same qualifier, so a syntax-valid but never-opened authored key exposes no
+historical row content.
+
+Retained starts are serialized with origin discovery in the writer transaction. The first
+start commits only the existing `thread.created` and `message.sent` claims. A different
+start key opens the newest owned thread for the exact source/episode (highest creation
+store index), without creating another thread or sending its draft. The action result
+names the actual thread and its first message. Same-key receipt replay is unchanged.
+Current-source starts retain their existing behavior. Starting or replying to a retained
+discussion does not reactivate its resolved Inbox source or settle its original work.
+
 The native CLI convenience `fractal alerts discuss ITEM --body TEXT --as PERSON`
 starts the same durable thread through `thread.start`. It uses the exact current source and
 episode and the daemon-assigned responsible agent. It offers no recipient override. Use

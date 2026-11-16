@@ -19,41 +19,6 @@ fn canonical_request_id(conn: &Connection, source: &str) -> Result<Option<String
         .optional().map_err(internal)
 }
 
-/// Authorize only against today's person-step assignment, never an original recipient or
-/// owning run. Historical authored attempts need not be today's attempt/readiness epoch.
-///
-/// This is a read-authorization check, NOT proof that an authored episode ever opened.
-/// A history projection must root keys in canonical thread membership or retained lifecycle
-/// evidence, then prove the exact opening before exposing authored payload/state. Missing
-/// opening evidence yields unavailable content. Never use this helper for writer admission.
-pub fn authorize_retained_episode(
-    conn: &Connection, person: &str, key: &SourceEpisode,
-) -> Result<bool, FractalError> {
-    if !key.source_id.starts_with("step-run/") { return Ok(false); }
-    let Ok(person) = identities::resolve_reference_conn(conn, person) else { return Ok(false) };
-    if !person.starts_with("person/") { return Ok(false); }
-    // Read the current policy directly, not a memoized view or its enriched current answers.
-    let current: Option<(String, Option<String>)> = conn.query_row(
-        "SELECT generation_id, assignee FROM step_runs WHERE subject=?1",
-        [&key.source_id], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional().map_err(internal)?;
-    let Some((generation, Some(assignee))) = current else { return Ok(false) };
-    if !identities::resolve_reference_conn(conn, &assignee).is_ok_and(|owner| owner == person) {
-        return Ok(false);
-    }
-    if let Some(id) = canonical_request_id(conn, &key.source_id)? {
-        return Ok(id == key.episode);
-    }
-    let Some((episode_generation, tail)) = key.episode.rsplit_once(':') else { return Ok(false) };
-    let Some((episode_generation, attempt)) = episode_generation.rsplit_once(':') else { return Ok(false) };
-    let canonical_number = |value: &str| value.parse::<u64>().is_ok_and(|n| n.to_string() == value);
-    Ok(episode_generation.starts_with("run-generation/")
-        && generation_id_from_subject(episode_generation) == generation_id_from_subject(&generation)
-        && canonical_number(attempt) && canonical_number(tail)
-        && key.source_id.strip_prefix("step-run/").is_some_and(|source|
-            source.strip_prefix(generation_id_from_subject(&generation))
-                .is_some_and(|path| path.starts_with('/') && path.len() > 1)))
-}
 
 fn unavailable(key: &SourceEpisode, reason: PayloadUnavailable) -> RequestHistoryItem {
     RequestHistoryItem { key: key.clone(), payload: HistoricalPayload::Unavailable { reason },
@@ -65,9 +30,9 @@ fn unavailable(key: &SourceEpisode, reason: PayloadUnavailable) -> RequestHistor
 pub fn retained_request_history(
     conn: &Connection, person: &str, key: &SourceEpisode, cut: u64,
 ) -> Result<Option<RequestHistoryItem>, FractalError> {
-    if !authorize_retained_episode(conn, person, key)? { return Ok(None); }
+    if discussion_source::qualify(conn, person, key, now_ms())?.is_none() { return Ok(None); }
     if canonical_request_id(conn, &key.source_id)?.as_deref() != Some(key.episode.as_str()) {
-        return Ok(None); // Authored episodes are reconstructed by the missions crate.
+        return Ok(None);
     }
     let cut = i64::try_from(cut).unwrap_or(i64::MAX);
     let length: Option<i64> = conn.query_row(
@@ -254,7 +219,7 @@ mod tests {
                    'ready',9,'person/reader','POISON CURRENT TITLE','POISON CURRENT TEXT','1','1');"
             ).unwrap();
             insert(&conn, "opening", "work.person-asked", 10, json!({
-                "person":"person/original", "attempt":1, "title":"Retained title",
+                "person":"person/reader", "attempt":1, "title":"Retained title",
                 "reason":"Retained question", "deadline_unix_ms":100
             }));
         }
@@ -268,7 +233,7 @@ mod tests {
         ).unwrap();
         conn.execute(
             "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,
-               accepted_at_unix_ms) VALUES(?1,?1,?2,?3,'history-reader','person/original',
+               accepted_at_unix_ms) VALUES(?1,?1,?2,?3,'history-reader','person/reader',
                ?4,'[]',?5)",
             params![id, SOURCE, kind, json!({"fields":fields,"evidence":[]}).to_string(), at.to_string()],
         ).unwrap();
@@ -292,7 +257,7 @@ mod tests {
         assert!(retained_request_history(&conn, "person/reader", &wrong, duplicate).unwrap().is_none());
         conn.execute("UPDATE step_runs SET assignee='person/reassigned' WHERE subject=?1", [SOURCE]).unwrap();
         assert!(retained_request_history(&conn, "person/reader", &key(), u64::MAX).unwrap().is_none());
-        assert!(retained_request_history(&conn, "person/reassigned", &key(), u64::MAX).unwrap().is_some());
+        assert!(retained_request_history(&conn, "person/reassigned", &key(), u64::MAX).unwrap().is_none());
         conn.execute("DELETE FROM step_runs WHERE subject=?1", [SOURCE]).unwrap();
         assert!(retained_request_history(&conn, "person/reassigned", &key(), u64::MAX).unwrap().is_none());
     }
@@ -413,7 +378,7 @@ mod tests {
         let conn = store.connection.write();
         insert(&conn, "hold", fractal_schema::availability::DEADLINE_CLOCK_KIND, 50,
             json!({"deadline_clock":"hold-all","until_unix_ms":150}));
-        conn.execute("UPDATE claims SET subject='person/original' WHERE id='hold'", []).unwrap();
+        conn.execute("UPDATE claims SET subject='person/reader' WHERE id='hold'", []).unwrap();
         insert(&conn, "on-time-held-clock", "work.person-done", 180, json!({
             "episode":"opening","status":"completed","summary":"held clock answer"
         }));
@@ -422,7 +387,7 @@ mod tests {
         }));
         insert(&conn, "later-clock", fractal_schema::availability::DEADLINE_CLOCK_KIND, 60,
             json!({"deadline_clock":"run"}));
-        conn.execute("UPDATE claims SET subject='person/original' WHERE id='later-clock'", []).unwrap();
+        conn.execute("UPDATE claims SET subject='person/reader' WHERE id='later-clock'", []).unwrap();
         match read(&conn, cut).state {
             EpisodeState::Available { answers, .. } => {
                 assert_eq!(answers.len(), 1);
@@ -433,19 +398,19 @@ mod tests {
     }
 
     #[test]
-    fn retained_runtime_authored_policy_checks_generation_not_current_attempt() {
+    fn authored_epoch_without_opening_recipient_never_qualifies() {
         let store = fixture();
         let conn = store.connection.write();
         conn.execute("DELETE FROM claims WHERE id='opening'", []).unwrap();
         let authored = SourceEpisode {
             source_id: SOURCE.into(), episode:"run-generation/history:1:2".into(),
         };
-        assert!(authorize_retained_episode(&conn, "person/reader", &authored).unwrap());
+        assert!(discussion_source::qualify(&conn, "person/reader", &authored, now_ms()).unwrap().is_none());
         assert!(retained_request_history(&conn, "person/reader", &authored, u64::MAX).unwrap().is_none());
         for episode in ["run-generation/other:1:2", "run-generation/history:01:2",
             "run-generation/history:1:invalid"] {
             let key = SourceEpisode { episode:episode.into(), ..authored.clone() };
-            assert!(!authorize_retained_episode(&conn, "person/reader", &key).unwrap());
+            assert!(discussion_source::qualify(&conn, "person/reader", &key, now_ms()).unwrap().is_none());
         }
     }
 

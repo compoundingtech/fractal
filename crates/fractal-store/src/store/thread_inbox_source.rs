@@ -8,7 +8,7 @@ pub struct InboxOrigin {
     pub episode: String,
 }
 
-pub(super) struct ResolvedSource {
+pub(in crate::store) struct ResolvedSource {
     pub item: AttentionItemView,
     pub evidence: Vec<String>,
 }
@@ -30,7 +30,13 @@ pub(super) fn resolve(
     }
     let person = identities::resolve_reference_conn(connection, person)?;
     let source = origin.source_id.as_str();
-    let mut item = if source.starts_with("custom/") {
+    let mut item = if fractal_schema::notice::is_reserved_subject(source) {
+        let key = request_history::SourceEpisode { source_id: source.into(), episode: origin.episode.clone() };
+        return discussion_source::qualify(connection, &person, &key, at)?
+            .filter(discussion_source::QualifiedDiscussionSource::is_current_notice)
+            .map(discussion_source::QualifiedDiscussionSource::into_resolved)
+            .ok_or_else(unavailable);
+    } else if source.starts_with("custom/") {
         custom_item(connection, source).map_err(internal)?
     } else if source.starts_with("step-run/") {
         attention_snapshot::person_attention_item(connection, source, at).map_err(internal)?
@@ -152,7 +158,7 @@ fn custom_item(connection: &Connection, source: &str) -> anyhow::Result<Option<A
 
 
 impl ResolvedSource {
-    pub(super) fn require_agent(
+    pub(in crate::store) fn require_agent(
         &self,
         store: &Store,
         connection: &Connection,
