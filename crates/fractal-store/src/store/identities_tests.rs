@@ -412,7 +412,7 @@ proptest! {
 }
 
 #[test]
-fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders() {
+fn mixed_structural_and_neutral_operation_history_requires_graph_repair_in_both_orders() {
     for neutral_first in [false, true] {
         let source = node("node-a", None, None);
         let store = node("node-b", None, None);
@@ -446,8 +446,9 @@ fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders
                 let result = try_project_simple_replication_tx(
                     &tx, store.origin(), current_index_tx(&tx).unwrap(),
                 ).unwrap();
-                assert!(matches!(result, IncrementalProjection::ReplayWithContext {
-                    reason: "operation-conflict", ..
+                // A mixed history must never take the graph-neutral registry-only path.
+                assert!(matches!(result, IncrementalProjection::ProjectedWithContext {
+                    code: "operation-conflict", ..
                 }), "neutral_first={neutral_first}");
                 tx.rollback().unwrap();
             }
@@ -459,6 +460,220 @@ fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders
         assert_eq!(error.details["reason"], "conflict");
         let digests = store.replication_snapshot().unwrap().projection_digests.clone();
         store.replay_replication_graph().unwrap();
+        let replayed = store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err();
+        assert_eq!(replayed.code, error.code);
+        assert_eq!(replayed.details["reason"], error.details["reason"]);
         assert_eq!(store.replication_snapshot().unwrap().projection_digests, digests);
     }
+}
+
+#[test]
+fn naming_operation_conflict_above_bound_defers_and_explicit_repair_recovers() {
+    let store = node("node-a", None, None);
+    let declaration = declare(&store, ORIGINAL);
+    let receipt = store.rename_identity(
+        IdentityKind::Agent, &request(ORIGINAL, RENAMED, "large-naming-conflict"), &[],
+    ).unwrap();
+    let rename = store.claim_by_id(&receipt.claim_id).unwrap().unwrap();
+    let (operation, _) = operation_parts(&rename.body).unwrap();
+    let declaration = store.claim_by_id(&declaration).unwrap().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for _ in 0..OPERATION_CONFLICT_NAMING_CLAIMS {
+            append_claim_record_tx(&tx, store.origin(), ORIGINAL, "intent.desired",
+                declaration.actor.as_deref(), &declaration.body, &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    store.replay_replication_graph().unwrap();
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap().canonical_id, RENAMED);
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, store.origin(), "github-event/github/acme/garden/issue/7/closed",
+            "github.event", None, &json!({"fields":{},"_operation":{"id":operation,"request_digest":"different"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    store.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert!(store.replication_projection_needs_recovery().unwrap());
+    let health = store.replication_status(false, None, &[]).unwrap();
+    let degraded = health.unhealthy.iter().find(|row|
+        row.aggregate == "projection:naming-operation-conflict").unwrap();
+    assert_eq!(degraded.error_code.as_deref(), Some("operation-conflict-naming-refold-limit"));
+    let details: Value = serde_json::from_str(degraded.error_message.as_ref().unwrap()).unwrap();
+    assert_eq!(details["projection_operation_id"], operation);
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err().code, "lifecycle-unavailable");
+    assert!(resolve_reference_conn(&store.readers.get(), RENAMED).is_err());
+    assert!(store.selected_desired_tokens(&[ORIGINAL]).is_err());
+    assert!(store.selected_desired_token(ORIGINAL).is_err());
+    store.replay_replication_graph().unwrap();
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
+        .any(|row| row.aggregate == "projection:naming-operation-conflict"));
+    let error = store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err();
+    assert_eq!(error.details["reason"], "conflict");
+    let digest = store.replication_snapshot().unwrap().projection_digests.clone();
+    store.replay_replication_graph().unwrap();
+    assert_eq!(digest, store.replication_snapshot().unwrap().projection_digests);
+}
+
+#[test]
+#[ignore = "explicit dirty-mark mutation probe; intentionally catches the parity assertion failure"]
+fn naming_operation_conflict_dirty_mark_mutation_is_detected() {
+    OMIT_OPERATION_CONFLICT_DIRTY.set(true);
+    let mutant = std::panic::catch_unwind(
+        mixed_structural_and_neutral_operation_history_requires_graph_repair_in_both_orders);
+    OMIT_OPERATION_CONFLICT_DIRTY.set(false);
+    assert!(mutant.is_err(), "removing the dirty mark must fail the mixed-history regression");
+    eprintln!("NAMING_DIRTY_MUTATION: mixed-history regression failed with the dirty mark omitted");
+}
+
+#[test]
+#[ignore = "writer-held naming refold measurement; run explicitly under a build ticket"]
+fn naming_operation_conflict_writer_hold_measurement() {
+    for count in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+        let store = Store::open_memory("naming-bench").unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for number in 0..count / 2 {
+                let identity = format!("mission/bench-{number}");
+                let declaration = append_claim_record_tx(&tx, store.origin(), &identity,
+                    "mission.published", None, &json!({}), &[], None).unwrap();
+                let rename = append_claim_record_tx(&tx, store.origin(), &identity, "mission.renamed",
+                    None, &json!({"fields":{"from":identity,"to":format!("mission/renamed-{number}"),
+                        "declaration":declaration.id,"owner_host":store.origin()},
+                        "_operation":{"id":format!("op/bench-{number}"),"request_digest":"benchmark"}}),
+                    &[], None).unwrap();
+                register_operation_tx(&tx, &rename).unwrap();
+            }
+            rebuild(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+        let mut samples = Vec::new();
+        for iteration in 0..110 {
+            let started = std::time::Instant::now();
+            {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h18f8ad5b42e2 owner=fractal_store::store::identities_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id='op/bench-0'", []).unwrap();
+                mark_operation_conflict_dirty(&tx).unwrap();
+                // Explicit benchmark of the canonical fold even if a measured lower cap
+                // later makes this history too large for automatic receipt repair.
+                reduce(&tx, false).unwrap();
+                tx.rollback().unwrap();
+            }
+            if iteration >= 10 { samples.push(started.elapsed().as_micros()); }
+        }
+        samples.sort_unstable();
+        eprintln!("NAMING_REFOLD_BENCH claims={count} samples=100 p50_us={} p99_us={}",
+            samples[49], samples[98]);
+    }
+}
+
+#[test]
+fn naming_operation_conflict_scope_fences_other_claimants_not_unrelated_names() {
+    const OTHER: &str = "agent/example-other/worker";
+    const UNRELATED: &str = "agent/example-unrelated/worker";
+    const DESTINATION: &str = "agent/example-contested/worker";
+    let a = node("node-a", None, None);
+    let b = node("node-b", None, None);
+    let store = node("node-c", None, None);
+    declare(&a, ORIGINAL);
+    declare(&b, OTHER);
+    let first = a.rename_identity(IdentityKind::Agent,
+        &request(ORIGINAL, DESTINATION, "scope-a"), &[]).unwrap();
+    let second = b.rename_identity(IdentityKind::Agent,
+        &request(OTHER, DESTINATION, "scope-b"), &[]).unwrap();
+    let first = a.claim_by_id(&first.claim_id).unwrap().unwrap();
+    let second = b.claim_by_id(&second.claim_id).unwrap().unwrap();
+    sync(&a, &store);
+    sync(&b, &store);
+    let declaration = declare(&store, UNRELATED);
+    let declaration = store.claim_by_id(&declaration).unwrap().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for _ in 0..OPERATION_CONFLICT_NAMING_CLAIMS {
+            append_claim_record_tx(&tx, store.origin(), UNRELATED, "intent.desired",
+                declaration.actor.as_deref(), &declaration.body, &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    store.replay_replication_graph().unwrap();
+    let (winner, loser) = if first.id < second.id { (&first, &second) } else { (&second, &first) };
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, &winner.subject).unwrap().canonical_id, DESTINATION);
+    let (operation, _) = operation_parts(&loser.body).unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, store.origin(), "custom/test/naming-scope", "custom.test.observed",
+            None, &json!({"fields":{},"_operation":{"id":operation,"request_digest":"different"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    store.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    // The conflicting operation belongs to the loser. Its scope must also fence the
+    // currently healthy winner, which a subject-only or cache-derived scope would miss.
+    let error = store.resolve_identity(IdentityKind::Agent, &winner.subject).unwrap_err();
+    assert_eq!(error.details["reason"], "operation-conflict-naming-refold-limit");
+    assert!(store.resolve_identity(IdentityKind::Agent, &loser.subject).is_err());
+    assert!(resolve_reference_conn(&store.readers.get(), DESTINATION).is_err());
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, UNRELATED).unwrap().identity, UNRELATED);
+    assert!(store.selected_desired_tokens(&[UNRELATED]).unwrap().contains_key(UNRELATED));
+    let health = store.replication_status(false, None, &[]).unwrap();
+    let degraded = health.unhealthy.iter().find(|row|
+        row.aggregate == "projection:naming-operation-conflict").unwrap();
+    let report: Value = serde_json::from_str(degraded.error_message.as_ref().unwrap()).unwrap();
+    assert_eq!(report["scope"], "scoped");
+    assert!(report["affected_names"].as_array().unwrap().contains(&json!(winner.subject)));
+    assert!(report["affected_names"].as_array().unwrap().contains(&json!(DESTINATION)));
+    assert_eq!(report["repair_command"], "run fractal replication replay --confirm in a planned window");
+    let scoped_keys: usize = store.readers.get().query_row(
+        "SELECT COUNT(*) FROM meta WHERE key GLOB 'operation-conflict-naming-name:*'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(scoped_keys, report["affected_names"].as_array().unwrap().len());
+    // A typed nested reference in a non-naming declaration must use the same fence.
+    let mut desired: DesiredSubject = serde_json::from_value(declaration.body.clone()).unwrap();
+    desired.subject = "resource/example-nested".into();
+    desired.kind = "resource".into();
+    desired.desired = json!({"name":"resource","arguments":["example-nested"],
+        "children":[{"name":"to","arguments":[winner.subject]}]});
+    assert!(normalize_desired(&store.readers.get(), &desired).is_err());
+    let mut intent = crate::parse_intent("version 2\nagent \"example-intent\" { command \"true\"; workspace \"/tmp\"; }\n", store.origin()).unwrap();
+    intent.subjects.clear();
+    intent.subjects.insert(desired.subject.clone(), desired);
+    assert!(normalize_intent(&store.readers.get(), &intent).is_err());
+    store.replay_replication_graph().unwrap();
+    let scoped_keys: usize = store.readers.get().query_row(
+        "SELECT COUNT(*) FROM meta WHERE key GLOB 'operation-conflict-naming-name:*'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(scoped_keys, 0, "explicit repair clears keyed failure scope");
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
+        .any(|row| row.aggregate == "projection:naming-operation-conflict"));
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, &winner.subject).unwrap().canonical_id, DESTINATION);
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, UNRELATED).unwrap().identity, UNRELATED);
+    let reference = store.replication_snapshot().unwrap().projection_digests.clone();
+    store.replay_replication_graph().unwrap();
+    assert_eq!(reference, store.replication_snapshot().unwrap().projection_digests);
+}
+
+#[test]
+#[ignore = "explicit scope mutation probe; intentionally catches a stale healthy competitor"]
+fn naming_operation_conflict_other_claimants_mutation_is_detected() {
+    conflict_scope::OMIT_OTHER_CLAIMANTS.set(true);
+    let mutant = std::panic::catch_unwind(
+        naming_operation_conflict_scope_fences_other_claimants_not_unrelated_names);
+    conflict_scope::OMIT_OTHER_CLAIMANTS.set(false);
+    assert!(mutant.is_err(), "omitting other claimants must fail the scope regression");
+    eprintln!("NAMING_SCOPE_MUTATION: other-claimant regression failed when competitor traversal was omitted");
 }
