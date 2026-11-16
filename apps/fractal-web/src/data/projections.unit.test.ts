@@ -65,6 +65,41 @@ test.each([
   },
 )
 
+test.each([
+  { state: 'running', harness_state: 'working', turn: 'active' },
+  { state: 'running', harness_state: 'idle', turn: 'inactive' },
+  { state: 'waiting', harness_state: 'blocked', turn: 'inactive' },
+  { state: 'suspended', harness_state: null, turn: 'inactive' },
+  { state: 'running', harness_state: null, turn: undefined },
+  { state: 'waiting', harness_state: 'indeterminate', turn: undefined },
+] as const)('reads a turn only from the seat itself: $state / $harness_state is $turn', ({ turn, ...observation }) => {
+  const row = openAgent(decodeUnknownSync(Agent, 'strict')({
+    kind: 'agent', id: 'agent/turn-row', name: 'Turn row', host_id: 'host/example', runtime_ids: [],
+    reachability: 'reachable', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z',
+    ...observation,
+  } satisfies AgentEncoded))
+  const projected = fleetFromAgents([row]).agents[0]!
+  // A running seat still reads as working in the roster; only its own harness report claims a turn.
+  expect(projected.turn).toBe(turn)
+})
+
+test.each([
+  { id: 'agent/example/atlas', name: 'Atlas', shown: 'Atlas' },
+  { id: 'agent/example/atlas', name: 'atlas', shown: 'atlas' },
+  // The daemon labels a seat that declares no name by its id without agent/; that is no name.
+  { id: 'agent/example/atlas', name: 'example/atlas', shown: 'An agent' },
+  { id: 'agent/example/atlas', name: 'agent/example/atlas', shown: 'An agent' },
+  { id: 'agent/example/d415892ea7a1dab11e6ba7ed22a8eb13', name: 'example/d415892ea7a1dab11e6ba7ed22a8eb13', shown: 'An agent' },
+  // Fractal's own reconciler reads as Fractal whatever it declares.
+  { id: 'agent/st3/reconciler', name: 'Reconciler', shown: 'Fractal' },
+] as const)('names a roster row "$name" as $shown, never by its id', ({ id, name, shown }) => {
+  const row = openAgent(decodeUnknownSync(Agent, 'strict')({
+    kind: 'agent', id, name, host_id: 'host/example', runtime_ids: [], reachability: 'reachable',
+    state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z',
+  } satisfies AgentEncoded))
+  expect(fleetFromAgents([row]).agents[0]?.name).toBe(shown)
+})
+
 const row = openAgent(decodeUnknownSync(
   Agent,
   'strict',

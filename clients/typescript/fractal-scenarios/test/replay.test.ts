@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  applyWindow, ClientError, FractalClient,
+  applyWindow, isResourceCollectionFrame, ClientError, FractalClient,
   type ActionRequest, type CollectionFrame, type CollectionStream, type CollectionWindow,
   type TerminalAttachment, type TimelineEntry,
 } from '@fractal/client'
@@ -264,7 +264,7 @@ describe('collection windows', () => {
       h.clock.advance(at)
       await h.replay.flush()
       for (const frame of h.frames.slice(read)) {
-        if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') throw new Error('Expected a resource collection window')
+        if (!isResourceCollectionFrame(frame)) throw new Error('Expected a resource collection window')
         const next = applyWindow(windows.get(frame.id ?? ''), frame)
         if (next !== undefined) windows.set(frame.id ?? '', next)
       }
@@ -289,7 +289,7 @@ describe('collection windows', () => {
     let read = 0
     const check = () => {
       for (const frame of h.frames.slice(read)) {
-        if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') throw new Error('Expected a resource collection window')
+        if (!isResourceCollectionFrame(frame)) throw new Error('Expected a resource collection window')
         const next = applyWindow(windows.get(frame.id ?? ''), frame)
         if (next !== undefined) windows.set(frame.id ?? '', next)
       }

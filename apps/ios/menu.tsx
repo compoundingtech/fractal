@@ -1,5 +1,5 @@
 import { cloneElement, isValidElement, type ReactElement } from 'react';
-import { ActionSheetIOS } from 'react-native';
+import { showOwnedActionSheet } from './ownedPresentationNative';
 
 // What else a person can do with a row, on long press, as an action sheet. The row keeps its
 // own tap. A native UIMenu wrapped around the row swallowed that tap on iOS 27, so a list of
@@ -8,7 +8,7 @@ export type MenuAction = { id: string; title: string; symbol?: string; destructi
 
 export function ContextMenu({ actions, title, children }: { actions: MenuAction[]; title?: string; children: ReactElement<{ onLongPress?: () => void }> }) {
   if (!actions.length || !isValidElement(children)) return children;
-  const show = () => ActionSheetIOS.showActionSheetWithOptions(
+  const show = () => showOwnedActionSheet(
     {
       title,
       options: [...actions.map(action => action.title), 'Cancel'],

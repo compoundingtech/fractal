@@ -33,6 +33,15 @@ export function PhoneWorkspaceTabs({ enabled = true, tabsHidden = false, tabs, s
   const { tabListProps } = useTabList({ 'aria-label': 'Workspace views' }, state, list)
   const panelId = `${prefix}-panel`
   const tabbed = enabled && !tabsHidden
+  // A tab selected from elsewhere, such as a thread opened in its own tab, scrolls into the row's view;
+  // only the tab list scrolls, never the page around it.
+  React.useLayoutEffect(() => {
+    const row = list.current, tab = row?.children[index]
+    if (!tabbed || row === null || tab === undefined) return
+    const bounds = row.getBoundingClientRect(), box = tab.getBoundingClientRect()
+    if (box.left < bounds.left) row.scrollLeft -= bounds.left - box.left
+    else if (box.right > bounds.right) row.scrollLeft += box.right - bounds.right
+  }, [index, tabs.length, tabbed])
   return <div {...stylex.props(styles.root)}>
     <div hidden={!enabled} {...stylex.props(styles.row, !enabled && styles.hidden)}>
       <div {...(enabled ? tabListProps : {})} ref={list} {...stylex.props(styles.list, tabsHidden && styles.hidden)}>

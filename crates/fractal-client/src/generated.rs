@@ -791,6 +791,9 @@ pub struct Attention {
     /// which is not urgent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub urgent: Option<bool>,
+    /// An unread incoming reply in an owned thread for this exact ask episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_unread: Option<bool>,
     /// The agent whose conversation this item belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
@@ -857,7 +860,7 @@ pub struct AttentionPresentation {
     /// The card; `None` for a row that is no card.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Who Chat about this reaches; `None` means the chief of staff.
+    /// The daemon-assigned responsible agent; `None` means discussion is unassigned.
     #[serde(default)]
     pub agent: Option<AttentionActor>,
     #[serde(default)]
@@ -4024,6 +4027,16 @@ pub enum ActionType {
     ArrangementMembershipEdit,
     #[serde(rename = "read-position.advance")]
     ReadPositionAdvance,
+    #[serde(rename = "thread.rename")]
+    ThreadRename,
+    #[serde(rename = "thread.start")]
+    ThreadStart,
+    #[serde(rename = "thread.reply")]
+    ThreadReply,
+    #[serde(rename = "thread.close")]
+    ThreadClose,
+    #[serde(rename = "thread.reopen")]
+    ThreadReopen,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "attention.seen")]
@@ -4042,6 +4055,12 @@ pub enum ActionType {
     MessageSend,
     #[serde(rename = "message.read")]
     MessageRead,
+    #[serde(rename = "thread.read")]
+    ThreadRead,
+    #[serde(rename = "thread.mark-unread")]
+    ThreadMarkUnread,
+    #[serde(rename = "thread.clear-unread")]
+    ThreadClearUnread,
     #[serde(rename = "message.close")]
     MessageClose,
     #[serde(rename = "launch.create")]
@@ -4900,6 +4919,118 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn thread_clear_unread(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadClearUnreadParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadClearUnread,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_close(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadClose,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_mark_unread(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadMarkUnreadParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadMarkUnread,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_read(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReadParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadRead,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_rename(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadRenameParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadRename,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_reopen(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadReopen,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_reply(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReplyParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadReply,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_start(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadStartParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadStart,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn work_ask(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -5062,6 +5193,28 @@ impl ActionRequest {
             &parameters,
         )
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadReadParameters {
+    pub target_id: String,
+    pub through_message_id: Option<String>,
+    pub seen_message_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadMarkUnreadParameters {
+    pub target_id: String,
+    pub anchor_message_id: String,
+    /// Captured opaque stable mark operation IDs, never claim IDs.
+    pub observed_marks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadClearUnreadParameters {
+    pub target_id: String,
+    /// Captured opaque stable mark operation IDs, never claim IDs.
+    pub observed_marks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -5513,6 +5666,148 @@ pub struct TerminalResizeParameters {
     pub columns: u16,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadState {
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadUnreadMark {
+    /// Opaque stable signed operation ID, never a claim ID.
+    pub mark_id: String,
+    pub anchor_message_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadUnreadReminder {
+    pub marks: Vec<ThreadUnreadMark>,
+    pub anchor_message_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadSummary {
+    pub id: String,
+    pub agent_id: String,
+    pub title: String,
+    pub title_revision: String,
+    pub revision: String,
+    pub state: ThreadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_reminder: Option<ThreadUnreadReminder>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadSummaryPage {
+    pub items: Vec<ThreadSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTimelineEvent {
+    pub id: String,
+    pub actor_id: String,
+    pub accepted_at_unix_ms: u64,
+    #[serde(flatten)]
+    pub change: ThreadTimelineChange,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum ThreadTimelineChange {
+    #[serde(rename = "message")]
+    Message {
+        content: String,
+        thread_quote_id: Option<String>,
+    },
+    #[serde(rename = "thread.renamed")]
+    Renamed {
+        previous_title: String,
+        title: String,
+    },
+    #[serde(rename = "thread.closed")]
+    Closed,
+    #[serde(rename = "thread.reopened")]
+    Reopened,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTimelineAnchor {
+    pub message_id: String,
+    pub state: ThreadTimelineAnchorState,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadTimelineAnchorState {
+    Current,
+    Unavailable,
+    Pending,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTimelinePage {
+    pub items: Vec<ThreadTimelineEvent>,
+    pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<ThreadTimelineAnchor>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadListScope<'a> {
+    Agent(&'a str),
+    Inbox { source: &'a str, episode: &'a str },
+    Mission(&'a str),
+    RecentlyClosed,
+    MarkedUnread,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadStartOrigin {
+    pub source_id: String,
+    pub episode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ThreadStartParameters {
+    pub target_id: String,
+    pub agent_id: String,
+    pub origin: ThreadStartOrigin,
+    pub title: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DeviceSignature>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ThreadReplyParameters {
+    pub target_id: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_quote_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DeviceSignature>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTargetParameters {
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadRenameParameters {
+    pub target_id: String,
+    pub title: String,
+    pub title_revision: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ActionResult {
     pub kind: String,
@@ -5537,6 +5832,8 @@ pub struct ActionResult {
     /// `read-position.advance`: the stored position after the forward-only merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_position_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_claim_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

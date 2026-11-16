@@ -108,15 +108,10 @@ fn label_text(model: &Model, label: &WorkLabel) -> String {
         .missions()
         .find(|mission| mission.header.id == label.mission_id)
         .map(crate::mission_display_label)
-        .unwrap_or_else(|| short(&label.mission_id));
+        .unwrap_or_else(|| "a mission".into());
     format!("{mission} › {}", label.path)
 }
 
-fn short(id: &str) -> String {
-    id.trim_start_matches("mission/")
-        .trim_start_matches("agent/")
-        .to_owned()
-}
 
 fn missions(model: &Model, person: &str, now: &str) -> Vec<Mission> {
     fractal_ui_model::missions::adapt(
@@ -383,20 +378,22 @@ fn tier(id: &str) -> Option<Tier> {
     }
 }
 
-/// Who Fractal names, as a person reads it: an agent by its label and id, Fractal's own
+/// Who Fractal names, as a person reads it: an agent by its display label, Fractal's own
 /// machinery as "Fractal", a mission or a person as Fractal labels it.
 fn who(actor: &fractal_client::AttentionActor) -> String {
     if actor.label == "st" {
         "Fractal".into()
-    } else if actor.id.starts_with("agent/") && actor.label != actor.id {
-        format!("{} · {}", actor.label, actor.id)
+    } else if actor.id.starts_with("agent/")
+        && (actor.label.trim().is_empty() || actor.label.starts_with("agent/"))
+    {
+        "an agent".into()
     } else {
         actor.label.clone()
     }
 }
 
 /// The attention rows st puts on Now, as st presents them (`Attention.presentation`): its
-/// group, its card, who Chat about this reaches, who raised it and the step it holds. The
+/// group, its card, the responsible thread agent, who raised it and the step it holds. The
 /// client keeps no derivation of its own. A row st puts on no Now is not shown; one st places
 /// in a way this client does not know shows what st says, as an unplaced card.
 #[cfg(test)]
@@ -473,19 +470,18 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                             step: path.clone().unwrap_or_default(),
                             feedback: kind == "feedback",
                         },
-                        "launch" => AttentionKind::Launch {
-                            planner: "The planner".into(),
-                            name: mission
-                                .as_deref()
-                                .map(short)
-                                .unwrap_or_else(|| item.title.clone()),
-                            preview: launch_preview(
-                                presentation.launch.as_ref(),
-                                mission
-                                    .as_deref()
-                                    .unwrap_or(&item.title)
-                                    .trim_start_matches("mission/"),
-                            ),
+                        "launch" => {
+                            let name = mission.as_deref().map_or_else(|| item.title.clone(), |id| {
+                                model.missions().find(|candidate| candidate.header.id == id)
+                                    .map(crate::mission_display_label)
+                                    .unwrap_or_else(|| "a mission".into())
+                            });
+                            let preview = launch_preview(presentation.launch.as_ref(), &name);
+                            AttentionKind::Launch {
+                                planner: "The planner".into(),
+                                name,
+                                preview,
+                            }
                         },
                         "revision" => AttentionKind::Revision {
                             reason: item.detail.clone(),
@@ -543,7 +539,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                                 .agent
                                 .as_ref()
                                 .map(|agent| agent.label.clone())
-                                .unwrap_or_else(|| short(&item.source_id)),
+                                .unwrap_or_else(|| "an agent".into()),
                             seat_id: item.source_id.clone(),
                             text: clean_message_text(&item.detail),
                             question: question_agents.contains(item.source_id.as_str()),
@@ -908,7 +904,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
                             .agents()
                             .find(|parent| parent.header.id == relation.agent_id)
                             .map(crate::agent_label)
-                            .unwrap_or_else(|| short(&relation.agent_id))
+                            .unwrap_or_else(|| "an agent".into())
                     }),
                 },
                 subagents: agent
@@ -1144,19 +1140,23 @@ mod tests {
     }
 
     #[test]
-    fn identity_labels_show_fallback_ids_only_once() {
-        for id in ["agent/example/unnamed", "person/ada"] {
+    fn identity_labels_use_names_or_plain_agent_words() {
+        for (id, expected) in [("agent/example/unnamed", "an agent"), ("person/ada", "person/ada")] {
             let actor = fractal_client::AttentionActor {
                 id: id.into(),
                 label: id.into(),
             };
-            assert_eq!(who(&actor), id);
+            let shown = who(&actor);
+            assert_eq!(shown, expected);
+            assert!(!shown.contains("agent/"), "{shown}");
         }
         let named = fractal_client::AttentionActor {
             id: "agent/example/maintainer".into(),
             label: "Maintainer".into(),
         };
-        assert_eq!(who(&named), "Maintainer · agent/example/maintainer");
+        let shown = who(&named);
+        assert_eq!(shown, "Maintainer");
+        assert!(!shown.contains("agent/"), "{shown}");
     }
 
     #[test]
@@ -2274,6 +2274,7 @@ mod tests {
         mission.step_metadata.insert(
             "step-run/example/build".into(),
             fractal_ui_model::missions::StepMetadata {
+                title: None,
                 blocked_reason: None,
                 last_progress: Some("  Tests pass on\nmain; opening the PR \n".into()),
                 nudged: None,
@@ -2665,14 +2666,13 @@ mod tests {
             matches!(&items[0].kind, AttentionKind::Request { question, .. } if question.contains("Source: step-run/example/ask"))
         );
         assert!(
-            matches!(&items[1].kind, AttentionKind::Launch { name, .. } if name == "example/ship")
+            matches!(&items[1].kind, AttentionKind::Launch { name, .. } if name == "a mission")
         );
     }
 
-    /// Chat about this reaches the agent st names: the step's claimant, else an agent working in
-    /// the mission, each with the label st gives it.
+    /// Thread responsibility uses the daemon assignment while labels and waiting context remain.
     #[test]
-    fn chat_reaches_the_claimant_or_an_agent_working_in_the_mission() {
+    fn thread_responsibility_keeps_the_daemon_assignment_labels_and_waiting_context() {
         let known = Known {
             labels: vec![("agent/example/auditor", "Auditor")],
             claimants: vec![("step-run/example/audit/1/review", "agent/example/auditor")],
@@ -2683,14 +2683,16 @@ mod tests {
         model.actor = "person/example".into();
         model.now.items.push(served_with(
             row("attention/claimed", "human-gate", serde_json::json!({"alert": true,
-                "step_run_id": "step-run/example/audit/1/review", "mission_id": "mission/example/audit"})),
+                "step_run_id": "step-run/example/audit/1/review", "mission_id": "mission/example/audit",
+                "conversation_id": "agent/example/auditor"})),
             &known,
         ));
         model.now.items.push(served_with(
             row(
                 "attention/working",
                 "human-gate",
-                serde_json::json!({"alert": true, "mission_id": "mission/example/ship"}),
+                serde_json::json!({"alert": true, "mission_id": "mission/example/ship",
+                    "conversation_id": "agent/example/builder"}),
             ),
             &known,
         ));
@@ -2698,10 +2700,24 @@ mod tests {
         assert_eq!(items[0].agent.as_deref(), Some("agent/example/auditor"));
         assert_eq!(
             items[0].raised_by.as_deref(),
-            Some("Auditor · agent/example/auditor")
+            Some("Auditor")
         );
+        assert!(!items[0].raised_by.as_deref().unwrap().contains("agent/"));
         assert_eq!(items[0].waiting.as_deref(), Some("step review"));
         assert_eq!(items[1].agent.as_deref(), Some("agent/example/builder"));
+    }
+
+    #[test]
+    fn attention_actor_labels_never_fall_back_to_agent_ids() {
+        for label in ["Atlas/Manager", "agent/example/atlas", ""] {
+            let actor = fractal_client::AttentionActor {
+                id: "agent/example/atlas".into(),
+                label: label.into(),
+            };
+            let shown = who(&actor);
+            assert_eq!(shown, if label == "Atlas/Manager" { label } else { "an agent" });
+            assert!(!shown.contains("agent/"), "{shown}");
+        }
     }
 
     #[test]
