@@ -52,7 +52,7 @@ describe('thread header seam', () => {
     expect(bound).not.toMatch(/Needs you/)
   })
   it.each([
-    ['waiting', 'Native waiting for tool response', false, 'Needs you'],
+    ['waiting', 'Native waiting for tool response', false, 'Waiting'],
     ['errored', 'Native tool execution errored', false, 'Failed'],
     ['working', 'Native working before connection loss', true, 'Last verified · Working'],
     ['idle', 'invalid-status', false, 'Idle'],

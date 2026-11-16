@@ -308,6 +308,47 @@ describe('tail-first transcript mounting', () => {
     expect(time()).toBe(sourceAt)
   })
 
+  // Construct wall-clock times in the host's local zone, just like the transcript's
+  // day keys and formatter; UTC midnight is not necessarily local midnight.
+  const beforeMidnight = new Date(2026, 9, 17, 23, 59).toISOString()
+  const afterMidnight = new Date(2026, 9, 18, 0, 1).toISOString()
+  const datedTurns = (timestamps: readonly string[]): readonly TranscriptTurn[] => timestamps.map((at, index) => ({
+    ...turns[index]!,
+    prompt: { ...turns[index]!.prompt!, at },
+  }))
+
+  it('renders exactly one day separator at local midnight in the mounted tail', async () => {
+    const entries = datedTurns(turns.map((_, index) => index < turns.length - 2 ? beforeMidnight : afterMidnight))
+    await render(transcript(entries))
+    expect(mountedSourceIds()).toEqual(entries.slice(-6).map(turn => turn.prompt!.id))
+    const separators = [...container.querySelectorAll('[data-testid="transcript-day"]')]
+    expect(separators).toHaveLength(1)
+    expect(separators[0]!.getAttribute('role')).toBe('separator')
+    expect(separators[0]!.closest('[data-testid="transcript-turn"]')?.getAttribute('data-item-id')).toBe(entries.at(-2)!.id)
+    expect(separators[0]!.textContent).toBe(new Intl.DateTimeFormat([], { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date(afterMidnight)))
+  })
+
+  it('adds one day separator when a live tail appends its first episode after local midnight', async () => {
+    const entries = datedTurns([...turns.slice(0, -1).map(() => beforeMidnight), afterMidnight])
+    await render(transcript(entries.slice(0, -1)))
+    expect(container.querySelectorAll('[data-testid="transcript-day"]')).toHaveLength(0)
+    const retained = container.querySelector(`[data-testid="transcript-turn"][data-item-id="${entries.at(-2)!.id}"]`)
+    await render(transcript(entries))
+    const separators = [...container.querySelectorAll('[data-testid="transcript-day"]')]
+    expect(separators).toHaveLength(1)
+    expect(separators[0]!.closest('[data-testid="transcript-turn"]')?.getAttribute('data-item-id')).toBe(entries.at(-1)!.id)
+    expect(container.querySelector(`[data-testid="transcript-turn"][data-item-id="${entries.at(-2)!.id}"]`)).toBe(retained)
+  })
+
+  it('adds no day separator for same-local-day episodes, including a live append', async () => {
+    const entries = datedTurns(turns.map((_, index) => new Date(2026, 9, 17, 22, index).toISOString()))
+    await render(transcript(entries.slice(0, -1)))
+    expect(container.querySelectorAll('[data-testid="transcript-day"]')).toHaveLength(0)
+    await render(transcript(entries))
+    expect(mountedSourceIds()).toContain(entries.at(-1)!.prompt!.id)
+    expect(container.querySelectorAll('[data-testid="transcript-day"]')).toHaveLength(0)
+  })
+
   it('mounts all reasoning in a crossing work-log disclosure and keeps it open while Show all reveals deferred tools and prose', async () => {
     const tool: ConversationItem = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
     const items = [...range('before', 0, 6).map(answerRow), thought('early/0'), thought('early/1'), tool, ...range('run', 0, 5).map(thought), ...range('after', 0, 3).map(answerRow)]

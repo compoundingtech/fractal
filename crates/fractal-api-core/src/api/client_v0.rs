@@ -321,6 +321,9 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -343,6 +346,9 @@ const ACTIONS: &[&str] = &[
     "arrangement.membership.edit",
     "read-position.advance",
     "attention.resolve",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -364,6 +370,7 @@ const ACTIONS: &[&str] = &[
     "custom.reply",
     "prompt.respond",
     "work.done",
+    "work.override",
     "work.cancel-ask",
     "work.claim",
     "work.renew",
@@ -406,6 +413,9 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "arrangement.edit",
     "arrangement.membership.edit",
     "read-position.advance",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -424,6 +434,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "session.import",
     "work.ask",
     "work.done",
+    "work.override",
     "work.cancel-ask",
     "work.claim",
     "work.renew",
@@ -486,6 +497,8 @@ pub struct ClientSession {
     /// Accept-time kernel connector generation; never supplied by a request header.
     pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub custom_forms: bool,
+    /// Negotiated `model-drift-attention.v1`: the client reads `model-drift` attention rows.
+    pub model_drift_attention: bool,
     pub conversation_blocks: bool,
     pub conversation_delivery_links: bool,
     pub conversation_message_participants: bool,
@@ -496,6 +509,14 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
+    /// Which attention rows this session's client can read as they are.
+    pub fn attention_compatibility(&self) -> crate::api::AttentionCompatibility {
+        crate::api::AttentionCompatibility {
+            custom_forms: self.custom_forms,
+            model_drift: self.model_drift_attention,
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(actor: &str, authority_actor: &str, transport: &'static str) -> Self {
         Self {
@@ -509,6 +530,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: true,
+            model_drift_attention: true,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -552,6 +574,7 @@ impl ClientSession {
                 local_peer: false,
                 peer_process: None,
                 custom_forms,
+                model_drift_attention: false,
                 conversation_blocks: false,
                 conversation_delivery_links: false,
                 conversation_message_participants: false,
@@ -592,6 +615,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -613,6 +637,7 @@ impl ClientSession {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
@@ -778,6 +803,10 @@ pub fn authenticate(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.split(',').any(|feature|
             feature.trim() == "conversation-delivery-links.v1"));
+    let model_drift_attention = request.headers().get("x-st3-features")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|feature|
+            feature.trim() == "model-drift-attention.v1"));
     let messages_paging = request
         .headers()
         .get("x-st3-features")
@@ -793,6 +822,7 @@ pub fn authenticate(
         session.actor = format!("client/local-web/{}", web.id);
         session.transport = "local-web";
         session.custom_forms = custom_forms;
+        session.model_drift_attention = model_drift_attention;
         session.grant_expires_at = Some(web.expires_at);
         session.conversation_blocks = conversation_blocks;
         session.messages_paging = messages_paging;
@@ -821,6 +851,7 @@ pub fn authenticate(
                 return Err(forbidden("local harnesses and peers cannot inspect owner administration"));
             }
             session.custom_forms = custom_forms;
+            session.model_drift_attention = model_drift_attention;
             session.conversation_blocks = conversation_blocks;
             session.conversation_delivery_links = conversation_delivery_links;
             session.conversation_message_participants = conversation_message_participants;
@@ -876,6 +907,7 @@ pub fn authenticate(
     {
         return Err(super::custom::notices_unavailable());
     }
+    session.model_drift_attention = model_drift_attention;
     session.conversation_blocks = conversation_blocks;
     session.conversation_delivery_links = conversation_delivery_links;
     session.conversation_message_participants = conversation_message_participants;
@@ -951,6 +983,7 @@ pub fn paired_client_session_at(
         local_peer: false,
         peer_process: None,
         custom_forms,
+        model_drift_attention: false,
         conversation_blocks: false,
         conversation_delivery_links: false,
         conversation_message_participants: false,
@@ -1001,6 +1034,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
         }
     }.ok_or_else(|| forbidden("the client session grant is absent"))?;
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
+    current.model_drift_attention = session.model_drift_attention;
     current.conversation_blocks = session.conversation_blocks;
     current.conversation_delivery_links = session.conversation_delivery_links;
     current.conversation_message_participants = session.conversation_message_participants;
@@ -1110,8 +1144,9 @@ pub fn mission_list_cards_with(
             })).collect::<Vec<_>>();
             let current=shown.iter().filter(|s| matches!(s["state"].as_str(),Some("ready"|"claimed"|"verifying"|"blocked")))
                 .map(|s| json!({"id":s["id"],"title":s["title"],"assignee":s["assignee"],"claimant":s["claimant"],"state":s["state"],"since":s["since"],"progress_at":s["progress_at"]})).collect::<Vec<_>>();
-            Ok::<Value,anyhow::Error>(json!({
-                "id":run["id"],"generation_id":run["generation_id"],"requester":run["requester"],
+            let mut value = json!({
+                "id":run["id"],"generation_id":run["generation_id"],"revision":run["revision"],"requester":run["requester"],
+                "retried_by":run["retried_by"],
                 "status":run["status"],"phase":run["phase"],"progress":{"done":done,"total":total},
                 "current_steps":current,"must_act":must_act,
                 "blocker":scheduler_fault.map(|reason| json!({"step":steps.first().map(|step| &step.subject),"reason":reason,"scope":crate::reconcile::FIRST_READINESS_FAULT_SCOPE})),
@@ -1120,7 +1155,13 @@ pub fn mission_list_cards_with(
                 "completed_at":run_states.get(run_id).and_then(|state| state.completed_at_unix_ms),
                 "eta":if terminal {None} else {store.mission_run_eta(run_id, at_unix_ms)?},
                 "steps":shown
-            }))
+            });
+            for field in ["retry_of", "supersedes", "superseded_by", "supersession_fault"] {
+                if run[field].is_string() {
+                    value[field] = run[field].clone();
+                }
+            }
+            Ok::<Value,anyhow::Error>(value)
         }).collect::<anyhow::Result<Vec<_>>>()?;
         let state=if details.iter().any(|run| run["blocker"]["scope"]==crate::reconcile::FIRST_READINESS_FAULT_SCOPE) {"blocked"} else {state};
         let must_act=["you","agent","blocked","system"].into_iter()
@@ -1831,7 +1872,7 @@ pub async fn now(
         move |state, snapshot| {
             let mut items =
                 super::client_attention_resources_with_previews(state, person.as_deref(), history)?;
-            client_attention_compatibility(&mut items, session.custom_forms);
+            client_attention_compatibility(&mut items, session.attention_compatibility());
             // The default Now view is the person's attention queue. Mission work belongs
             // in Control; only an explicit work filter opts it into this combined view.
             if actor.is_some() || owner_run.is_some() {
@@ -4586,7 +4627,7 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
     ) {
         return Some("control.runtimes");
     }
-    if matches!(action, "work.done" | "custom.reply" | "prompt.respond") {
+    if matches!(action, "work.done" | "work.override" | "custom.reply" | "prompt.respond") {
         return Some("control.attention");
     }
     Some(match action.split_once('.')?.0 {

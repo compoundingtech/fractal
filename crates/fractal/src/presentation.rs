@@ -114,6 +114,21 @@ pub(crate) fn render_mission_run(
         short_subject(&selected.mission, "mission/")
     );
     let _ = writeln!(output, "RUN       {}", selected.subject);
+    if let Some(source) = &selected.retry_of {
+        let _ = writeln!(output, "RETRY OF  {source}");
+    }
+    for retry in &selected.retried_by {
+        let _ = writeln!(output, "RETRIED BY {retry}");
+    }
+    if let Some(source) = &selected.supersedes {
+        let _ = writeln!(output, "SUPERSEDES {source}");
+    }
+    if let Some(replacement) = &selected.superseded_by {
+        let _ = writeln!(output, "SUPERSEDED BY {replacement}");
+    }
+    if let Some(reason) = &selected.supersession_fault {
+        let _ = writeln!(output, "{} {reason}", style.status_value("blocked", "SUPERSESSION FAULT"));
+    }
     let _ = writeln!(
         output,
         "STATE     {} · {}",
@@ -866,11 +881,14 @@ pub(crate) fn render_claim_lease(
     output
 }
 
+/// `source` is the step's SOURCE row (`source_cli::render_step_source`), printed under its
+/// definition when its run's revision has a source map.
 pub(crate) fn render_step_run(
     step: &StepRunView,
     style: OutputStyle,
     now_unix_ms: u128,
     driver_held: Option<bool>,
+    source: Option<&str>,
 ) -> String {
     let mut output = String::new();
     let title = step.title.as_deref().unwrap_or(&step.step);
@@ -885,6 +903,9 @@ pub(crate) fn render_step_run(
     let _ = writeln!(output, "MISSION RUN {}", step.run);
     let _ = writeln!(output, "GENERATION {}", step.generation);
     let _ = writeln!(output, "DEFINITION {}", step.definition_hash);
+    if let Some(source) = source {
+        output.push_str(source);
+    }
     let _ = writeln!(
         output,
         "UPDATED    {}",
@@ -1220,6 +1241,8 @@ pub(crate) fn mission_run_signature(runs: &[MissionRunView]) -> anyhow::Result<S
                     "subject": step.subject,
                     "status": step.status,
                     "attempt": step.attempt,
+                    "retry": step.retry,
+                    "not_before_unix_ms": step.not_before_unix_ms,
                     "claimant": step.claimant,
                     "blocked_reason": step.blocked_reason,
                     "progress_summary": step.progress_summary,
@@ -1493,6 +1516,29 @@ fn render_graph_step(output: &mut String, step: &StepRunView, indent: &str, styl
         style.status_value(&step.status, format!("{:<10}", step.status)),
         step.step.rsplit('/').next().unwrap_or(&step.step),
     );
+    if let Some(retry) = &step.retry {
+        let _ = write!(output, "{indent}  retry: attempt {}/{}", step.attempt, retry.attempts);
+        if retry.schedule_ms.is_empty() {
+            let _ = write!(output, " · backoff {}ms", retry.backoff_ms);
+        } else {
+            let _ = write!(output, " · delays");
+            for delay in &retry.schedule_ms {
+                let _ = write!(output, " {delay}ms");
+            }
+        }
+        if let Some(window) = retry.window_ms {
+            let _ = write!(output, " · within {window}ms");
+        }
+        if retry.on_error_tags.is_empty() {
+            let _ = write!(output, " · on any failure");
+        } else {
+            let _ = write!(output, " · on {}", retry.on_error_tags.join(", "));
+        }
+        if let Some(due) = step.not_before_unix_ms {
+            let _ = write!(output, " · next due unix ms {due}");
+        }
+        let _ = writeln!(output);
+    }
     if let Some(reason) = &step.blocked_reason {
         let _ = writeln!(output, "{indent}  reason: {reason}");
     }
@@ -1655,50 +1701,110 @@ mod tests {
     use fractal_daemon::model::{LoopRunView, MissionRunInput, UnderSpec};
 
     fn step(subject: &str, path: &str, status: &str) -> StepRunView {
-        StepRunView {
-            subject: subject.into(),
-            run: "mission-run/demo/run".into(),
-            generation: "run-generation/demo-generation".into(),
-            step: path.into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition-hash".into(),
-            status: status.into(),
-            attempt: 1,
-            assigned_to: Some("agent/demo/worker".into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: Some(path.replace('/', " ")),
-            goals: vec!["Complete the work.".into()],
-            constraints: vec!["Keep the proof.".into()],
-            under: Vec::<UnderSpec>::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: None,
-            wake: None,
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 1_000,
-            updated_at_unix_ms: 2_000,
-            person_answers: Vec::new(),
-        }
+        StepRunView { retry: None, executions: None, effects: Vec::new(), subject: subject.into(),
+        run: "mission-run/demo/run".into(),
+        generation: "run-generation/demo-generation".into(),
+        step: path.into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition-hash".into(),
+        status: status.into(),
+        attempt: 1,
+        assigned_to: Some("agent/demo/worker".into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: Some(path.replace('/', " ")),
+        goals: vec!["Complete the work.".into()],
+        constraints: vec!["Keep the proof.".into()],
+        under: Vec::<UnderSpec>::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: None,
+        wake: None,
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 1_000,
+        updated_at_unix_ms: 2_000,
+        person_answers: Vec::new(), }
+    }
+
+    #[test]
+    fn mission_show_exposes_native_retry_policy_attempt_and_due_time() {
+        let mut pending = step("step-run/demo-generation/build", "build", "pending");
+        pending.attempt = 2;
+        pending.not_before_unix_ms = Some(900_000);
+        pending.retry = Some(fractal_store::model::RetrySpec {
+            attempts: 4,
+            backoff_ms: 0,
+            schedule_ms: vec![120_000, 600_000, 1_800_000],
+            window_ms: Some(7_200_000),
+            on_error_tags: vec!["HostUnavailable".into(), "SlotLost".into()],
+        });
+        // Inline golden for the complete step block used by missions show.
+        let mut step_output = String::new();
+        render_graph_step(&mut step_output, &pending, "  ", OutputStyle::plain());
+        assert_eq!(
+            step_output,
+            concat!(
+                "  · pending    build — build · demo/worker · attempt 2\n",
+                "    retry: attempt 2/4 · delays 120000ms 600000ms 1800000ms · within 7200000ms · on HostUnavailable, SlotLost · next due unix ms 900000\n",
+            ),
+        );
+        let selected = run("mission-run/demo/run", None, vec![pending.clone()]);
+        let rendered = render_mission_run_page(
+            &selected, std::slice::from_ref(&selected), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains(
+            "retry: attempt 2/4 · delays 120000ms 600000ms 1800000ms · within 7200000ms · on HostUnavailable, SlotLost · next due unix ms 900000"
+        ), "{rendered}");
+        let json = serde_json::to_value(&selected).unwrap();
+        assert_eq!(json["steps"][0]["retry"]["attempts"], 4);
+        assert_eq!(json["steps"][0]["retry"]["schedule_ms"], serde_json::json!([120_000, 600_000, 1_800_000]));
+        assert_eq!(json["steps"][0]["retry"]["window_ms"], 7_200_000);
+        assert_eq!(json["steps"][0]["retry"]["on_error_tags"], serde_json::json!(["HostUnavailable", "SlotLost"]));
+        assert_eq!(json["steps"][0]["attempt"], 2);
+        assert_eq!(json["steps"][0]["not_before_unix_ms"], 900_000);
+        let prior = mission_run_signature(std::slice::from_ref(&selected)).unwrap();
+        let mut rescheduled = selected;
+        rescheduled.steps[0].not_before_unix_ms = Some(1_000_000);
+        assert_ne!(prior, mission_run_signature(&[rescheduled]).unwrap());
+        pending.retry = None;
+        let json = serde_json::to_value(&pending).unwrap();
+        assert!(json.get("retry").is_none());
+        let mut rendered = String::new();
+        render_graph_step(&mut rendered, &pending, "", OutputStyle::plain());
+        assert!(!rendered.contains("retry:"));
+    }
+
+    #[test]
+    fn mission_show_retry_retirement_blockage_names_operator_recovery() {
+        let mut blocked = step("step-run/demo-generation/build", "build", "blocked");
+        blocked.attempt = 2;
+        let reason = "waiting for previous attempt resource retirement; cancel the mission run or release/recover the retained resource custody";
+        blocked.blocked_reason = Some(reason.into());
+        let selected = run("mission-run/demo/run", None, vec![blocked]);
+        let rendered = render_mission_run_page(
+            &selected, std::slice::from_ref(&selected), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains(&format!("    reason: {reason}\n")), "{rendered}");
+        assert_eq!(serde_json::to_value(selected).unwrap()["steps"][0]["blocked_reason"], reason);
     }
 
     #[test]
@@ -1722,7 +1828,7 @@ mod tests {
             resolved_by: None,
             evidence: vec![],
         });
-        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("Sender class: external-assistant"));
         assert!(rendered.contains("Assistant grant: assistant-grant/test"));
         assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
@@ -1746,6 +1852,11 @@ mod tests {
             root_revision: "root-revision".into(),
             root_mission_run: "mission-run/demo/run".into(),
             parent_step_run: parent.map(str::to_owned),
+            retry_of: None,
+            retried_by: Vec::new(),
+            supersedes: None,
+            superseded_by: None,
+            supersession_fault: None,
             workspace: "/workspace".into(),
             requester: "person/tester".into(),
             inputs: BTreeMap::from([(
@@ -1772,6 +1883,42 @@ mod tests {
             stuck_gates: Vec::new(),
             scheduler_fault: None,
         }
+    }
+
+    #[test]
+    fn mission_show_displays_exact_retry_links() {
+        let mut selected = run("mission-run/demo/retry", None, Vec::new());
+        selected.retry_of = Some("mission-run/demo/original".into());
+        selected.retried_by = vec![
+            "mission-run/demo/retry-again".into(),
+            "mission-run/demo/another-retry".into(),
+        ];
+        let rendered = render_mission_run_page(
+            &selected, std::slice::from_ref(&selected), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains("RETRY OF  mission-run/demo/original"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/retry-again"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/another-retry"));
+        let plain = run("mission-run/demo/original", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("RETRY OF"));
+        assert!(!rendered.contains("RETRIED BY"));
+    }
+
+    #[test]
+    fn mission_show_displays_supersession_links_and_admission_fault() {
+        let mut selected = run("mission-run/demo/current", None, Vec::new());
+        selected.supersedes = Some("mission-run/demo/previous".into());
+        selected.superseded_by = Some("mission-run/demo/replacement".into());
+        selected.supersession_fault = Some("revision old -> new: input branch changed kind from Text to Resource".into());
+        let rendered = render_mission_run_page(&selected, &[], OutputStyle::plain(), 3_000);
+        assert!(rendered.contains("SUPERSEDES mission-run/demo/previous"));
+        assert!(rendered.contains("SUPERSEDED BY mission-run/demo/replacement"));
+        assert!(rendered.contains("SUPERSESSION FAULT revision old -> new: input branch changed kind from Text to Resource"));
+        let plain = run("mission-run/demo/ordinary", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("SUPERSED"));
+        assert!(!rendered.contains("SUPERSESSION FAULT"));
     }
 
     fn terminal(subject: &str, status: &str) -> SubjectStatus {
@@ -2248,7 +2395,7 @@ mod tests {
         claimed.execution_elapsed_ms = 1_000;
         claimed.timeout_ms = Some(60_000);
 
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), None);
 
         assert!(rendered.contains("SUBJECT    step-run/demo-generation/build"));
         assert!(rendered.contains("GENERATION run-generation/demo-generation"));
@@ -2256,6 +2403,11 @@ mod tests {
         assert!(!rendered.contains("fractal work renew"));
         assert!(rendered.contains("Execution    1000ms / 60000ms · active 1s ago"));
         assert!(rendered.contains("• Complete the work."));
+        assert!(!rendered.contains("SOURCE"));
+
+        let source = "SOURCE     schickling/factory@2e047be graph/demo/mission.ts:7-11\n  via      graph/demo/steps.ts:6-10\n";
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), Some(source));
+        assert!(rendered.contains(&format!("DEFINITION {}\n{source}UPDATED", claimed.definition_hash)), "{rendered}");
     }
 
     #[test]
@@ -2263,12 +2415,12 @@ mod tests {
         let mut claimed = step("step-run/demo-generation/build", "build", "claimed");
         claimed.claimant = Some("person/operator".into());
         claimed.claim_expires_at_unix_ms = Some(62_001);
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("Lease        The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew step-run/demo-generation/build --as person/operator\n"));
         assert!(!rendered.contains("st driver renews"));
 
         claimed.claim_incarnation = Some("incarnation/manual".into());
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("--as person/operator --incarnation incarnation/manual\n"));
     }
 

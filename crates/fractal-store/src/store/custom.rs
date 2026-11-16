@@ -299,7 +299,6 @@ fn capture_work(connection: &Connection) -> Result<()> {
 }
 
 fn flush_pending(tx: &Transaction<'_>) -> Result<()> {
-    notice_authority::refresh_binding(tx)?;
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM local_custom_dirty)", [], |r| {
         r.get::<_, bool>(0)
     })? {
@@ -378,13 +377,6 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
         let records = claims(tx, &subject)?;
         let mut registrations = BTreeMap::new();
         for c in records.iter().filter(|c| c.kind == schema::REGISTERED) {
-            if !c
-                .actor
-                .as_deref()
-                .is_some_and(|a| a.starts_with("agent/") || a.starts_with("person/"))
-            {
-                continue;
-            }
             let f = fields(c);
             let Some(reference) = f.get("document").and_then(Value::as_str) else {
                 continue;
@@ -404,6 +396,11 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
                 continue;
             }
             if fractal_schema::notice::validate_registration(&m, hash).is_err() {
+                continue;
+            }
+            if !c.actor.as_deref().is_some_and(|actor| actor.starts_with("agent/") || actor.starts_with("person/"))
+                && (c.actor.as_deref() != Some(fractal_schema::notice::RUNTIME_ACTOR)
+                    || fractal_schema::notice::pinned_hash(&m) != Some(hash)) {
                 continue;
             }
             registrations.entry(hash.to_owned()).or_insert((m, c));
@@ -443,6 +440,7 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
 /// including facts received before the immutable manifest or their creation claim.
 pub fn prepare(
     tx: &Transaction<'_>,
+    origin: &str,
     input: &ClaimInput,
 ) -> Result<Option<BTreeMap<String, Value>>, FractalError> {
     if input.subject.starts_with(schema::REGISTRY_PREFIX) || input.kind == schema::REGISTERED {
@@ -479,17 +477,26 @@ pub fn prepare(
         return Err(fail("claim pins another registration"));
     }
     f.insert("_registration".into(), json!(hash));
-    let history = claims(tx, &input.subject).map_err(internal)?;
+    if input.subject.starts_with(fractal_schema::notice::DIGEST_SOURCE_PREFIX) {
+        notice_authority::pin_digest_owner(tx, origin, &mut f).map_err(|e| fail(e.to_string()))?;
+    }
+    let mut history = claims(tx, &input.subject).map_err(internal)?;
+    notice_authority::retain_authenticated_digest_sources(tx, &input.subject, &mut history).map_err(internal)?;
     let creation = history.iter().find(|c| {
         c.kind == m.creation_kind && fields(c).get("_registration") == Some(&json!(hash))
     });
     if input.subject.starts_with("custom/attention/source/") && creation.is_some() {
         return Err(fail("notices unavailable: producer input is immutable"));
     }
-    validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f, creation)
+    let position = if input.subject.starts_with(fractal_schema::notice::SNAPSHOT_PREFIX)
+        || input.subject.starts_with(fractal_schema::notice::DIGEST_SOURCE_PREFIX) {
+        Some(notice_authority::Position::next(tx, origin).map_err(internal)?)
+    } else { None };
+    validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f, creation, position)
         .map_err(|e| fail(e.to_string()))?;
     Ok(Some(f))
 }
+#[allow(clippy::too_many_arguments)]
 fn validate_fact(
     connection: &Connection,
     subject: &str,
@@ -498,21 +505,24 @@ fn validate_fact(
     actor: Option<&str>,
     f: &BTreeMap<String, Value>,
     creation: Option<&ClaimRecord>,
+    position: Option<notice_authority::Position<'_>>,
 ) -> Result<()> {
     let spec = m
         .claims
         .get(kind)
         .ok_or_else(|| anyhow::anyhow!("claim kind is not registered for this subject"))?;
-    schema::validate_fields(spec, f)?;
+    if subject.starts_with(fractal_schema::notice::DIGEST_SNAPSHOT_PREFIX) {
+        fractal_schema::notice::validate_digest_snapshot_fields(f)?;
+    } else {
+        schema::validate_fields(spec, f)?;
+    }
+    // Only reserved notice snapshots and digest sources may be daemon-authored.
     let actor = actor
-        .filter(|a| a.starts_with("agent/") || a.starts_with("person/"))
+        .filter(|a| a.starts_with("agent/") || a.starts_with("person/")
+            || (*a == fractal_schema::notice::RUNTIME_ACTOR && fractal_schema::notice::is_reserved_subject(subject)))
         .ok_or_else(|| anyhow::anyhow!("typed claim needs a concrete actor"))?;
     fractal_schema::registry().validate_subject(actor)?;
-    anyhow::ensure!(
-        actor.starts_with("agent/") || actor.starts_with("person/"),
-        "typed actor must be a person or agent"
-    );
-    notice_authority::validate(connection, subject, m, kind, actor, f, creation)?;
+    notice_authority::validate(connection, subject, m, kind, actor, f, creation, position)?;
     match spec.authority {
         Authority::Creator => {
             if let Some(c) = creation {
@@ -672,9 +682,10 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
     Ok(false)
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
-    let history = claims(tx, subject)?;
+    let mut history = claims(tx, subject)?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h5f040aa46115 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
     notice_authority::record_dependencies(tx, subject, &history)?;
+    notice_authority::retain_authenticated_digest_sources(tx, subject, &mut history)?;
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
         if fractal_schema::notice::is_reserved_subject(subject) {
             let body = json!({"id":subject,"kind":"custom-subject","state":"unavailable","error":"notices unavailable: pinned registration is missing or mismatched"});
@@ -714,7 +725,11 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     } else { None };
     let mut valid = Vec::new();
     for c in &pinned {
-        match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
+        let position = if subject.starts_with(fractal_schema::notice::SNAPSHOT_PREFIX)
+            || subject.starts_with(fractal_schema::notice::DIGEST_SOURCE_PREFIX) {
+            notice_authority::Position::written(tx, c).map(Some)
+        } else { Ok(None) };
+        match position.and_then(|position| validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c), creation, position)) {
             Ok(()) => valid.push(c.clone()),
             Err(e) => {
                 error = Some(e.to_string());
@@ -1088,7 +1103,7 @@ impl Store {
         );
         for claim in &history {
             validate_fact(&snapshot, subject, &manifest, &claim.kind,
-                claim.actor.as_deref(), &fields(claim), Some(creation))?;
+                claim.actor.as_deref(), &fields(claim), Some(creation), None)?;
         }
         let kinds = schema::decisions::input_kinds(version);
         let revision = basis_revision_from_history(subject, &kinds, &history)?;

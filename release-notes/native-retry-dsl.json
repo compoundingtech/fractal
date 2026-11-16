@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declare native retry schedules, retry windows and typed error tag filters in TypeScript steps and program mission intents.",
+  "replay": {"status": "none", "detail": "The DSL emits native retry declarations; it does not change journal encoding. Engine-side retries start fresh attempts rather than replaying an old attempt's journal."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Existing attempts/backoff policies retain their emitted KDL. Optional delays override backoff and repeat the final delay; within bounds the policy from the first attempt start; on filters typed error tags, with empty or absent lists preserving retry-all behavior. Program intent retry lowers onto the generated program step. New fields require a daemon supporting native retry policies."},
+  "downtime": {"status": "none", "detail": "No downtime required for the TypeScript DSL update."},
+  "manual": {"status": "changed", "detail": "Use attempts for the total attempt count (1..100), positive duration strings for delays and within, and on for eligible typed error tags. Keep deterministic review refusals out of a transient-only tag list."},
+  "recovery": {"status": "none", "detail": "Remove the optional new retry fields to return to attempts/backoff declarations."}
+}

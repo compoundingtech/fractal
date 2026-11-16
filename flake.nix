@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/79d526d1be4f77bb3764dc1d880492806f8a07fc";
+    pty.url = "github:compoundingtech/pty/d0e816ac4129c97f39473855bb4fe527701ea07c";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Fabric v0.9.4 includes bounded peer expiry and recoverable identity rotation.
     fabric.url = "github:compoundingtech/fabric/19e7f8964ce8305aeb8c200fb717967aa03f738f";
@@ -15,7 +15,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/15ff7fa8968469c2c99a647888a999f9d62ffde5";
+      "github:overengineeringstudio/effect-utils/d85c8f7f78007fb56dac5cc23be5cbe3443a7e6b";
     mergemaster.url = "github:compoundingtech/mergemaster/v0.6.0";
     mergemaster.inputs.nixpkgs.follows = "nixpkgs";
     mergemaster.inputs.effect-utils.follows = "effect-utils";
@@ -68,6 +68,16 @@
             else
               export RUSTC_WRAPPER=${sccache}/bin/sccache
             fi
+          fi
+        '';
+
+        cargoDebugShellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+          # macOS keeps unpacked debug objects in target; disable debug info by default.
+          if [ -z "''${CARGO_PROFILE_DEV_DEBUG+x}" ]; then
+            export CARGO_PROFILE_DEV_DEBUG=0
+          fi
+          if [ -z "''${CARGO_PROFILE_TEST_DEBUG+x}" ]; then
+            export CARGO_PROFILE_TEST_DEBUG=0
           fi
         '';
 
@@ -141,7 +151,7 @@
                 (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
                   "st3/config.toml".force = true;
                 });
-              config.services.smalltalk = {
+              config.services.fractal = {
                 enable = true;
                 person = "person/ada";
                 socket = "/tmp/fractal-test.sock";
@@ -972,7 +982,7 @@
         checks.hm-module-eval =
           let
             rendered = hmModuleEval.config;
-            stableBinDir = "${rendered.services.smalltalk.stateDir}/bin";
+            stableBinDir = "${rendered.services.fractal.stateDir}/bin";
             stableExecutable = "${stableBinDir}/fractal";
             package = toString (builtins.head rendered.home.packages);
             activation = rendered.home.activation.smalltalkBinary;
@@ -1063,12 +1073,12 @@
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
-          assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
+          assert rendered.services.fractal.webListen == "127.0.0.1:7410";
           assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
           assert pkgs.lib.hasInfix "--web-dist" args;
           # The PTY wrapper is a symlinkJoin: individual assets resolve outside its web root.
-          assert toString rendered.services.smalltalk.package != package;
-          assert builtins.elem "${rendered.services.smalltalk.package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
+          assert toString rendered.services.fractal.package != package;
+          assert builtins.elem "${rendered.services.fractal.package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
           assert !(builtins.elem "${package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args)));
           assert (
             let
@@ -1085,7 +1095,7 @@
             pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/fractal-client.sock"'' args
             && !(pkgs.lib.hasInfix "%%t/fractal-client.sock" args)
           else
-            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/fractal-client.sock" args);
+            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.fractal.stateDir}/run/fractal-client.sock" args);
           assert (if pkgs.stdenv.hostPlatform.isLinux then
             pkgs.lib.hasPrefix ''"${stableExecutable}" '' args
           else
@@ -1709,6 +1719,11 @@
           assert legacyPreflight.before == [ "writeBoundary" ];
           assert legacyPreflight.after == [ ];
           assert pkgs.stdenv.hostPlatform.isDarwin || legacyPreflight.data == preflight.data;
+          # Public options are Fractal-only; legacy service names below remain
+          # until the host migrator has moved state and published its receipts.
+          assert hmModuleEval.options.services ? fractal;
+          assert !(hmModuleEval.options.services ? smalltalk);
+          assert completed.services.fractal.fractalMigration.phase == "completed";
           assert !completed.xdg.configFile."st3/config.toml".enable;
           assert !(completed.xdg.configFile ? "fractal/config.toml");
           assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
@@ -2011,8 +2026,8 @@
             };
             unitText = units rendered;
             forbiddenPaths = map (package: builtins.unsafeDiscardStringContext (toString package)) [
-              rendered.services.smalltalk.package
-              rendered.services.smalltalk.ptyPackage
+              rendered.services.fractal.package
+              rendered.services.fractal.ptyPackage
               (builtins.head hmModuleEval.config.home.packages)
             ];
             applyScript = if pkgs.stdenv.hostPlatform.isLinux then
@@ -2087,6 +2102,8 @@
             chmod -R u+w hooks
             cp ${self}/crates/fractal-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
             cp ${self}/crates/fractal-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            mkdir -p tests/fixtures/harness-timeline
+            cp ${self}/crates/fractal-drivers/tests/fixtures/harness-timeline/omp-response-evidence.json tests/fixtures/harness-timeline/
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"
@@ -2212,7 +2229,7 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
-          shellHook = sccacheShellHook + ''
+          shellHook = sccacheShellHook + cargoDebugShellHook + ''
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               source ${./scripts/ci-cargo-tools-env} || exit $?
               # The wrapper is selected above only when no host wrapper is inherited.
@@ -2236,7 +2253,7 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
-          shellHook = sccacheShellHook + ''
+          shellHook = sccacheShellHook + cargoDebugShellHook + ''
             export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | sed -n '\|^/nix/store/|p' | paste -sd:):/usr/bin:/bin"
           '';
         };
@@ -2248,7 +2265,7 @@
           '';
         };
         # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root
-        # Rust nixpkgs: pnpm 12.17.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
+        # Rust nixpkgs: pnpm 12.17.0 (`mkPnpm`), Node 24.22, Bun 1.4.2, Corepack 0.36 and Buck2.
         # The Buck root mirrors `mkConsumerBuckRoot`; its rules and capabilities cells are linked
         # into `.buck2/` from the store, and `scripts/ci-fractal-web` fails if the checked-in
         # `.buckconfig`, `BUCK` or `buck2/toolchains/BUCK` drift from it.

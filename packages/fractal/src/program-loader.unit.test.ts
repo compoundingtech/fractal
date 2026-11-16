@@ -141,6 +141,16 @@ describe('program missions', () => {
         const bundle = readFileSync(join(bundleDir, `${sha256}.mjs`))
         expect(createHash('sha256').update(bundle).digest('hex')).toBe(sha256)
         expect(kdl).toContain(`program "${join(bundleDir, `${sha256}.mjs`)}"`)
+        expect(kdl).toContain(
+          [
+            '    retry {',
+            '      attempts 4',
+            '      delays "2m" "10m" "30m"',
+            '      within "2h"',
+            '      on "HostUnavailable" "SlotLost"',
+            '    }',
+          ].join('\n'),
+        )
       }),
     120_000,
   )
@@ -158,6 +168,25 @@ describe('program missions', () => {
           readFileSync(join(first, `${a.sha256}.mjs`)),
         )
       }),
+    120_000,
+  )
+
+  it.effect(
+    'bundle the same bytes from any build directory, as for a tree checked out elsewhere',
+    () =>
+      Effect.gen(function* () {
+        // Dependencies outside the tree (a loader's linked node_modules) sit at another relative
+        // path from every checkout; the bytes must not record that path.
+        const module = join(programs, 'factory/land-program/mission.ts')
+        const near = yield* bundleProgram({ module, cwd: programs, bundleDir: scratch(), bun: 'bun' })
+        const deeper = yield* bundleProgram({
+          module,
+          cwd: join(programs, 'factory/land-program'),
+          bundleDir: scratch(),
+          bun: 'bun',
+        })
+        expect(deeper.sha256).toBe(near.sha256)
+      }).pipe(Effect.provide(NodeFileSystem.layer)),
     120_000,
   )
 

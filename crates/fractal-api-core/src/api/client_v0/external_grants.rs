@@ -3,6 +3,7 @@ use super::*;
 use rusqlite::OptionalExtension as _;
 pub const ROUTES: &[(&str, &str)] = &[
     ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
+    ("availability", "read.assistant.availability"),
     ("attention-content", "read.assistant.attention"),
     ("attention-rich", "read.assistant.attention"), ("missions-rich", "read.assistant.missions"),
     ("agents-rich", "read.assistant.agents"),
@@ -13,6 +14,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("conversation-timeline", "read.assistant.conversation"),
     ("conversation-search", "read.assistant.conversation"),
     ("terminal-content", "read.assistant.terminal"),
+    ("slo", "read.assistant.slo"), ("slo-history", "read.assistant.slo"),
 ];
 pub const PRINCIPAL: &str = "assistant/chatgpt";
 pub const MCP_PRINCIPAL: &str = "assistant/mcp";
@@ -141,7 +143,9 @@ pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
 pub const SCOPES: &[&str] = &[
     "read.assistant.summary", "read.assistant.attention", "read.assistant.missions",
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
+    "read.assistant.slo",
     "write.assistant.messages", "write.assistant.custom-reply", "write.assistant.answers",
+    "read.assistant.availability",
 ];
 // Serializes code consumption and grant policy transitions. Subject fences also protect
 // against concurrent writers in the authoritative store.
@@ -305,7 +309,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         pairing_grant: Some(granted.subject.clone()),
         // An assistant grant is not a device pairing: it never registers push tokens.
         pairing_issued_here: false,
-        grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
+        grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false, model_drift_attention:false,
         assistant_write: None,
         conversation_blocks:false, conversation_delivery_links:false, conversation_message_participants:false, messages_paging:false, assistant_content_handles:false, local_peer:false, peer_process:None, scopes })
 }

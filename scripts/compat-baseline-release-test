@@ -146,6 +146,19 @@ class Policy(unittest.TestCase):
         self.assertEqual(set(updates), {baseline.BASELINES[0]})
         self.assertIsNone(json.loads(updates[baseline.BASELINES[0]])['exception_reason'])
 
+    def test_main_fleet_pin_survives_stable_publication_and_freshness_checks(self):
+        fleet = pin(f'fleet-{SOURCE}')
+        pins = {baseline.BASELINES[0]: fleet, baseline.BASELINES[1]: pin('v0.3.18')}
+        baseline.check(pins, self.releases, require_latest=True)
+        updates = baseline.changes(pins, pin('v0.3.18'))
+        self.assertNotIn(baseline.BASELINES[0], updates)
+
+    def test_main_source_tag_cannot_name_a_different_commit_or_messaging_pin(self):
+        with self.assertRaisesRegex(baseline.BaselineError, 'exact baseline source'):
+            baseline.validate(pin('fleet-' + 'c' * 40), 'fleet')
+        with self.assertRaisesRegex(baseline.BaselineError, 'only the fleet baseline'):
+            baseline.check({baseline.BASELINES[1]: pin(f'fleet-{SOURCE}')}, self.releases)
+
     def test_generated_publication_tokens_do_not_gain_maintenance_writes(self):
         workflows = {}
         for filename in ('release-fractal.yml', 'release-daily.yml'):
@@ -213,6 +226,23 @@ class Archives(unittest.TestCase):
             digest = hashlib.sha256((self.dist / f'smalltalk-{target}.tar.gz').read_bytes()).hexdigest()
             self.assertEqual(value['bundles'][target]['sha256'], digest)
         baseline.validate(value, 'fixture')
+
+    def test_main_fleet_release_uses_the_same_archive_provenance_checks(self):
+        tag = f'fleet-{SOURCE}'
+        def api(endpoint):
+            return {'draft': False} if '/releases/tags/' in endpoint else {
+                'object': {'type': 'commit', 'sha': SOURCE}}
+        with patch.object(baseline, 'run', side_effect=self.download), patch.object(baseline, 'api', side_effect=api):
+            value = baseline.release_pin(tag, [], fleet=True)
+        self.assertEqual(value['commit'], SOURCE)
+        self.assertEqual(value['tag'], tag)
+        baseline.validate(value, 'fleet')
+
+    def test_unpublished_main_source_cannot_be_pinned(self):
+        with patch.object(baseline, 'api', return_value={'draft': True}):
+            with self.assertRaisesRegex(baseline.BaselineError, 'not published'):
+                baseline.release_pin(f'fleet-{SOURCE}', [], fleet=True)
+
 
     def test_fractal_preferred_per_target_with_smalltalk_fallback(self):
         target = baseline.TARGETS[0]

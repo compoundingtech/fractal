@@ -88,21 +88,87 @@ async fn leave_snapshot_is_read_only_and_reports_expiry_confirmation_and_persist
 #[tokio::test]
 async fn leave_authority_socket_is_private_and_reserves_its_address_until_exit() {
     let root = tempfile::tempdir().unwrap();
-    let (reservation, listener) = bind_leave_state_socket(root.path()).unwrap();
-    let path = leave_state_socket(root.path());
+    let api_socket = root.path().join("api.sock");
+    let (reservation, listener) = bind_leave_state_socket(&api_socket).unwrap();
+    let path = leave_state_socket(&api_socket).unwrap();
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    assert!(bind_leave_state_socket(root.path()).is_err());
+    assert!(bind_leave_state_socket(&api_socket).is_err());
     assert!(tokio::net::UnixStream::connect(&path).await.is_ok());
     drop(listener);
     assert!(
-        bind_leave_state_socket(root.path()).is_err(),
+        bind_leave_state_socket(&api_socket).is_err(),
         "startup reservation outlives listener"
     );
     drop(reservation);
-    let (_reservation, _listener) = bind_leave_state_socket(root.path()).unwrap();
+    let (_reservation, _listener) = bind_leave_state_socket(&api_socket).unwrap();
+}
+
+#[tokio::test]
+async fn leave_state_socket_ignores_long_state_directory() {
+    let runtime = tempfile::tempdir().unwrap();
+    let config = WorkerConfig {
+        node: "node".into(),
+        fleet_id: "fleet".into(),
+        secret_file: PathBuf::from("secret"),
+        state_dir: PathBuf::from(format!("/{}", "s".repeat(120))),
+        api_socket: runtime.path().join("api.sock"),
+        peers: Vec::new(),
+        peer_listen: None,
+        fleet: None,
+    };
+    assert!(config.state_dir.as_os_str().len() > 120);
+    assert_eq!(
+        leave_state_socket(&config.api_socket).unwrap(),
+        runtime.path().join("api.sock.leave-state.sock")
+    );
+    let (_reservation, _listener) = bind_leave_state_socket(&config.api_socket).unwrap();
+}
+
+#[tokio::test]
+async fn leave_state_socket_bind_error_names_path_length_and_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let api_socket = root.path().join("s".repeat(120)).join("api.sock");
+    let path = leave_state_socket(&api_socket).unwrap();
+    let error = bind_leave_state_socket(&api_socket).unwrap_err().to_string();
+    assert!(error.contains(&path.display().to_string()), "{error}");
+    assert!(error.contains(&format!("{} bytes", path.as_os_str().len())), "{error}");
+    #[cfg(target_os = "macos")]
+    assert!(error.contains("platform limit 103 bytes"), "{error}");
+    #[cfg(not(target_os = "macos"))]
+    assert!(error.contains("platform limit 107 bytes"), "{error}");
+}
+
+#[tokio::test]
+async fn leave_state_sockets_are_distinct_for_endpoints_in_one_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("fractal.sock");
+    let second = root.path().join("st3.sock");
+    let same_stem = root.path().join("fractal.other");
+    let first_path = leave_state_socket(&first).unwrap();
+    assert_ne!(first_path, leave_state_socket(&second).unwrap());
+    assert_ne!(first_path, leave_state_socket(&same_stem).unwrap());
+    let (_first_lock, _first_listener) = bind_leave_state_socket(&first).unwrap();
+    let (_second_lock, _second_listener) = bind_leave_state_socket(&second).unwrap();
+    let (_third_lock, _third_listener) = bind_leave_state_socket(&same_stem).unwrap();
+    assert!(first_path.with_extension("sock.lock").exists());
+    let named_like_worker = root.path().join("leave-state.sock");
+    assert_ne!(leave_state_socket(&named_like_worker).unwrap(), named_like_worker);
+}
+
+#[tokio::test]
+async fn leave_state_socket_refuses_equal_api_path_before_replacing_listener() {
+    let root = tempfile::tempdir().unwrap();
+    let api_socket = root.path().join("api.sock");
+    let _api_listener = tokio::net::UnixListener::bind(&api_socket).unwrap();
+    let error = bind_leave_state_socket_path(&api_socket, &api_socket).unwrap_err();
+    let io = error.downcast_ref::<std::io::Error>().unwrap();
+    assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(io.to_string().contains(&api_socket.display().to_string()));
+    assert!(!api_socket.with_extension("sock.lock").exists());
+    assert!(tokio::net::UnixStream::connect(&api_socket).await.is_ok());
 }
 
 /// A store on the plain runtime.

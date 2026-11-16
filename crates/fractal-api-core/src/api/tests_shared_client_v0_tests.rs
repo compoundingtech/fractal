@@ -23,7 +23,7 @@ pub async fn json_request(app: Router, path: &str, value: Value) -> (StatusCode,
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let envelope: Value = serde_json::from_slice(&bytes).unwrap();
     if path.starts_with("/v1/client/") {
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert_eq!(envelope["snapshot"]["host_id"], "host/node");
         assert!(envelope["request_id"].as_str().unwrap().contains('-'));
         assert!(envelope["snapshot"]["store_index"].is_u64());
@@ -56,13 +56,13 @@ pub async fn get_request(app: Router, path: &str) -> (StatusCode, Value) {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let envelope: Value = serde_json::from_slice(&bytes).unwrap();
     if path.starts_with("/v1/client/") {
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert!(envelope["request_id"].as_str().unwrap().contains('-'));
         if status.is_success() {
             assert_eq!(envelope["snapshot"]["host_id"], "host/node");
             assert!(envelope["snapshot"]["store_index"].is_u64());
         } else {
-            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["error_version"], "fractal.client.error.v0");
             assert!(envelope["code"].as_str().is_some());
         }
     } else {

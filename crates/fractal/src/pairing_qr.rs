@@ -166,7 +166,7 @@ mod tests {
             store: Arc::new(fractal_daemon::store::Store::open_memory(node).unwrap()),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: node.into(), state_dir: root.path().into(), pty_root: root.path().join("pty"),
+            node: node.into(), api_socket: root.path().join("api.sock"),state_dir: root.path().into(), pty_root: root.path().join("pty"),
             pty_binary: "pty".into(), owning_person: None, fleet_id: None,
             configured_peers: vec![], client_relay: None, native_session_home: None,
             planner_default: Default::default(), harness_question_sink: None,

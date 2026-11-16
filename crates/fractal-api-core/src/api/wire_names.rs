@@ -36,15 +36,15 @@ pub fn api_version(version: &str) -> bool {
     matches!(version, "st3.client.v0" | "fractal.client.v0")
 }
 
-pub(super) fn protocol_matches(value: &str, old: &str) -> bool {
-    value == old || old.strip_prefix("st3.client.").is_some_and(|suffix| {
-        value.strip_prefix("fractal.client.") == Some(suffix)
+pub(super) fn protocol_matches(value: &str, canonical: &str) -> bool {
+    value == canonical || canonical.strip_prefix("fractal.client.").is_some_and(|suffix| {
+        value.strip_prefix("st3.client.") == Some(suffix)
     })
 }
 
-pub fn selected_protocol<'a>(protocols: &[&'a str], old: &str) -> Option<&'a str> {
+pub fn selected_protocol<'a>(protocols: &[&'a str], canonical: &str) -> Option<&'a str> {
     match protocols {
-        [protocol] if protocol_matches(protocol, old) => Some(protocol),
+        [protocol] if protocol_matches(protocol, canonical) => Some(protocol),
         _ => None,
     }
 }
@@ -56,14 +56,14 @@ pub fn capability(protocol: &str) -> Option<&str> {
 }
 
 pub fn terminal_protocol<'a>(
-    protocols: &[&'a str], old: &str, allow_direct: bool,
+    protocols: &[&'a str], canonical: &str, allow_direct: bool,
 ) -> Option<(&'a str, Option<&'a str>)> {
     match protocols {
-        [protocol] if allow_direct && protocol_matches(protocol, old) => Some((protocol, None)),
+        [protocol] if allow_direct && protocol_matches(protocol, canonical) => Some((protocol, None)),
         [first, second] => {
-            if protocol_matches(first, old) {
+            if protocol_matches(first, canonical) {
                 Some((*first, Some(capability(second)?)))
-            } else if protocol_matches(second, old) {
+            } else if protocol_matches(second, canonical) {
                 Some((*second, Some(capability(first)?)))
             } else {
                 None
@@ -106,13 +106,13 @@ mod tests {
             for protocol in [old, new.as_str()] {
                 for prefix in ["st3.cap.", "fractal.cap."] {
                     let cap = format!("{prefix}secret");
-                    assert_eq!(terminal_protocol(&[protocol, &cap], old, false),
+                    assert_eq!(terminal_protocol(&[protocol, &cap], &new, false),
                         Some((protocol, Some("secret"))));
-                    assert_eq!(terminal_protocol(&[protocol], old, true), Some((protocol, None)));
+                    assert_eq!(terminal_protocol(&[protocol], &new, true), Some((protocol, None)));
                 }
-                assert!(terminal_protocol(&[protocol, "st3.cap.a", "fractal.cap.b"], old, false).is_none());
+                assert!(terminal_protocol(&[protocol, "st3.cap.a", "fractal.cap.b"], &new, false).is_none());
             }
-            assert!(terminal_protocol(&[old, &new], old, false).is_none());
+            assert!(terminal_protocol(&[old, &new], &new, false).is_none());
         }
     }
 
@@ -121,9 +121,9 @@ mod tests {
         for suffix in ["terminal.v0", "pty.v0", "conversation.v0", "collections.v0"] {
             let old = format!("st3.client.{suffix}");
             let new = format!("fractal.client.{suffix}");
-            assert_eq!(selected_protocol(&[&old], &old), Some(old.as_str()));
-            assert_eq!(selected_protocol(&[&new], &old), Some(new.as_str()));
-            assert!(selected_protocol(&[&old, &new], &old).is_none());
+            assert_eq!(selected_protocol(&[&old], &new), Some(old.as_str()));
+            assert_eq!(selected_protocol(&[&new], &new), Some(new.as_str()));
+            assert!(selected_protocol(&[&old, &new], &new).is_none());
         }
         for prefix in ["st3.cap.", "fractal.cap."] {
             assert_eq!(capability(&format!("{prefix}secret")), Some("secret"));
@@ -146,19 +146,19 @@ mod tests {
             websocket: WebSocketUpgrade,
             headers: HeaderMap,
         ) -> Response {
-            let old = match surface.as_str() {
-                "terminal" => "st3.client.terminal.v0",
-                "pty" => "st3.client.pty.v0",
-                "conversation" => "st3.client.conversation.v0",
-                "collections" => "st3.client.collections.v0",
+            let canonical = match surface.as_str() {
+                "terminal" => "fractal.client.terminal.v0",
+                "pty" => "fractal.client.pty.v0",
+                "conversation" => "fractal.client.conversation.v0",
+                "collections" => "fractal.client.collections.v0",
                 _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
             };
             let protocols = headers.get("sec-websocket-protocol").unwrap().to_str().unwrap()
                 .split(',').map(str::trim).collect::<Vec<_>>();
             let selected = if matches!(surface.as_str(), "terminal" | "pty") {
-                terminal_protocol(&protocols, old, surface == "pty").map(|(selected, _)| selected)
+                terminal_protocol(&protocols, canonical, surface == "pty").map(|(selected, _)| selected)
             } else {
-                selected_protocol(&protocols, old)
+                selected_protocol(&protocols, canonical)
             };
             let Some(selected) = selected else {
                 return axum::http::StatusCode::BAD_REQUEST.into_response();

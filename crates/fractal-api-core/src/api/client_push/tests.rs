@@ -15,6 +15,7 @@ fn state(root: &std::path::Path) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0u64).0,
         node: "push-test".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused"),
@@ -83,7 +84,7 @@ async fn send(
 }
 
 fn assert_local_envelope(response: &Value, status: Value) {
-    assert_eq!(response["api_version"], "st3.client.v0");
+    assert_eq!(response["api_version"], "fractal.client.v0");
     assert!(response["request_id"].is_string());
     assert_eq!(response["value"], status);
     for field in ["snapshot", "claims", "receipt", "token"] {

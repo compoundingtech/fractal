@@ -137,7 +137,8 @@ wrong until the host is repaired; exchanges cannot fix it.
 
 ## Navigation
 
-The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage.
+The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage; its
+palette also opens Availability, the person's own availability and directive note.
 The phone tabs are Now, Resources, Fleet, and Spaces.
 
 Terminal workspace tabs derive presentation identity from their existing pane keys,
@@ -175,7 +176,11 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
   stopped on you. A footer counts missions that don't need you.
 - Each item: glyph and kind word, title, "who is waiting · waited N".
 - Every card shows links to its mission and agent, a **related** section (who raised it, when
-  Fractal says, and each target as a link), **Chat about this**, and **Go to** its mission or agent.
+  Fractal says, and each target as a link), **Chat about this**, **Go to** its mission or agent,
+  and **Remind me in 3h** (`attention.snooze`): Fractal keeps the snooze, so the item leaves Now
+  on every device of the person until then, and its deadline does not move. On an item already
+  put off (its `snoozed_until` still ahead) the same key brings it back (`until: null`). Home
+  counts what is put off in a note below the list.
 - Cards per kind:
   - **review** (human gate): question, because, what to look at, step; Approve, or Request
     changes with a text box the agent reads (sent as the reject reason).
@@ -191,7 +196,11 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
     suggested fix when Fractal gives one; Mark resolved.
   - **message** (demo only; a live unread message stays in its conversation and has no tier):
     the real message (load it by the item's source id: the attention item carries only a
-    generic title); Reply, Mark read, Remind me later (kept on the device only).
+    generic title); Reply, Mark read.
+- Dismissing a request (x, then y) sends `attention.dismiss`: its asker reads `dismissed`, with
+  each note on its answers (`label: note`, one per line) as the text. A request that offers its
+  own `dismiss` answer is answered with that answer instead (`work.done`), its note as the
+  reason and the other notes alongside, since Fractal refuses `attention.dismiss` there.
 - Confirm destructive or binding actions (approve, cancel, reject, resolve) with a second tap.
 - **Chat about this** sends a *new* Fractal message to the agent involved (or the chief of
   staff when no agent is), titled `About: <item title>`, with the item's id, title and mission
@@ -268,7 +277,7 @@ use Ctrl+A then t from the conversation, or Enter on an already detached termina
 Ctrl+L opens the next outstanding Inbox item in the focused split, replacing only that
 split's tab and adding the replaced content to place history. Agent-blocking questions
 come first, then decisions, failures, and other items; each class is oldest first.
-Closed and snoozed items are excluded. The flash gives `n/m · reason`; after the last item,
+Closed and snoozed (`snoozed_until` still ahead) items are excluded. The flash gives `n/m · reason`; after the last item,
 `all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
 goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
 While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
@@ -381,6 +390,193 @@ follow it:
   conversation's messages, drop the pending copy. If the send fails, show it red with the reason.
 - Read a fresh snapshot right before every action and retry once on `StaleFence`: a graph that
   moved is not the person's problem.
+
+### Composer input history
+
+This is the approved target contract for the TUI, web and iOS composers; it does not
+claim that the existing clients or API already implement it. History is a personal
+input tool, not a transcript search and not a recorder of unsent drafts.
+
+#### Ownership, contents and source
+
+- The durable source is Fractal's accepted sent-message log. Include only messages
+  whose authenticated author equals the current person; a `person/` sender prefix,
+  a `user` transcript role or readable conversation is not sufficient.
+- Scope is **person × agent**, across that agent's conversations. Search can
+  explicitly narrow to a conversation within that agent. Cross-agent history
+  requires a separate product decision; never merge accounts or authorities.
+- Include successfully accepted text, including dictated sends; exclude pending,
+  failed, duplicate delivery attempts, harness-injected inputs and other authors.
+  A multi-recipient message has one stable history identity, not one per delivery.
+- Eligibility requires an accepted sent message, exact authenticated author,
+  current source authorization and no canonical exclusion fact. Legacy messages
+  need no affirmative eligibility marker. Honor existing redaction, deletion,
+  sensitivity or body-hiding expiry facts before indexing, counts or delivery;
+  do not infer them from tags or regexes or create a new write policy here.
+  If the eligibility or authorization read errors or is unknown, return no result
+  with an explicit error at query/accept time; absence of an exclusion fact is
+  not itself unknown eligibility. Future redaction/deletion features must add
+  their canonical fact to this eligibility fold. Never reconstruct excluded text
+  from a transcript, attachment or older cache.
+- Recalling text does not restore old attachments, execute commands or send a
+  message. Attachment references in text remain text. The current unsent draft,
+  its subject, attachment identities, selection and cursor remain recoverable.
+- Adjacent identical text is collapsed in the recall presentation, including at
+  page boundaries; nonadjacent repetitions remain distinct. This never mutates
+  sent messages or loses the selected message's provenance.
+
+#### Authorized projection API
+
+The read operation is `input-history.list`,
+`GET /v1/client/input-history`, using the existing client page/error conventions.
+It requires an authenticated person session and `read.projections`; it never
+accepts an owner override. Existing authorization for the source message,
+conversation and agent remains necessary on every read.
+
+The query contains `scope` (`conversation` or `agent`), the required `agent`
+identifier, a required `conversation` identifier only for conversation scope,
+optional `text`, and the usual bounded `limit` and opaque `cursor`. Inconsistent selectors are
+validation errors, not silently widened searches. Empty text lists recent inputs;
+nonempty text is a literal, Unicode case-folded substring search, not regex,
+shell syntax or transcript search. Preserve original input bytes in the result.
+An optional exact `message` selector resolves one previously selected message
+within that scope against current authorization and eligibility, without an old
+cursor. Before replacing a draft from cached history, perform this lookup and
+use its returned text; an excluded/unavailable result leaves the draft unchanged.
+
+Return a standard page of `InputHistoryEntry`, plus a monotonic
+`history_revision` and explicit completeness/coverage information. An entry has
+`message_id`, `author`, `agent_ids`, `conversation_ids`, `accepted_at`,
+`accepted_order`, and full reusable `text`. Use canonical identity types and the
+existing accepted-message order; do not use client clocks or excerpts as input.
+Order newest first by `(accepted_order, message_id)` descending. Search uses the
+same order. A first page establishes a result snapshot; continuations bind the
+owner, authority, scope, query, limit and snapshot. New sends do not shift a
+selected result. Expired or incompatible cursors use the normal explicit cursor
+error, never restart at page one while pretending to continue.
+
+Filtering precedes pagination and counts. Page filling and search must use a
+bounded indexed read over the projection, not scan every transcript or fetch
+every prior page. Publish/invalidate it from accepted-message and eligibility
+changes using existing reactive collection conventions; no timer polling.
+This is a derived index, not an independent durable raw-prompt journal.
+
+Current authorization overrides the result snapshot: continuations and result
+use recheck access and eligibility. A snapshot cannot resurrect a revoked entry.
+`input-history` change notifications carry revision/invalidation information,
+not excluded text. Revocation, deletion or sensitivity changes invalidate cached
+pages and an open search, clear revoked previews and require an authorized
+refresh before a cached result can be accepted. Logout, unpair, authority or
+person change clears all history state. When disconnected or authorization
+freshness is unknown, cached results cannot be accepted until revalidated;
+ordinary draft editing remains available. Do not erase a person's separately
+owned editable draft as a side effect of invalidating history.
+
+#### Session cache and shared contract
+
+Each client uses a bounded **session-memory** cache keyed by authority, person,
+scope, query and revision. Share accepted message IDs across pages and reconcile
+successful sends with those IDs; do not record a second optimistic history entry.
+Declare entry/byte/page bounds and evict without losing the active draft.
+Coverage labels distinguish a complete result from loaded recent pages,
+unavailable older pages and a failed refresh. Never call a partial search empty
+history. No disk prompt cache, draft synchronization or content telemetry is
+implied by this contract. Clear cache does not mean delete sent messages.
+
+Own the schema and conformance vectors alongside existing client models.
+Use the established Rust/TypeScript twin-and-fixture pattern in
+`fractal-ui-model::prompts`, with a reducer per platform rather than adding a
+WASM/native bridge solely for history. Generated API types remain generated from
+the canonical client schema. iOS currently uses the TypeScript client model;
+native keyboard adapters must not become a separate history implementation.
+
+The platform-neutral contract consists of:
+
+- `HistoryScope`: agent, or a conversation within that agent, with canonical IDs.
+- `HistoryEntry` / `HistoryPage`: the authorized projection entry, stable order,
+  continuation, revision and coverage; excluded entries are never represented
+  by reusable redaction placeholders.
+- `DraftSnapshot`: text, cursor, selection, subject and opaque attachment
+  identities. Restore identities, not copied/uploaded attachment bytes.
+- `HistoryState`: idle, browsing (original draft, frozen result IDs, index), or
+  searching (pre-search draft, query, result IDs, selected ID and coverage).
+- `HistoryAction`: older/newer, open search, change query, select/cycle result,
+  accept, cancel, edit, scope change, page arrival and invalidation.
+- `HistoryEffect`: replace editable draft, restore draft, request an authorized
+  page, revalidate selection or clear history. There is no send effect.
+
+Adapters supply visual-row boundaries, focus, composition state, selection,
+popup ownership and modifier information. Cursor offsets in shared vectors use
+Unicode scalar positions; adapters translate to platform offsets without
+splitting grapheme clusters. State transitions preserve the draft independently
+of network completion. Stale page arrivals cannot change a newer scope/query.
+
+#### Keyboard and focus precedence
+
+- Plain Up on the first **visual** row recalls older input, even in a nonempty
+  composer; plain Down on the last visual row recalls newer input while browsing.
+  Interior rows move the caret. Wrapped rows count, not only newline characters.
+  Down while idle remains ordinary caret movement. Clamp at the oldest entry;
+  Down beyond newest restores the original complete draft.
+- Before the first replacement, snapshot the full unsent draft. Editing recalled
+  text exits browsing and makes the edited draft the next browsing baseline.
+  Selection extension, noncollapsed selections, IME/composition and suggestion
+  popups keep their normal keys. Only unmodified arrow events enter history.
+- Ctrl+Up/Down remains reserved for thread-row focus, never history. Outside a
+  focused composer or search overlay, existing list/find/scroll keys retain
+  their meanings. Raw terminal input is not a composer.
+- Ctrl+R in a focused, live composer opens reverse incremental history search.
+  Typing updates matches; repeated Ctrl+R selects the next older match, clamping
+  at the oldest; Up/Down select older/newer matches. Query/scope changes reset
+  selection to the newest matching result, not a stale result index.
+- Enter or Tab accepts the selected result **to edit only**, never sends.
+  No-match or unvalidated selections cannot be accepted. Escape or Ctrl+C
+  cancels and restores the pre-search draft. Overlay cancellation takes
+  precedence over cancelling a run or clearing the composer. Accessible
+  platform focus traversal takes precedence over optional Tab acceptance.
+- Existing Ctrl+R retry/resend/reconnect remains outside composer search.
+  Offline recovery is not swallowed by history; hints show the focused action.
+  The web captures only handled, cancelable Ctrl+R in composer/search scope,
+  never Cmd+R, Ctrl+Shift+R or reload outside it. A labeled button remains the
+  dependable alternative when the browser or OS owns the shortcut.
+
+#### Search and touch surfaces
+
+Every client exposes a labeled **Input history** button, explicit scope,
+incremental query, result list, selected-result preview, coverage, loading,
+empty, no-match and error states. Results identify source agent/conversation
+and time. Use the same ordering and accept/cancel semantics on every client.
+Do not announce full potentially sensitive previews automatically.
+
+On iPhone, the button opens a native searchable sheet with **Use in composer**
+and **Cancel**, not a mandatory swipe gesture. On iPad, hardware keys mirror
+the contract where native interception is supported, including real visual-row
+boundaries; a plain `TextInput.onKeyPress` hook is not proof of chord delivery.
+Preserve native selection, dictation, IME and existing key-quality hooks.
+Use native accessible sheet/dialog/list primitives, visible focus, screen-reader
+labels and concise selection/count announcements, Dynamic Type/reflow, adequate
+touch targets and focus restoration. No capability depends on a gesture alone.
+
+#### Conformance vectors and platform acceptance
+
+One shared fixture corpus specifies initial state, actions, adapter boundary
+facts, authorized pages, final state and effects. Every reducer consumes it.
+Vectors cover first/last/interior wrapped rows; multiline entries; empty history;
+oldest clamping and newest draft restoration; cursor/selection/subject/attachments;
+editing recalled input; combining text and emoji offsets; IME, selection, popup
+and modifier pass-through; search narrowing, no-match, cycling and cancel/accept;
+scope/query races; dedupe across page boundaries; incoming sends during browsing;
+failed/pending sends; cache eviction; stale cursors; incomplete coverage; author
+and authority changes; redaction, sensitivity, deletion and access revocation.
+Assertions include **no send effect** and **no excluded text in cache/results**.
+
+Server acceptance separately exercises authenticated author equality, grants,
+scope validation, complete body reads, stable indexed pagination/search and
+revocation across continuations. Platform integration tests exercise actual key
+delivery and visual layout, not just supplied boundary flags: TUI captures,
+browser reload behavior in Chromium/Firefox/Safari, and real iPhone/iPad
+touch/hardware-keyboard and VoiceOver paths. Fixture parity does not replace
+those platform tests.
 
 ### Images
 
@@ -556,14 +752,16 @@ unsaid until its first agents roster. The summary's count of active missions rea
 Precedence (`fractal-ui-model::missions::word`, shared with the terminal UI's own adapter), first match wins: an open human
 gate on the mission (decision); no runs (not_started); a blocked mission or step (stalled);
 completed (done); a failed mission or step (failed); cancelled; only keep-open steps still
-running (watching); a step claimed, working or verifying (working); a ready unclaimed step,
-which is unstaffed when its queuing agent is stopped, failed or faulted, queued when an agent
-queues it, and unclaimed otherwise; a waiting or pending step (held); standing, running, ready or
-draft (idle); otherwise done.
+running (watching); a non-agentless step claimed, working, running or verifying with an agent
+claimant or assignee (working); a ready unclaimed step, which is unstaffed when its queuing agent
+is stopped, failed or faulted, queued when an agent queues it, and unclaimed otherwise; a waiting,
+pending or in-hand step without an assigned agent (held); standing, running, ready or draft (idle);
+otherwise done.
 
-`who` is the person the open gate waits on for decision; the working step's owner for working
-and watching (`st` for an agentless step); the stuck step's seat for queued, unstaffed, stalled
-and failed; and `nobody` otherwise.
+`who` is the person the open gate waits on for decision; the working step's owner for working;
+`st` for watching; the stuck step's seat for queued, unstaffed, stalled and failed; and `nobody`
+otherwise. A gated step uses `needs_you` and names the person who must answer. Other in-hand
+steps without an assigned agent use `waiting`, never `working`.
 
 The existing `must_act` (`you`, `agent`, `system`, `blocked`, `nobody`) stays on the row for
 older clients. `who` replaces it for display.
@@ -650,7 +848,9 @@ Kinds come from `attention_kind`: a human gate is `stopped` · `review` (`feedba
 mode); a person step or agent request is `stopped` · `request`, or `later` · `update` when it
 carries an update; a launch approval is `today` · `launch`; a revision approval is `today` ·
 `revision`; a `custom.*` kind is `today` · `request`; a harness prompt is `stopped` · `prompt`;
-a harness login is `stopped` · `login`. A fault is a `fault` card with no tier: Fractal sends each
+a harness login is `stopped` · `login`; a host hold is `stopped` · `request` until its owner
+releases it or the configured host operator explicitly recovers its terminal owner's hold.
+A model drift is `today` · `update`. A fault is a `fault` card with no tier: Fractal sends each
 fault to the agent that owns it, and neither client shows one on Now. An unread message has
 neither.
 
@@ -712,6 +912,31 @@ syntax with a `legacy loop shape` comment; the current parser still rejects thos
 the latest published revision; an unknown mission or revision returns not found. Reads never
 fall back from an unknown explicit revision to the latest. Clients show the served text, not
 a client-side serialization.
+
+### Source maps
+
+Two reads, not projections, with the same `read.declarations` grant as the declaration reads.
+A refusal reads "Fractal does not show this source to this device".
+
+`source-map.get`, `GET /v1/client/source-maps?subject=…`, with an optional `revision` (default:
+the subject's current revision), answers `{subject, revision, current?, map, kdl, revisions}` for
+an agent or mission. `map` is the `source.mapped` claim the revision's first mapped set
+publication recorded (`docs/st3/owned-sets.md`): repository, ref, sha, the contributing `files`
+with their sha256 `blob_hash`, the declaration file and import closure as indices, and `nodes`,
+each a KDL node path with its TS span and frames (declaration → helper → value; `precision:
+enclosing` is a range, not a point). `kdl` is that revision's canonical KDL with environment
+values redacted, and the node path is the join key with it: agent, mission, step and gate nodes
+by name, others by index among same-named siblings. Revisions here are subject revisions, which
+for agents differ from the declaration ids `agent-declaration.get` names; `current` is the
+subject's current revision, so a client marks the live one without comparing those ids.
+`revisions` lists every mapped revision of the subject, newest first. A revision without a map
+is not found; clients say the subject has no source map rather than guessing.
+
+`source-blob.get`, `GET /v1/client/source-blobs/{sha256}?subject=…&revision=…`, answers
+`{hash, text}`: one file version, only when that revision's map names the hash in its `files`;
+any other hash is not found, whatever else Fractal stores. Text is content-addressed and never
+changes. A mission run's pinned revision is `MissionRunSummary.revision`; clients open the map
+at that revision, not the mission's current one.
 
 ### Graph flags
 

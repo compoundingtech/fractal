@@ -451,7 +451,7 @@ impl Store {
                     deadline_unix_ms: None,
                     default_answer: None,
                     conversation,
-                    ..attention_item_from_review(review)
+                    ..attention_item_from_review(review, step)
                 });
             }
         }
@@ -552,10 +552,13 @@ impl Store {
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
         let mut items = self.mission_run_attention_items(person)?;
+        items.extend(self.host_hold_attention_items(person)?);
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
+        items.extend(self.model_drift_attention_items(person, as_of)?);
         items.extend(self.harness_prompt_attention_items(person, as_of)?);
         items.extend(self.custom_attention_items(person)?);
+        items.extend(self.host_hold_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
             self.broken_gate_items(person, as_of)?
@@ -594,7 +597,7 @@ impl Store {
                         sources.insert((run, "mission-run.created"));
                     }
                 }
-                "human-gate" | "revision-approval" => {
+                "human-gate" | "revision-approval" | "effect-unresolved" => {
                     if let Some(run) = run_subject(item) {
                         sources.insert((run, "mission-run.created"));
                     }
@@ -607,7 +610,7 @@ impl Store {
                         sources.insert((run, "mission-run.created"));
                     }
                 }
-                "harness-login" | "harness-prompt" | "fault" => {
+                "harness-login" | "harness-prompt" | "fault" | model_drift::MODEL_DRIFT_ATTENTION_KIND => {
                     actors.insert(item.subject.clone());
                 }
                 kind if kind.starts_with("custom.") => {
@@ -666,15 +669,16 @@ impl Store {
             let run_origin = || run_subject(item)
                 .and_then(|run| source(&run, "mission-run.created").map(|(origin, _)| origin.clone()));
             let origin = match item.kind.as_str() {
+                "host-hold" => Some(self.origin.to_owned()),
                 "person-step" | "agent-request" => {
                     if let Some(ask) = source(&item.subject, "work.person-asked") {
                         owner(Some(ask))
                     } else { run_origin() }
                 }
-                "human-gate" | "revision-approval" => run_origin(),
+                "human-gate" | "revision-approval" | "effect-unresolved" => run_origin(),
                 "launch-approval" => source(&item.subject, "planning-session.started")
                     .map(|(origin, _)| origin.clone()),
-                "harness-login" | "harness-prompt" => member_origin(&item.subject),
+                "harness-login" | "harness-prompt" | model_drift::MODEL_DRIFT_ATTENTION_KIND => member_origin(&item.subject),
                 "fault" => {
                     if item.mission_run.is_some() { run_origin() }
                     else { member_origin(&item.subject) }
@@ -1277,7 +1281,7 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
     Ok(pull_request_state_tx(connection, target)?.map(|(state, since)| (state, Some(since))))
 }
 
-fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
+fn attention_item_from_review(review: HumanReviewView, step: Option<String>) -> AttentionItemView {
     AttentionItemView {
         deadline_unix_ms: None,
         default_answer: None,
@@ -1299,7 +1303,7 @@ fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
         detail: review.question,
         mission: Some(review.mission),
         mission_run: Some(review.mission_run),
-        step: review.step,
+        step,
         targets: review.review_targets,
         requested_at_unix_ms: review.requested_at_unix_ms,
         actions: vec![
@@ -1751,7 +1755,7 @@ mod population_attention_ownership_tests {
         let store = Store::open_memory("replica").unwrap();
         place(&store, "agent/source", "seat-host");
         place(&store, "agent/presentation-only", "presentation-host");
-        for kind in ["harness-login", "harness-prompt", "fault"] {
+        for kind in ["harness-login", "harness-prompt", "fault", "model-drift"] {
             assert_eq!(
                 store.attention_source_origin(&item(kind, "agent/source", None)).unwrap(),
                 "seat-host",
@@ -1765,7 +1769,7 @@ mod population_attention_ownership_tests {
             let store = Store::open_memory(reader).unwrap();
             source_claim(&store, "source-host", "mission-run/example", "mission-run.created", "person/reviewer");
             source_claim(&store, "later-writer", "mission-run/example", "mission-run.state", "person/reviewer");
-            for kind in ["person-step", "human-gate", "revision-approval", "fault"] {
+            for kind in ["person-step", "human-gate", "revision-approval", "effect-unresolved", "fault"] {
                 assert_eq!(
                     store.attention_source_origin(&item(kind, "step-run/source", Some("mission-run/example"))).unwrap(),
                     "source-host",

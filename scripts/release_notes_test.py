@@ -17,7 +17,7 @@ from unittest.mock import patch
 import zipfile
 
 sys.dont_write_bytecode = True
-from release_notes import FIELDS, ImpactError, check_pull_request, collect, render, validate, version
+from release_notes import FIELDS, ImpactError, check_pull_request, collect, fragment_texts, render, validate, version
 
 ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader('release_daily', str(ROOT / 'scripts/release-fractal-daily'))
@@ -284,6 +284,69 @@ class ReleaseNotes(unittest.TestCase):
         source = self.commit('Missing rules transition')
         with self.assertRaisesRegex(ImpactError, 'rules version 10 -> 11'):
             check_pull_request(self.repo, self.base, source)
+
+    def test_fragments_use_one_batch_and_preserve_source_order_and_contents(self):
+        value = fragment('Unicode café ' + 'x' * 4000)
+        names = [f'nested/change-{index:02}' for index in range(24)]
+        for name in reversed(names):
+            self.add_fragment(name, value)
+        self.write('release-notes/ignored.txt', 'not JSON')
+        self.write('outside.json', 'not a fragment')
+        source = self.commit('Many identical large fragment blobs')
+        self.write('release-notes/nested/change-00.json', '{')
+        self.add_fragment('uncommitted')
+        with patch('release_notes.subprocess.check_output', wraps=subprocess.check_output) as calls:
+            report = collect(self.repo, self.base, source)
+        self.assertEqual(report['fragments'], [
+            {'path': f'release-notes/{name}.json', **value} for name in names])
+        commands = [call.args[0] for call in calls.call_args_list]
+        self.assertEqual(sum(command[1:] == ['cat-file', '--batch'] for command in commands), 1)
+        self.assertEqual(sum(command[1:4] == ['ls-tree', '-r', '-z'] for command in commands), 1)
+        self.assertFalse(any(command[1] == 'show' and ':release-notes/' in command[-1]
+                             for command in commands))
+
+    def test_batch_intentionally_includes_git_quoted_fragment_names(self):
+        # NUL-delimited tree paths fix the old silent omission of quoted names.
+        names = ['café', 'double"quote', 'back\\slash', 'tab\tname', 'line\nname']
+        for name in names:
+            self.add_fragment(name)
+        source = self.commit('Fragments with Git-quoted names')
+        expected = {f'release-notes/{name}.json': fragment() for name in names}
+        self.assertEqual(
+            {path: json.loads(content) for path, content in fragment_texts(self.repo, source)},
+            expected)
+        self.write('release-notes/café.json', '{')
+        invalid = self.commit('Invalid Git-quoted historical fragment')
+        with self.assertRaisesRegex(ImpactError, 'release-notes/café.json: invalid JSON'):
+            collect(self.repo, source, invalid)
+
+    def test_batch_preserves_invalid_json_diagnostic_and_validation_order(self):
+        self.write('release-notes/z.json', '{}')
+        self.write('release-notes/a.json', '{\r\n')
+        source = self.commit('Invalid JSON before invalid metadata')
+        with self.assertRaises(ImpactError) as raised:
+            collect(self.repo, self.base, source)
+        try:
+            json.loads('{\n')
+        except json.JSONDecodeError as error:
+            self.assertEqual(str(raised.exception), f'release-notes/a.json: invalid JSON: {error}')
+
+    def test_batch_validates_old_fragments_not_just_new_ones(self):
+        self.write('release-notes/old.json', '{}')
+        base = self.commit('Invalid historical metadata')
+        self.add_fragment()
+        source = self.commit('Valid new metadata')
+        with self.assertRaisesRegex(ImpactError, 'release-notes/old.json: missing required fields'):
+            collect(self.repo, base, source)
+
+    def test_batch_rejects_missing_and_truncated_objects(self):
+        oid = b'a' * 40
+        entry = b'100644 blob ' + oid + b'\trelease-notes/change.json\0'
+        for output in (oid + b' missing\n', oid + b' blob 10\n{}'):
+            with self.subTest(output=output):
+                with patch('release_notes.subprocess.check_output', side_effect=[entry, output]):
+                    with self.assertRaises(ImpactError):
+                        list(fragment_texts(self.repo, self.base))
 
     def test_pr_accepts_explicit_unknown_and_matching_version_transitions(self):
         self.write('crates/smallclaims/src/store.rs', 'pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 17;";')

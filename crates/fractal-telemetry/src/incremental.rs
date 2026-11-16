@@ -33,6 +33,19 @@ pub struct ChangeFeed {
     pub changes: Vec<Change>,
 }
 
+/// What [`Incremental::readers_since`] found in the feed after its cursor.
+#[derive(Clone, Debug, Default)]
+pub struct FeedReaders {
+    /// Where the next read of the feed starts.
+    pub cursor: (u64, i64),
+    /// The items that read something that changed, in name order.
+    pub readers: Vec<String>,
+    /// The changed subjects that no evaluation has recorded yet, such as a mission run just
+    /// created, in name order. One can belong to another host, so the caller decides which to
+    /// evaluate.
+    pub unseen: Vec<String>,
+}
+
 /// The change feed a pass reads. The store implements it, so this module names no store code.
 pub trait ChangeSource {
     /// What changed after store index `index` and local observation `local`: each new claim and
@@ -113,6 +126,13 @@ struct Item {
 /// key a read notes for subjects it cannot name in advance.
 pub fn change_keys(change: &Change) -> Vec<String> {
     let mut keys = vec![change.subject.clone(), format!("kind:{}", change.kind)];
+    // Operation receipts may arrive on different subjects (including a conflicting
+    // writer's message). Readers depend on the operation, not its chosen subject.
+    if let Ok(body) = serde_json::from_str::<Value>(&change.body)
+        && let Some(operation) = body.pointer("/_operation/id").and_then(Value::as_str)
+    {
+        keys.push(format!("operation:{operation}"));
+    }
     if let Some(actor) = &change.actor {
         keys.push(format!("actor:{actor}"));
     }
@@ -125,6 +145,7 @@ pub fn change_keys(change: &Change) -> Vec<String> {
             .map(str::to_owned)
     };
     match change.kind.as_str() {
+        "resource-membership.changed" => keys.push("seat-admission".into()),
         "message.sent" => keys.extend(field("to").map(|to| format!("mailbox:{to}"))),
         "mission-run.report-to" => {
             keys.extend(field("report_to").map(|agent| format!("reports-to:{agent}")));
@@ -475,17 +496,32 @@ impl Incremental {
             .is_none_or(|item| item.dirty || item.due.is_some_and(|due| due <= now))
     }
 
-    /// The items named with `prefix` that read something the feed has after `cursor`, in name
-    /// order, and the cursor to pass next time. With no cursor it starts where the passes' own
-    /// reading of the feed is. Unlike [`Self::observe`], it marks nothing and leaves the passes'
-    /// place in the feed alone: an evaluation clears its item's mark, so a mark set from another
-    /// thread while a pass evaluates that item would be lost until the next full pass.
+    /// Registered items in this section that changed or reached their deadline.
+    /// This walks only the in-memory index, never the durable subject history.
+    pub fn needed_items(&self, prefix: &str, now: u128) -> BTreeSet<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .items
+            .iter()
+            .filter(|(name, item)| name.starts_with(prefix)
+                && (item.dirty || item.due.is_some_and(|due| due <= now)))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// The items named with `prefix` that read something the feed has after `cursor`, and the
+    /// subjects named with `prefix` that the feed changed and no evaluation has recorded yet;
+    /// see [`FeedReaders`]. With no cursor it starts where the passes' own reading of the feed
+    /// is. Unlike [`Self::observe`], it marks nothing and leaves the passes' place in the feed
+    /// alone: an evaluation clears its item's mark, so a mark set from another thread while a
+    /// pass evaluates that item would be lost until the next full pass.
     pub fn readers_since<S: ChangeSource + ?Sized>(
         &self,
         store: &S,
         cursor: Option<(u64, i64)>,
         prefix: &str,
-    ) -> Result<((u64, i64), Vec<String>)> {
+    ) -> Result<FeedReaders> {
         let watermark = self
             .state
             .lock()
@@ -493,7 +529,11 @@ impl Incremental {
             .watermark;
         let Some((index, local)) = cursor.or(watermark) else {
             let feed = store.changes_since(i64::MAX as u64, i64::MAX)?;
-            return Ok(((feed.index, feed.local), Vec::new()));
+            return Ok(FeedReaders {
+                cursor: (feed.index, feed.local),
+                readers: Vec::new(),
+                unseen: Vec::new(),
+            });
         };
         let feed = store.changes_since(index, local)?;
         let state = self
@@ -508,7 +548,18 @@ impl Incremental {
             .filter(|item| item.starts_with(prefix))
             .cloned()
             .collect::<BTreeSet<_>>();
-        Ok(((feed.index, feed.local), readers.into_iter().collect()))
+        let unseen = feed
+            .changes
+            .iter()
+            .map(|change| &change.subject)
+            .filter(|subject| subject.starts_with(prefix) && !state.items.contains_key(*subject))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Ok(FeedReaders {
+            cursor: (feed.index, feed.local),
+            readers: readers.into_iter().collect(),
+            unseen: unseen.into_iter().collect(),
+        })
     }
 
     pub fn evaluated(&self, item: &str, reads: BTreeSet<String>, due: Option<u128>) {
@@ -664,6 +715,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effect_items_follow_operation_changes_and_lease_deadlines_not_unrelated_wakes() {
+        let feed = Feed(Mutex::new(Vec::new()));
+        let incremental = Incremental::default();
+        incremental.observe(&feed).unwrap();
+        incremental.evaluated("effect/completed",
+            BTreeSet::from(["effect/completed".into(), "operation:send".into()]), None);
+        incremental.evaluated("effect/pending",
+            BTreeSet::from(["effect/pending".into(), "step-run/work".into()]), Some(100));
+        feed.0.lock().unwrap().push(change("unrelated/x", "example.changed", None, "{}"));
+        incremental.observe(&feed).unwrap();
+        assert!(incremental.needed_items("effect/", 99).is_empty());
+        assert_eq!(incremental.needed_items("effect/", 100),
+            BTreeSet::from(["effect/pending".to_owned()]));
+        // A conflicting operation receipt need not use the effect's own subject.
+        feed.0.lock().unwrap().push(change("message/another-writer", "message.sent", None,
+            r#"{"fields":{"to":"agent/other"},"_operation":{"id":"send"}}"#));
+        let changed = incremental.readers_since(&feed, None, "effect/").unwrap();
+        assert_eq!(changed.readers, ["effect/completed"]);
+        incremental.observe(&feed).unwrap();
+        assert_eq!(incremental.needed_items("effect/", 99),
+            BTreeSet::from(["effect/completed".to_owned()]));
+    }
+
+    #[test]
     fn a_watch_subject_names_its_thread_and_seat() {
         assert_eq!(
             split_watch_subject("subscription/watch/acme/garden/12/example/planner"),
@@ -699,10 +774,20 @@ mod tests {
         incremental.evaluated("stop/c", reads(&["resource/x"]), None);
         feed.0.lock().unwrap().push(change("resource/x", "resource.observed", None, "{}"));
 
-        let (cursor, readers) = incremental.readers_since(&feed, None, "mission-run/").unwrap();
-        assert_eq!(readers, ["mission-run/a"]);
-        let (_, again) = incremental.readers_since(&feed, Some(cursor), "mission-run/").unwrap();
-        assert!(again.is_empty());
+        let first = incremental.readers_since(&feed, None, "mission-run/").unwrap();
+        assert_eq!(first.readers, ["mission-run/a"]);
+        assert!(first.unseen.is_empty());
+        let again = incremental.readers_since(&feed, Some(first.cursor), "mission-run/").unwrap();
+        assert!(again.readers.is_empty());
+
+        // A change to a subject no evaluation recorded yet names it unseen, not a reader; a
+        // known item's own change is not unseen.
+        feed.0.lock().unwrap().push(change("mission-run/new", "mission-run.created", None, "{}"));
+        feed.0.lock().unwrap().push(change("mission-run/a", "mission-run.state", None, "{}"));
+        feed.0.lock().unwrap().push(change("stop/new", "stop.created", None, "{}"));
+        let next = incremental.readers_since(&feed, Some(again.cursor), "mission-run/").unwrap();
+        assert!(next.readers.is_empty());
+        assert_eq!(next.unseen, ["mission-run/new"]);
 
         // It marked nothing, and the passes still read the change from where they were.
         assert!(!incremental.needs("stop/c", 0));

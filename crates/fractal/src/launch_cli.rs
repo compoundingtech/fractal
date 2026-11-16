@@ -2,6 +2,66 @@ use super::*;
 // The same print macros as main.rs: CLI output goes through st3's writer.
 use fractal_daemon::{cli_print as print, cli_println as println};
 
+/// Resolve against the approved revision, or the exact candidate being approved, not the
+/// planning agent's local workspace. Planning itself remains local to the publishing daemon.
+async fn launch_run_workspace(
+    client: &Client,
+    session_id: &str,
+    preview_hash: Option<&str>,
+    workspace: Option<&Path>,
+    inputs: &[(String, String)],
+) -> Result<PathBuf> {
+    let session: PlanningSessionView = client
+        .get(&format!("/v1/launches/{}", urlencoding::encode(session_id)))
+        .await?;
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let candidate = if let Some(hash) = preview_hash {
+        session
+            .variants
+            .iter()
+            .find(|variant| {
+                variant
+                    .preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.hash == hash)
+            })
+            .map(|variant| &variant.candidate)
+            .or_else(|| {
+                session
+                    .preview
+                    .as_ref()
+                    .filter(|preview| preview.hash == hash)
+                    .and(session.candidate.as_ref())
+            })
+            .context("the launch has no candidate matching this preview hash")?
+    } else {
+        let revision = session.published_revision.as_deref().context("the launch has no approved revision")?;
+        session.candidate.iter()
+            .chain(session.variants.iter().map(|variant| &variant.candidate))
+            .find(|candidate| candidate.mission_revision == revision)
+            .context("the launch has no candidate matching its approved revision")?
+    };
+    let (name, hash) = candidate.kdl.rsplit_once('@').context("the launch candidate has no pinned KDL document")?;
+    let bytes = document_bytes(client, name, hash).await?;
+    let source = std::str::from_utf8(&bytes).context("the launch candidate KDL is not UTF-8")?;
+    let intent = fractal_daemon::parse_intent(source, local)?;
+    // The immutable candidate's root identity survives public-name changes. Implicit
+    // loop-round and branch graphs share the map but are not top-level candidates.
+    let roots = fractal_daemon::mission::top_level_mission_ids(&intent.missions);
+    anyhow::ensure!(roots.len() == 1, "the launch candidate must declare exactly one top-level mission");
+    let root = roots.first().context("the launch candidate declares no top-level mission")?;
+    let mission = intent.missions.get(root).context("the launch candidate root is missing")?;
+    resolve_mission_workspace(
+        mission,
+        workspace,
+        local,
+        &unique_pairs(inputs.to_vec(), "input")?,
+    )
+}
+
 pub(super) async fn run_launch(
     client: &Client,
     endpoint: &Endpoint,
@@ -210,8 +270,14 @@ pub(super) async fn run_launch(
                 .await?
         }
         LaunchCommand::ApproveAndLaunch(args) => {
-            let workspace = fs::canonicalize(&args.workspace)
-                .with_context(|| format!("resolve workspace {}", args.workspace.display()))?;
+            let workspace = launch_run_workspace(
+                client,
+                &args.session,
+                Some(&args.preview_hash),
+                args.workspace.as_deref(),
+                &args.inputs,
+            )
+            .await?;
             let response: LaunchApproveAndStartView = client
                 .post(
                     &format!(
@@ -234,8 +300,14 @@ pub(super) async fn run_launch(
             return Ok(());
         }
         LaunchCommand::Run(args) => {
-            let workspace = fs::canonicalize(&args.workspace)
-                .with_context(|| format!("resolve workspace {}", args.workspace.display()))?;
+            let workspace = launch_run_workspace(
+                client,
+                &args.session,
+                None,
+                args.workspace.as_deref(),
+                &args.inputs,
+            )
+            .await?;
             let response: MissionRunView = client
                 .post(
                     &format!("/v1/launches/{}/start", urlencoding::encode(&args.session)),
@@ -383,6 +455,82 @@ fn quiet_query(quiet: Option<&str>) -> Result<String> {
     })
 }
 
+pub(super) fn mission_runs_path(mission_prefix: &str, active: bool, limit: u16) -> String {
+    format!(
+        "/v1/client/mission-runs?mission_prefix={}&active={active}&limit={limit}",
+        urlencoding::encode(mission_prefix)
+    )
+}
+
+pub(super) fn render_mission_runs_query(response: &Value) -> String {
+    use std::fmt::Write as _;
+
+    // The native client has already removed the HTTP response envelope.
+    let value = response;
+    let mut output = String::from("MISSION RUNS\n");
+    let runs = value["runs"].as_array();
+    if runs.is_none_or(Vec::is_empty) {
+        output.push_str("  none\n");
+    }
+    for run in runs.into_iter().flatten() {
+        let _ = writeln!(
+            output,
+            "  {}  {}  {}",
+            run["run_id"].as_str().unwrap_or("unknown"),
+            run["phase"].as_str().unwrap_or("unknown"),
+            run["mission_id"].as_str().unwrap_or("unknown"),
+        );
+        for (field, label) in [
+            ("status", "status"),
+            ("revision", "revision"),
+            ("host_id", "host"),
+            ("started_at", "started"),
+            ("updated_at", "updated"),
+        ] {
+            if let Some(value) = run.get(field).filter(|value| !value.is_null()) {
+                if let Some(text) = value.as_str() {
+                    let _ = writeln!(output, "    {label}: {text}");
+                } else {
+                    let _ = writeln!(output, "    {label}: {value}");
+                }
+            }
+        }
+        for step in run["steps"].as_array().into_iter().flatten() {
+            let _ = writeln!(
+                output,
+                "    {}  {}",
+                step["step_id"].as_str().unwrap_or("unknown"),
+                step["state"].as_str().unwrap_or("unknown"),
+            );
+        }
+        if run["steps_truncated"] == true {
+            output.push_str("    More steps exist; inspect this run with fractal missions show.\n");
+        }
+    }
+    if value["truncated"] == true {
+        output.push_str("  More runs match; narrow --mission-prefix or increase --limit (maximum 500).\n");
+    }
+    output
+}
+
+pub(super) async fn run_mission_runs_to(
+    client: &Client,
+    mission_prefix: &str,
+    active: bool,
+    limit: u16,
+    json_output: bool,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let response = client.get_envelope(&mission_runs_path(mission_prefix, active, limit)).await?;
+    if json_output {
+        serde_json::to_writer_pretty(&mut *output, &response)?;
+        writeln!(output)?;
+    } else {
+        write!(output, "{}", render_mission_runs_query(&response["value"]))?;
+    }
+    Ok(())
+}
+
 pub(super) async fn run_mission_view(
     client: &Client,
     endpoint: &Endpoint,
@@ -402,6 +550,11 @@ pub(super) async fn run_mission_view(
                 Ok(())
             }
         }
+        MissionViewCommand::Runs { mission_prefix, active, limit } => {
+            run_mission_runs_to(
+                client, &mission_prefix, active, limit, json_output, &mut cli_output::stdout(),
+            ).await
+        }
         MissionViewCommand::Ls {
             watch,
             all,
@@ -410,6 +563,7 @@ pub(super) async fn run_mission_view(
             since,
             until,
             status,
+            mission,
         } => {
             anyhow::ensure!(
                 limit > 0 && limit <= 200,
@@ -418,6 +572,7 @@ pub(super) async fn run_mission_view(
             if since.is_some()
                 || until.is_some()
                 || status.is_some()
+                || mission.is_some()
                 || cursor
                     .as_deref()
                     .is_some_and(|c| c.starts_with("outcomes:"))
@@ -429,6 +584,7 @@ pub(super) async fn run_mission_view(
                     until,
                     status,
                     None,
+                    mission,
                     cursor,
                     limit,
                     json_output,
@@ -564,6 +720,7 @@ pub(super) async fn run_mission_view(
             check_mission_file(attributed.as_ref().unwrap_or(client), args, json_output).await
         }
         MissionViewCommand::Start(args) => start_mission_run(client, args, json_output).await,
+        MissionViewCommand::Retry(args) => retry_mission_run(client, args, json_output).await,
         MissionViewCommand::Cancel(args) => {
             cancel_mission_run(client, endpoint, args, json_output).await
         }
@@ -602,6 +759,7 @@ async fn check_mission_file(
     let checked = run_gate_check(
         client,
         &intent,
+        None,
         &args.workspace,
         &args.inputs,
         |view, item| {
@@ -676,6 +834,32 @@ async fn cancel_mission_run(
         )
         .await?;
     print_client_value(&response, json_output)
+}
+
+async fn retry_mission_run(
+    client: &Client,
+    args: MissionRunRetryArgs,
+    json_output: bool,
+) -> Result<()> {
+    let subject = format!("mission-run/{}", args.run.trim_start_matches("mission-run/"));
+    let run: MissionRunView = client
+        .post(
+            &format!("/v1/mission-runs/{}/retry", urlencoding::encode(&subject)),
+            &fractal_daemon::model::MissionRunRetryRequest {
+                actor: args.actor,
+                same_revision: args.same_revision,
+                reason: args.reason,
+                idempotency_key: format!("mission-retry:{subject}:{}", uuid::Uuid::now_v7().simple()),
+            },
+        )
+        .await?;
+    if json_output {
+        print_value(&run, true)
+    } else {
+        println!("{} retries {subject} at revision {}", run.subject, run.revision);
+        print!("{}", cli_help::mission_next_steps(&run));
+        Ok(())
+    }
 }
 
 async fn set_mission_run_outcome(
@@ -853,7 +1037,7 @@ fn render_mission_overview(view: &Value) -> String {
         out.push_str(&fractal_daemon::provenance::render(&provenance));
     }
     for (key, title) in [("newest", "NEWEST"), ("failed", "FAILED")] {
-        let _ = writeln!(out, "{title} (up to {} runs)", view["preview_limit"]);
+        let _ = writeln!(out, "{title} (up to {} runs; a window, not the full history)", view["preview_limit"]);
         if let Some(runs) = view[key].as_array() {
             for run in runs {
                 let _ = writeln!(
@@ -868,6 +1052,8 @@ fn render_mission_overview(view: &Value) -> String {
             }
         }
     }
+    let mission = view["mission"].as_str().unwrap_or("?");
+    let _ = writeln!(out, "Full history: fractal missions ls --all --mission {mission}");
     out
 }
 

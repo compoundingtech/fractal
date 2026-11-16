@@ -1055,7 +1055,7 @@ mod tests {
                 } else {
                     client_attention_resources_at(&state.store, Some("person/ada"), false, now)?
                 };
-                client_attention_compatibility(&mut items, session.custom_forms);
+                client_attention_compatibility(&mut items, session.attention_compatibility());
                 Ok((items, false))
             };
             let oracle = state.store.read_snapshot(|_| projection()).unwrap();
@@ -1082,7 +1082,7 @@ mod tests {
                         } else {
                             client_attention_resources_fenced_at(&state.store, Some("person/ada"), now)?
                         };
-                        client_attention_compatibility(&mut items, session.custom_forms);
+                        client_attention_compatibility(&mut items, session.attention_compatibility());
                         Ok((items, false, until, None))
                     })).map(|(items, more, _)| (items, more)).unwrap()
             };

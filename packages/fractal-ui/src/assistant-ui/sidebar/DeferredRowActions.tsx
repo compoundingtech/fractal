@@ -29,6 +29,7 @@ export interface AgentRowActionsProps extends SidebarClock {
   readonly wrapDetailsTrigger?: (trigger: React.ReactElement) => React.ReactNode
   readonly onDetailsPress?: () => void
   readonly onMenuOpenChange?: (isOpen: boolean) => void
+  readonly onDetailsOpenChange?: (isOpen: boolean) => void
 }
 
 /** The eager trigger shell keeps collection focus, geometry and focus restoration stable during import. */
@@ -36,21 +37,31 @@ export const AgentRowActions = (props: AgentRowActionsProps) => {
   const touch = useTouchLayout()
   const [menuOpen, setMenuOpen] = React.useState(false)
   const [detailsOpen, setDetailsOpen] = React.useState(false)
+  const lifecycle = React.useRef({ menuOpen, detailsOpen, onMenuOpenChange: props.onMenuOpenChange, onDetailsOpenChange: props.onDetailsOpenChange })
+  lifecycle.current = { menuOpen, detailsOpen, onMenuOpenChange: props.onMenuOpenChange, onDetailsOpenChange: props.onDetailsOpenChange }
+  React.useEffect(() => () => {
+    if (lifecycle.current.menuOpen) lifecycle.current.onMenuOpenChange?.(false)
+    if (lifecycle.current.detailsOpen) lifecycle.current.onDetailsOpenChange?.(false)
+  }, [])
+  const changeDetailsOpen = (open: boolean) => {
+    setDetailsOpen(open)
+    props.onDetailsOpenChange?.(open)
+  }
   const trigger = <VisuallyHidden isFocusable><Button aria-label={`Reported details for ${props.row.title}`} onPress={props.onDetailsPress} {...stylex.props(styles.iconButton, touch && styles.detailsTouchTarget)}><Icon name="message" /></Button></VisuallyHidden>
   return <ThemePortal>
     <DialogTrigger isOpen={detailsOpen} onOpenChange={open => {
-      setDetailsOpen(open)
+      changeDetailsOpen(open)
       if (!open) requestAnimationFrame(() => {
         const button = props.menuTriggerRef.current
         const active = button?.ownerDocument.activeElement
         if (active === button?.ownerDocument.body || active === props.anchorRef.current || active === props.anchorRef.current?.closest('[role="row"]')) button?.focus()
       })
     }}>{props.wrapDetailsTrigger === undefined ? trigger : props.wrapDetailsTrigger(trigger)}
-      {detailsOpen && <DeferredSurfaceBoundary load={loadAgentReportedDetails} surfaceProps={props} fallback={<Popover triggerRef={props.menuTriggerRef} placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Reported details for ${props.row.title}`}><p role="alert">These agent details could not load.</p><Button onPress={() => setDetailsOpen(false)}>Close</Button></Dialog></Popover>} />}
+      {detailsOpen && <DeferredSurfaceBoundary load={loadAgentReportedDetails} surfaceProps={props} fallback={<Popover triggerRef={props.menuTriggerRef} placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Reported details for ${props.row.title}`}><p role="alert">These agent details could not load.</p><Button onPress={() => changeDetailsOpen(false)}>Close</Button></Dialog></Popover>} />}
     </DialogTrigger>
     <MenuTrigger isOpen={menuOpen} onOpenChange={open => { setMenuOpen(open); props.onMenuOpenChange?.(open) }}>
       <Button ref={props.menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${props.row.title}`} className={state => stylex.props(props.menuButtonStyle(state), touch && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button>
-      {menuOpen && <DeferredSurfaceBoundary load={loadAgentRowMenu} surfaceProps={{ ...props, onDetailsPress: () => { props.onDetailsPress?.(); setDetailsOpen(true) } }} fallback={<Popover placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Actions for ${props.row.title}`}><p role="alert">These agent actions could not load.</p><Button onPress={() => { setMenuOpen(false); props.onMenuOpenChange?.(false) }}>Close</Button></Dialog></Popover>} />}
+      {menuOpen && <DeferredSurfaceBoundary load={loadAgentRowMenu} surfaceProps={{ ...props, onDetailsPress: () => { props.onDetailsPress?.(); changeDetailsOpen(true) } }} fallback={<Popover placement="bottom end" {...stylex.props(styles.failureSurface)}><Dialog aria-label={`Actions for ${props.row.title}`}><p role="alert">These agent actions could not load.</p><Button onPress={() => { setMenuOpen(false); props.onMenuOpenChange?.(false) }}>Close</Button></Dialog></Popover>} />}
     </MenuTrigger>
   </ThemePortal>
 }

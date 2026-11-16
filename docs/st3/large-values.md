@@ -24,6 +24,10 @@ same stable ID, owning **producer module**, and a breakup/reference TODO.
 IDs use `lv-h<12hex>` / `flow-h<12hex>`: the alphabetic hash tag distinguishes
 source fingerprints from numbered decision citations. Full content fingerprints
 remain separate and unchanged by that namespace.
+Site records store only reviewed identity and metadata (`id`, `path`, `kind`,
+`fingerprint`, `owner`, `todo`, `disposition`). Excerpts and line locations are
+diagnostics the guard recomputes from source when it reports a finding; they are
+not stored per record, and a record carrying extra fields is rejected.
 `declarations` records every column and index expression found by the declared
 lexical catalog, including types that look small. A template that cannot be
 resolved stays explicitly unresolved. No catalog entry proves a value's size.
@@ -118,6 +122,18 @@ indexed seeks bound non-prose-history work, not encoded key size. The existing
 `chunk-or-reference-variable-columns` TODO must preserve subject/incarnation equality,
 numeric accepted-time ordering, local arrival order and snapshot fences during reference
 conversion. The indexes add no new value representation.
+
+### Source map texts and claims
+
+`fractal_store::store::source_maps` owns `lv-hefc9d72adcbd`: a set publication's source map
+stages each newly named file text in `local_blobs` (hash TEXT, bytes BLOB, size INTEGER), the
+same staged representation as `put_blob`, and the `source.mapped` claim that names it promotes
+it into `blobs` in the same transaction. The producer caps a file at 1 MiB and a map at 32 MiB;
+those limits are the producer's own and are not a general bound. It also owns
+`lv-hcd0064dd968e`, the reader that selects the canonical first `source.mapped` claim body of
+one `subject@revision`. Both keep the existing inline blob and claim-body representations; the
+eventual chunked or referenced blob format must keep sha256 identity and claim-referenced
+replication and retention.
 
 ### Client operation admission inventory (PR #5921)
 
@@ -228,6 +244,8 @@ These accept existing inline representations, not a value-size or cost bound.
 The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
 
 The same flow takes a `source_forced` flag: a mission retire that its owning set's source gate admitted as forced skips only the plain `set-managed-subject` refusal, and records its source debt in the same transaction. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
+
+The same flow also runs the person-availability actor check, refusing any availability claim whose actor is not its subject person. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
 
 ### Agent answer atomicity inventory review
 
@@ -739,3 +757,102 @@ only the typed degraded-run result; other errors still propagate and degraded
 health/membership remains until explicit repair. Fixture-only `lv-hec42c211f7cb`
 and `lv-hf851bfc39d1f` force startup migration and out-of-order sibling work to
 prove that exclusion does not strand the queue.
+
+### GitHub plugin read fixture includes (PR #6396)
+
+The `fractal_api_client_v0::api::client_v0::github_plugin_reads::tests` maintainer
+owns `lv-ha3a3bb1e957c` and `lv-h8fa94b508404`, reviewed for
+[PR #6396](https://github.com/compoundingtech/fractal/pull/6396).
+The former includes the shared GitHub wire JSON fixtures; the latter includes
+the capabilities JSON used to negotiate the real client's response ceiling.
+They contain test-only paths, item bodies, patches and capability metadata,
+not SQL statements, database columns or index keys, and are parsed in memory.
+Keeping exact fixture bytes inline preserves the cross-client wire assertions;
+neither site writes those bytes to SQLite or changes a production representation.
+The lexical catalog conservatively inventories these includes. The owning module
+retains `trace-statement-and-value-representation`: trace any future fixture or
+consumer change before adding SQL execution or persistence, and review the
+resulting value/column representation rather than treating these markers as a
+permanent storage exemption.
+
+### Durable host hold storage
+
+`fractal_store::store::host_holds` owns `lv-ha677d62abc9d`,
+`lv-h93ce54913c6d` and `lv-h16424da0718d`. These reviewed allow-for-now
+sites declare, insert and revision-check the authoritative local host-hold
+record. Owner/host keys and serialized hold bodies remain inline; sizes are
+not proven bounded. Their eventual representation change must preserve
+authenticated ownership, exact-revision release and the committed local
+observation in the same writer transaction. Terminal run status cannot reclaim
+an unresolved hold; reclamation needs a separate explicit retention policy.
+
+### Finite membership storage
+
+`fractal_store::store::resource_membership` owns schema site
+`lv-hb7bab5eb8be2` and mutation sites `lv-h15191adeac97`,
+`lv-h32081bb17f3d`, `lv-hbb24831194f3`, `lv-h466c8225b3a9` and
+`lv-hacf1fd1c6d10`. Host/epoch and host/lane/policy TEXT record the authority
+fence and installed policy; membership identifier, host, lane, state and JSON body
+record execution custody, grants, child runs and runtime roots. The queue index
+retains host, lane, state and membership identifier keys. Inline updates preserve
+one transaction for policy, admission, child attachment and retirement decisions.
+The schema TODO is to chunk or reference variable columns and keys; the mutation
+TODO is to bound or reference bodies and account for their cleanup without
+weakening fencing or releasing uncertain execution custody. Neither queue order,
+capacity counts nor the host-local authority proves value sizes.
+
+### Indexed mission run summaries
+
+The `fractal_store::store` maintainer owns revised schema site
+`lv-h709be0a6fbc5`, replacing `lv-h2c1da3f5b1d1`. Its new
+`mission_runs_open_mission_prefix_index` retains existing mission ID, creation-time
+and run ID TEXT keys, restricted to nonterminal runs. The explicit `mission_id>=''`
+domain predicate scopes planner eligibility to prefix readers rather than changing
+the index selected by unrelated open-run queues. Schema installation builds this
+index synchronously, not online; its duration on a large store is unmeasured.
+The existing `chunk-or-reference-variable-columns` task must preserve prefix seeks,
+descending creation-time/run-ID ordering and both partial-index predicates when
+those keys move to a bounded or referenced representation.
+
+The `fractal_store::store::mission_run_query` maintainer owns
+`lv-hbc959d871d00`, `lv-h890a38462624`, `lv-hf58566f1b601` and
+`lv-hd7513b5c921e`. The run reader binds literal mission-prefix bounds and a row
+limit, selecting existing run/mission/generation IDs, revision, status, phase and
+timestamps. Its bounded current-generation step reader hydrates step rows for
+the shared effective-state rules. The ownership reader binds one run ID and
+selects run, generation and root-run status/phase by their indexed identities.
+The canonical host reader binds the exact run subject and selects the creation
+claim's origin, excluding repaired replica records.
+These narrow projections avoid hydrating claim bodies or folding run history;
+run and step row limits are not encoded byte-size or statement-cost proofs.
+Values remain inline to reuse existing projections and canonical claim identity.
+The module retains `trace-statement-and-value-representation`: trace the macro
+and canonical SQL expansions and preserve prefix ordering, current-generation
+identity and canonical origin selection through a reference/chunk conversion.
+
+The `fractal::main_tests` maintainer owns `lv-hd8a0024f2dd3` and
+`lv-h0dd9e5195a5e`, respectively the run-summary JSON and rendered-text fixture
+includes. These test-only values are parsed or compared in memory, not written
+to SQLite. Exact inline fixtures preserve renderer and truncation assertions.
+Their `trace-statement-and-value-representation` task is to review the producer
+and any future persistence consumer before changing that representation; the
+conservative include inventory is not a permanent exemption or a byte-size bound.
+
+### Native effect resolution
+
+`fractal_store::store::effects` owns `lv-h4d33c1e58bfd`, the step/effect reverse
+index. Its step and effect subject TEXT keys remain inline like the existing
+claim-subject indexes; their representation still needs chunk/reference review.
+`lv-hb9a49c3cca1c` walks one effect's predecessor graph to distinguish a person's
+covered unresolved episodes from concurrent observations. `lv-h01c4365780a3`
+selects that effect's monotonic phase through canonical ordering. Both reads
+reuse existing claim identity/body/predecessor representation, not a size proof:
+the owner must trace those values to bounded physical references without
+weakening causal resolution or immutable receipt selection.
+
+`fractal_store::store` owns `lv-he1edfe7bd7b2`, which reopens the existing current
+generation on a causally backed late effect conflict. Run identity and timestamp
+TEXT stay inline with the surrounding run-state projection. Representation and
+reclamation review must preserve the evidence-backed hold and terminal-tree
+invariants; no growing receipt body is synthesized by this update.
+

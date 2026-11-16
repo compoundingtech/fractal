@@ -425,6 +425,52 @@ describe('asks, child runs and worker turns', () => {
     }),
   )
 
+  it.effect('returns execution evidence separately from a worker product, live and on replay', () =>
+    Effect.gen(function* () {
+      const execution = {
+        id: 'claim/invocation',
+        step_subject: 'step-run/child/review',
+        attempt: 1,
+        agent: 'agent/child/reviewer',
+        incarnation_id: 'runtime-1',
+        declared_model: 'requested-model',
+        observed_models: ['actual-model'],
+        fallback: null,
+        started_at_unix_ms: 10,
+        ended_at_unix_ms: 30,
+        duration_ms: 20,
+        status: 'completed',
+        trace_id: null,
+        exit_evidence: null,
+        usage: null,
+      }
+      const worker = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Read.', reportTo, input: Change,
+          output: Schema.Struct({ value: Verdict, executions: Schema.optionalKey(Schema.Unknown) }) },
+        () => Fractal.step({ id: 'read', success: Verdict, execution: true }).pipe(
+          Effect.provide(Fractal.Worker.layer({ mission: 'worker', product: 'verdict' })),
+        ),
+      )
+      const exit: ProgramExit = { _tag: 'Success', value: {
+        run: 'mission-run/child', status: 'completed', executions: [execution],
+        products: { 'resource/mission-run/child/verdict': { verdict: 'GO' } },
+      } }
+      const host = fakeHost({ child: async () => exit })
+      const expected = { _tag: 'Success', value: {
+        value: { verdict: 'GO' }, executions: [execution],
+      } }
+      expect(yield* start(worker, host)).toEqual(expected)
+      expect(yield* start(worker, fakeHost({ journal: [['read', exit]] }))).toEqual(expected)
+      const legacy: ProgramExit = { _tag: 'Success', value: {
+        run: 'mission-run/child', status: 'completed',
+        products: { 'resource/mission-run/child/verdict': { verdict: 'GO' } },
+      } }
+      expect(yield* start(worker, fakeHost({ journal: [['read', legacy]] }))).toEqual({
+        _tag: 'Success', value: { value: { verdict: 'GO' } },
+      })
+    }),
+  )
+
   it.effect('fail typed when the daemon withdraws an ask', () =>
     Effect.gen(function* () {
       const asking = Fractal.mission(

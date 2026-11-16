@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The iOS app's Now opens with the person's own status, interruptions, deadline clock and directive note",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, claim or client API change; the app uses the existing client-v0 availability operations."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change. The app reads GET /v1/client/availability and GET /v1/client/notes whenever a connection goes live and on pull to refresh; it never polls."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "A member whose capabilities do not list write.availability shows no availability section; an older app shows nothing new. A response word a later daemon adds reads as itself; a person no device has reported for a day reads as available."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing is stored on the phone; the next read shows the current state."
+  }
+}

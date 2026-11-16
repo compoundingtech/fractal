@@ -112,11 +112,12 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
       // Search reveals descendants temporarily, without changing the saved working layout.
       if (query.trim() !== '') return
       const ids = registry.get(collapseAtom).filter(folder => folder !== id)
-      // Parent seats default collapsed; store an explicit expanded override separately.
+      // Parent seats store an explicit override either way: an expanded marker, or the plain id below, which a seat with
+      // further missions needs because it starts open and a collapse must stick.
       if (currentRoster.current.some(seat => seat.id === id)) {
         const marker = `wf/expanded/${id}`
         const next = ids.filter(value => value !== marker)
-        setCollapsedIds(collapsed ? next : [...next, marker])
+        setCollapsedIds(collapsed ? [...next, id] : [...next, marker])
         return
       }
       setCollapsedIds(collapsed ? [...ids, id] : ids)
