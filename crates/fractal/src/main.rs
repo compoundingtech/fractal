@@ -4314,11 +4314,14 @@ struct AttentionSnoozeArgs {
     #[command(flatten)]
     target: AttentionControlArgs,
     /// How long to put it off, such as `30m`, `4h` or `1d`.
-    #[arg(long = "for", conflicts_with_all = ["until", "clear"], required_unless_present_any = ["until", "clear"])]
+    #[arg(long = "for", conflicts_with_all = ["until", "clear", "indefinite"], required_unless_present_any = ["until", "clear", "indefinite"])]
     duration: Option<String>,
     /// Put it off until this RFC 3339 instant.
-    #[arg(long, conflicts_with = "clear")]
+    #[arg(long, conflicts_with_all = ["clear", "indefinite"])]
     until: Option<String>,
+    /// Keep it snoozed until you explicitly bring it back.
+    #[arg(long, conflicts_with = "clear")]
+    indefinite: bool,
     /// Bring it back now.
     #[arg(long)]
     clear: bool,
