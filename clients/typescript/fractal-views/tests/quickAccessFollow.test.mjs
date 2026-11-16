@@ -191,5 +191,3 @@ test('an explicit retired refusal remains terminal even if this client never saw
   assert.equal(h.states.at(-1).editable, false);
   assert.match(h.states.at(-1).detail, /Restoring removed Pins/); follow.close();
 });
-
-
