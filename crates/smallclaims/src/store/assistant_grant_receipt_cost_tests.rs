@@ -79,7 +79,7 @@ fn fresh_nonmember_proof_receipt_has_constant_complete_transaction_vm_cost() {
             /* sqlite-large-value: allow-for-now lv-hfe820094f334 owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start) SELECT claim_id,position,rowid,?2,0 FROM replica_records WHERE claim_id=?1 LIMIT 1",
             params![grant.id, key.public()],
         ).unwrap();
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h18b15ee88afe owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h06e4c583bde0 owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&grant.id]).unwrap();
     }
     let before = receipt_projection_work_state(&target.readers.get());
     assert_eq!(before[1].len(), 1, "checkpoint fixture must be nonempty");

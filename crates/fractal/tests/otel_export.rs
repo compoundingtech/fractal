@@ -2898,6 +2898,89 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     provider.shutdown().unwrap();
 }
 
+/// The callback survives store disposal and exports only successful cached counts.
+#[test]
+fn assistant_grant_queue_gauge_exports_exact_cached_tasks_without_live_store() {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, RwLock};
+    use fractal_daemon::api::mailbox_metrics::register_authority_queue_metrics;
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        data::{AggregatedMetrics, MetricData},
+    };
+
+    let cache = Arc::new(RwLock::new(None));
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter.clone())
+            .with_interval(Duration::from_secs(3600)).build())
+        .build();
+    register_authority_queue_metrics(&provider.meter("st3"), Arc::clone(&cache));
+    let collect = || {
+        provider.force_flush().unwrap();
+        let batches = exporter.get_finished_metrics().unwrap();
+        let mut counts = BTreeMap::new();
+        if let Some(batch) = batches.last() {
+            for scope in batch.scope_metrics() {
+                for metric in scope.metrics() {
+                    assert_eq!(metric.name(), "st.assistant_grant.pending_tasks");
+                    assert_eq!(metric.unit(), "{task}");
+                    let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data() else {
+                        panic!("pending tasks must export as a u64 gauge");
+                    };
+                    for point in gauge.data_points() {
+                        let attributes = point.attributes().collect::<Vec<_>>();
+                        assert_eq!(attributes.len(), 1);
+                        assert_eq!(attributes[0].key.as_str(), "st.assistant_grant.queue");
+                        assert!(counts.insert(attributes[0].value.to_string(), point.value()).is_none());
+                    }
+                }
+            }
+        }
+        counts
+    };
+    assert!(collect().is_empty(), "an uninitialized cache must not fabricate zero tasks");
+
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("claims.sqlite3");
+    let store = fractal_daemon::store::Store::open(&database, "example").unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.execute_batch(
+        "WITH RECURSIVE tasks(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM tasks WHERE id<1000)
+         INSERT INTO assistant_grant_proof_invalidations(id,writer,sequence,envelope_hash,member_key)
+         SELECT id,'example',id,'hash','key' FROM tasks;
+         WITH RECURSIVE tasks(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM tasks WHERE id<1000)
+         INSERT INTO assistant_grant_retractions(id,writer,member_key,lower_sequence,upper_sequence)
+         SELECT id,'example','key',id,id FROM tasks;"
+    ).unwrap();
+    let counts = store.assistant_grant_pending_task_counts().unwrap();
+    assert_eq!(counts, [1000, 1000], "release bound is 1000 tasks per queue");
+    *cache.write().unwrap() = Some(counts);
+    // Future-schema refusal must happen before either unsupported queue is touched.
+    connection.execute_batch(
+        "UPDATE meta SET value='999' WHERE key='assistant_grant_authority_schema_version';
+         DROP TABLE assistant_grant_proof_invalidations;
+         DROP TABLE assistant_grant_retractions;"
+    ).unwrap();
+    let error = store.assistant_grant_pending_task_counts().unwrap_err();
+    assert!(error.to_string().contains("schema is unsupported"), "{error:#}");
+    drop(connection);
+    drop(store);
+    drop(root);
+
+    assert_eq!(collect(), BTreeMap::from([
+        ("proof_invalidations".to_owned(), 1000),
+        ("retractions".to_owned(), 1000),
+    ]), "a failed refresh retains the complete cached snapshot after store disposal");
+    *cache.write().unwrap() = Some([1001, 0]);
+    assert_eq!(collect(), BTreeMap::from([
+        ("proof_invalidations".to_owned(), 1001),
+        ("retractions".to_owned(), 0),
+    ]), "over-bound queues remain visible, and successful empty queues report zero");
+    provider.shutdown().unwrap();
+}
+
 /// The child exports an isolated cached snapshot through the real HTTP/JSON exporter.
 /// The parent checks the receiver's decoded OTLP, not merely local instrument counters.
 #[cfg(target_os = "linux")]

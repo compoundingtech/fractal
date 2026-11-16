@@ -606,6 +606,44 @@ async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation(
     }
 }
 
+#[tokio::test]
+async fn writer_transaction_rechecks_orphan_obligations_and_future_schema_with_cached_authorization() {
+    use fractal_daemon::store::assistant_write::{AssistantWriteAuthorization, authorize_grant};
+    for principal in [AssistantPrincipal::Chatgpt, AssistantPrincipal::Mcp] {
+        let h = Harness::new();
+        let paired = h.pair_principal(principal).await;
+        // Cache authorization from a policy that grants every writer scope under test.
+        // The shared fixture policy omits custom replies.
+        let mut writer_scopes = scopes();
+        writer_scopes.push(AssistantScope::CustomReply);
+        let grant = h.policy(&paired, writer_scopes).await;
+        let mut connection = rusqlite::Connection::open(h.root.path().join("store.sqlite")).unwrap();
+        for scope in ["write.assistant.messages", "write.assistant.answers", "write.assistant.custom-reply"] {
+            let authorization = AssistantWriteAuthorization {
+                grant_subject:grant_subject(&paired), actor:paired.session_actor.clone(), owner:OWNER.into(),
+                policy_revision:grant.policy_revision, scope:scope.into(), recipient:Some(AGENT.into()),
+            };
+            authorize_grant(&connection, "assistant-native", &authorization)
+                .unwrap_or_else(|error| panic!("clean cached authorization for {scope}: {error:?}"));
+            for obligation in [
+                "INSERT INTO assistant_grant_dirty(claim_id,grant_subject) VALUES('orphan',NULL)",
+                "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,grant_subject) VALUES('orphan',0,0,'orphan',NULL)",
+                "INSERT INTO assistant_grant_recompute(claim_id,grant_subject) VALUES('orphan',NULL)",
+                "INSERT INTO assistant_grant_proof_rechecks(claim_id,grant_subject) VALUES('orphan',NULL)",
+                "UPDATE meta SET value='999' WHERE key='assistant_grant_authority_schema_version'",
+            ] {
+                let transaction = connection.transaction().unwrap();
+                transaction.execute(obligation, []).unwrap();
+                let error = authorize_grant(&transaction, "assistant-native", &authorization).unwrap_err();
+                assert_eq!(error.code, "assistant-grant-authority-not-ready", "{scope}: {obligation}");
+                transaction.rollback().unwrap();
+                authorize_grant(&connection, "assistant-native", &authorization)
+                    .unwrap_or_else(|error| panic!("cached authorization after rolling back {obligation} for {scope}: {error:?}"));
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn synchronous_send_rechecks_pending_subject_revocation_and_scope_removal_before_commit() {
     let h = Arc::new(Harness::new());

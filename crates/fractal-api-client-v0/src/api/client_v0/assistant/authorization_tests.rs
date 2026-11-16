@@ -101,6 +101,59 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
     (status,serde_json::from_slice(&bytes).unwrap(),bytes.len())
 }
 
+#[tokio::test]
+async fn orphan_and_future_schema_obligations_fence_every_grant_exercise_even_with_a_cached_session() {
+    use smallclaims::store::assistant_grant_authority as authority;
+    for obligation in [
+        /* sqlite-large-value: allow-for-now lv-hffbddfb58577 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id,grant_subject) VALUES('orphan',NULL)",
+        /* sqlite-large-value: allow-for-now lv-h7bb2eec36284 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,grant_subject) VALUES('orphan',0,0,'orphan',NULL)",
+        /* sqlite-large-value: allow-for-now lv-h115dfb5c3355 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_recompute(claim_id,grant_subject) VALUES('orphan',NULL)",
+        /* sqlite-large-value: allow-for-now lv-h2c6d56dbc0b1 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks(claim_id,grant_subject) VALUES('orphan',NULL)",
+        /* sqlite-large-value: allow-for-now lv-he2e593d92573 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='999' WHERE key='assistant_grant_authority_schema_version'",
+    ] {
+        let fixture = fixture(SCOPES, true).await;
+        let session = fixture.session();
+        let payload = fixture.payload("summary", "");
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER, fixture.header(&payload, &fixture.attestor).parse().unwrap());
+        let snapshot = new_client_snapshot(&fixture.state);
+        let grant_subject = subject(&fixture.grant).unwrap();
+        let before_policy = fixture.state.store.latest_claim(&grant_subject, None).unwrap().unwrap().id;
+        fixture.state.store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h3f1aa0751015 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=trace-statement-and-value-representation */ obligation, []).unwrap();
+        let assert_fenced = |error: ApiError| {
+            assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{obligation}: {}", error.message);
+            assert_eq!(error.code, "assistant-grant-authority-not-ready");
+        };
+        assert_fenced(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").unwrap_err());
+        let error = authority::candidates(&fixture.state.store.readers.get(), PRINCIPAL, OWNER, None, None, None).unwrap_err();
+        assert_eq!(error.code, "assistant-grant-authority-not-ready");
+        assert_fenced(pin(State(fixture.state.clone()), Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()), Json(fixture.trust_request())).await.unwrap_err());
+        let context = response_body::Context {
+            state: fixture.state.clone(), client_request: true, local_only_response: false,
+            request_id: "request/orphan".into(), client_snapshot: None, server: None, roster: false,
+        };
+        assert_fenced(read_inner(State(fixture.state.clone()), Extension(session.clone()), Extension(snapshot.clone()),
+            OriginalUri("/v1/client/assistant/summary".parse().unwrap()), headers, &context).await.err().unwrap());
+        for action_type in ["message.send", "work.done", "custom.reply"] {
+            let request = serde_json::from_value(json!({
+                "api_version":CLIENT_API_VERSION,"id":"action/orphan","type":action_type,
+                "idempotency_key":"orphan-must-not-write",
+                "fence":{"snapshot_id":snapshot.id,"subject_revisions":{}},"parameters":{}
+            })).unwrap();
+            assert_fenced(super::super::native::propose(State(fixture.state.clone()), Extension(snapshot.clone()),
+                Extension(session.clone()), Json(request)).await.unwrap_err());
+        }
+        let (status, body, _) = fixture.request("/v1/client/assistant/summary", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "assistant-grant-authority-not-ready");
+        assert_eq!(body["retryable"], true);
+        assert_eq!(fixture.state.store.latest_claim(&grant_subject, None).unwrap().unwrap().id, before_policy);
+        assert!(fixture.state.store.claims_for_kind_at(
+            "custom.client.assistant.v1.read-used", None, true, 1).unwrap().claims.is_empty());
+    }
+}
+
 // Measurement, not a constant-work assertion: nonempty queues deliberately keep
 // subject-outer access, and the summary still checks each grant independently.
 #[tokio::test]
@@ -135,7 +188,7 @@ async fn assistant_summary_nonempty_queue_work_by_grant_count() {
             // Unrelated dirty work stays queued throughout the GET, exercising
             // the nonempty-queue arm without fencing the request's grants.
 
-            connection.execute(/* sqlite-large-value: allow-for-now lv-h1d115332e959 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES('unrelated-summary-work')", []).unwrap();
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h137fd120105d owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id,grant_subject) VALUES('unrelated-summary-work','custom/client/assistant-v1-unrelated-summary')", []).unwrap();
             assert!(authority::maintenance_pending(&connection).unwrap());
         }
         let payload = fixture.payload("summary", "");

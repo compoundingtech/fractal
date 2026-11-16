@@ -438,7 +438,7 @@ fn fenced_opposite_profile_witness_matches_independent_raw_history_oracle() {
         assert_conflict_oracle(&target, &own, &witness, true);
         assert!(!authority::contains(&target.readers.get(), &witness.id).unwrap());
         {
-            target.connection.write().execute(/* sqlite-large-value: allow-for-now lv-he4d6e9e7421e owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&witness.id]).unwrap();
+            target.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb380275198b3 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&witness.id]).unwrap();
         }
         assert_conflict_oracle(&target, &own, &witness, true);
         drain_authority(&target);
@@ -768,7 +768,7 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
                 // Prepared-envelope revalidation changes evidence and invokes
                 // its non-verifying hook in the same writer transaction.
                 connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-hf26931e7ebc2 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
+                    /* sqlite-large-value: allow-for-now lv-h97d6b9d91013 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&grant.id],
                 ).unwrap();
                 authority::refresh_envelope(&connection,&grant.origin,sequence,&hash).unwrap();
                 assert!(!connection.query_row(
@@ -1288,7 +1288,7 @@ fn ordinary_dirty_subject_is_not_starved_by_past_covering_addition_backlog() {
     ).unwrap();
     assert!(queued > 4, "fixture needs a sustained addition backlog");
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h2483f627e2e6 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
+        /* sqlite-large-value: allow-for-now lv-hf8e12e9e1c52 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&grant.id],
     ).unwrap();
     assert!(authority::subject_ready(&connection, &grant.subject).is_err());
     authority::take_authentication_claims();

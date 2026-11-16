@@ -778,6 +778,28 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 }
 
 #[test]
+fn assistant_revoke_rejection_keeps_heading_and_reason_on_separate_lines() {
+    let code = fractal_client::ErrorCode::AssistantGrantAuthorityNotReady;
+    let api = fractal_client::ClientError::Api(
+        code.clone(), "grant authority is still recovering".into(),
+        Box::new(fractal_client::ErrorEnvelope {
+            api_version: "st3.client.v0".into(), error_version: "st3.client.error.v0".into(),
+            request_id: "request/revoke".into(), code,
+            message: "grant authority is still recovering".into(), retryable: true,
+            retry_after_ms: None, details: Default::default(),
+        }),
+    );
+    let error = anyhow::Error::new(api).context("Couldn't revoke this grant.");
+    for mode in [ClientMessage::Human, ClientMessage::Stable] {
+        let rendered = render_client_error(&error, mode);
+        assert!(rendered.starts_with("Couldn't revoke this grant.\n"), "{rendered}");
+        assert!(rendered.lines().nth(1).unwrap().contains("grant authority is still recovering"), "{rendered}");
+        assert!(rendered.ends_with("(assistant-grant-authority-not-ready)"), "{rendered}");
+    }
+    assert!(error.downcast_ref::<fractal_client::ClientError>().is_some());
+}
+
+#[test]
 fn diagnostic_prefix_preserves_gate_and_native_driver_contracts() {
     assert_eq!(ClientMessage::Human.product_name(), "Fractal");
     assert_eq!(ClientMessage::Stable.product_name(), "st");
@@ -899,6 +921,41 @@ async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
         assert_eq!(plain_error(&error),
             "st hit a problem: the blob store failed (internal)");
     }
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn assistant_revoke_command_preserves_retryable_server_rejection_and_heading() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("revoke.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().route(
+        "/v1/client/assistant/grants/111111111111111111111111/revoke",
+        axum::routing::post(|| async {
+            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+                "api_version":"st3.client.v0","error_version":"st3.client.error.v0",
+                "request_id":"request/revoke","code":"assistant-grant-authority-not-ready",
+                "message":"grant authority is still recovering","retryable":true,"details":{}
+            })))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let config = Config { person:Some("person/operator".into()), state_dir:directory.path().into(),
+        ..Config::default() };
+    let error = run_devices(Endpoint::Unix(socket), &config, DevicesArgs {
+        person:Some("person/operator".into()), all:false, cursor:None, limit:50,
+        command:Some(DevicesCommand::Grant { command:AssistantGrantCommand::Revoke {
+            grant:"111111111111111111111111".into(),
+        }}),
+    }, false).await.unwrap_err();
+    assert!(matches!(error.downcast_ref::<fractal_client::ClientError>(),
+        Some(fractal_client::ClientError::Api(fractal_client::ErrorCode::AssistantGrantAuthorityNotReady, _, envelope))
+            if envelope.retryable));
+    let rendered = cli_error_message(&error, false);
+    assert!(rendered.starts_with("Couldn't revoke this grant.\n"), "{rendered}");
+    assert!(rendered.lines().nth(1).unwrap().contains("grant authority is still recovering"), "{rendered}");
     server.abort();
     let _ = server.await;
 }
