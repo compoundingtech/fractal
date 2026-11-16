@@ -61,3 +61,22 @@ test('explicit Mark unread preserves natural reads and supersedes observed IDs o
   assert.deepEqual(ports.reads, [], 'the unread intent does not alter natural history');
   assert.deepEqual(edits, [{ kind: 'mark', anchor_message: 'message/visible', observed_marks: ['opaque/from-summary'] }]);
 });
+
+test('a failed natural read does not reserve a clear that was never sent', async () => {
+  const { ports } = mount();
+  const edits = [];
+  let failed = false;
+  ports.options.canEdit = true;
+  ports.options.summary.unread_reminder = { marks: [{ mark_id: 'opaque/captured', anchor_message_id: 'message/visible' }], anchor_message_id: 'message/visible' };
+  ports.options.api = { state: 'ready', actions: {
+    edit: async edit => { edits.push(edit); return { how: 'sent' }; },
+  } };
+  ports.options.read = async () => {
+    if (!failed) { failed = true; return { how: 'failed', error: 'Read refused' }; }
+    return { how: 'sent' };
+  };
+  ports.focus(); await ports.flush();
+  assert.deepEqual(edits, []);
+  ports.scroll(); await ports.flush();
+  assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/captured'] }]);
+});

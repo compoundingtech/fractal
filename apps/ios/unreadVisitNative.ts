@@ -27,11 +27,18 @@ export function useUnreadVisit(options: {
     controller.send({ kind: 'visibility', value: navigation.isFocused() });
   };
   const perform = async (effects: readonly VisitEffect[], capturedLease: object): Promise<UnreadActionResult> => {
+    const release = (unsent: readonly VisitEffect[]) => {
+      for (const effect of unsent) controller.send(effect.kind === 'read'
+        ? { kind: 'read-failed', messageIds: effect.messageIds }
+        : { kind: 'edit-failed', observed_marks: effect.edit.observed_marks });
+    };
     let result: UnreadActionResult = { how: 'sent' };
-    for (const effect of effects) {
+    for (const [index, effect] of effects.entries()) {
       // Re-check the live grant, app and visit after every asynchronous boundary.
-      if (lease.current !== capturedLease || !navigation.isFocused() || AppState.currentState !== 'active')
+      if (lease.current !== capturedLease || !navigation.isFocused() || AppState.currentState !== 'active') {
+        release(effects.slice(index));
         return { how: 'failed', error: 'Open this thread in the foreground first.' };
+      }
       const grants = currentGrants();
       try {
         result = effect.kind === 'read' && grants.canRead
@@ -40,13 +47,12 @@ export function useUnreadVisit(options: {
       } catch (error) {
         result = { how: 'failed', error: error instanceof Error ? error.message : String(error) };
       }
-      if (result.how === 'failed') {
-        controller.send(effect.kind === 'read'
-          ? { kind: 'read-failed', messageIds: effect.messageIds }
-          : { kind: 'edit-failed', observed_marks: effect.edit.observed_marks });
+      // Preserve only the unknown-outcome effect's reservation. Effects that were
+      // never sent must remain eligible when the person views their anchors again.
+      if (result.how !== 'sent') {
+        release(effects.slice(index + (result.how === 'unconfirmed' ? 1 : 0)));
+        return result;
       }
-      // An unknown outcome is retained by the adapter, never retried as a fresh intent.
-      if (result.how !== 'sent') return result;
       controller.send({ kind: 'edit-finished' });
     }
     return result;
