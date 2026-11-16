@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Define selector priority, aging and no preemption, and the CPU ledger WAIT reason; definitions only, with no implementation or enforcement.",
+  "replay": {
+    "status": "none",
+    "detail": "Documentation only; no claim, projection or replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Definitions only; no selector or ledger storage or database schema is implemented."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Documentation only; no scheduling or admission behavior changes. FIFO still decides the seat queue."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Documentation only; no CLI, API, protocol or harness behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Documentation only; no service interruption or restart is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Documentation only; no manual upgrade action. Active admission needs separate approval."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Documentation only; no state migration or recovery behavior changes."
+  }
+}

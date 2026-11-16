@@ -41,6 +41,7 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", self.path("home/.config"))
             .env("XDG_STATE_HOME", self.path("home/.local/state"))
             .env("XDG_RUNTIME_DIR", self.path("run"))
+            .env("SYSTEMD_UNIT_PATH", self.path("home/.config/systemd/user"))
             .env("PATH", self.path("bin"))
             .current_dir(self.root.path())
             .stdin(Stdio::null());
@@ -150,18 +151,34 @@ fn conflicting_services(fixture: &Fixture) {
     for name in ["st3.service", "fractal.service"] {
         fs::write(units.join(name), name).unwrap();
     }
+    // Only the legacy unit is loaded. The new unit's local file must still cause a
+    // conflict without asking systemd to resolve (and load) its absent name.
     let manager = fixture.path("bin/systemctl");
     fs::write(&manager, r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/manager.log"
-if [ "$2" != show ]; then
+case "$2" in
+list-units)
+    printf '%s\n' '[{"unit":"st3.service","load":"loaded","active":"inactive","sub":"dead"}]'
+    ;;
+show)
+    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup ]; then
+        echo 'unexpected property request' >&2
+        exit 9
+    fi
+    shift 4
+    for name in "$@"; do
+        if [ "$name" != st3.service ]; then
+            echo 'must not query an unloaded service' >&2
+            exit 9
+        fi
+        printf 'Id=%s\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n\n' "$name"
+    done
+    ;;
+*)
     echo 'unexpected service mutation' >&2
     exit 9
-fi
-if [ -f "$HOME/.config/systemd/user/$3" ]; then
-    printf 'LoadState=loaded\nActiveState=inactive\nSubState=dead\n'
-else
-    printf 'LoadState=not-found\nActiveState=inactive\nSubState=dead\n'
-fi
+    ;;
+esac
 "#).unwrap();
     fs::set_permissions(manager, fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -205,7 +222,11 @@ fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() 
     assert_eq!(fs::read_link(binaries.join("st")).unwrap(), Path::new("st3"));
     assert!(!work.exists());
     let calls = fs::read_to_string(fixture.path("home/manager.log")).unwrap();
-    assert!(calls.lines().all(|line| line.starts_with("--user show ")), "{calls}");
+    assert!(calls.lines().any(|line| line.starts_with("--user list-units ")), "{calls}");
+    assert!(calls.lines().all(|line| {
+        line.starts_with("--user list-units ")
+            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup st3.service"
+    }), "{calls}");
 }
 
 #[cfg(target_os = "linux")]
@@ -254,7 +275,11 @@ fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
     let output = fixture.cli().args(["uninstall", "--dry-run", "--no-service"]).output().unwrap();
     success(&output);
     let calls = fs::read_to_string(fixture.path("home/manager.log")).unwrap();
-    assert!(calls.lines().all(|line| line.starts_with("--user show ")), "{calls}");
+    assert!(calls.lines().any(|line| line.starts_with("--user list-units ")), "{calls}");
+    assert!(calls.lines().all(|line| {
+        line.starts_with("--user list-units ")
+            || line == "--user show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup st3.service"
+    }), "{calls}");
 }
 
 #[cfg(target_os = "linux")]
@@ -1057,14 +1082,31 @@ fn removing_services_skips_absent_replication_but_preserves_installed_unit_error
         fixture.path("bin/systemctl"),
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/manager.log"
-if [ "$2" = show ]; then
-    if [ -f "$HOME/.config/systemd/user/$3" ] || { [ "$3" = st3-replication.service ] && [ -f "$HOME/loaded-replication" ]; }; then
-        printf 'LoadState=loaded\nActiveState=active\nSubState=running\n'
-        exit 0
+case "$2" in
+list-units)
+    if [ -f "$HOME/loaded-replication" ]; then
+        printf '%s\n' '[{"unit":"st3-replication.service","load":"loaded","active":"active","sub":"running"}]'
+    else
+        printf '%s\n' '[]'
     fi
-    printf 'LoadState=not-found\nActiveState=inactive\nSubState=dead\n'
-    exit 4
-fi
+    exit 0
+    ;;
+show)
+    if [ "$3" != --no-pager ] || [ "$4" != --property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup ]; then
+        echo 'unexpected property request' >&2
+        exit 9
+    fi
+    shift 4
+    for name in "$@"; do
+        if [ "$name" != st3-replication.service ] || [ ! -f "$HOME/loaded-replication" ]; then
+            echo 'must not query an unloaded service' >&2
+            exit 9
+        fi
+        printf 'Id=%s\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=0\nControlGroup=\n\n' "$name"
+    done
+    exit 0
+    ;;
+esac
 case "$*" in
     *st3-replication.service*) echo 'replication unit denied' >&2; exit 7;;
     *st3.service*) echo 'Unit not loaded' >&2; exit 5;;
@@ -1085,20 +1127,20 @@ esac
     success(&output);
     assert!(output.stderr.is_empty());
     let log = fixture.path("home/manager.log");
-    assert!(
-        fs::read_to_string(&log)
-            .unwrap()
-            .ends_with("--user daemon-reload\n")
-    );
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(calls.ends_with("--user daemon-reload\n"), "{calls}");
+    assert!(!calls.lines().any(|line| line.starts_with("--user show ")), "{calls}");
     fs::write(&log, "").unwrap();
     let unit = fixture.path("home/.config/systemd/user/st3-replication.service");
     fs::create_dir_all(unit.parent().unwrap()).unwrap();
     fs::write(&unit, "installed replication unit").unwrap();
+    // A local unit file is installed even when absent from the loaded snapshot.
     for file_present in [true, false] {
         if !file_present {
             fs::remove_file(&unit).unwrap();
             fs::write(fixture.path("home/loaded-replication"), "loaded service").unwrap();
         }
+        fs::write(&log, "").unwrap();
         let output = fixture
             .cli()
             .args(["service", "uninstall"])
@@ -1107,7 +1149,14 @@ esac
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("replication unit denied"));
         assert_eq!(unit.exists(), file_present);
-        assert!(!fs::read_to_string(&log).unwrap().contains("daemon-reload"));
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(!calls.contains("daemon-reload"), "{calls}");
+        assert!(calls.contains("--user disable --now st3-replication.service\n"), "{calls}");
+        assert_eq!(
+            calls.lines().any(|line| line.starts_with("--user show ")),
+            !file_present,
+            "{calls}"
+        );
     }
 }
 
@@ -1498,6 +1547,7 @@ async fn onboarding_api(
         notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0_u64).0,
         node: "studio".into(),
+        api_socket: state_dir.join("api.sock"),
         state_dir: state_dir.clone(),
         pty_root: state_dir.join("pty"),
         pty_binary: "pty".into(),

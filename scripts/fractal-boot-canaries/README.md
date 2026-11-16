@@ -29,6 +29,10 @@ inherited `PATH` entries that neither contain an `st2` executable nor name an `s
 Provide Bash, Python, `env`, Git, curl and `pty` on the inherited path, plus Node for pi/omp.
 Login shells and stand-in interpreters use discovered absolute executables; conventional
 system bin directories are not required, so these fixtures also run in Nix sandboxes.
+Each private daemon also gets `AGENT_RUNTIME_PROFILE` (a `runtime-profile.json` in its root whose
+`generalist` persona names that private bin directory as `harnessBin`) and `AGENT_PERSONA=generalist`,
+so managed launch starts the `omp`, `claude` or `codex` in that directory: the stand-in, or the
+raw OMP the `when-idle` runner links there.
 
 The OMP `when-idle` regression uses a separate runner:
 

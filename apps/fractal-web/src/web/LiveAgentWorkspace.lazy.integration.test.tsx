@@ -67,7 +67,7 @@ vi.mock('../data/react.tsx', () => ({
   useNow: () => 0,
   useNowSnapshot: () => 0,
   useGatewaySync: () => gatewayObservation,
-  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, missions: waitingFeed, attention: waitingFeed }),
+  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, terminal: () => waitingFeed, agents: waitingFeed, missions: waitingFeed, attention: waitingFeed, usage: { _tag: 'undeclared' } }),
   useFeedInterest: () => {},
 }))
 
@@ -245,12 +245,12 @@ describe('Alerts tab import boundary', () => {
 
 
 describe('gateway connection banner', () => {
-  it('shows nothing while live and keeps connection wording out of the footer', async () => {
+  it('shows nothing while live and keeps connection wording out of the sidebar', async () => {
     await renderShell()
     expect(container.querySelector('[data-connection-state]')).toBeNull()
-    const footer = container.querySelector('footer')
-    expect(footer?.textContent).not.toContain('Connected')
-    expect(footer?.textContent).not.toContain('alpha.example')
+    const sidebar = container.querySelector('[aria-label="Agents"]')
+    expect(sidebar?.textContent).not.toContain('Connected')
+    expect(sidebar?.textContent).not.toContain('alpha.example')
   })
 
   it('places one band under the thread header with the countdown and one reconnect action', async () => {
@@ -267,7 +267,7 @@ describe('gateway connection banner', () => {
     expect(band?.textContent).toContain('Next try in 3s · attempt 2')
     expect(band?.textContent).not.toContain('Reconnecting in')
     expect(band?.textContent).not.toContain('Private diagnostic')
-    expect(container.querySelector('footer')?.querySelector('[data-connection-state]')).toBeNull()
+    expect(container.querySelector('[aria-label="Agents"] [data-connection-state]')).toBeNull()
     const buttons = band?.querySelectorAll('button') ?? []
     expect(buttons).toHaveLength(1)
     await act(async () => (buttons[0] as HTMLButtonElement | undefined)?.click())
@@ -297,14 +297,14 @@ describe('terminal import intent', () => {
     expect(terminalPrefetch).not.toHaveBeenCalled()
     await act(async () => resolveTerminal())
     expect(prepareTerminal).toHaveBeenCalledTimes(1)
-    const toggle = container.querySelector('[aria-label="Toggle terminal drawer"]')!
+    const toggle = container.querySelector('[aria-label="Show terminal"]')!
     await act(async () => toggle.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })))
     expect(terminalPrefetch).toHaveBeenCalledWith('terminal/example')
     expect(terminalRequested).toHaveBeenCalledTimes(1)
     await act(async () => toggle.dispatchEvent(new FocusEvent('focusin', { bubbles: true })))
     expect(terminalPrefetch).toHaveBeenCalledTimes(2)
     await act(async () => (toggle as HTMLButtonElement).click())
-    // Drawer demand reuses the idle request rather than importing the terminal chunk again.
+    // Showing the terminal reuses the idle request rather than importing the terminal chunk again.
     expect(terminalRequested).toHaveBeenCalledTimes(1)
   })
   it('renders a loaded terminal in the reopen commit without a lazy fallback', async () => {

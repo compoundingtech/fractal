@@ -195,7 +195,7 @@ pub(super) fn prompt_model<'w>(world: &'w World, item: &'w Attention) -> Option<
 }
 
 /// One option row: the mark, its number and its words, wrapped under themselves.
-fn option_lines(marked: bool, keys: bool, number: usize, label: &str, style: Style, width: usize) -> Vec<Line<'static>> {
+pub(super) fn option_lines(marked: bool, keys: bool, number: usize, label: &str, style: Style, width: usize) -> Vec<Line<'static>> {
     let lead = if marked { "❯ " } else { "  " };
     let style = if marked {
         style.add_modifier(Modifier::BOLD).fg(theme::ACCENT)
@@ -590,7 +590,7 @@ impl Ui {
             .filter(|item| {
                 item.is_alert()
                     && item.is_in(agent)
-                    && !self.snoozed.contains(&item.id)
+                    && !item.snoozed(self.world.at)
                     && !self.closed.contains(&item.id)
             })
             .collect()
@@ -1480,6 +1480,8 @@ mod tests {
         Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: "builder is waiting for permission".into(),
@@ -2378,6 +2380,8 @@ mod tests {
         Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
+            episode: None,
             id: "attention/release".into(),
             tier: Tier::Stopped,
             title: "How far does the release go?".into(),

@@ -1,3 +1,113 @@
+struct RetryClock;
+
+impl Drop for RetryClock {
+    fn drop(&mut self) {
+        smallclaims::store::set_thread_clock(None);
+    }
+}
+
+fn retry_clock_at(store: &Store, at: u128) {
+    smallclaims::store::set_thread_clock(Some(at));
+    store.set_write_clock_at(at).unwrap();
+}
+
+fn retry_clock_run(store: &Store, key: &str) -> MissionRunView {
+    publish_mission(
+        store,
+        r#"version 2
+mission "retry-clock" state="ready" {
+  concurrent-runs
+  goal "Retry with an activation-based budget."
+  step "work" { agentless }
+  step "other" { agentless }
+}
+"#,
+        "retry-clock-mission",
+    );
+    store
+        .create_mission_run(&MissionRunRequest {
+            mission: "retry-clock".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        })
+        .unwrap()
+}
+
+#[test]
+fn first_attempt_anchor_is_activation_not_creation_and_survives_retries() {
+    let _clock = RetryClock;
+    let store = Store::open_memory("node").unwrap();
+    let created = 1_800_000_000_000;
+    retry_clock_at(&store, created);
+    let run = retry_clock_run(&store, "anchor-run");
+    let subject = &run.steps[0].subject;
+    assert_eq!(store.first_step_attempt_started_at(subject).unwrap(), None);
+    assert_eq!(store.first_step_attempt_started_at("missing").unwrap(), None);
+
+    let activated = created + 600_000;
+    retry_clock_at(&store, activated);
+    assert!(store.set_step_state(subject, "ready", None).unwrap());
+    retry_clock_at(&store, activated + 100);
+    assert!(store.set_step_state(subject, "working", None).unwrap());
+    assert_eq!(store.first_step_attempt_started_at(subject).unwrap(), Some(activated));
+    assert!(store.set_step_state(subject, "failed", None).unwrap());
+    assert!(store.retry_step(subject, "retry", 500).unwrap());
+    assert_eq!(store.first_step_attempt_started_at(subject).unwrap(), Some(activated));
+    retry_clock_at(&store, activated + 600);
+    assert!(store.set_step_state(subject, "ready", None).unwrap());
+    assert!(store.set_step_state(subject, "working", None).unwrap());
+    assert!(store.set_step_state(subject, "failed", None).unwrap());
+    assert!(store.retry_step(subject, "retry again", 1_000).unwrap());
+    assert_eq!(store.first_step_attempt_started_at(subject).unwrap(), Some(activated));
+
+    // Agentless activation can go straight to working without a ready claim.
+    let other = &run.steps[1].subject;
+    assert!(store.set_step_state(other, "working", None).unwrap());
+    assert_eq!(store.first_step_attempt_started_at(other).unwrap(), Some(activated + 600));
+}
+
+#[test]
+fn retry_deadline_query_selects_future_pending_local_work() {
+    let _clock = RetryClock;
+    let store = Store::open_memory("node").unwrap();
+    let now = 1_800_000_000_000;
+    retry_clock_at(&store, now);
+    let run = retry_clock_run(&store, "wake-run");
+    let first = &run.steps[0].subject;
+    let second = &run.steps[1].subject;
+    assert_eq!(store.next_step_retry_deadline("node").unwrap(), None);
+    for (subject, delay) in [(first, 1_000), (second, 2_000)] {
+        assert!(store.set_step_state(subject, "working", None).unwrap());
+        assert!(store.set_step_state(subject, "failed", None).unwrap());
+        assert!(store.retry_step(subject, "retry", delay).unwrap());
+    }
+    let index = store.index().unwrap();
+    assert_eq!(store.next_step_retry_deadline("node").unwrap(), Some(now + 1_000));
+    assert_eq!(store.next_step_retry_deadline("another-node").unwrap(), None);
+    assert_eq!(store.index().unwrap(), index, "deadline reads do not write");
+
+    // An elapsed deadline must not repeatedly re-arm an immediate timer.
+    retry_clock_at(&store, now + 1_000);
+    assert_eq!(store.next_step_retry_deadline("node").unwrap(), Some(now + 2_000));
+    assert!(store.set_step_state(second, "ready", None).unwrap());
+    assert_eq!(store.next_step_retry_deadline("node").unwrap(), None);
+    assert!(store.set_step_state(second, "failed", None).unwrap());
+    assert!(store.retry_step(second, "retry", 5_000).unwrap());
+    assert_eq!(store.next_step_retry_deadline("node").unwrap(), Some(now + 6_000));
+    store
+        .set_mission_run_state(&run.id, "running", "cleanup-failure", None)
+        .unwrap();
+    assert_eq!(store.next_step_retry_deadline("node").unwrap(), None);
+    store
+        .set_mission_run_state(&run.id, "failed", "terminal", None)
+        .unwrap();
+    assert_eq!(store.next_step_retry_deadline("node").unwrap(), None);
+}
+
 
 
 

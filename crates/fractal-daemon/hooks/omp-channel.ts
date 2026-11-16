@@ -768,9 +768,14 @@ export default function (pi: ExtensionAPI) {
             state.restoringAsk.ready = true;
             retryPendingAsk();
           }
+          if (!state.restoringAsk) {
+            // Hello validated the protocol and ready bound the native session. The handoff
+            // handler can now choose send versus steer using ctx.isIdle(), even if this
+            // provider has worked continuously since launch. Restored asks retain their fence.
+            send({ type: "delivery_ready" });
+          }
           // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-          // Every fresh channel needs the provider's idle proof, including reconnects
-          // during an idle session where no further turn boundary will arrive.
+          // Continue observing actual idle independently of handoff readiness.
           watchSettle(ctx);
           // The fence proves only the first session restored by this cold launch. A later explicit
           // in-process session switch becomes the current binding and must not inherit the old ID.
@@ -989,24 +994,42 @@ export default function (pi: ExtensionAPI) {
     const usage = message.usage && typeof message.usage === "object"
       ? message.usage as Record<string, unknown>
       : undefined;
-    // Per-response spend: the provider's disjoint token buckets, its model, and the cost the
-    // harness itself computed. Nothing else about the request leaves the harness.
+    // Only observed response metadata and numeric usage leave the harness, never raw requests.
     const cost = usage?.cost && typeof usage.cost === "object"
       ? usage.cost as Record<string, unknown>
       : undefined;
+    const cttl = usage?.cttl && typeof usage.cttl === "object"
+      ? usage.cttl as Record<string, unknown>
+      : undefined;
     return { message: {
       id: boundedTimelineString(message.id, 256),
+      responseId: boundedTimelineString(message.responseId, 256),
       role: boundedTimelineString(message.role, 32),
       content,
       model: boundedTimelineString(message.model, 128),
       provider: boundedTimelineString(message.provider, 64),
+      api: boundedTimelineString(message.api, 128),
+      stopReason: boundedTimelineString(message.stopReason, 64),
+      timestamp: finiteOrNull(message.timestamp),
+      completedAt: finiteOrNull(message.completedAt),
+      duration: finiteOrNull(message.duration),
+      ttft: finiteOrNull(message.ttft),
       usage: usage ? {
         input: finiteOrNull(usage.input ?? usage.inputTokens),
         output: finiteOrNull(usage.output ?? usage.outputTokens),
         cacheRead: finiteOrNull(usage.cacheRead),
         cacheWrite: finiteOrNull(usage.cacheWrite),
         totalTokens: finiteOrNull(usage.totalTokens),
-        cost: cost ? finiteOrNull(cost.total) : null,
+        reasoningTokens: finiteOrNull(usage.reasoningTokens),
+        cttl: cttl ? { ephemeral1h: finiteOrNull(cttl.ephemeral1h) } : undefined,
+        cost: cost ? {
+          input: finiteOrNull(cost.input),
+          output: finiteOrNull(cost.output),
+          cacheRead: finiteOrNull(cost.cacheRead),
+          cacheWrite: finiteOrNull(cost.cacheWrite),
+          total: finiteOrNull(cost.total),
+        } : finiteOrNull(usage.cost),
+        premiumRequests: finiteOrNull(usage.premiumRequests),
       } : undefined,
     } };
   };

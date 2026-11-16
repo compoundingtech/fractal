@@ -179,7 +179,6 @@ impl Store {
                 .map_err(|error| FractalError::new(error.code, error.message))?;
         }
         let actor = normalize_actor(&request.actor, "agent");
-        let step = attention_closing_step(&self.readers.get(), &actor, request, closing)?;
         let mut fields = BTreeMap::from([
             ("reviewer".into(), Value::String(reviewer)),
             ("title".into(), Value::String(request.title.clone())),
@@ -193,14 +192,13 @@ impl Store {
         if let Some(until) = until {
             fields.insert("until".into(), Value::String(until.into()));
         }
-        if let Some((step, attempt)) = step {
-            fields.insert("step".into(), Value::String(step));
-            fields.insert("step_attempt".into(), Value::from(attempt));
+        if let Some(step) = &closing.step {
+            fields.insert("step".into(), Value::String(step.clone()));
         }
         if let Some(closed_by) = &closing.closed_by {
             fields.insert("closed_by".into(), Value::String(closed_by.clone()));
         }
-        self.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.to_owned(),
             kind: "attention.requested".into(),
             actor: Some(actor),
@@ -208,7 +206,45 @@ impl Store {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(request.idempotency_key.clone()),
-        })?;
+        };
+        let subjects = closing.step.iter().cloned().collect::<Vec<_>>();
+        let prepare = |connection: &Connection, input: &ClaimInput| {
+            let actor = input.actor.as_deref().expect("attention requests have an actor");
+            let mut fields = input.fields.clone();
+            // Base requests hashed the selected step and attempt. Reuse that binding for
+            // a receipt retry, but continue hashing every caller-supplied field afresh.
+            if let Some((operation, _)) = identities::claim_operation(input)?
+                && let Some((_, canonical_claim, _)) = operation_tx(connection, &operation).map_err(internal)?
+                && let Some(claim) = claim_by_id_tx(connection, &canonical_claim).map_err(internal)?
+                && let Some(previous) = claim.body.get("fields")
+                && let Some(step) = previous.get("step").and_then(Value::as_str)
+                && closing.until.is_none() && closing.closed_by.is_none()
+                && closing.step.as_deref().is_none_or(|requested| requested == step)
+            {
+                fields.insert("step".into(), Value::String(step.into()));
+                if let Some(attempt) = previous.get("step_attempt") {
+                    fields.insert("step_attempt".into(), attempt.clone());
+                }
+                return Ok(fields);
+            }
+            let step = attention_closing_step(connection, actor, request, closing)?;
+            if let Some((step, attempt)) = step {
+                fields.insert("step".into(), Value::String(step));
+                fields.insert("step_attempt".into(), Value::from(attempt));
+            }
+            Ok(fields)
+        };
+        append_claim_with_commit_context(
+            &self.graph, &input, None, None, None, None,
+            ClaimCommitContext {
+                run_projection_subjects: &subjects,
+                all_run_projections: closing.step.is_none()
+                    && closing.until.is_none() && closing.closed_by.is_none(),
+                prepare_request_fields: Some(&prepare),
+                ..Default::default()
+            },
+        )?;
+        self.run_projection_finished();
         self.attention_request(subject)
             .map_err(internal)?
             .ok_or_else(|| FractalError::new("internal", "the attention request was not stored"))
@@ -415,7 +451,7 @@ impl Store {
                     deadline_unix_ms: None,
                     default_answer: None,
                     conversation,
-                    ..attention_item_from_review(review)
+                    ..attention_item_from_review(review, step)
                 });
             }
         }
@@ -516,10 +552,13 @@ impl Store {
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
         let mut items = self.mission_run_attention_items(person)?;
+        items.extend(self.host_hold_attention_items(person)?);
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
+        items.extend(self.model_drift_attention_items(person, as_of)?);
         items.extend(self.harness_prompt_attention_items(person, as_of)?);
         items.extend(self.custom_attention_items(person)?);
+        items.extend(self.host_hold_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
             self.broken_gate_items(person, as_of)?
@@ -558,7 +597,7 @@ impl Store {
                         sources.insert((run, "mission-run.created"));
                     }
                 }
-                "human-gate" | "revision-approval" => {
+                "human-gate" | "revision-approval" | "effect-unresolved" => {
                     if let Some(run) = run_subject(item) {
                         sources.insert((run, "mission-run.created"));
                     }
@@ -571,7 +610,7 @@ impl Store {
                         sources.insert((run, "mission-run.created"));
                     }
                 }
-                "harness-login" | "harness-prompt" | "fault" => {
+                "harness-login" | "harness-prompt" | "fault" | model_drift::MODEL_DRIFT_ATTENTION_KIND => {
                     actors.insert(item.subject.clone());
                 }
                 kind if kind.starts_with("custom.") => {
@@ -630,15 +669,16 @@ impl Store {
             let run_origin = || run_subject(item)
                 .and_then(|run| source(&run, "mission-run.created").map(|(origin, _)| origin.clone()));
             let origin = match item.kind.as_str() {
+                "host-hold" => Some(self.origin.to_owned()),
                 "person-step" | "agent-request" => {
                     if let Some(ask) = source(&item.subject, "work.person-asked") {
                         owner(Some(ask))
                     } else { run_origin() }
                 }
-                "human-gate" | "revision-approval" => run_origin(),
+                "human-gate" | "revision-approval" | "effect-unresolved" => run_origin(),
                 "launch-approval" => source(&item.subject, "planning-session.started")
                     .map(|(origin, _)| origin.clone()),
-                "harness-login" | "harness-prompt" => member_origin(&item.subject),
+                "harness-login" | "harness-prompt" | model_drift::MODEL_DRIFT_ATTENTION_KIND => member_origin(&item.subject),
                 "fault" => {
                     if item.mission_run.is_some() { run_origin() }
                     else { member_origin(&item.subject) }
@@ -1241,7 +1281,7 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
     Ok(pull_request_state_tx(connection, target)?.map(|(state, since)| (state, Some(since))))
 }
 
-fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
+fn attention_item_from_review(review: HumanReviewView, step: Option<String>) -> AttentionItemView {
     AttentionItemView {
         deadline_unix_ms: None,
         default_answer: None,
@@ -1263,7 +1303,7 @@ fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
         detail: review.question,
         mission: Some(review.mission),
         mission_run: Some(review.mission_run),
-        step: review.step,
+        step,
         targets: review.review_targets,
         requested_at_unix_ms: review.requested_at_unix_ms,
         actions: vec![
@@ -1715,7 +1755,7 @@ mod population_attention_ownership_tests {
         let store = Store::open_memory("replica").unwrap();
         place(&store, "agent/source", "seat-host");
         place(&store, "agent/presentation-only", "presentation-host");
-        for kind in ["harness-login", "harness-prompt", "fault"] {
+        for kind in ["harness-login", "harness-prompt", "fault", "model-drift"] {
             assert_eq!(
                 store.attention_source_origin(&item(kind, "agent/source", None)).unwrap(),
                 "seat-host",
@@ -1729,7 +1769,7 @@ mod population_attention_ownership_tests {
             let store = Store::open_memory(reader).unwrap();
             source_claim(&store, "source-host", "mission-run/example", "mission-run.created", "person/reviewer");
             source_claim(&store, "later-writer", "mission-run/example", "mission-run.state", "person/reviewer");
-            for kind in ["person-step", "human-gate", "revision-approval", "fault"] {
+            for kind in ["person-step", "human-gate", "revision-approval", "effect-unresolved", "fault"] {
                 assert_eq!(
                     store.attention_source_origin(&item(kind, "step-run/source", Some("mission-run/example"))).unwrap(),
                     "source-host",

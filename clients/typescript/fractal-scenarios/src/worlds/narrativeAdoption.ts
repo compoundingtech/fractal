@@ -1,3 +1,4 @@
+import { optionalSource } from '@fractal/client/markdown'
 import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { TimelineEntry } from '@fractal/client'
 import ciRows from '../../recordings/ci-failing-fix.normalized.json' with { type: 'json' }
@@ -78,7 +79,7 @@ const offlineConversation = (base: Slice<'conversation'>, captured: Slice<'conve
   const recorded = captured.state.threads.find((thread) => thread.agent === original.agent)!
   const boundary = recorded.items.find((item) => item.type === 'content' &&
     typeof item.body === 'object' && item.body !== null && 'text' in item.body &&
-    item.body.text === 'Readiness: 2 of 3 replicas')
+    optionalSource(item.body.text) === 'Readiness: 2 of 3 replicas')
   if (!boundary) throw new Error('Offline recording has no declared report splice point')
   const prefix = recorded.items.filter((item) => item.sequence < boundary.sequence)
   const shift = Math.max(0, ...prefix.map((item) => item.sequence)) + 1 - report.sequence

@@ -17,6 +17,8 @@ The terminal must already be declared on the same host. Publish with the termina
 
 This declaration records a harness configuration but never launches it. The caller runs `fractal driver claude --subject agent/example/terminal-claude -- <provider argv>` as a child of its shell with its chosen permission settings, driver environment, channel and hook registrations. The launcher owns argument merging and unmanaged fallback. Declaring a binding alone does not arrange those registrations.
 
+Person-owned terminal bindings retain native harness execution; they do not select the managed agent-seat wrapper. The driver reads the declaration through its authenticated client before selecting this path. Agent-owned bindings and agents without a binding use the managed launch contract for OMP, Claude, and Codex.
+
 The driver keeps the terminal's `st3.subject` tag. It reads the binding and matches that terminal's tag and exact PTY incarnation in the local registry. Its agent incarnation appends `:bound:<invocation UUID>` to the PTY incarnation. Mail and driver exit reports use that invocation fence, so a prior harness in the same shell cannot end the next one.
 
 Reconciliation adopts the running PTY without a start. Once the driver records an exit for the current invocation, the seat stays exited across daemon restarts while the terminal's shell remains running. A missing or replacement PTY ends the binding without a launch. Stopping a bound seat detaches its graph runtime; it does not stop the harness process or shell. The person can exit the harness from its terminal. Bound seats cannot declare checkouts, rendering, terminals or exec sidecars, rollout, fresh-context recovery or one-shot retirement and cannot be materialized inside mission runs.

@@ -261,6 +261,9 @@ export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 /** Dev/test builds without debug information or incremental state, as on the fleet runners. */
 export const buildEnv = { CARGO_PROFILE_DEV_DEBUG: '0', CARGO_PROFILE_TEST_DEBUG: '0', CARGO_INCREMENTAL: '0' }
 
+// This archive is dependency-only evidence, even on an exact key hit: its key
+// omits Rust sources. buildSnapshotPrepare discards local package fingerprints
+// and outputs after restoration; only exact-source snapshots retain them.
 export const cargoCacheStep = {
   name: 'Restore the Cargo target and registry',
   id: 'cargo-cache',
@@ -867,8 +870,8 @@ printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
-  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
-  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-',
+  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.22.2-${{ hashFiles('pnpm-lock.yaml') }}",
+  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.22.2-',
 } as const
 
 /**

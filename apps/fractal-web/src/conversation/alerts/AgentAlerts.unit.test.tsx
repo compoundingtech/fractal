@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { ClientError, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
-import { Option } from 'effect'
+import { DateTime, Option } from 'effect'
 
 // Node rendering exercises the real composition, not the CSS compiler.
 vi.mock('@stylexjs/stylex', () => ({
@@ -14,7 +14,8 @@ vi.mock('@stylexjs/stylex', () => ({
 }))
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
 
-import { AgentAlerts, promptAlerts } from './AgentAlerts.tsx'
+import { AgentAlerts } from './AgentAlerts.tsx'
+import { promptAlerts } from './alertChoices.ts'
 import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
 const seat = 'agent/example/atlas'
@@ -30,7 +31,7 @@ const alert = (id: string, answers: readonly string[], detail = 'Claude asks to 
     detail,
     priority: 'high',
     state: 'open',
-    requested_at: '2026-10-13T10:00:00Z',
+    requested_at: DateTime.makeUnsafe('2026-10-13T10:00:00Z'),
     person_id: 'person/avery',
     source_id: seat,
     conversation_id: seat,
@@ -106,10 +107,12 @@ describe('AgentAlerts', () => {
         { question: 'Which pets?', header: 'Pets', multiSelect: true, options: [{ label: 'Cat', description: '' }, { label: 'Fish', description: '' }] },
       ] }),
     ])
+    // One question at a time, in one card, answered together.
     expect(html).toContain('Color · Which color?')
-    expect(html).toContain('Which pets? (choose any)')
-    expect(html).toContain('>Fish<')
-    expect(html).toMatch(/disabled=""[^>]*>Send</)
+    expect(html).toContain('1 of 2')
+    expect(html).toContain('>Blue<')
+    expect(html).not.toContain('Which pets?')
+    expect(html).toMatch(/disabled=""[^>]*>Next</)
     expect(html).toContain('>Decline<')
   })
 
@@ -134,12 +137,13 @@ describe('AgentAlerts', () => {
     const item = alert('attention/q', ['answer', 'deny'], undefined, 'q')
     for (const tool of ['AskUserQuestion', 'request_user_input']) {
       const html = render([item], [call('q', tool, { questions: [{ question: 'Pick?', options: [{ label: 'One' }] }] }, false)], false)
-      expect(html).not.toContain('>Send<')
+      expect(html).not.toContain('>One<')
+      expect(html).toContain('>Deny<')
       expect(html).toContain('incomplete or unsupported')
     }
     expect(render([item], [call('q', 'request_user_input', { questions: [] })])).toContain('incomplete or unsupported')
     expect(render([alert('a', ['allow', 'deny'], undefined, 'c')], [call('c', 'Bash', { command: 'make' })], false)).not.toContain('>Allow<')
-    expect(renderToStaticMarkup(<AgentAlerts alerts={[item]} />)).toContain('Answer it in the agent&#x27;s terminal.')
+    expect(renderToStaticMarkup(<AgentAlerts alerts={[item]} />)).toContain('terminal')
   })
 })
 

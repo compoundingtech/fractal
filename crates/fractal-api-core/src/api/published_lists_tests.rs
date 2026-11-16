@@ -130,7 +130,7 @@ fn published_missions_match_the_direct_fold_through_work_leases_failure_and_reti
 
     // A new mission, a retired one, and a rejected write that changes nothing.
     mission(&store, "garden/delta");
-    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma").unwrap();
+    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma", None).unwrap();
     assert!(store
         .work_action(&plant, "progress", &WorkRequest {
             wait_ms: None,
@@ -287,7 +287,108 @@ fn fold_work_checked(store: &Store) -> (Arc<Publication<WorkRows>>, bool) {
             }
         }
     }
+    assert_eq!(
+        work_oracle(store, time, Some("garden/birch"), usize::MAX),
+        work_oracle(store, time, Some("agent/garden/birch"), usize::MAX),
+        "legacy and canonical actor filters preserve the same direct seat-queue order"
+    );
+    let (legacy, _) = publication.rows.actor_rows("garden/birch");
+    let (canonical, built) = publication.rows.actor_rows("agent/garden/birch");
+    assert!(!built, "a canonical actor reuses its legacy filter's order");
+    assert!(Arc::ptr_eq(&legacy, &canonical), "both spellings share one actor order");
     (publication, changed)
+}
+
+#[test]
+fn published_work_keeps_persisted_legacy_assignments_and_available_seats_visible() {
+    let _clock = Clock::at(start_time());
+    for available in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let store = Store::open(&path, "cedar").unwrap();
+        mission(&store, "garden/alpha");
+        let run = start(&store, "garden/alpha", "legacy-work-list");
+        let (subject, _) = step(&run, "plant");
+        store.set_step_state(&subject, "ready", None).unwrap();
+        // Retain an actual older member's projection spelling, rather than testing two empty
+        // actor filters against a row already canonicalized by the current writer.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        smallclaims::store::projection_digest::register(&connection).unwrap();
+        let assignee = (!available).then_some("garden/ash");
+        let candidates = if available { r#"["garden/ash"]"# } else { "[]" };
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h16928b5eb896 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to=?3 WHERE subject=?1",
+            rusqlite::params![subject, assignee, candidates],
+        ).unwrap();
+        drop(connection);
+        let (publication, _) = fold_work_checked(&store);
+        for actor in ["garden/ash", "agent/garden/ash"] {
+            let (indexes, _) = publication.rows.actor_rows(actor);
+            assert_eq!(indexes.len(), 1, "{actor}, available={available}");
+            assert_eq!(publication.rows.order[indexes[0] as usize], subject);
+            assert_eq!(
+                work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0.len(),
+                1,
+                "the persisted legacy row is visible in the direct read too"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_spelling_ready_rows_keep_queue_order_in_direct_and_published_work() {
+    for (legacy, canonical) in [
+        ("node/worker", "agent/node/worker"),
+        ("node.builder", "agent/node.builder"),
+    ] {
+    let _clock = Clock::at(start_time());
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Store::open(&path, "cedar").unwrap();
+    mission(&store, "garden/alpha");
+    let first = start(&store, "garden/alpha", "mixed-first");
+    let second = start(&store, "garden/alpha", "mixed-second");
+    let (first_subject, _) = step(&first, "plant");
+    let (second_subject, _) = step(&second, "plant");
+    for subject in [&first_subject, &second_subject] {
+        store.set_step_state(subject, "ready", None).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    smallclaims::store::projection_digest::register(&connection).unwrap();
+    for (subject, assignee, created) in [
+        (&first_subject, if legacy.contains('/') { legacy } else { canonical }, "10"),
+        (&second_subject, canonical, "20"),
+    ] {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hb7cf1dc01667 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, created_at_unix_ms=?3 WHERE subject=?1",
+            rusqlite::params![subject, assignee, created],
+        ).unwrap();
+    }
+    drop(connection);
+    store.move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
+        agent: canonical.into(),
+        run: second.id.clone(),
+        placement: "top".into(),
+        anchor: None,
+        reason: Some("reverse readiness order".into()),
+        actor: "person/operator".into(),
+        idempotency_key: "reverse-ready-order".into(),
+    }).unwrap();
+    let (publication, _) = fold_work_checked(&store);
+    for actor in [legacy, canonical] {
+        let order = store.seat_run_order(actor).unwrap();
+        let work = store.client_work_at_snapshot(Some(actor), false, publication.rows.time_unix_ms).unwrap();
+        let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
+        let selected = crate::seat_queue::select(canonical, &steps, &order);
+        assert_eq!(selected.ready, [&*second_subject, &*first_subject],
+            "both spellings honor the explicit queue order, opposite readiness order");
+        let direct = work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0;
+        let (indexes, _) = publication.rows.actor_rows(actor);
+        assert_eq!(indexes.iter().map(|&index| publication.rows.order[index as usize].as_str())
+            .collect::<Vec<_>>(), [&*second_subject, &*first_subject]);
+        assert_eq!(publication.rows.page_of(Some(&indexes), 0, usize::MAX).0, direct);
+    }
+    }
 }
 
 #[test]
@@ -1073,6 +1174,80 @@ async fn http_work_pages_come_from_publications_and_never_read_the_list_directly
     assert_eq!(store.direct_work_reads(), direct, "an ended list is never read directly");
 }
 
+#[tokio::test]
+async fn work_fresh_retry_pins_the_first_cut_while_the_index_keeps_advancing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    let list = store.published_work_list();
+    list.start();
+    fold_work_checked(store);
+    mission(store, "garden/first");
+    let fresh = ClientListQuery { fresh: true, ..work_query(None, 200) };
+    let refused = work_page(&state, fresh.clone()).await.unwrap_err();
+    assert_eq!(refused.code, WORK_LIST_NOT_FRESH);
+    let wanted = refused.details["wanted_cut"].as_u64().unwrap();
+    let (publication, _) = folded_at_once(fold_work(store, None, None));
+    assert_eq!(publication.cut, wanted);
+    // Each subsequent request sees a newer head, but the first requested cut suffices.
+    mission(store, "garden/second");
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        let query = ClientListQuery { min_cut: Some(wanted), ..fresh.clone() };
+        async move { work_page(&state, query).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    mission(store, "garden/third");
+    assert!(list.publish(publication, list.generation()).is_some());
+    waiting.await.unwrap().unwrap();
+    for name in ["garden/fourth", "garden/fifth"] {
+        mission(store, name);
+        let (Extension(snapshot), _) = client_work(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Query(ClientListQuery { min_cut: Some(wanted), ..fresh.clone() }),
+        ).await.unwrap();
+        assert_eq!(snapshot.store_index, wanted);
+        assert!(store.index().unwrap() > wanted);
+    }
+}
+
+#[tokio::test]
+async fn work_fresh_without_min_cut_still_samples_each_request() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    store.published_work_list().start();
+    fold_work_checked(store);
+    let fresh = ClientListQuery { fresh: true, ..work_query(None, 200) };
+    for name in ["garden/first", "garden/second"] {
+        mission(store, name);
+        let refused = work_page(&state, fresh.clone()).await.unwrap_err();
+        assert_eq!(refused.code, WORK_LIST_NOT_FRESH);
+        assert_eq!(refused.details["wanted_cut"], json!(store.index().unwrap()));
+    }
+}
+
+#[tokio::test]
+async fn work_min_cut_rejects_future_indexes_and_accepts_zero_and_current() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    store.published_work_list().start();
+    fold_work_checked(store);
+    let head = store.index().unwrap();
+    for fresh in [false, true] {
+        let refused = work_page(&state, ClientListQuery {
+            fresh, min_cut: Some(head + 1), ..work_query(None, 200)
+        }).await.unwrap_err();
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        for cut in [0, head] {
+            work_page(&state, ClientListQuery {
+                fresh, min_cut: Some(cut), ..work_query(None, 200)
+            }).await.unwrap();
+        }
+    }
+}
+
 #[test]
 fn an_actors_order_is_built_once_per_publication_by_its_first_read() {
     let _clock = Clock::at(start_time());
@@ -1211,6 +1386,9 @@ fn an_incremental_fold_reads_only_the_seats_it_can_reorder() {
         seat_mission(&store, &name, &seat);
         runs.insert(n, ready_run(&store, &name, &format!("seat-{n}-1")));
     }
+    // Equal join times use run identity, not creation order. Make the second run
+    // join later so moving it to the top must change the queue.
+    _clock.set(now_ms() + 1);
     let second = ready_run(&store, "garden/seat-5", "seat-5-2");
     store.published_work_list().start();
     // From nothing: every shown seat once, charged as the cold fold.
@@ -1894,6 +2072,10 @@ fn eta_shared_step_completion_republishes_other_missions_open_run() {
     let waiting = start(&store, "eta/b", "waiting");
     let (before, _) = fold(&store);
     assert!(before.rows.cards["mission/eta/b"]["run_details"][0]["eta"].is_null());
+    // The run chip pins the declaration sheet to the run's revision.
+    let card = &before.rows.cards["mission/eta/b"];
+    assert_eq!(card["run_details"][0]["revision"], card["mission_revision"]);
+    assert!(card["run_details"][0]["revision"].is_string());
     for (index, duration) in [100_u64, 300].into_iter().enumerate() {
         let run = start(&store, "eta/a", &format!("sample-{index}"));
         store
@@ -2041,7 +2223,7 @@ fn work_refresher() -> Refresher<WorkRows> {
     }
 }
 
-/// The runtimes fold has no change check: no local claim cuts its pause.
+/// Runtime commits are coalesced on the ordinary pause, without a local-commit hold.
 fn runtimes_refresher() -> Refresher<crate::store::runtime_list::RuntimeRows> {
     Refresher {
         list: |store| store.published_runtime_list(), name: "runtimes", label: "runtimes/refresh", fold: fold_runtimes,
@@ -2229,4 +2411,135 @@ async fn every_refresher_on_a_store_shares_one_look_at_each_commit() {
     // Once every holder is gone, the next one starts a scanner of its own.
     drop((holders, waiting));
     assert_eq!(store.local_commits("test", local_commits::every_local_claim(&store)).looks(), 0);
+}
+
+#[test]
+fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_flips() {
+    use crate::api::client_v0::published_runtimes::fold as runtimes;
+    use crate::store::published_list::Publication;
+    use crate::store::runtime_list::RuntimeRows;
+    fn raw(store: &Store, subject: &str, kind: &str, body: Value) -> String {
+        let claim = store.connection.batched(|tx| -> anyhow::Result<_> {
+            let claim = smallclaims::store::append_claim_record_tx(
+                tx, store.origin(), subject, kind, None, &body, &[], None)?;
+            smallclaims::store::register_operation_tx(tx, &claim)?;
+            if kind == "owned-set.revised" { crate::store::owned_sets::project_tx(tx)?; }
+            Ok(claim)
+        }).unwrap().unwrap();
+        store.committed_index.fetch_max(claim.store_index, std::sync::atomic::Ordering::Release);
+        claim.id
+    }
+    fn check(store: &Store, base: &mut Publication<RuntimeRows>) -> bool {
+        let (next, changed) = runtimes(store, Some(base)).unwrap().unwrap();
+        *store.fractal.subject_cache.lock().unwrap() = Default::default();
+        let (oracle, _) = runtimes(store, None).unwrap().unwrap();
+        assert_eq!(next.cut, oracle.cut);
+        assert_eq!(next.rows.items, oracle.rows.items);
+        assert_eq!(next.rows.digest, oracle.rows.digest);
+        assert_eq!(next.rows.time_unix_ms, oracle.rows.time_unix_ms);
+        assert_eq!(changed, next.rows.items != base.rows.items);
+        *base = next;
+        changed
+    }
+    for reverse in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("graph.db"), "cedar").unwrap();
+        publish(&store, r#"version 2
+mission "garden/runtime" state="ready" {
+  goal "Exercise runtime ownership"
+  agent "worker" { command "true" }
+  step "plant" { assigned-to "agent/${ST_MISSION_RUN}/worker" }
+}"#, "runtime-mission");
+        let run = start(&store, "garden/runtime", "runtime-1");
+        let (_, owned) = step(&run, "plant");
+        let mut declarations = crate::graph::parse_execution_intent(
+            "version 2\nagent \"worker\" { command \"true\" }", "cedar", &run.id).unwrap();
+        for desired in declarations.subjects.values_mut() {
+            desired.owner_run = Some(run.subject.clone());
+            desired.owner_generation = Some(run.generation.clone());
+        }
+        crate::store::owned_sets_tests_shared::direct(&store, &declarations, "runtime-declaration").unwrap();
+        assert_eq!(store.desired_subjects().unwrap().iter().find(|row| row.subject == owned)
+            .unwrap().owner_run.as_deref(), Some(run.subject.as_str()));
+        let subjects = if reverse {
+            vec![owned.as_str(), "agent/cedar.z", "agent/cedar.a"]
+        } else {
+            vec!["agent/cedar.a", "agent/cedar.z", owned.as_str()]
+        };
+        let mut base = runtimes(&store, None).unwrap().unwrap().0;
+        for status in ["running", "stopped", "running"] {
+            for subject in &subjects {
+                store.append_claim(&crate::model::ClaimInput {
+                    subject: (*subject).into(), kind: "runtime.observed".into(), actor: None,
+                    fields: BTreeMap::from([
+                        ("runtime_id".into(), json!(subject)),
+                        ("status".into(), json!(status)),
+                        ("terminal".into(), json!(true)),
+                    ]),
+                    evidence: vec![], expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                assert_eq!(store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap(),
+                    BTreeSet::from([(*subject).to_owned()]));
+                check(&store, &mut base);
+                let items = Arc::clone(&base.rows.items);
+                crate::test_support::note_local_claim(&store, &format!("message/unrelated-runtime-{}", base.cut));
+                assert!(store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap().is_empty());
+                assert!(!check(&store, &mut base));
+                assert!(Arc::ptr_eq(&items, &base.rows.items), "unrelated commits do not fold or copy rows");
+            }
+        }
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("test")).unwrap();
+        check(&store, &mut base);
+        assert!(!base.rows.items.iter().any(|row| row["owner_id"] == owned));
+        // Model old-peer history below today's reserved-kind write admission, just as
+        // the native publication visibility fixtures do.
+        raw(&store, "agent/cedar.a", "custom.attention.notice-created",
+            json!({"fields":{"status":"running"}}));
+        check(&store, &mut base);
+        assert!(!base.rows.items.iter().any(|row| row["owner_id"] == "agent/cedar.a"));
+    }
+    let store = Store::open_memory("cedar").unwrap();
+    raw(&store, "agent/cedar.conflict", "runtime.observed", json!({
+        "fields":{"runtime_id":"conflict","status":"running","terminal":true},
+        "_operation":{"id":"runtime-operation","request_digest":"first"}
+    }));
+    let mut base = runtimes(&store, None).unwrap().unwrap().0;
+    raw(&store, "daemon/unrelated", "daemon.started", json!({
+        "fields":{"status":"running"},
+        "_operation":{"id":"runtime-operation","request_digest":"different"}
+    }));
+    assert!(check(&store, &mut base));
+    assert_eq!(base.rows.items[0]["state"], "unreachable");
+    assert_eq!(base.rows.items[0]["terminal_access"]["read"], "unavailable");
+    assert!(base.rows.items[0]["operational"]["reasons"][0].as_str().unwrap().contains("idempotency-conflict"));
+
+    let store = Store::open_memory("amber").unwrap();
+    let intent = crate::store::owned_sets_tests_shared::bundle("true", true);
+    let mut options = crate::store::owned_sets::Options {
+        set: "garden".into(),
+        source: crate::store::owned_sets::Source { repository: "example/garden".into(),
+            r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
+        expected_set: "absent".into(), rollout: None, adopt: Default::default(),
+        allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
+    };
+    options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
+    store.apply_owned_set(&intent, &options, "runtime-owned", "person/operator").unwrap();
+    raw(&store, "agent/garden/meadow", "runtime.observed",
+        json!({"fields":{"runtime_id":"meadow","status":"stopped"}}));
+    let mut base = runtimes(&store, None).unwrap().unwrap().0;
+    assert_eq!(base.rows.items.len(), 1, "a declared stopped agent remains current");
+    let prior = crate::store::owned_sets::selected(&store.readers.get(), None).unwrap().remove(0);
+    let mut receipt = prior.receipt;
+    receipt.previous = Some(format!("{}@{}", prior.id, prior.revision));
+    receipt.source.sequence += 1;
+    receipt.members.remove("agent/garden/meadow");
+    let revision = smallclaims::hash::canonical_hash(&receipt).unwrap();
+    // A winning receipt omits a previously known member: no declaration is appended
+    // for it, but its implicit stop's desired token becomes the receipt claim.
+    let receipt_claim = raw(&store, "owned-set/garden", "owned-set.revised",
+        json!({"fields":{"revision":revision,"body":receipt}}));
+    assert!(crate::store::owned_sets::selected(&store.readers.get(), None).unwrap()[0].blockers.is_empty());
+    assert!(check(&store, &mut base));
+    assert!(base.rows.items.is_empty(), "the implicit stop moves the runtime to history");
+    assert_eq!(store.selected_desired_tokens(&["agent/garden/meadow"]).unwrap()["agent/garden/meadow"], receipt_claim);
 }

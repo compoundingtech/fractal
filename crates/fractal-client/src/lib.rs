@@ -224,6 +224,15 @@ pub enum Observation<'a> {
         status: Option<u16>,
         took: Duration,
     },
+    /// One logical mutation, including retries of a refused projection drain. The request
+    /// observations above still describe each physical attempt.
+    Mutation {
+        method: &'a str,
+        route: &'a str,
+        attempts: u32,
+        took: Duration,
+        retry_wait: Duration,
+    },
     /// A collections-stream frame: the subscription, the frame kind, its size, and for the
     /// first frame of a subscription how long after the subscribe command it arrived.
     Frame {
@@ -532,6 +541,15 @@ impl CollectionStream {
             command["subject"] = serde_json::json!(subject);
         }
         self.send(&command).await
+    }
+    /// Follow the person's read positions; frames are invalidations, so re-list `read_positions_list`.
+    pub async fn subscribe_read_positions(
+        &mut self,
+        id: &str,
+        person: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"read-positions", "person":person, "limit":limit})).await
     }
 
     pub async fn subscribe_ordered_memberships(
@@ -1269,6 +1287,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::ValidationFailed
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
+        | ErrorCode::AttentionDismissUnsupported
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -1319,7 +1338,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
+        | ErrorCode::SetManagedSubject
         | ErrorCode::MessageSelectorsNotReady
+        | ErrorCode::DatabaseBusy
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
@@ -1413,9 +1434,9 @@ impl Client {
 
     fn features(&self) -> &'static str {
         if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2"
         } else {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1"
         }
     }
 
@@ -1856,10 +1877,13 @@ impl Client {
         Ok(response)
     }
     /// The current work list's first page as of this request: the daemon waits briefly for a
-    /// publication at least as new as the request. While the list is not ready, or not yet that
-    /// fresh, and while the daemon is unreachable, it asks again within the client's daemon
-    /// wait, measured once from the first attempt across every attempt and pause. A zero wait
-    /// asks once. Only these answers are asked again; any other error returns at once.
+    /// publication at least as new as the request. The first not-fresh answer's wanted cut,
+    /// when supplied, is pinned as min_cut on every retry; later answers cannot advance it.
+    /// Older daemons that omit the cut retain unpinned retries. While the list is not ready,
+    /// or not yet that fresh, and while the daemon is unreachable, it asks again within the
+    /// client's daemon wait, measured once from the first attempt across every attempt and
+    /// pause. A zero wait asks once. Only these answers are asked again; any other error
+    /// returns at once.
     pub async fn work_list_fresh(
         &self,
         actor: Option<&str>,
@@ -1872,7 +1896,8 @@ impl Client {
         if let Some(actor) = actor {
             query.push(format!("actor={}", percent_encode(actor)));
         }
-        let path = format!("/v1/client/work?{}", query.join("&"));
+        let mut path = format!("/v1/client/work?{}", query.join("&"));
+        let mut wanted_cut = None;
         let started = tokio::time::Instant::now();
         let deadline = started + self.outage_wait;
         let mut pause = Duration::from_millis(100);
@@ -1923,6 +1948,17 @@ impl Client {
                     }
                     outcome => outcome,
                 };
+            }
+            if wanted_cut.is_none()
+                && let Err(ClientError::Api(_, _, envelope)) = &outcome
+                && let Some(reason) = envelope.details.get("reason")
+                && reason.as_str() == Some("work-list-not-fresh")
+                && let Some(cut) = envelope.details.get("wanted_cut")
+                && let Some(cut) = cut.as_u64()
+            {
+                use std::fmt::Write as _;
+                write!(&mut path, "&min_cut={cut}").expect("writing to a String cannot fail");
+                wanted_cut = Some(cut);
             }
             // An unreachable daemon is announced once, as for every other request.
             if let Err(ClientError::Unreachable(outage)) = &outcome
@@ -2199,6 +2235,24 @@ impl Client {
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
+    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {
+        self.get("/v1/client/auto-resolved").await
+    }
+    pub async fn availability_list(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Envelope<PersonAvailabilities>, ClientError> {
+        match person {
+            Some(person) => {
+                self.get(&format!(
+                    "/v1/client/availability?person={}",
+                    percent_encode(person)
+                ))
+                .await
+            }
+            None => self.get("/v1/client/availability").await,
+        }
+    }
     pub async fn custom_subjects_list(
         &self,
         kind: Option<&str>,
@@ -2327,6 +2381,31 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn source_map_get(
+        &self,
+        subject: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<SubjectSourceMap>, ClientError> {
+        let mut path = format!("/v1/client/source-maps?subject={}", percent_encode(subject));
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
+    }
+    pub async fn source_blob_get(
+        &self,
+        hash: &str,
+        subject: &str,
+        revision: &str,
+    ) -> Result<Envelope<SourceBlob>, ClientError> {
+        self.get(&format!(
+            "/v1/client/source-blobs/{}?subject={}&revision={}",
+            percent_encode(hash),
+            percent_encode(subject),
+            percent_encode(revision)
+        ))
+        .await
+    }
     pub async fn subject_definition(
         &self,
         subject: &str,
@@ -2381,6 +2460,102 @@ impl Client {
             format!("?{}", query.join("&"))
         };
         self.get(&format!("/v1/client/usage{query}")).await
+    }
+    pub async fn usage_hub_quota(
+        &self,
+    ) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {
+        self.get("/v1/client/usage/quota").await
+    }
+    pub async fn github_plugin_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/issues/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_conversation(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/conversation",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_checks(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/checks",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/files",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/comments/{comment_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/runs/{run_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
     }
     pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {
         self.get("/v1/client/clients").await
@@ -2897,6 +3072,24 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn read_positions_list(
+        &self,
+        person: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ReadPositionPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/read-positions?person={}",
+            percent_encode(person)
+        );
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
     pub async fn glasses_list(
         &self,
         cursor: Option<&str>,
@@ -3082,6 +3275,17 @@ impl Client {
                 .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn attention_dismiss(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionDismissParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_dismiss(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -3090,6 +3294,28 @@ impl Client {
         parameters: AttentionResolveParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::attention_resolve(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_seen(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSeenParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_seen(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_snooze(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSnoozeParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_snooze(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3358,6 +3584,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn read_position_advance(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ReadPositionAdvanceParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::read_position_advance(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn review_approve(
         &self,
         id: impl Into<String>,
@@ -3589,6 +3826,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn work_override(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PersonOverrideParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::work_override(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn work_progress(
         &self,
         id: impl Into<String>,
@@ -3658,6 +3906,40 @@ impl Client {
         report: &ObservationReport,
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Set or clear the session person's own availability. Requires `write.availability`;
+    /// agent sessions are refused.
+    pub async fn availability_set(
+        &self,
+        request: &AvailabilitySet,
+    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/availability", Some(body))
+            .await
+    }
+
+    /// Report one device's raw state for the session person, on every state change and again at
+    /// the result's `report_again_at`; the daemon derives presence and assigns the source.
+    /// Requires `write.presence`; agent sessions are refused.
+    pub async fn presence_report(
+        &self,
+        report: &PresenceReport,
+    ) -> Result<Envelope<PresenceReportResult>, ClientError> {
+        self.post("/v1/client/presence", report).await
+    }
+
+    /// Set or clear the session person's own directive note. Requires `write.notes`;
+    /// agent sessions are refused.
+    pub async fn notes_set(
+        &self,
+        request: &DirectiveNoteSet,
+    ) -> Result<Envelope<DirectiveNoteSetResult>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/notes", Some(body))
+            .await
     }
 
     /// Replace this paired device's local-only push registration. No graph receipt.
@@ -4487,18 +4769,50 @@ impl Client {
         content_type: &str,
     ) -> Result<T, ClientError> {
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
-            match self
-                .request_once(method.clone(), path, body.clone(), key, content_type, None)
-                .await
-            {
+        let result = loop {
+            attempts += 1;
+            let request =
+                self.request_once(method.clone(), path, body.clone(), key, content_type, None);
+            let outcome = request.await;
+            match outcome {
+                Err(error @ ClientError::Api(..))
+                    if mutation
+                        && matches!(&error,
+                    ClientError::Api(_, _, envelope)
+                        if envelope.retryable
+                            && envelope.details.get("reason").and_then(serde_json::Value::as_str)
+                                == Some("run-projection-drain")) =>
+                {
+                    let remaining =
+                        drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    // Never cancel an in-flight mutation and then report the earlier refusal.
+                    // Reserve the complete ordinary request deadline before sending again.
+                    if remaining < request_deadline(&method, path) + pause {
+                        break Err(error);
+                    }
+                    draining = true;
+                    let waited = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += waited.elapsed();
+                    if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                        < request_deadline(&method, path)
+                    {
+                        break Err(error);
+                    }
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
                 Err(ClientError::Unreachable(mut outage)) if !self.outage_wait.is_zero() => {
                     let waited = started.elapsed();
                     if waited >= self.outage_wait {
                         outage.waited = Some(waited);
-                        return Err(ClientError::Unreachable(outage));
+                        break Err(ClientError::Unreachable(outage));
                     }
                     if self.announce_outage_wait && !announced {
                         eprintln!(
@@ -4508,12 +4822,37 @@ impl Client {
                         );
                         announced = true;
                     }
-                    tokio::time::sleep(pause.min(self.outage_wait - waited)).await;
+                    let remaining = if draining {
+                        (self.outage_wait - waited).min(
+                            drain_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
+                    } else {
+                        self.outage_wait - waited
+                    };
+                    let slept = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += slept.elapsed();
+                    if draining
+                        && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                            < request_deadline(&method, path)
+                    {
+                        break Err(ClientError::Unreachable(outage));
+                    }
                     pause = (pause * 2).min(Duration::from_secs(1));
                 }
-                outcome => return outcome,
+                outcome => break outcome,
             }
+        };
+        if mutation && OBSERVER.get().is_some() {
+            observe(Observation::Mutation {
+                method: method.as_str(),
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
     async fn request_once<T: DeserializeOwned>(
         &self,
@@ -5009,7 +5348,7 @@ mod wire_receiver_tests {
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
         // WebSocket sender cutover does not change the HTTP API/error versions.
-        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1").unwrap();
+        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1").unwrap();
         assert_eq!(
             request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
             TERMINAL_SUBPROTOCOL
@@ -5634,6 +5973,7 @@ mod tests {
         for code in [
             ErrorCode::InvalidAnswer,
             ErrorCode::NotAnswerable,
+            ErrorCode::AttentionDismissUnsupported,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
@@ -5697,8 +6037,8 @@ mod tests {
 
     #[test]
     fn messages_paging_is_explicit_for_every_constructor_and_websocket_request() {
-        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1";
-        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2";
+        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1";
+        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2";
         for client in [
             Client::unix("/unused"),
             Client::unix_as("/unused", "person/test"),
@@ -6274,6 +6614,33 @@ mod tests {
     }
 
     #[test]
+    fn auto_resolved_models_decode_and_override_omits_absent_summary() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/auto-resolved.json"
+        ))
+        .unwrap();
+        let rows: Envelope<AutoResolvedAsks> = serde_json::from_value(wire.clone()).unwrap();
+        assert!(rows.value.complete);
+        assert_eq!(
+            rows.value.items[0].default_answer.as_ref().unwrap().id,
+            "hold"
+        );
+        assert_eq!(serde_json::to_value(rows).unwrap(), wire);
+        let parameters = PersonOverrideParameters {
+            target_id: "step-run/example".into(),
+            episode: "claim/example".into(),
+            answer: PersonOverrideAnswer {
+                id: "ship".into(),
+                text: None,
+            },
+            summary: None,
+        };
+        let wire = serde_json::to_value(parameters).unwrap();
+        assert!(wire.get("summary").is_none());
+        assert!(wire["answer"].get("text").is_none());
+    }
+
+    #[test]
     fn schedule_models_preserve_unknown_fields_and_state_strings() {
         let wire: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/fixtures/schedules-page.json"
@@ -6395,11 +6762,40 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_work_list_pins_the_first_wanted_cut_across_retries() {
+        runtime().block_on(async {
+            let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("pinned.sock");
+            let not_fresh = |cut: u64| {
+                let mut error: serde_json::Value =
+                    serde_json::from_str(&work_list_error("work-list-not-fresh", true)).unwrap();
+                error["details"]["wanted_cut"] = serde_json::json!(cut);
+                error.to_string()
+            };
+            let server = scripted_server(&socket, vec![
+                (0, 503, not_fresh(7)),
+                (0, 503, not_fresh(11)),
+                (0, 503, work_list_error("work-list-not-ready", true)),
+                (0, 200, page),
+            ]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(5), false);
+            client.work_list_fresh(Some("agent/garden/ash"), Some(5)).await.unwrap();
+            assert_eq!(server.await.unwrap(), vec![
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+            ]);
+        });
+    }
+
+    #[test]
     fn a_fresh_work_list_retries_only_not_ready_and_not_fresh_within_one_daemon_wait() {
         runtime().block_on(async {
             let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
             let directory = tempfile::tempdir().unwrap();
-            // Not ready, then not fresh, then rows: three requests, one answer.
+            // Legacy errors omit wanted_cut: not ready, then not fresh, then rows stay unpinned.
             let socket = directory.path().join("ready.sock");
             let server = scripted_server(&socket, vec![
                 (0, 503, work_list_error("work-list-not-ready", true)),

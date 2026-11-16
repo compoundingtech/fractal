@@ -15,10 +15,14 @@ impl WritePrincipal {
         }
         let agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.as_str())
             .or_else(|| request.extensions().get::<NativeDeliveryPeer>().map(|peer| peer.agent.as_str()));
-        if let Some(agent) = agent {
-            let actor = public_identity(
+        // A program effect writes as its run, `mission-run/RUN`.
+        let actor = match request.extensions().get::<BoundRun>() {
+            Some(run) => Some(run.0.run.clone()),
+            None => agent.map(|agent| public_identity(
                 &state.store, crate::store::identities::IdentityKind::Agent, agent,
-            )?.identity;
+            ).map(|identity| identity.identity)).transpose()?,
+        };
+        if let Some(actor) = actor {
             if let Some(session) = request.extensions().get::<client_v0::ClientSession>()
                 && (session.pairing_grant.is_some() || client_v0::acting_party(session))
                 && !is_bound_actor(&state.store, &session.authority_actor, &actor)?
@@ -98,6 +102,9 @@ impl WritePrincipal {
 
 fn native_scope(path: &str, value: Option<&Value>) -> Option<&'static str> {
     if path.starts_with("/v1/client/") { return None; }
+    if path == "/v1/work/override" {
+        return Some("control.attention");
+    }
     let action = match path {
         "/v1/work/done" => Some("work.done"),
         "/v1/custom/reply" => Some("custom.reply"),
@@ -134,6 +141,7 @@ pub(super) async fn bind_request(
         .is_some_and(|session| session.pairing_grant.is_some());
     if !paired
         && request.extensions().get::<BoundAgent>().is_none()
+        && request.extensions().get::<BoundRun>().is_none()
         && request.extensions().get::<NativeDeliveryPeer>().is_none()
         && !matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
     {
@@ -141,6 +149,7 @@ pub(super) async fn bind_request(
     }
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX)
         || request.uri().path() == "/v1/repair/apply"
+        || request.uri().path() == "/v1/replication/replay"
     {
         return Err(WritePrincipal::mismatch());
     }

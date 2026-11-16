@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import appSource from '../web/App.tsx?raw'
+import buildChangesSource from './BuildChangesSegment.tsx?raw'
 import devbarSource from './DevBar.tsx?raw'
 import preferenceSource from './devBarPreference.ts?raw'
 import transportMetersSource from './transportMeters.tsx?raw'
@@ -16,11 +17,15 @@ describe('composable developer diagnostics boundary', () => {
 
   it('composes the kit shell with host-owned counters, meters, and transport slots', () => {
     expect(devbarSource).toContain("import { Devbar } from '@overeng/devbar'")
-    expect(devbarSource).toContain("import { BuildIdentitySegment } from '@overeng/devbar/build-identity'")
-    expect(devbarSource).toContain('<BuildIdentitySegment identity={buildIdentity} />')
+    // Build identity and recent changes share one segment: the kit trigger with a host-owned disclosure.
+    expect(devbarSource).toContain("import { BuildChangesSegment } from './BuildChangesSegment.tsx'")
+    expect(devbarSource).toMatch(/\{\s*id: 'build',\s*priority: 1,\s*hasAlert: hasUnseen,\s*render: \(\) => \(\s*<BuildChangesSegment\b/)
+    expect(devbarSource).not.toContain("id: 'version'")
+    expect(devbarSource).not.toContain("id: 'changelog'")
+    expect(buildChangesSource).toContain("import { BuildIdentitySegment } from '@overeng/devbar/build-identity'")
+    expect(buildChangesSource).toMatch(/<BuildIdentitySegment\s+identity=\{identity\}\s+now=\{now\}\s+disclosure=\{\{/)
     expect(devbarSource).toContain("{ id: 'counters', label: 'Counters'")
     expect(devbarSource).toContain("{ id: 'meters', label: 'Meters'")
-    expect(devbarSource).toContain("{ id: 'version', render:")
     for (const id of ['websocket', 'http-active', 'http-p50', 'http-p95', 'http-errors', 'subscriptions', 'message-rate']) {
       expect(transportMetersSource).toContain(`{ id: '${id}', label:`)
     }

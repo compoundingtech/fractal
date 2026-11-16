@@ -147,21 +147,21 @@ async fn mixed_pair(old: Option<PathBuf>, old_issuer: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
+#[ignore = "needs ST3_COMPAT_BIN: the pinned deployed source"]
 async fn previous_release_refuses_service_grants_from_a_candidate_issuer() {
     if fractal_daemon::test_support::supervise_test() { return; }
     mixed_pair(Some(compat_binary()), false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
+#[ignore = "needs ST3_COMPAT_BIN: the pinned deployed source"]
 async fn previous_release_refuses_offline_seeded_service_grants_with_its_own_origin() {
     if fractal_daemon::test_support::supervise_test() { return; }
     mixed_pair(Some(compat_binary()), true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
+#[ignore = "needs ST3_COMPAT_BIN: the pinned deployed source"]
 async fn previous_release_refuses_plugin_service_grants_on_same_database_rollback() {
     if fractal_daemon::test_support::supervise_test() { return; }
     let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the pinned baseline"));
@@ -182,45 +182,21 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     for (index, grant) in grants.iter().take(6).enumerate() {
         assert_auth(&node, grant, index == 3).await;
     }
-    // Older baselines admitted this profile-blind counterexample. v0.3.31's
-    // Profile::issuable unconditionally refuses service profiles; no config enables them.
+    // The deployed baseline understands service profiles. The counterexample is
+    // refused by its principal grammar, not by treating the profile as assistant.
     let (status, body) = auth_response(&node, &grants[6]).await;
-    let baseline_refuses_service_profiles = status == 403;
-    if baseline_refuses_service_profiles {
-        let error: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(error["code"], "forbidden", "{body}");
-        assert_eq!(error["message"], "service grant issuance is disabled", "{body}");
-        eprintln!(
-            "baseline release already refuses service profiles: the profile-blind transition \
-             is behind this fleet; skipping only the baseline counterexample acceptance assertion"
-        );
-    } else {
-        assert_eq!(status, 400, "{} grant {}: {body}\n{}", node.name, grants[6].id, node.logs());
-    }
+    assert_eq!(status, 403, "{body}");
+    let error: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["code"], "forbidden", "{body}");
+    assert_eq!(error["message"], "invalid service principal", "{body}");
+    // Owner inspection must preserve the plugin principal rather than laundering
+    // a retained service record into an assistant identity.
     let owner = Client::unix_as(node.socket(), PERSON).unwrap();
-    if baseline_refuses_service_profiles {
-        // v0.3.31 also validates the stored principal while projecting an owner read.
-        // A plugin is not an assistant: only the historical projection assertion is skipped.
-        let response = reqwest::Client::builder().unix_socket(node.socket()).build().unwrap()
-            .get(format!("http://localhost/v1/client/assistant/grants/{}", grants[0].id))
-            .header("x-st3-person", PERSON).send().await.unwrap();
-        let status = response.status();
-        let body = response.text().await.unwrap();
-        assert_eq!(status.as_u16(), 403, "{body}");
-        let error: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(error["code"], "forbidden", "{body}");
-        assert_eq!(error["message"], "invalid assistant principal", "{body}");
-        eprintln!(
-            "baseline release already validates assistant principals: skipping only the \
-             historical plugin-grant projection assertions"
-        );
-    } else {
-        let inspected: Value = owner
-            .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
-        assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
-        assert_eq!(inspected["principal"], "assistant/chatgpt", "{inspected}");
-        assert_eq!(inspected["scopes"], json!(["read.service.status"]), "{inspected}");
-    }
+    let inspected: Value = owner
+        .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
+    assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
+    assert_eq!(inspected["principal"], PLUGIN, "{inspected}");
+    assert_eq!(inspected["scopes"], json!(["read.service.status"]), "{inspected}");
     // Keep a positive owner-read control with the assistant principal and profile
     // accepted by both binaries; refusal above must not conceal a broken inspection route.
     let inspected: Value = owner

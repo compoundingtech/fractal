@@ -42,6 +42,10 @@ use crate::api::mission_eligibility_doctor::{THRESHOLD_MS, check};
 
 
 fn missing() -> (Arc<Store>, Reconciler<FakeRuntime>, MissionRunView) {
+missing_with_revision(false)
+}
+
+fn missing_with_revision(prepublish_revision: bool) -> (Arc<Store>, Reconciler<FakeRuntime>, MissionRunView) {
 let store = Arc::new(Store::open_memory("node").unwrap());
 apply_source(
     &store,
@@ -53,10 +57,24 @@ mission "orchid" state="ready" {
 }"#,
     "first",
 );
+let initial = store.mission_spec("orchid", None).unwrap().unwrap();
+if prepublish_revision {
+    // Keep the direct generation-cutover control independent of eager S3 publication.
+    apply_source(
+        &store,
+        r#"version 2
+mission "orchid" state="ready" {
+ goal "Change the diagnostic goal."
+ completion { when "all-steps-exhausted" }
+ step "work" { assigned-to "agent/orchid/absent" }
+}"#,
+        "second",
+    );
+}
 let run = store
     .create_mission_run(&crate::model::MissionRunRequest {
         mission: "orchid".into(),
-        revision: None,
+        revision: prepublish_revision.then_some(initial.revision),
         workspace: "/tmp".into(),
         requester: Some("person/lichen".into()),
         mode: None,
@@ -121,7 +139,7 @@ assert_eq!(
 #[test]
 fn doctor_clears_on_eligibility_root_stop_cutover_or_terminal_state() {
 for action in ["restore", "root-stop", "revision", "cancel"] {
-    let (store, reconciler, run) = missing();
+    let (store, reconciler, run) = missing_with_revision(action == "revision");
     let items = current(&store);
     let overdue = items[0].requested_at_unix_ms + THRESHOLD_MS;
     assert_eq!(check(&store, &items, overdue).unwrap().status, "fail");
@@ -138,16 +156,6 @@ for action in ["restore", "root-stop", "revision", "cancel"] {
         }
         "root-stop" => apply_source(&store, "version 2\nstop \"agent/orchid/absent\"", "stop"),
         "revision" => {
-            apply_source(
-                &store,
-                r#"version 2
-mission "orchid" state="ready" {
- goal "Change the diagnostic goal."
- completion { when "all-steps-exhausted" }
- step "work" { assigned-to "agent/orchid/absent" }
-}"#,
-                "second",
-            );
             let next = store.mission_spec("orchid", None).unwrap().unwrap();
             store
                 .adopt_mission_revision(

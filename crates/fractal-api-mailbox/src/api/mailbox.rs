@@ -2411,14 +2411,23 @@ mod tests {
     }
 
     #[test]
-    fn recovery_refills_on_settled_receipt_deltas_in_batches_of_five() {
-        for (stream, withdraw) in [(false, false), (true, false), (false, true), (true, true)] {
+    fn recovery_refills_on_settled_receipt_and_expiry_deltas_in_batches_of_five() {
+        for (stream, terminal) in [false, true].into_iter()
+            .flat_map(|stream| ["message.delivered", "message.closed", "message.expired"].map(|phase| (stream, phase))) {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("graph.db");
         let store = Arc::new(Store::open(&database, "node").unwrap());
         let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
         let receipt = |subject: &str, phase: &str| {
-            if stream {
+            if phase == "message.expired" {
+                crate::store::stream_mirror::mirror(&store).unwrap();
+                store.append_claim(&ClaimInput {
+                    subject: subject.into(), kind: phase.into(), actor: Some("daemon/runtime".into()),
+                    fields: BTreeMap::from([("status".into(), json!("expired")),
+                        ("reason".into(), json!("cutoff-uncertain-attempt"))]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            } else if stream {
                 crate::store::messages_shard::record_lifecycle(
                     &store, subject, phase, Some(if phase == "message.closed" { "daemon/runtime" } else { "agent/eval.worker" }),
                     &BTreeMap::from([("status".into(), json!(phase.strip_prefix("message.").unwrap()))]),
@@ -2464,6 +2473,7 @@ mod tests {
             assert_eq!(recovery.backlog, expected);
             assert_eq!(snapshot.1.iter().filter(|m| m.status == "sent")
                 .map(|m| m.subject.clone()).collect::<std::collections::BTreeSet<_>>(), expected);
+            assert!(!snapshot.1.iter().any(|message| message.status == "expired"));
             previous = Some((mark, snapshot));
             for (position, subject) in expected.iter().enumerate() {
                 let phase = if position == 0 { "message.staged" } else { "message.delivered" };
@@ -2476,11 +2486,11 @@ mod tests {
             assert_eq!(recovery.backlog, expected, "one staged member must block refill");
             assert!(!snapshot.1.iter().any(|m| m.status == "sent"));
             previous = Some((mark, snapshot));
-            receipt(expected.first().unwrap(), if withdraw { "message.closed" } else { "message.delivered" });
+            receipt(expected.first().unwrap(), terminal);
             assert!(recovery_batch_settled(&store, &expected).unwrap());
-            if withdraw {
+            if terminal != "message.delivered" {
                 let message = store.message(expected.first().unwrap()).unwrap().unwrap();
-                assert_eq!(message.status, "closed");
+                assert_eq!(message.status, terminal.strip_prefix("message.").unwrap());
                 for kind in ["message.delivered", "message.read"] {
                     assert!(if stream {
                         crate::store::messages_shard::mailbox_reads::lifecycle_step(
@@ -2997,14 +3007,15 @@ mod tests {
             super::super::accept_message(
                 &state,
                 MessageSendRequest {
-                    idempotency_key: key.into(),
-                    from: from.into(),
-                    to: fence.subject.clone(),
-                    content: format!("{key} words"),
-                    title: Some(key.into()),
-                    in_reply_to: in_reply_to.map(str::to_owned),
-                    tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-                    attachments: Vec::new(),
+                owner: None,
+                idempotency_key: key.into(),
+                from: from.into(),
+                to: fence.subject.clone(),
+                content: format!("{key} words"),
+                title: Some(key.into()),
+                in_reply_to: in_reply_to.map(str::to_owned),
+                tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+                attachments: Vec::new(),
                 },
                 None,
                 None,
@@ -3095,14 +3106,15 @@ mod tests {
         let asked = super::super::accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "asked".into(),
-                from: fence.subject.clone(),
-                to: "agent/eval.peer".into(),
-                content: "Which branch?".into(),
-                title: None,
-                in_reply_to: None,
-                tags: vec![crate::silent::SILENT_TAG.into()],
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "asked".into(),
+            from: fence.subject.clone(),
+            to: "agent/eval.peer".into(),
+            content: "Which branch?".into(),
+            title: None,
+            in_reply_to: None,
+            tags: vec![crate::silent::SILENT_TAG.into()],
+            attachments: Vec::new(),
             },
             None,
             None,
@@ -3895,6 +3907,12 @@ mod tests {
         report_control_effects(false).await;
     }
 
+    // Admission controls compare the reported reason, not the assessment's elapsed-time suffix.
+    fn delivery_report_reason_is(subject: &str, expected: &str) -> bool {
+        delivery_presence::assess_current(subject, "omp", Some("current")).reason
+            .is_some_and(|reason| reason.split_once("; channel non-ready for ").is_some_and(|(reported, _)| reported == expected))
+    }
+
     #[cfg(all(feature = "test-support", target_os = "linux"))]
     async fn report_control_effects(native: bool) {
         use crate::store::owned_sets::{Options, Source};
@@ -3913,7 +3931,7 @@ mod tests {
             set: name.into(), source: Source { repository: "fixture/report".into(),
                 r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
             expected_set: "absent".into(), rollout: Some(policy.clone()),
-            adopt: Default::default(), allow_empty: false, confirm_retire: None,
+            adopt: Default::default(), allow_empty: false, confirm_retire: None, policy: None,
             expected_subjects: Default::default(),
         };
         let preview = state.store.owned_set_preview(&input, &options).unwrap();
@@ -3954,7 +3972,7 @@ mod tests {
         stream.socket.send(Message::Text(baseline.to_string().into())).await.unwrap();
         stream.socket.send(Message::Ping(vec![0].into())).await.unwrap();
         expect_pong(&mut stream.socket, &[0]).await;
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        assert!(delivery_report_reason_is(&subject, "baseline"));
         let tap_count = || std::env::var_os("ST3_TEST_ADMITTED_REPORTS").map(|path| {
             std::fs::read_to_string(path).unwrap_or_default().lines().filter(|line|
                 serde_json::from_str::<Value>(line).is_ok_and(|value| value["subject"] == subject)).count()
@@ -3983,7 +4001,7 @@ mod tests {
                 expect_pong(&mut stream.socket, &barrier).await;
                 assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_none(), "{refusal}");
                 assert_eq!(state.store.index().unwrap(), index, "no drain/recovery claim: {refusal}");
-                assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+                assert!(delivery_report_reason_is(&subject, "baseline"));
                 assert_eq!(tap_count(), initial_taps, "no admitted tap: {refusal}");
                 harness_events::write_snapshot(&agent_dir, "harness-state", &raw).unwrap();
             }
@@ -3997,7 +4015,7 @@ mod tests {
         stream.socket.send(Message::Ping(vec![4].into())).await.unwrap();
         expect_pong(&mut stream.socket, &[4]).await;
         assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_some());
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        assert!(delivery_report_reason_is(&subject, "baseline"));
         assert_eq!(tap_count(), initial_taps);
         let mut accepted = report("later-admissible");
         accepted["mailbox_replay_ack"] = json!(true);
@@ -4005,7 +4023,7 @@ mod tests {
         stream.socket.send(Message::Ping(vec![5].into())).await.unwrap();
         if native { assert!(matches!(next(&mut stream.socket).await, Frame::Replay { .. })); }
         expect_pong(&mut stream.socket, &[5]).await;
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("later-admissible"));
+        assert!(delivery_report_reason_is(&subject, "later-admissible"));
         assert_eq!(tap_count(), initial_taps.map(|count| count + 1));
     }
 
@@ -4117,7 +4135,7 @@ mod tests {
             let report = |reason: &str| Message::Text(json!({"transport":"omp-channel","pid":37,"ready":false,"reason":reason}).to_string().into());
             stream.socket.send(report(&original)).await.unwrap();
             let deadline = tokio::time::Instant::now()+Duration::from_secs(2);
-            while delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref()!=Some(&original) {
+            while !delivery_report_reason_is(&subject, &original) {
                 assert!(tokio::time::Instant::now()<deadline,"unchanged argv report was not admitted");
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -4158,7 +4176,7 @@ mod tests {
             stream.socket.send(Message::Ping(vec![1].into())).await.unwrap();
             expect_pong(&mut stream.socket, &[1]).await;
             assert_eq!(stream.reads.load(SeqCst), reads, "dirty snapshot processing must remain held");
-            assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(),Some(original.as_str()));
+            assert!(delivery_report_reason_is(&subject, &original));
             assert!(state.store.mailbox_lease_authority(&fence).unwrap().is_none());
         }
     }
@@ -4567,7 +4585,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_mailbox_matches_full_oracle_across_coalesced_lifecycle_changes() {
+    fn incremental_mailbox_matches_full_oracle_across_coalesced_lifecycle_and_expiry_changes() {
         let store = Store::open_memory("node").unwrap();
         crate::store::mailbox_tests::ready(&store, "session-1");
         let fence = store
@@ -4601,7 +4619,7 @@ mod tests {
                     subject: subject.into(),
                     kind: format!("message.{phase}"),
                     actor: Some(
-                        if phase == "closed" {
+                        if matches!(phase, "closed" | "expired") {
                             "daemon/runtime"
                         } else {
                             "person/fixture"
@@ -4615,6 +4633,9 @@ mod tests {
                             ("to".into(), json!(to)),
                             ("content".into(), json!("An oracle fixture.")),
                         ])
+                    } else if phase == "expired" {
+                        BTreeMap::from([("status".into(), json!(phase)),
+                            ("reason".into(), json!("no-live-recipient"))])
                     } else {
                         BTreeMap::from([("status".into(), json!(phase))])
                     },
@@ -4627,16 +4648,17 @@ mod tests {
         // Two sends and multiple receipts arrive before one cursor read; no notification is used.
         append("message/one", "sent", &fence.subject);
         append("message/two", "sent", &fence.subject);
+        append("message/three", "sent", &fence.subject);
         append("message/one", "staged", "");
         append("message/one", "delivered", "");
         append("message/foreign", "sent", "agent/other");
-        for phase in [None, Some("read"), Some("closed")] {
+        for phase in [None, Some("read"), Some("expired"), Some("closed")] {
             if let Some(phase) = phase {
                 append(
-                    if phase == "closed" {
-                        "message/two"
-                    } else {
-                        "message/one"
+                    match phase {
+                        "closed" => "message/two",
+                        "expired" => "message/three",
+                        _ => "message/one",
                     },
                     phase,
                     "",
@@ -4660,6 +4682,9 @@ mod tests {
                 serde_json::to_value(&oracle).unwrap()
             );
             assert!(updated);
+            if phase == Some("expired") {
+                assert!(!view.1.iter().any(|message| message.subject == "message/three"));
+            }
             previous = Some((mark, view));
         }
         // An idle cursor check performs no full read and produces no mailbox frame.
@@ -4723,7 +4748,7 @@ mod tests {
         assert!(updated);
         assert!(
             view.1.is_empty(),
-            "read and closed messages must both leave the mailbox"
+            "read, closed, and expired messages must leave the mailbox"
         );
         assert_eq!(
             reads.get(),
@@ -4881,7 +4906,7 @@ mod tests {
             set: name.into(), source: Source { repository: "fixture/stream".into(),
                 r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
             expected_set: "absent".into(), rollout: Some(policy.clone()),
-            adopt: Default::default(), allow_empty: false, confirm_retire: None,
+            adopt: Default::default(), allow_empty: false, confirm_retire: None, policy: None,
             expected_subjects: Default::default(),
         };
         let preview = store.owned_set_preview(&input, &options).unwrap();

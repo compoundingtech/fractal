@@ -23,10 +23,10 @@ const meta = {
         Requests in flight, p50/p95 HTTP response-header latency over the latest 256 responses, HTTP
         errors, shared socket subscriptions and incoming messages per second are each a canvas tile
         with history and an evidence card; a click opens its details. Anything not yet measured reads
-        n/a, not zero. WebSocket state is a state element, not a meter. The row also shows the
-        shared display version, including dirty-source semantics; expanded details retain the full
-        source revision and deployment identity. Changes opens recent changes and marks unread
-        entries with a dot. The Counters panel retains sorted app measurements,
+        n/a, not zero. WebSocket state is a state element, not a meter. The row also shows one build
+        entry: the short source revision and age, including dirty-source semantics, with a dot for
+        unread changes. Opening it shows the full source revision, deployment identity and recent
+        changes together. The Counters panel retains sorted app measurements,
         including render commits, decode time, retained entries, socket errors, resyncs and retries.
         Meters share one collector session; the Meters panel's strips can be frozen independently.
       </p>

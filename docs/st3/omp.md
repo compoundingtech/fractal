@@ -355,6 +355,12 @@ bind the named session. The bridge below inspects only the OMP session successfu
 one of those paths. Without a selected session, including a `native-continue-unavailable` fallback,
 there is no bridge; it never chooses a transcript or session itself.
 
+The OMP extension proves mailbox handoff readiness with `delivery_ready` after validating
+the channel hello and sending its native-session `ready` binding. This proof is independent
+of activity: a provider working continuously from launch, or attached to a fresh channel
+mid-turn, can receive steering mail without first becoming idle. Actual idle observations
+remain separate; protocol rejection and interrupted-ask restoration keep delivery fenced.
+
 OMP 18.4.10 needs a temporary, token-free recovery bridge for an open `ask` picker:
 `arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge`
 ([migration registry](https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf)).
@@ -374,7 +380,7 @@ The extension holds mailbox delivery, waits for its ready frame and first idle, 
 raw F5 from the Rust channel. For OMP's native interrupted result, the same toolCall id, questions,
 and options reopen without a model turn or human action. Channel readiness resumes when that ask
 starts again, or after a 120-second timeout with a diagnostic. Both exits send `delivery_ready`
-to release the Rust channel's first-idle delivery gate independently of activity. A reopened
+to release the Rust channel's handoff-readiness gate independently of activity. A reopened
 picker remains blocked on the person and ordinary mail stays outside OMP until it resolves.
 Its existing state-frame `reason` names the reopened toolCall id
 (`reopened interrupted ask <toolCallId>`), alongside `ask: "question"`, so clients can explain

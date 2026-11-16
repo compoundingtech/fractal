@@ -299,7 +299,7 @@ impl DeliveryStore for Store {
         let child = parent.map(|parent| ChildMissionContext {
             root_revision: parent.root_revision.clone(),
             root_run_id: parent.root_mission_run.trim_start_matches("mission-run/").into(),
-            parent_step_run: normalize_step_run(subscription), default_selector: None,
+            parent_step_run: normalize_step_run(subscription), default_selector: None, started_by: None,
         });
         self.create_mission_run_inner(request, child, None, Some((resource, discovery)))
     }
@@ -935,8 +935,11 @@ impl DeliveryStore for Store {
         if let Some((deadline, attempts)) = local {
             return Ok(Some((deadline as u128, attempts)));
         }
+        // Pin the request seek, like the other plan-sensitive history reads:
+        // without ANALYZE, adding a kind-leading index can make SQLite prefer
+        // a generic subject/kind scan that decodes every deferred request.
         let count: u32 = connection.query_row(
-            "SELECT COUNT(*) FROM claims
+            "SELECT COUNT(*) FROM claims INDEXED BY claims_subscription_deferred_request_index
              WHERE subject=?1 AND kind='subscription.mission-deferred'
                AND json_extract(body, '$.fields.request')=?2",
             params![subject, request],

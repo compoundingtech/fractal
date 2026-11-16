@@ -44,9 +44,15 @@
 //! Every sample starts without a registration for POST and with one for DELETE; fixture writes
 //! and row-count assertions stay outside the measured request.
 //!
+//! Retry samples create independent runs from one failed terminal source in a concurrent-runs
+//! mission. Each attempt uses its own stable key, so every measured request writes a new run
+//! rather than measuring idempotent replay; source preparation is outside the counted region.
+//!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
+
+mod assistant_admission;
 
 use fractal_daemon::ConversationReadsStore;
 use fractal_daemon::CustomStore;
@@ -141,6 +147,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "GET /v1/source-blobs/{hash}",
+        "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
+    ),
     (
         "GET /v1/custom/decision-inputs",
         "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
@@ -318,6 +328,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/missions-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
     ("GET /v1/client/assistant/agents-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
     ("GET /v1/client/assistant/summary", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/availability", "requires a paired assistant granted read.assistant.availability and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the grant person's availability and directive note read"),
     ("GET /v1/client/assistant/attention", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
@@ -327,6 +338,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
     ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
+    ("GET /v1/client/assistant/slo", "requires a paired assistant granted read.assistant.slo and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the bounded objective/budget projection"),
+    ("GET /v1/client/assistant/slo-history", "requires a paired assistant granted read.assistant.slo and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the bounded history projection"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
     ("POST /v1/internal/fleet/redeem", "fleet membership"),
@@ -381,6 +394,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
+    ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
+    ("POST /v1/hosts/holds/release", "owner/revision-fenced host-local resolution; covered by host_holds::tests::owner_and_revision_fence_release_without_occupying_capacity"),
+    ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -479,6 +495,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
+    (
+        "POST /v1/replication/replay",
+        "explicit planned-window operator replay holds the writer; covered by replication_replay::tests",
+    ),
     ("POST /v1/rules/set", "sets an authority rule"),
     (
         "POST /v1/client/actions",
@@ -489,8 +509,52 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "uploads image bytes, outside the graph",
     ),
     (
+        "GET /v1/agent-invocations/{*invocation}",
+        "returns all receipts for an invocation and folds the owning agent's artifact claims before filtering; cost can grow with unrelated artifact history and is not bounded by this fixture; no cost-independence claim is made",
+    ),
+    (
+        "GET /v1/client/invocation-artifacts/{id}",
+        "answers retained private bytes, which the JSON cost client cannot decode and the generated cost store never seeds; invocation_artifacts tests cover the content-addressed lookup and authorization",
+    ),
+    (
+        "DELETE /v1/client/invocation-artifacts/{id}",
+        "writes one tombstone per invocation/kind/hash reference; invocation_artifacts tests cover idempotent deletion and revocation authority across later same-hash captures",
+    ),
+    (
+        "POST /v1/invocation-input",
+        "requires a live kernel connector-generation witness descending from the daemon-recorded runtime process of the exact incarnation, absent from generated cost stores; agent_invocations tests cover capture, retry and conflict work",
+    ),
+    (
         "GET /v1/client/blobs/{id}",
         "image bytes, outside the graph",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
     ),
     (
         "GET /v1/client/conversations/{id}/content/{reference}/chunk",
@@ -530,6 +594,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     ("POST /v1/work/cancel-ask", "cancels a person ask"),
     (
+        "POST /v1/work/override",
+        "requires a deadline-resolved structured ask, absent from this cost fixture; native CLI round trip and person and episode fences are covered by client_v0_cli::cli_person_override_replaces_a_deadline_default_once",
+    ),
+    (
         "POST /v1/work/mission/{*subject}",
         "publishes a step's mission",
     ),
@@ -568,6 +636,26 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/mailbox/receipts",
         "a bound mailbox stream's receipt; the same lifecycle write is measured as \
          POST /v1/messages/{message_id}/claims",
+    ),
+    (
+        "GET /v1/source-maps/revisions",
+        "reads the source.mapped claims of one subject through the claims (subject, kind) index; generated cost stores publish no source maps, so the probe would measure an empty range; cost grows with that subject's mapped revisions",
+    ),
+    (
+        "GET /v1/source-maps/where",
+        "a reverse lookup that decodes the source map of every live agent and non-retired mission revision and reads the matching file texts on each request; generated cost stores publish no source maps; cost grows with live mapped subjects and is not measured here",
+    ),
+    (
+        "GET /v1/source-maps/declaration",
+        "renders one stored agent or mission revision as canonical KDL by subject and revision key; generated cost stores publish no source maps, so the subject has no mapped revision to resolve",
+    ),
+    (
+        "GET /v1/client/source-maps",
+        "reads one subject's source.mapped claim at one revision (or its current revision) through the claims (subject, kind) index and renders that revision as canonical KDL; generated cost stores publish no source maps, so the probe would measure a 404",
+    ),
+    (
+        "GET /v1/client/source-blobs/{hash}",
+        "reads one content-addressed source blob after checking the subject's map at that revision names it; generated cost stores publish no source maps or blobs, so the probe would measure a 404",
     ),
 ];
 
@@ -629,6 +717,16 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get("GET /v1/effects/by-key", "/v1/effects/by-key?key={effect_key}"),
+    post("POST /v1/effects/{*subject}", "/v1/effects/{effect_subject}/resolve", |_, attempt| json!({
+        "actor": "person/bench-operator",
+        "outcome": "abandoned",
+        "evidence": ["message/cost-effect-evidence"],
+        "idempotency_key": format!("cost-effect-resolution-{attempt}"),
+    })),
+    get("GET /v1/client/claims", "/v1/client/claims?limit=100"),
+    get("GET /v1/client/claims/by-id/{id}", "/v1/client/claims/by-id/{service_claim}"),
+    get("GET /v1/client/work-items/{*subject}", "/v1/client/work-items/{step}"),
     post("POST /v1/client/push-registration", "/v1/client/push-registration", |_, _| push_body()),
     Probe {
         route: "DELETE /v1/client/push-registration",
@@ -641,11 +739,19 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/changes", "/v1/client/changes?repository=cost/garden&offline=true&limit=10"),
     get("GET /v1/client/change", "/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001"),
     post("POST /v1/client/changes/sync", "/v1/client/changes/sync", |_, _| json!({"repository":"cost/garden"})),
-    put("PUT /v1/notes", "/v1/notes", |_, attempt| json!({
-        "person":"person/bench-operator", "actor":"person/bench-operator",
+    get("GET /v1/client/notes", "/v1/client/notes"),
+    get("GET /v1/client/auto-resolved", "/v1/client/auto-resolved"),
+    put("PUT /v1/client/notes", "/v1/client/notes", |_, attempt| json!({
         "text":format!("Invented current person context {attempt}"),
     })),
-    get("GET /v1/client/notes", "/v1/client/notes"),
+    get("GET /v1/client/availability", "/v1/client/availability"),
+    put("PUT /v1/client/availability", "/v1/client/availability", |_, attempt| json!({
+        "interruptions": {"value": if attempt % 2 == 0 { "urgent" } else { "all" }},
+    })),
+    post("POST /v1/client/presence", "/v1/client/presence", |_, _| json!({
+        "state": "active",
+        "observed_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    })),
     get(
         "GET /v1/client/adapter/deliveries",
         "/v1/client/adapter/deliveries?after={adapter_frontier}&wait_ms=0",
@@ -714,6 +820,10 @@ const PROBES: &[Probe] = &[
         "/v1/client/arrangements?person=person%2Fada",
     ),
     get(
+        "GET /v1/client/read-positions",
+        "/v1/client/read-positions?person=person%2Fada",
+    ),
+    get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
     ),
@@ -732,6 +842,8 @@ const PROBES: &[Probe] = &[
     post("POST /v1/sets/apply", "/v1/sets/apply", |_, attempt| {
         owned_set_request(&format!("apply-{attempt}"))
     }),
+    get("GET /v1/source/status", "/v1/source/status"),
+    get("GET /v1/source-maps", "/v1/source-maps?subject=agent/bench/cost/fixture&texts=true"),
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
@@ -853,6 +965,8 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/usage", "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}"),
     // Measure the disabled gateway read; external fetch work is byte-bounded, not store-sized.
     get("GET /v1/client/quota", "/v1/client/quota"),
+    // The unconfigured usage hub returns disabled locally without an external request.
+    get("GET /v1/client/usage/quota", "/v1/client/usage/quota"),
     get("GET /v1/client/clients", "/v1/client/clients"),
     get(
         "GET /v1/client/subject-definition",
@@ -963,6 +1077,10 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/missions", "/v1/client/missions"),
     get("GET /v1/client/missions-tree", "/v1/client/missions-tree"),
+    get(
+        "GET /v1/client/mission-runs",
+        "/v1/client/mission-runs?mission_prefix=cost%2F&active=true&limit=10",
+    ),
     get(
         "GET /v1/client/missions/{*id}",
         "/v1/client/missions/{mission}",
@@ -1145,6 +1263,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/hosts/{host}/agent-workspace",
         "/v1/hosts/bench-host/agent-workspace?identity=bench/seat-0",
     ),
+    get("GET /v1/hosts/holds", "/v1/hosts/holds"),
     // Writes, each with a new idempotency key.
     post("POST /v1/claims", "/v1/claims", |fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
@@ -1389,6 +1508,16 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
     get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
+    post(
+        "POST /v1/mission-runs/{run}/retry",
+        "/v1/mission-runs/{retry_run}/retry",
+        |_, attempt| json!({
+            "actor": "person/bench-operator",
+            "same_revision": false,
+            "reason": "Retry the invented failed work.",
+            "idempotency_key": format!("cost-mission-retry-{attempt}"),
+        }),
+    ),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
     post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
@@ -1475,6 +1604,23 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
         "cost-arrangement-current",
         json!([{"op":"rename","name":"Invented arrangement"}]),
     )
+}
+
+/// Retained advances grow while the projected answer stays one conversation.
+fn seed_read_positions(store: &Store, scale: f64) {
+    for advance in 0..((scale * 10_000.0).round() as u64).max(1) {
+        store.append_claim(&ClaimInput {
+            subject: fractal_schema::read_positions::subject(ARRANGEMENT_OWNER),
+            kind: fractal_schema::read_positions::KIND.into(),
+            actor: Some(ARRANGEMENT_OWNER.into()),
+            fields: BTreeMap::from([
+                ("owner".into(), json!(ARRANGEMENT_OWNER)),
+                ("conversation".into(), json!(ARRANGEMENT_PLACEMENT)),
+                ("at_ms".into(), json!(advance)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).expect("the read-position cost fixture must publish");
+    }
 }
 
 const MEMBERSHIP_OWNER: &str = "person/avery";
@@ -1857,6 +2003,7 @@ async fn populated_ready_work_cost_by_cohort_size() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
         state_dir: root.path().join("state"),
         pty_root: root.path().join("pty"),
         pty_binary: stub_pty(root.path()),
@@ -1970,6 +2117,7 @@ mission "cost/history" state="ready" {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
         state_dir: root.path().join("state"),
         pty_root: root.path().join("pty"),
         pty_binary: stub_pty(root.path()),
@@ -2918,6 +3066,74 @@ fn seed_git_change_reads(store: &Store, scale: f64) {
     }
 }
 
+#[cfg(test)]
+const SERVICE_PROBE_TOKEN: &str = "invented-cost-service-reader";
+
+// This integration-test target alone constructs the disabled Service profile.
+#[cfg(test)]
+fn seed_service_probe(store: &Store) -> String {
+    use fractal_daemon::api::client_v0::{credential_digest, external_grants};
+    const ID: &str = "787878787878787878787878";
+    store.append_claim(&ClaimInput {
+        subject:external_grants::subject(ID).unwrap(),kind:external_grants::GRANTED.into(),
+        actor:Some("person/bench-operator".into()),
+        fields:serde_json::from_value(json!({
+            "profile":"service","principal":"plugin/cost/reader","grant_id":ID,
+            "session_actor":format!("plugin/cost/reader/session/{ID}"),
+            "issuer":"person/bench-operator","expires_at_unix_ms":u64::MAX,
+            "credential_hash":credential_digest(SERVICE_PROBE_TOKEN),
+            "scopes":["read.claims","read.work"],
+        })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"gate-operation/cost/service-read".into(),kind:"gate.result".into(),actor:None,
+        fields:serde_json::from_value(json!({"verdict":"pass"})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap().id
+}
+
+#[cfg(test)]
+async fn service_probe(app: &Router, path: &str) -> Result<Value,String> {
+    use axum::{body::Body,http::Request};
+    use tower::ServiceExt as _;
+    let response = app.clone().oneshot(Request::builder().uri(path)
+        .header("authorization",format!("Bearer {SERVICE_PROBE_TOKEN}"))
+        .body(Body::empty()).map_err(|error| error.to_string())?)
+        .await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(),usize::MAX).await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("service read {path} failed: {status}"));
+    }
+    let envelope: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let answer = envelope["value"].clone();
+    if path.starts_with("/v1/client/claims/by-id/") {
+        if answer["body"]["fields"]["verdict"] != "pass" {
+            return Err("service receipt probe must read its populated receipt".into());
+        }
+    } else if path.starts_with("/v1/client/claims?") {
+        if !answer["claims"].as_array().is_some_and(|claims| !claims.is_empty()) {
+            return Err("service page probe must read populated claims".into());
+        }
+    } else if !answer["subject"].as_str().is_some_and(|subject| subject.starts_with("step-run/")) {
+        return Err("service work probe must read a populated work item".into());
+    }
+    Ok(answer)
+}
+
+async fn required_service_probe(app: &Router, path: &str) -> Value {
+    service_probe(app,path).await.unwrap_or_else(|error| {
+        panic!("seeded service probe must succeed before cost aggregation: {error}")
+    })
+}
+
+#[tokio::test]
+#[should_panic(expected = "seeded service probe must succeed before cost aggregation")]
+async fn missing_service_probe_is_fatal_before_cost_aggregation() {
+    let app = Router::new().fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+    required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -3044,6 +3260,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -3080,6 +3302,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.join("state").join("api.sock"),
         state_dir: root.join("state"),
         pty_root: root.join("pty"),
         pty_binary: pty,
@@ -3098,6 +3321,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let mut state = state;
     state.harness_question_sink = Some(harness_sink.clone());
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
+    let service_claim = seed_service_probe(&store);
+    let mut service_state = state.clone();
+    service_state.owning_person = Some("person/bench-operator".into());
+    let service_router = fractal_daemon::api::fabric_router(service_state);
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
     tokio::time::timeout(Duration::from_secs(120),
@@ -3137,8 +3364,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     assert!(change["item"]["last_indexed"].is_object());
     let sync: Value = person.post("/v1/client/changes/sync", &json!({"repository":"cost/garden"})).await.unwrap();
     assert_eq!(sync["sync"]["status"], "unavailable");
-    let seeded: Value = person.request("PUT", "/v1/notes", Some(&json!({
-        "person":"person/bench-operator", "actor":"person/bench-operator",
+    let seeded: Value = person.request("PUT", "/v1/client/notes", Some(&json!({
         "text":"Invented current person context",
     }))).await.expect("the note write probe must pass the real feature barrier");
     assert_eq!(seeded["note"]["person"], "person/bench-operator");
@@ -3165,6 +3391,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert("service_claim",service_claim);
     fixture.items.insert(
         "harness_question",
         urlencoding::encode(&harness_question.id).into_owned(),
@@ -3276,10 +3503,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         publication["revision"].as_str(),
         Some(expected_publication_revision.as_deref().unwrap())
     );
-    client
-        .post::<_, Value>("/v1/sets/apply", &owned_set_request("fixture"))
+    // The fixture set carries a source map, so the source-map read probe answers a real claim.
+    let mut fixture_set = owned_set_request("fixture");
+    fixture_set["source_map"] = json!({
+        "schema": "fractal.source-map/v1",
+        "files": [{"repository": "acme/garden", "path": "graph/fixture.ts", "blob": "b".repeat(40),
+            "text": "export default fixture\n"}],
+        "subjects": {"agent/bench/cost/fixture": {"declaration": 0, "inputs": [0]}},
+    });
+    let applied: Value = client
+        .post("/v1/sets/apply", &fixture_set)
         .await
         .expect("the owned-set read fixture must publish");
+    assert_eq!(applied["publication"]["source_maps"]["recorded"], 1, "{applied}");
     let selected: Value = person
         .get("/v1/client/sets/bench/cost/fixture")
         .await
@@ -3306,6 +3542,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         .await
         .expect("the arrangement list probe must read the selected owner's fixture");
     assert_eq!(page["items"], json!([selected]));
+    let page: Value = arrangement_person
+        .get("/v1/client/read-positions?person=person%2Fada")
+        .await
+        .expect("the read-position list probe must read the selected owner's projection");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["owner"], ARRANGEMENT_OWNER);
+    assert_eq!(page["items"][0]["conversation"], ARRANGEMENT_PLACEMENT);
     let page: Value = membership_person
         .get(MEMBERSHIP_PATH)
         .await
@@ -3356,6 +3599,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         }
         if probe.route == "POST /v1/agents/rename-id" {
             prepare_renames(&store);
+        }
+        if probe.route == "POST /v1/mission-runs/{run}/retry" {
+            prepare_retry(&store, &mut fixture, root);
         }
         if probe.route == "GET /v1/client/conversations/search" {
             // The cold build owns all SQL work through the worker's explicit completion,
@@ -3413,6 +3659,37 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            // Seed a fresh durable uncertainty outside the measured region. In particular,
+            // resolution must write a new receipt on every sample, never an idempotent replay.
+            if probe.route.contains("/v1/effects/") {
+                let key = format!("native-effect/[\"cost\",\"{}-{attempt}\"]", probe.route);
+                let operation = smallclaims::store::operation_id_for_key(&key);
+                let subject = format!("effect/{operation}");
+                let fields: BTreeMap<String, Value> = serde_json::from_value(json!({
+                    "effect_id": subject,
+                    "operation_id": operation,
+                    "provider": "native-message",
+                    "target": "agent/ada",
+                    "payload_digest": "cost-effect-payload",
+                    "class": "native-coordinated",
+                    "bound_step_run": fixture.items["step"],
+                    "bound_attempt": 1,
+                    "lease_owner": fixture.subjects.seats[0],
+                    "lease_incarnation": SEAT_RUNTIME,
+                    "error": "delivery-unknown",
+                    "evidence": [],
+                })).unwrap();
+                for kind in ["effect.intended", "effect.unresolved"] {
+                    store.append_claim(&ClaimInput {
+                        subject: subject.clone(), kind: kind.into(),
+                        actor: Some(fixture.subjects.seats[0].clone()),
+                        fields: fields.clone(), evidence: vec![],
+                        expected_subject: None, idempotency_key: None,
+                    }).unwrap();
+                }
+                fixture.items.insert("effect_key", urlencoding::encode(&key).into_owned());
+                fixture.items.insert("effect_subject", urlencoding::encode(&subject).into_owned());
+            }
             if probe.route.contains("/replication/") {
                 prepare_replication(&mut fixture, &store, &peer).await;
             }
@@ -3434,6 +3711,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
+                let path = fixture.fill(probe.path,attempt);
+                counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await
             } else if let Some(call) = probe.direct {
                 let (store, fixture) = (store.clone(), &fixture);
                 counted(|| async move {
@@ -3445,16 +3725,17 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 let client = if path == MEMBERSHIP_PATH {
                     membership_person.clone()
-                } else if path.starts_with("/v1/client/arrangements") {
+                } else if path.starts_with("/v1/client/arrangements") || path.starts_with("/v1/client/read-positions") {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path == "/v1/notes" {
+                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
                     person.clone()
                 } else {
                     client.clone()
                 };
                 let expected_publication = &publication;
+                let expected_retry_source = fixture.items.get("retry_subject");
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
@@ -3472,10 +3753,29 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route.contains("/v1/effects/") {
+                                anyhow::ensure!(
+                                    value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
+                                    "the effect probe must read a populated uncertainty or record a real human resolution",
+                                );
+                            }
                             if probe.route == "POST /v1/fleet/transports" {
                                 anyhow::ensure!(
                                     value["published"] == true,
                                     "the transport cost probe must publish an attributed endpoint announcement",
+                                );
+                            }
+                            if probe.route == "POST /v1/mission-runs/{run}/retry" {
+                                let source = expected_retry_source.expect("retry source is prepared");
+                                anyhow::ensure!(
+                                    value["retry_of"].as_str() == Some(source.as_str())
+                                        && value["subject"].as_str().is_some_and(|subject| subject != source.as_str())
+                                        && value["steps"].as_array().is_some_and(|steps| {
+                                            !steps.is_empty() && steps.iter().all(|step| {
+                                                step["status"] == "pending" && step["attempt"] == 1
+                                            })
+                                        }),
+                                    "the retry cost probe must create a fresh linked run with pending steps",
                                 );
                             }
                             if probe.route == "GET /v1/client/quota" {
@@ -3516,6 +3816,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     "SELECT COUNT(*) FROM local_push_registrations", [], |row| row.get(0),
                 ).unwrap();
                 assert_eq!(rows, u64::from(probe.body.is_some()));
+            }
+            if probe.route == "POST /v1/mission-runs/{run}/retry" {
+                let source = store.mission_run(&fixture.items["retry_subject"]).unwrap().unwrap();
+                assert_eq!(source.status, "failed", "retry must leave its source terminal");
+                assert!(source.steps.iter().all(|step| step.status == "failed"));
+                assert_eq!(source.retried_by.len(), attempt + 1, "each sample must write a new retry");
             }
             if attempt > 0 {
                 samples.push(cost);
@@ -3925,6 +4231,34 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         peer_inventory: Value::Null,
         peer_exchange: Value::Null,
     }
+}
+
+/// Keep the source terminal and permit all four independent retries without bypassing admission.
+fn prepare_retry(store: &Store, fixture: &mut Fixture, workspace: &Path) {
+    let kdl = r#"version 2
+mission "cost-retry" state="ready" {
+  concurrent-runs
+  input "value" kind="text"
+  goal "Retry independent invented work."
+  step "review" { assigned-to "person/bench-operator" }
+}"#;
+    let intent = fractal_daemon::parse_intent(kdl, NODE).unwrap();
+    store.apply_internal(&intent, "cost-retry-definition").unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "cost-retry".into(),
+        revision: None,
+        workspace: workspace.display().to_string(),
+        requester: Some("person/bench-operator".into()),
+        mode: None,
+        inputs: BTreeMap::from([("value".into(), "Invented retry input".into())]),
+        idempotency_key: "cost-retry-source".into(),
+    }).unwrap();
+    for step in &source.steps {
+        store.set_step_state(&step.subject, "failed", Some("Invented failure")).unwrap();
+    }
+    store.set_mission_run_state(&source.id, "failed", "terminal", Some("Invented failure")).unwrap();
+    fixture.items.insert("retry_run", source.id);
+    fixture.items.insert("retry_subject", source.subject);
 }
 
 /// Set up fresh writes outside the measured region. A handoff releases its sender before the

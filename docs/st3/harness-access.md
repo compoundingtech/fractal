@@ -3,7 +3,7 @@
 The install's `config.toml` selects `access_mode = "auto"` or `"bypass"`.
 Service installation writes `auto` when creating a new config. An existing config
 without this key means `bypass`; installing again preserves its bytes. Home Manager
-keeps its existing default and accepts `services.smalltalk.accessMode = "auto"`
+keeps its existing default and accepts `services.fractal.accessMode = "auto"`
 for a new installation. Restart the daemon after changing the mode; `fractal doctor`
 shows the mode that daemon actually started with.
 
@@ -42,7 +42,7 @@ This section is written for a person's own agent to read and act on at their req
   either mode, so Codex asks. Setup asks no permission-mode question for Claude; its default is
   the install mode. The tick adds no second set of levels.
 - **Where the setting lives.** `access_mode` in `~/.config/st3/config.toml` (or the
-  Home Manager option `services.smalltalk.accessMode`). Setup writes `auto` when it creates
+  Home Manager option `services.fractal.accessMode`). Setup writes `auto` when it creates
   a config. A config without the key reads as `bypass`, and Fractal never adds or rewrites a key it
   did not create, so an existing install stays on bypass until the person asks for a change.
   A seat declared with its own permission options keeps them in either mode. The Codex tick

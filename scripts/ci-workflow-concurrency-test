@@ -90,6 +90,35 @@ assert policy('fleet.yml', 'merge_group', 100) == ('workspace-100-merge_group', 
 assert not policy('main-upkeep.yml', 'push', 100, ref='refs/heads/other')[1]
 assert not policy('perf.yml', 'push', 100, ref='refs/heads/other')[1]
 
+# Required-workflow admission must select protected source identity, never an Actions
+# commit-status context. These local topology checks do not assert live enforcement.
+history = (ROOT / '.github/workflows/public-repo-history.yml').read_text()
+history_source = (ROOT / '.github/workflows/public-repo-history.yml.genie.ts').read_text()
+assert re.search(r'^on:\n  pull_request:\n    types:', history, re.M), history
+assert re.search(r'^  merge_group: null$', history, re.M), history
+assert re.search(r'^permissions:\n  contents: read\n\n', history, re.M), history
+assert 'github-script' not in history and not re.search(r'^\s+\w+: write$', history, re.M)
+assert 'createCommitStatus' not in history and 'createCommitStatus' not in history_source
+assert 'statuses:' not in history and 'pull_request_target:' not in history
+assert 'persist-credentials: false' in history
+assert 'ref: ${{ github.workflow_sha }}' in history
+assert 'HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}' in history
+assert 'git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA"' in history
+assert 'python3 "$PWD/scripts/check-public-repo" --repo "$PWD" --base "$BASE_SHA" --head "$HEAD_SHA"' in history
+assert 'ref: ${{ github.event.pull_request.head.sha' not in history
+for event in ('pull_request', 'merge_group'):
+    first, second = policy('public-repo-history.yml', event, 100, 42), policy(
+        'public-repo-history.yml', event, 101, 42)
+    assert not first[1] and not second[1] and first[0] != second[0], (event, first, second)
+settings = json.loads((ROOT / '.github/repo-settings.json').read_text())
+required_contexts = [check['context'] for ruleset in settings['rulesets']
+                     for rule in ruleset['rules'] if rule['type'] == 'required_status_checks'
+                     for check in rule['parameters']['required_status_checks']]
+assert 'public-repo-history' not in required_contexts, 'the shared Actions app is not a trusted producer identity'
+assert not any(rule['type'] == 'workflows' for ruleset in settings['rulesets'] for rule in ruleset['rules']), (
+    'required workflows belong in the separate organization ruleset, not repository settings')
+print('passed: read-only history topology preserves independent runs and rejects forgeable Actions status admission')
+
 for action in ['labeled', 'unlabeled']:
     unrelated = policy('perf.yml', 'pull_request', 100, 42, action=action, label='reviewed')
     assert unrelated[0] != 'perf-42' and not unrelated[1], (action, 'unrelated labels must not cancel or replace PR work')

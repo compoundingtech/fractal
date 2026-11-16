@@ -8,6 +8,9 @@ pub use fractal_delivery::store::person_work::{current, declaration_live, enrich
 #[cfg(test)]
 mod revision_provenance_tests;
 
+/// A person may replace a deadline resolution for seven days after it was recorded.
+pub const PERSON_OVERRIDE_WINDOW_MS: u128 = 7 * 24 * 60 * 60 * 1_000;
+
 // Only ready/pending raw steps can be cancelled by reconcile_person_asks. Start from the
 // existing open-step index so completed ask history costs no candidate reads. The explicit
 // NOT IN repeats that index's predicate; CROSS JOIN keeps the sparse steps as the outer loop.
@@ -137,15 +140,39 @@ fn with_deadline(mut body: Value, deadline: &Option<AskDeadline>) -> Value {
     body
 }
 
-/// Whether an ask already recorded under a key was asked with the same deadline and default: a
-/// retry with the same key keeps the first ask's absolute deadline, so it must not name another.
-fn same_deadline(existing: &Value, input: &PersonAskRequest) -> bool {
+/// The priority an ask records: one of [`fractal_schema::availability::PRIORITIES`], or `None`
+/// for `normal`, which an ask has without one, so naming it records the same ask.
+fn ask_priority(input: &PersonAskRequest) -> Result<Option<&str>, FractalError> {
+    match input.priority.as_deref() {
+        None | Some("normal") => Ok(None),
+        Some(priority) if fractal_schema::availability::PRIORITIES.contains(&priority) => Ok(Some(priority)),
+        Some(priority) => Err(FractalError::new(
+            "invalid-ask-priority",
+            format!("an ask's priority is critical, high, normal or low, not `{priority}`"),
+        )),
+    }
+}
+
+/// Adds a priority other than `normal` to an ask claim body.
+fn with_priority(mut body: Value, priority: Option<&str>) -> Value {
+    if let Some(priority) = priority {
+        body["fields"]["priority"] = json!(priority);
+    }
+    body
+}
+
+/// Whether an ask already recorded under a key was asked with the same deadline, default and
+/// priority: a retry with the same key keeps the first ask's absolute deadline, so it must not
+/// name another.
+fn same_terms(existing: &Value, input: &PersonAskRequest, priority: Option<&str>) -> bool {
     existing["fields"]["deadline_ms"] == json!(input.deadline_ms)
         && existing["fields"]["default_answer"] == json!(input.default_answer)
+        && existing["fields"]["priority"].as_str() == priority
 }
 
 /// The answer the person gives and the summary history keeps. A free-text ask takes text
-/// only; a structured ask resolves the named answer against its request.
+/// only, or the person's own dismissal; a structured ask resolves the named answer against its
+/// request.
 fn resolve_answer(
     ask: Option<&ClaimRecord>,
     input: &PersonStepResponse,
@@ -160,6 +187,24 @@ fn resolve_answer(
         let Some(answer) = &input.answer else {
             return Ok((None, input.summary.clone()));
         };
+        // The person may set a free-text ask aside too. It records the dismissal a feedback
+        // request records, the structured form of a free-text ask, so the asker reads
+        // `dismissed` rather than text that looks like a reply. A step with no ask has no asker
+        // to tell, so it is the person's own work and is not dismissed.
+        if !cancel && ask.is_some() && answer.id.as_deref() == Some(crate::person_request::DISMISS) && answer.option_notes.is_empty() {
+            let mut dismissed = json!({"type": "feedback", "outcome": "dismissed"});
+            if let Some(text) = answer.text.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+                if text.chars().count() > crate::person_request::MAX_TEXT {
+                    return Err(FractalError::new(
+                        "invalid-person-answer",
+                        format!("answer text must be at most {} characters", crate::person_request::MAX_TEXT),
+                    ));
+                }
+                dismissed["text"] = json!(text);
+            }
+            let summary = answer_summary(&dismissed);
+            return Ok((Some(dismissed), summary));
+        }
         if cancel || answer.id.is_some() || !answer.option_notes.is_empty() {
             return Err(FractalError::new(
                 "invalid-person-answer",
@@ -263,6 +308,7 @@ fn send_response_tx(
     let fields = &ask.body["fields"];
     let title = fields["title"].as_str().unwrap_or_default();
     let timed_out = response.body["fields"]["resolved_by"] == "deadline";
+    let explicit_override = response.kind == "work.person-override";
     let person = if timed_out {
         fields["person"].as_str().unwrap_or("the person")
     } else {
@@ -273,7 +319,7 @@ fn send_response_tx(
     let verb = if timed_out {
         "did not answer, by its deadline,"
     } else if overrides_default {
-        "answered, before its deadline,"
+        if explicit_override { "overrode the deadline answer to" } else { "answered, before its deadline," }
     } else if answer.is_some_and(|answer| answer["outcome"] == "dismissed") {
         "dismissed"
     } else {
@@ -281,7 +327,11 @@ fn send_response_tx(
     };
     let mut content = format!("{person} {verb} `{}`: {title}\n\n", ask.subject);
     if overrides_default {
-        content.push_str("That answer reached the ask's own member after its deadline had applied the default, so it replaces the default.\n\n");
+        if explicit_override {
+            content.push_str("This answer replaces the deadline default. Effects already taken on the default were not undone; the asker decides what to compensate.\n\n");
+        } else {
+            content.push_str("That answer reached the ask's own member after its deadline had applied the default, so it replaces the default. Effects already taken on the default were not undone.\n\n");
+        }
     }
     if response.body["fields"].get("acted_for").is_some() {
         content.push_str(&format!(
@@ -315,7 +365,9 @@ fn send_response_tx(
         "\n\nThe answer as data: `st work show {} --json` (person_answers).",
         ask.subject
     ));
-    let key = if overrides_default {
+    let key = if explicit_override {
+        format!("person-answer-override:{}", response.body["fields"]["key"].as_str().unwrap_or_default())
+    } else if overrides_default {
         format!("person-answer-overrides-default:{}:{}", ask.subject, response.id)
     } else {
         format!("person-answer:{}:{}", ask.subject, response.id)
@@ -333,7 +385,7 @@ fn send_response_tx(
     if let Some(run) = fields["owner_run"].as_str() {
         tags.push(Value::String(format!("mission-run:{run}")));
     }
-    let heading = if timed_out { "Timed out" } else if overrides_default { "Answered before its deadline" } else { "Answered" };
+    let heading = if timed_out { "Timed out" } else if explicit_override { "Deadline answer overridden" } else if overrides_default { "Answered before its deadline" } else { "Answered" };
     let body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
         "title": format!("{heading}: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
     if let Some(authorization) = authorization {
@@ -354,9 +406,11 @@ pub struct PersonAskPass {
     pub next_deadline: Option<u128>,
 }
 
+
 pub trait PersonWorkStore {
     /// A daemon-owned approval ask, projected in the same transaction as its durable claim.
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
+    fn override_person_step(&self, input: &PersonStepResponse) -> Result<StepRunView, FractalError>;
     fn finish_person_step(
             &self,
             input: &PersonStepResponse,
@@ -396,9 +450,7 @@ pub trait PersonWorkStore {
     /// person's home until they open or read it, and it is refused unless `about` names the
     /// person's own run or step, or their message to the poster.
     fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
-    /// Nothing an ask waited on disappears silently: when its requester, originating step or
-    /// owning run ends, the requester hears once that the ask is gone, and the person gets one
-    /// update saying so.
+    /// When an owning episode ends, tell the requester once; history retains the withdrawal.
     fn tell_ask_ended(&self, tx: &Transaction<'_>, ask: &ClaimRecord) -> Result<()>;
     /// One update step for `person`, about the work `structured` names.
     #[allow(clippy::too_many_arguments)]
@@ -418,11 +470,14 @@ pub trait PersonWorkStore {
 impl PersonWorkStore for Store {
 
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
+        let program = input.actor == crate::model::PROGRAM_ASKER;
         if !crate::model::person_subject(&input.person)
-            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing")
+            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing" || program)
             || input.title.trim().is_empty()
             || input.reason.trim().is_empty()
             || input.idempotency_key.is_empty()
+            // A program asks only on its own step.
+            || (program && (input.step.is_none() || input.new_run.is_some()))
         {
             return Err(FractalError::new(
                 "invalid-person-ask",
@@ -440,7 +495,8 @@ impl PersonWorkStore for Store {
             return self.ask_person_in_new_run(input);
         }
         let now = now_ms();
-        self.connection.batched(|tx| {
+        let subject = normalize_step_run(input.step.as_deref().expect("existing-run ask has a step"));
+        self.with_run_fence(&subject, |tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -449,6 +505,7 @@ impl PersonWorkStore for Store {
                 &stable_input
             };
             let structured = canonical_request(input)?;
+            let priority = ask_priority(input)?;
             let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now)?;
             let named = step(tx, &normalize_step_run(input.step.as_deref().unwrap())).map_err(internal)?
                 .ok_or_else(|| FractalError::new("missing-step-run", format!("asking step `{}` does not exist; use a current step from `work ls`, or omit --step for an independent ask", input.step.as_deref().unwrap())))?;
@@ -466,7 +523,7 @@ impl PersonWorkStore for Store {
                     || existing.body["fields"]["title"] != input.title
                     || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
-                    || !same_deadline(&existing.body, input) {
+                    || !same_terms(&existing.body, input, priority) {
                     return Err(FractalError::new("idempotency-conflict", "this ask key already names a different question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask is no longer retained"));
@@ -487,12 +544,22 @@ impl PersonWorkStore for Store {
                 Ok(proven && legacy["fields"]["step"] == origin_subject && legacy["fields"]["step_attempt"].as_u64() == Some(origin.attempt as u64)
                     && matches!(origin.status.as_str(), "ready" | "blocked" | "claimed" | "working"))
             }).transpose().map_err(internal)?.unwrap_or(false);
-            if step_owner_is_terminal_tx(tx, &origin_subject)?
-                || !declaration_live(tx, &input.actor).map_err(internal)?
-                || (!legacy_origin && (!matches!(origin.status.as_str(), "claimed" | "working")
-                || origin.claimant.as_deref() != Some(input.actor.as_str())
-                || origin.claim_incarnation != input.incarnation
-                || origin.claim_expires_at_unix_ms.is_none_or(|expiry| expiry <= now_ms()))) {
+            // A program step has no claimant: the daemon asks for the step's current attempt,
+            // which the request names as its incarnation (docs/st3/program-engine.md §6). Only a
+            // step whose definition runs a program may be asked from this way.
+            let stale = if program {
+                !origin.agentless
+                    || !matches!(origin.status.as_str(), "ready" | "working" | "blocked" | "waiting-person")
+                    || input.incarnation.as_deref() != Some(origin.attempt.to_string().as_str())
+                    || !fractal_store::store::person_work::runs_program(tx, &origin).map_err(internal)?
+            } else {
+                !declaration_live(tx, &input.actor).map_err(internal)?
+                    || (!legacy_origin && (!matches!(origin.status.as_str(), "claimed" | "working")
+                    || origin.claimant.as_deref() != Some(input.actor.as_str())
+                    || origin.claim_incarnation != input.incarnation
+                    || origin.claim_expires_at_unix_ms.is_none_or(|expiry| expiry <= now_ms())))
+            };
+            if step_owner_is_terminal_tx(tx, &origin_subject)? || stale {
                 return Err(FractalError::new("stale-work-ask", format!(
                     "cannot ask from step `{origin_subject}`: status `{}`, claimant `{}`, expected incarnation `{}`, given `{}`; only its live claimant can block this step. Refresh `work ls` and use its current claim and incarnation, or omit --step for an independent ask",
                     origin.status, origin.claimant.as_deref().unwrap_or("<none>"), origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));
@@ -500,16 +567,16 @@ impl PersonWorkStore for Store {
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
-                &with_deadline(with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
+                &with_priority(with_deadline(with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
                     "origin_step": origin_subject, "origin_attempt": origin.attempt,
                     "person": input.person, "title": input.title, "reason": input.reason,
-                    "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
+                    "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             let pause = append_claim_tx(tx, &self.origin, &origin_subject, "step-run.state", Some("daemon/runtime"),
                 &json!({"fields": {"status": "waiting-person", "reason": subject, "attempt": origin.attempt}}), &[claim.id], None).map_err(claim_append_error)?;
             project_mission_run_update(tx, &pause)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))
-        }).map_err(internal)?
+        })
     }
 
     fn finish_person_step(
@@ -552,7 +619,8 @@ impl PersonWorkStore for Store {
             None => None,
         };
         let deadlines = self.ask_deadlines();
-        self.connection.batched(|tx| {
+        let subject = normalize_step_run(&input.subject);
+        self.with_run_fence(&subject, |tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -562,7 +630,6 @@ impl PersonWorkStore for Store {
             };
             let assistant_grant_id = authorization.map(|authorization|
                 super::assistant_write::authorize_grant(tx, &self.origin, authorization)).transpose()?;
-            let subject = normalize_step_run(&input.subject);
             let mut view = step(tx, &subject).map_err(internal)?
                 .ok_or_else(|| FractalError::new("missing-step-run", "the person step does not exist"))?;
             let ask = request(tx, &subject).map_err(internal)?;
@@ -696,27 +763,96 @@ impl PersonWorkStore for Store {
             }
             // Past its deadline the ask's own member applies the default, which a later answer on
             // another member must not race; answers before it win (`standing_responses`). The
-            // stored time decides, so it is checked here, and refusing rolls this write back.
+            // stored time decides, against the deadline the person's held clock moved
+            // (`answer_cutoff`), so it is checked here, and refusing rolls this write back.
             if !cancel && deadlines
-                && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| claim.accepted_at_unix_ms >= u128::from(deadline)) {
+                && ask.as_ref().map(|a| answer_cutoff(tx, a)).transpose().map_err(internal)?.flatten()
+                    .is_some_and(|cutoff| claim.accepted_at_unix_ms >= cutoff) {
                 return Err(FractalError::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
             }
+            // Projection applies cancellation with the exact ask fence. Keep the derived
+            // origin claim as a notification so local and replicated run invalidation wakes.
+            let waiting_origin = ask.as_ref().and_then(|ask| ask.body["fields"]["origin_step"].as_str()
+                .map(|origin| (ask, origin))).map(|(ask, origin)| {
+                    step(tx, origin).map(|view| view.filter(|view| view.status == "waiting-person"
+                        && view.blocked_reason.as_deref() == Some(ask.subject.as_str())
+                        && ask.body["fields"]["origin_attempt"].as_u64() == Some(u64::from(view.attempt))))
+                }).transpose().map_err(internal)?.flatten();
             project(tx, &claim)?;
             if let Some(ask) = ask.as_ref().filter(|a| !cancel && a.body["fields"]["origin_step"].is_null() && !is_update(a)) {
                 send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), authorization)?;
             }
-            if let Some(origin) = ask.as_ref().and_then(|a| a.body["fields"]["origin_step"].as_str()) {
-                if let Some(origin_view) = step(tx, origin).map_err(internal)? {
-                    if origin_view.status == "ready" {
-                        let response = append_claim_tx(tx, &self.origin, origin, "step-run.state", Some("daemon/runtime"),
-                            &json!({"fields": {"status": "ready", "attempt": origin_view.attempt, "readiness_epoch": origin_view.readiness_epoch,
-                                "reason": format!("Person response: {summary}")}}), &[claim.id], None).map_err(claim_append_error)?;
-                        project_mission_run_update(tx, &response)?;
-                    }
-                }
+            if let Some(origin_view) = waiting_origin {
+                let failed = cancel && step(tx, &origin_view.subject).map_err(internal)?
+                    .is_some_and(|view| view.status == "failed");
+                let reason = if failed { format!("ask cancelled by {}", input.actor) } else { format!("Person response: {summary}") };
+                let response = append_claim_tx(tx, &self.origin, &origin_view.subject, "step-run.state", Some("daemon/runtime"),
+                    &json!({"fields": {"status": if failed { "failed" } else { "ready" }, "attempt": origin_view.attempt,
+                        "reason": reason}}), &[claim.id], None).map_err(claim_append_error)?;
+                project_mission_run_update(tx, &response)?;
             }
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the person step disappeared"))
-        }).map_err(internal)?
+        })
+    }
+
+    fn override_person_step(&self, input: &PersonStepResponse) -> Result<StepRunView, FractalError> {
+        let subject = normalize_step_run(&input.subject);
+        self.with_run_fence(&subject, |tx| {
+            let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
+            let ask = request(tx, &subject).map_err(internal)?
+                .ok_or_else(|| FractalError::new("missing-person-ask", "this step is not a person ask"))?;
+            if !actor.starts_with("person/") || ask.body["fields"]["person"] != actor || input.delegation.is_some() {
+                return Err(FractalError::new("forbidden", "only the ask's person can override its deadline answer"));
+            }
+            if input.episode.as_deref() != Some(ask.id.as_str()) {
+                return Err(FractalError::new("stale-fence", "the override must name the exact asking episode"));
+            }
+            let (answer, summary) = resolve_answer(Some(&ask), input, false)?;
+            let answer = answer.filter(|answer| answer["id"].is_string())
+                .ok_or_else(|| FractalError::new("invalid-person-answer", "an override needs a named answer"))?;
+            let key = format!("person-override:{}:{}", ask.id, answer["id"].as_str().expect("checked answer id"));
+            let responses = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0352dbe30fbd owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+                 FROM claims WHERE subject=?1 AND kind IN ('work.person-done','work.person-cancelled','work.person-override')
+                 ORDER BY CANONICAL_DESC(claims)")).map_err(internal)?
+                .query_map([&subject], claim_from_row).map_err(internal)?
+                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+            // A retry remains successful even after the admission window, without notifying again.
+            if let Some(existing) = responses.iter().rev().find(|claim| claim.kind == "work.person-override"
+                && claim.body["fields"]["key"] == key && claim.actor.as_deref() == Some(actor.as_str())) {
+                if existing.body["fields"]["answer"] != answer || existing.body["fields"]["summary"] != summary {
+                    return Err(FractalError::new("idempotency-conflict", "this override key already has another answer"));
+                }
+                return step(tx, &subject).map_err(internal)?
+                    .ok_or_else(|| FractalError::new("missing-step-run", "the person step disappeared"));
+            }
+            let deadline = responses.iter().find(|claim| claim.kind == "work.person-done"
+                && claim.body["fields"]["episode"] == ask.id && claim.body["fields"]["resolved_by"] == "deadline")
+                .ok_or_else(|| FractalError::new("stale-fence", "only an ask resolved by its deadline can be overridden"))?;
+            let answer_deadline = answer_cutoff(tx, &ask).map_err(internal)?.unwrap_or(deadline.accepted_at_unix_ms);
+            if responses.iter().any(|claim| claim.body["fields"]["episode"] == ask.id
+                && (claim.kind == "work.person-cancelled" || (claim.kind == "work.person-done"
+                    && claim.body["fields"]["resolved_by"] != "deadline"
+                    && claim.accepted_at_unix_ms < answer_deadline))) {
+                return Err(FractalError::new("stale-fence", "this ask already has a person answer"));
+            }
+            let cutoff = deadline.accepted_at_unix_ms.saturating_add(PERSON_OVERRIDE_WINDOW_MS);
+            if now_ms() > cutoff {
+                return Err(FractalError::new("stale-fence", "the seven-day deadline override window has closed"));
+            }
+            let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-override", Some(&actor),
+                &json!({"fields":{"answer":answer,"summary":summary,"episode":ask.id,"overrides":deadline.id,"key":key},
+                    "evidence":input.evidence}), &[ask.id.clone(), deadline.id.clone()], None).map_err(claim_append_error)?;
+            if claim.accepted_at_unix_ms > cutoff {
+                return Err(FractalError::new("stale-fence", "the seven-day deadline override window has closed"));
+            }
+            // Only the ask's owner sends: an offline retry on another member must not deliver twice.
+            if ask.origin == self.origin {
+                send_overridden_default_tx(tx, &self.origin, &ask, &claim)?;
+            }
+            step(tx, &subject).map_err(internal)?
+                .ok_or_else(|| FractalError::new("missing-step-run", "the person step disappeared"))
+        })
     }
 
     fn ask_images(&self, step_subject: &str) -> Result<Option<AskImages>> {
@@ -742,7 +878,7 @@ impl PersonWorkStore for Store {
     }
 
     fn reconcile_person_asks_at(&self, now: u128) -> Result<PersonAskPass> {
-        /// How many asks one pass ends, each with its cancellation, message and update.
+        /// How many asks one pass ends, each with its cancellation and requester message.
         const ENDED_ASKS_PER_PASS: usize = 32;
         let deadlines = self.ask_deadlines();
         // Off, the count restarts when deadlines are next on, so asks made meanwhile do not
@@ -753,9 +889,9 @@ impl PersonWorkStore for Store {
         {
             self.ask_deadline_policy_changed();
         }
-        // Off, nothing applies a default, so there is none to override; the check resumes from
-        // where it stopped when deadlines are on again.
-        let overridden = deadlines && self.tell_overridden_defaults()?;
+        // Previously resolved asks still accept explicit overrides when new deadlines are off.
+        // Their notifications must continue independently of the current deadline policy.
+        let overridden = self.tell_overridden_defaults()?;
         // Drop this read connection before submitting any cancellation transaction.
         let has_asks: bool = {
             let connection = self.readers.get();
@@ -779,8 +915,11 @@ impl PersonWorkStore for Store {
             let mut pass = PersonAskPass { changed: overridden, ..PersonAskPass::default() };
             let mut ended = 0;
             for ask in asks {
-                // Each ending writes a cancellation, a message and an update while holding the
-                // single writer; the rest end on the next pass, which this one's commit wakes.
+                if fractal_store::store::run_projection_pending_tx(tx, &ask.subject)? {
+                    continue;
+                }
+                // Each ending holds the single writer; the rest end on the next pass,
+                // which this one's commit wakes.
                 if ended == ENDED_ASKS_PER_PASS {
                     break;
                 }
@@ -796,7 +935,10 @@ impl PersonWorkStore for Store {
                     if !deadlines || ask.origin != self.origin {
                         continue;
                     }
-                    let Some(deadline) = ask_deadline(&ask, since, default_ms) else { continue };
+                    // The person's held deadline clock moves the deadline; while it is held
+                    // nothing resolves the ask and no wake is armed: resuming writes a claim
+                    // that wakes the reconciler.
+                    let Some(deadline) = effective_ask_deadline(tx, &ask, since, default_ms)? else { continue };
                     if deadline > now {
                         pass.next_deadline = Some(pass.next_deadline.map_or(deadline, |next| next.min(deadline)));
                         continue;
@@ -809,7 +951,7 @@ impl PersonWorkStore for Store {
                 }
                 // The requester, origin or owning run ended.
                 let claim = append_claim_tx(tx, &self.origin, &ask.subject, "work.person-cancelled", Some("daemon/runtime"),
-                    &json!({"fields": {"attempt": view.attempt, "status": "cancelled", "summary": "the requester, origin or owning run ended", "key": format!("person-owner-ended:{}", ask.id)}}), std::slice::from_ref(&ask.id), None)?;
+                    &json!({"fields": {"attempt": view.attempt, "status": "cancelled", "episode": ask.id, "summary": "the requester, origin or owning run ended", "key": format!("person-owner-ended:{}", ask.id)}}), std::slice::from_ref(&ask.id), None)?;
                 project(tx, &claim).map_err(anyhow::Error::new)?;
                 // Telling is best effort: a notice that cannot be written must never undo
                 // this cancellation or the others in this pass.
@@ -842,33 +984,59 @@ impl PersonWorkStore for Store {
         /// How many new person answers one pass looks at.
         const ANSWERS_PER_PASS: i64 = 256;
         let after = self.person_answers_checked.load(std::sync::atomic::Ordering::Relaxed);
-        let (checked, overriding) = {
+        // Each new person answer to an ask of this member that a deadline resolved, with when
+        // the default was applied.
+        let (checked, resolved) = {
             let connection = self.readers.get();
-            let mut query = connection.prepare_cached("SELECT answer.store_index, answer.id, EXISTS(SELECT 1 FROM claims ask JOIN claims applied
+            let mut query = connection.prepare_cached("SELECT answer.store_index, answer.id, (SELECT MIN(CAST(applied.accepted_at_unix_ms AS INTEGER))
+                  FROM claims ask JOIN claims applied
                     ON applied.subject=ask.subject AND applied.kind='work.person-done' AND applied.origin=?2
                     AND json_extract(applied.body,'$.fields.resolved_by')='deadline'
                   WHERE ask.subject=answer.subject AND ask.kind='work.person-asked' AND ask.origin=?2
-                    AND CAST(answer.accepted_at_unix_ms AS INTEGER) < COALESCE(json_extract(ask.body,'$.fields.deadline_unix_ms'),
-                      CAST(applied.accepted_at_unix_ms AS INTEGER)))
-                FROM claims answer WHERE answer.kind='work.person-done' AND answer.store_index>?1
+                    AND (answer.kind!='work.person-override' OR (
+                      json_extract(answer.body,'$.fields.episode')=ask.id
+                      AND answer.actor=json_extract(ask.body,'$.fields.person')
+                      AND json_extract(answer.body,'$.fields.overrides')=applied.id)))
+                FROM claims answer WHERE answer.kind IN ('work.person-done','work.person-override') AND answer.store_index>?1
                   AND json_extract(answer.body,'$.fields.resolved_by') IS NOT 'deadline'
                 ORDER BY answer.store_index LIMIT ?3")?;
             let rows = query
                 .query_map(params![after as i64, self.origin, ANSWERS_PER_PASS], |row| {
-                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
+                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let checked = rows.last().map(|(index, _, _)| *index);
-            (checked, rows.into_iter().filter(|(_, _, overrides)| *overrides).map(|(_, id, _)| id).collect::<Vec<_>>())
+            (checked, rows.into_iter()
+                .filter_map(|(_, id, applied)| Some((id, u128::try_from(applied?).ok()?)))
+                .collect::<Vec<_>>())
         };
         let mut told = false;
-        if !overriding.is_empty() {
+        if !resolved.is_empty() {
             told = self.connection.batched(|tx| -> Result<bool> {
                 let mut told = false;
-                for id in &overriding {
+                for (id, applied) in &resolved {
                     let Some(response) = tx.query_row("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1",
                         [id], claim_from_row).optional()? else { continue };
                     let Some(ask) = request(tx, &response.subject)? else { continue };
+                    // The same cutoff `standing_responses` keeps the answer by.
+                    if response.kind != "work.person-override"
+                        && response.accepted_at_unix_ms >= answer_cutoff(tx, &ask)?.unwrap_or(*applied) {
+                        continue;
+                    }
+                    // An explicit post-resolution action supersedes ordinary racing answers.
+                    // A delayed pre-cutoff response must not tell the asker that it now stands.
+                    if response.kind != "work.person-override" && tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM claims replacement JOIN claims deadline
+                           ON deadline.id=json_extract(replacement.body,'$.fields.overrides')
+                         WHERE replacement.subject=?1 AND replacement.kind='work.person-override'
+                           AND replacement.actor=?2 AND json_extract(replacement.body,'$.fields.episode')=?3
+                           AND json_type(replacement.body,'$.fields.answer')='object'
+                           AND deadline.subject=?1 AND deadline.kind='work.person-done'
+                           AND json_extract(deadline.body,'$.fields.resolved_by')='deadline'
+                           AND json_extract(deadline.body,'$.fields.episode')=?3)",
+                        params![ask.subject, ask.body["fields"]["person"].as_str(), ask.id], |row| row.get::<_, bool>(0))? {
+                        continue;
+                    }
                     send_overridden_default_tx(tx, &self.origin, &ask, &response).map_err(anyhow::Error::new)?;
                     told = true;
                 }
@@ -922,9 +1090,16 @@ impl PersonWorkStore for Store {
                 "an update waits for nobody, so it has no deadline or default answer",
             ));
         }
+        // `normal` is what every ask has without a priority, so naming it changes nothing.
+        if ask_priority(input)?.is_some() {
+            return Err(FractalError::new(
+                "invalid-ask-priority",
+                "an update asks nothing, so it has no priority",
+            ));
+        }
         let structured = canonical_request(input)?;
         let about = structured["about"].as_str().unwrap_or_default().to_owned();
-        self.connection.batched(|tx| {
+        self.with_all_runs_fenced(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -941,7 +1116,7 @@ impl PersonWorkStore for Store {
                     input.person)));
             }
             self.append_update_tx(tx, &input.actor, &input.person, &input.title, &input.reason, &input.idempotency_key, &structured)
-        }).map_err(internal)?
+        })
     }
 
     fn tell_ask_ended(&self, tx: &Transaction<'_>, ask: &ClaimRecord) -> Result<()> {
@@ -967,14 +1142,6 @@ impl PersonWorkStore for Store {
                 "from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
                 "title": format!("Ask cancelled: {title}"), "in_reply_to": null,
                 "tags": [format!("st3-ask-ended:{}", ask.subject)]}}), std::slice::from_ref(&ask.id), None)?;
-        }
-        if person.starts_with("person/") {
-            let update = json!({"version": 1, "type": "update", "about": ask.subject});
-            self.append_update_tx(tx, "daemon/runtime", person,
-                &format!("Cancelled: {title}"),
-                &format!("{requester} asked you \"{title}\". That ask ended because {why}, so nothing waits on your answer now."),
-                &format!("st3-ask-ended:{}", ask.id), &update)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         }
         Ok(())
     }
@@ -1007,10 +1174,13 @@ impl PersonWorkStore for Store {
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"update\" {{ assigned-to {:?}; goal {:?}; }} }}", title, person, reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
             let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the update mission could not be parsed"))?;
+            let owner = current_desired_row(tx, actor).map_err(internal)?;
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(actor),
                 &with_request(json!({"fields": {"run": format!("mission-run/person-update/{}", &hash[..32]),
                     "generation": format!("run-generation/{generation}"), "person": person, "title": title,
-                    "reason": reason, "key": idempotency_key, "attempt": 1, "status": "ready", "mission_spec": mission}}), structured),
+                    "reason": reason, "key": idempotency_key, "attempt": 1, "status": "ready", "mission_spec": mission,
+                    "owner_run": owner.as_ref().and_then(|row| row.owner_run.as_deref()),
+                    "owner_generation": owner.as_ref().and_then(|row| row.owner_generation.as_deref())}}), structured),
                 &[], None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the update could not be projected"))
@@ -1030,8 +1200,9 @@ impl PersonWorkStore for Store {
             ));
         }
         let structured = canonical_request(input)?;
+        let priority = ask_priority(input)?;
         let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now_ms())?;
-        self.connection.batched(|tx| {
+        self.with_all_runs_fenced(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -1056,7 +1227,7 @@ impl PersonWorkStore for Store {
             if let Some(existing) = request(tx, &subject).map_err(internal)? {
                 if existing.body["fields"]["person"] != input.person || existing.body["fields"]["title"] != input.title || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
-                    || !same_deadline(&existing.body, input) {
+                    || !same_terms(&existing.body, input, priority) {
                     return Err(FractalError::new("idempotency-conflict", "this ask key already names another question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask is no longer retained"));
@@ -1065,17 +1236,20 @@ impl PersonWorkStore for Store {
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}", input.title, input.person, input.reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
             let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the person mission could not be parsed"))?;
+            let owner = current_desired_row(tx, &input.actor).map_err(internal)?;
             let run = format!("mission-run/person-ask/{}", &hash[..32]);
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
-                &with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
+                &with_priority(with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
                     "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
                     "attempt": 1, "status": "ready", "mission_spec": mission,
-                    "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
+                    "owner_run": owner.as_ref().and_then(|row| row.owner_run.as_deref()),
+                    "owner_generation": owner.as_ref().and_then(|row| row.owner_generation.as_deref()),
+                    "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))
-        }).map_err(internal)?
+        })
     }
 }
 

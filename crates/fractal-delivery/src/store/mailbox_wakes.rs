@@ -202,7 +202,8 @@ impl MailboxWakesStore for Store {
                 "SELECT json_extract(body,'$.fields.to') FROM claims WHERE subject=?1 AND kind='message.sent'
                  UNION SELECT json_extract(child.value,'$.arguments[0]')
                  FROM desired,json_each(desired.body,'$.children') child
-                 WHERE desired.subject=?1 AND desired.kind='message' AND json_extract(child.value,'$.name')='to'"
+                 WHERE desired.subject=?1 AND desired.kind='message' AND json_extract(child.value,'$.name')='to'
+                 UNION SELECT json_extract(fields,'$.to') FROM local_stream_sent WHERE subject=?1"
             )?.query_map([&subject], |r| r.get::<_, Option<String>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for recipient in recipients.into_iter().flatten() {

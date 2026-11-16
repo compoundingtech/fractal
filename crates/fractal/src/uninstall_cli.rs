@@ -102,6 +102,8 @@ pub(super) async fn run_uninstall(
     paths.extend(fractal_daemon::startup::paths(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.client_gateway_socket));
+    paths.extend(fractal_daemon::config::legacy_socket_files(&config.socket));
+    paths.extend(fractal_daemon::config::legacy_socket_files(&config.client_gateway_socket));
     if st2_only_hooks {
         paths.push(st2_state);
     }

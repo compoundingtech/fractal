@@ -182,6 +182,7 @@ impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         resource_references::create_schema(connection)?;
+        effects::create_schema(connection)?;
         // Legacy run stamps are projection metadata, not ownership of a shared URI.
         connection.execute(
             /* sqlite-large-value: allow-for-now lv-h379d33768384 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run=NULL, owner_generation=NULL, owner_step=NULL
@@ -215,6 +216,7 @@ impl FractalRuntime {
         slo_breaches::create_schema(connection)?;
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
+        input_history::create_schema(connection)?;
         client_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
         // After every projection its triggers maintain.
@@ -267,6 +269,17 @@ impl FractalRuntime {
 impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
         Some(self.observer_actuals.clone())
+    }
+    fn admit_writer_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        writer: &str,
+        kind: &str,
+        subject: &str,
+    ) -> Result<(), FractalError> {
+        // A document a run binds is decided by its run authority, as its claims are.
+        super::run_authority::admit_tx(transaction, origin, Some(writer), kind, subject, &BTreeMap::new())
     }
     fn idempotency_response_in_use(&self, connection: &Connection, response: &str) -> Result<bool> {
         // Some local entries contain a digest, not JSON. They have no work lifetime to pin.
@@ -464,6 +477,13 @@ impl Runtime for FractalRuntime {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
         self.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
+        if input.kind == message_expiry::KIND {
+            let gate = self.extensions.get::<message_expiry::ReceiptGate>();
+            let _held = gate.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let admission = |connection: &Connection| message_expiry::validate_shard(self, connection, &input.subject);
+            return append_claim_with_commit_context(store, input, None, None, None, None,
+                ClaimCommitContext { expiry_writer: true, admission: Some(&admission), ..Default::default() });
+        }
         append_claim_fenced_outcome(store, input, None)
     }
 
@@ -488,6 +508,12 @@ impl Runtime for FractalRuntime {
             ordered_membership::rebuild(transaction)?;
             arrangements::repair_frontier(transaction, &subject)?;
             ordered_membership::repair_frontier(transaction, &subject)?;
+        } else if kind == read_positions::KIND {
+            // A retracted advance can lower a maximum: refold every unrepaired advance.
+            read_positions::repair_frontier(transaction)?;
+        } else if fractal_schema::attention_controls::KINDS.contains(&kind.as_str()) {
+            // A retracted control can move seen later or bring back an older snooze.
+            attention_controls::rebuild(transaction)?;
         } else {
             ordered_membership::member_repaired(transaction, &subject)?;
         }
@@ -518,13 +544,38 @@ impl Runtime for FractalRuntime {
         )
     }
 
+    fn operation_claim_is_graph_neutral(&self, kind: &str) -> bool {
+        !replay_projects_kind(kind)
+    }
+
     fn project_incremental(
         &self,
         transaction: &Transaction<'_>,
         origin: &str,
         through: u64,
     ) -> Result<IncrementalProjection, FractalError> {
-        try_project_simple_replication_tx(transaction, origin, through)
+        try_project_simple_replication_inner_tx(transaction, origin, through, false, true)
+    }
+
+    fn project_incremental_chunk(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        through: u64,
+    ) -> Result<IncrementalProjection, FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
+        try_project_simple_replication_inner_tx(transaction, origin, through, true, true)
+    }
+
+    fn projection_work_pending(&self, connection: &Connection) -> Result<bool, FractalError> {
+        projection_work_pending_tx(connection)
+    }
+
+    fn finish_projection_work(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
+        finish_projection_work_tx(transaction)
     }
 
     fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
@@ -757,16 +808,22 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         desired_progress::initialize_write_witness(&transaction)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcbab08c75150 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hc85e78595758 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ attention_controls::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
+        mission_supersession::install_schema(&transaction)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
         desired_progress::initialize_write_witness(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2eda34b01b09 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9d92a9b287c2 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ attention_controls::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
+        mission_supersession::install_schema(connection)?;
     }
     Ok(())
 }
@@ -847,6 +904,242 @@ impl FractalRuntime {
 mod schema_install_tests {
     use super::*;
 
+    /// What smallclaims installs before the runtime's schema: its tables and the fleet generation
+    /// counter, which the notice owner's invalidation trigger watches.
+    fn graph_schema(connection: &Connection) {
+        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        connection.execute_batch("CREATE TABLE fleet_generation(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL); INSERT INTO fleet_generation VALUES(1,0);").unwrap();
+    }
+
+    #[test]
+    fn assistant_principal_index_installs_on_existing_claims_and_reopens_without_ddl() {
+        const GRANTED: &str = "custom.client.assistant.v1.granted";
+        const REVOKED: &str = "custom.client.assistant.v1.revoked";
+        const POLICY: &str = "custom.client.assistant.v1.policy";
+        const INDEX: &str = "claims_assistant_v1_principal_index";
+        const SELECT: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
+        const ACTIVE: &str =
+            "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+     AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
+     AND (?5 IS NULL OR COALESCE(
+         (SELECT CASE WHEN json_type(policy.body,'$.fields') IS NULL THEN 1 ELSE
+             COALESCE(json_type(policy.body,'$.fields.expires_at_unix_ms')='integer'
+                 AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5,0) END
+          FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 ORDER BY policy.store_index DESC LIMIT 1),
+         CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
+             COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
+                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
+
+        fn snapshot(connection: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+            connection
+                .prepare("SELECT * FROM claims ORDER BY store_index")
+                .unwrap()
+                .query_map([], |row| {
+                    (0..row.as_ref().column_count()).map(|column| row.get(column)).collect()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        fn plan(connection: &Connection, sql: &str, active: bool) -> Vec<String> {
+            let parameters: Vec<&dyn rusqlite::ToSql> = if active {
+                vec![&GRANTED, &"assistant/chatgpt", &REVOKED, &POLICY, &100_u64]
+            } else {
+                vec![&GRANTED, &"assistant/chatgpt"]
+            };
+            connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(parameters.as_slice(), |row| row.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        // These supported stores need additive DDL, not a data or version conversion.
+        for version in [18, 19, fractal_schema::STORAGE_VERSION] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("claims.sqlite");
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+            install_initial_schema(&connection, true).unwrap();
+            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index;").unwrap();
+            connection.pragma_update(None, "user_version", version).unwrap();
+            connection.execute(
+                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('batch','node',1,'hash','1')",
+                [],
+            ).unwrap();
+            for (id, subject, kind, body) in [
+                ("legacy", "custom/client/legacy", GRANTED, r#"{"fields":{"expires_at_unix_ms":200}}"#),
+                ("chatgpt", "custom/client/chatgpt", GRANTED, r#"{"fields":{"principal":"assistant/chatgpt","expires_at_unix_ms":50}}"#),
+                ("mcp", "custom/client/mcp", GRANTED, r#"{"fields":{"principal":"assistant/mcp","expires_at_unix_ms":200}}"#),
+                ("policy", "custom/client/chatgpt", POLICY, r#"{"fields":{"expires_at_unix_ms":200}}"#),
+                ("revoked", "custom/client/legacy", REVOKED, r#"{"fields":{}}"#),
+                ("unrelated", "custom/test/unrelated", "custom.test.recorded", r#"{"fields":{}}"#),
+            ] {
+                connection.execute(
+                    "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES(?1,'batch',?2,?3,'node',?4,'[]','1')",
+                    params![id, subject, kind, body],
+                ).unwrap();
+            }
+            let before = snapshot(&connection);
+            let plans_before = [plan(&connection, SELECT, false), plan(&connection, ACTIVE, true)];
+            assert!(plans_before.iter().flatten().all(|detail| !detail.contains(INDEX)));
+            drop(connection);
+
+            let connection = Connection::open(&path).unwrap();
+            migrate_schema(&connection).unwrap();
+            install_initial_schema(&connection, false).unwrap();
+            assert_eq!(snapshot(&connection), before, "version {version}: claim bytes");
+            assert_eq!(
+                connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(),
+                version,
+            );
+            for (sql, active, previous) in [(SELECT, false, &plans_before[0]), (ACTIVE, true, &plans_before[1])] {
+                let current = plan(&connection, sql, active);
+                eprintln!("assistant admission version={version} active={active} before={previous:?} after={current:?}");
+                assert!(
+                    current.iter().any(|detail| detail.contains("SEARCH") && detail.contains(INDEX)
+                        && detail.contains("kind=?") && detail.contains("<expr>=?")),
+                    "version {version}: before={previous:?}; after={current:?}",
+                );
+            }
+            for (principal, mut expected) in [
+                ("assistant/chatgpt", vec!["chatgpt".to_owned(), "legacy".to_owned()]),
+                ("assistant/mcp", vec!["mcp".to_owned()]),
+            ] {
+                let mut found = connection.prepare(SELECT).unwrap()
+                    .query_map(params![GRANTED, principal], |row| row.get::<_, String>(0))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                found.sort();
+                expected.sort();
+                assert_eq!(found, expected);
+            }
+            let active = connection.prepare(ACTIVE).unwrap()
+                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, 100_u64], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(active, vec!["chatgpt"]);
+            let unfiltered = connection.prepare(ACTIVE).unwrap()
+                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, Option::<u64>::None], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(unfiltered.len(), 2, "no cutoff preserves unfiltered validation candidates");
+            let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
+            drop(connection);
+
+            let connection = Connection::open(&path).unwrap();
+            migrate_schema(&connection).unwrap();
+            install_initial_schema(&connection, false).unwrap();
+            assert_eq!(snapshot(&connection), before);
+            assert_eq!(
+                connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(),
+                cookie,
+                "an unchanged reopen must not rebuild the index",
+            );
+        }
+    }
+
+    #[test]
+    fn supersession_queue_counter_survives_empty_reopen_without_frontier_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queue-counter.sqlite");
+        let mut previous = 0;
+        for (attempt, goal) in ["First publication.", "Second publication.", "Third publication."].into_iter().enumerate() {
+            let store = Store::open(&path, "owner").unwrap();
+            let source = format!("version 2\nmission \"counter\" state=\"ready\" {{ goal {goal:?}; step \"work\" {{ agentless }} }}\n");
+            let intent = crate::graph::parse_test_intent(&source, "owner").unwrap();
+            let plan = store.mission(&intent, IntentInput {
+                kdl: source, source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, &format!("counter-{attempt}")).unwrap();
+            let sequence: u64 = store.readers.get().query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert!(sequence > previous, "emptying and reopening must not reuse a drain ceiling");
+            previous = sequence;
+            assert_eq!(store.readers.get().query_row(
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), 0, "ordinary publication drains its own head");
+            let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            assert!(store.index().unwrap() > 0);
+            let work = scope.finish();
+            assert_eq!(work.fullscan_steps, 0, "private queue allocation must not add work to canonical frontier reads: {work:?}");
+        }
+    }
+
+    #[test]
+    fn supersession_bootstrap_recovers_after_each_data_write_refusal() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        for (refused_table, refused_meta_insert) in [
+            ("local_mission_supersession_heads_v3", 0), ("meta", 1), ("meta", 2),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("bootstrap.sqlite");
+            let store = Store::open(&path, "owner").unwrap();
+            let source = "version 2\nmission \"existing-head\" state=\"ready\" { goal \"Recover selected heads.\"; step \"work\" { agentless } }\n";
+            let intent = crate::graph::parse_test_intent(source, "owner").unwrap();
+            let plan = store.mission(&intent, IntentInput {
+                kdl: source.into(), source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, "bootstrap-head").unwrap();
+            {
+                let connection = store.connection.write();
+                connection.execute("DELETE FROM meta WHERE key=?1",
+                    [mission_supersession::BOOTSTRAP_KEY]).unwrap();
+                connection.execute("DELETE FROM local_mission_supersession_heads_v3", []).unwrap();
+                let counter = || connection.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
+                    [], |row| row.get::<_, u64>(0),
+                ).unwrap();
+                let counter_before = counter();
+                let meta_inserts = std::sync::atomic::AtomicUsize::new(0);
+                connection.authorizer(Some(move |context: AuthContext<'_>| {
+                    let denied = match context.action {
+                        AuthAction::Insert { table_name } if table_name == refused_table => {
+                            table_name != "meta" || meta_inserts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 == refused_meta_insert
+                        }
+                        _ => false,
+                    };
+                    if denied {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }));
+                assert!(mission_supersession::install_schema(&connection).is_err());
+                connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                assert!(connection.is_autocommit(), "failed bootstrap must roll back");
+                assert_eq!(counter(), counter_before, "failed bootstrap must roll back its allocator");
+                assert_eq!(connection.query_row(
+                    "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
+                    [], |row| row.get::<_, u64>(0),
+                ).unwrap(), 0, "head seed and completion marker must commit together");
+                assert!(!connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+                    [mission_supersession::BOOTSTRAP_KEY], |row| row.get::<_, bool>(0),
+                ).unwrap());
+            }
+            drop(store);
+            let store = Store::open(&path, "owner").unwrap();
+            let connection = store.connection.write();
+            assert_eq!(connection.query_row(
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3 WHERE mission_id='existing-head'",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), 1, "reopen must recover the existing selected head");
+            assert!(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')",
+                [mission_supersession::BOOTSTRAP_KEY], |row| row.get::<_, bool>(0),
+            ).unwrap());
+            let changes = connection.total_changes();
+            let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
+            install_initial_schema(&connection, false).unwrap();
+            assert_eq!(connection.total_changes(), changes, "complete reopen must not write");
+            assert_eq!(connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(), cookie);
+        }
+    }
+
     #[test]
     fn complete_runtime_schema_does_not_take_a_held_writer_lock() {
         let directory = tempfile::tempdir().unwrap();
@@ -893,9 +1186,7 @@ mod schema_install_tests {
     #[test]
     fn incomplete_runtime_schema_keeps_completed_ddl() {
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('preserved');").unwrap();
         assert!(
             FractalRuntime::default()
@@ -916,9 +1207,7 @@ mod schema_install_tests {
     #[test]
     fn failed_runtime_schema_install_rolls_back_its_ddl_and_preserves_existing_data() {
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         // This damaged table fails after the runtime's early claim indexes were created.
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('existing');").unwrap();
         let error = FractalRuntime::default()
@@ -939,9 +1228,7 @@ mod schema_install_tests {
     fn late_install_error_fixture() -> (Connection, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved');").unwrap();
         let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed = reached.clone();
@@ -1046,9 +1333,7 @@ mod schema_install_tests {
     fn fresh_late_runtime_ddl_has_one_transaction_boundary() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let committed = events.clone();
         connection.commit_hook(Some(move || {
@@ -1151,9 +1436,7 @@ mod schema_install_tests {
                 let connection = Connection::open(&path).unwrap();
                 connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved'); PRAGMA user_version=18;").unwrap();
                 if phase != "core" {
-                    connection
-                        .execute_batch(smallclaims::store::SCHEMA)
-                        .unwrap();
+                    graph_schema(&connection);
                 }
             }
             let status = std::process::Command::new(std::env::current_exe().unwrap())

@@ -140,6 +140,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
         notify: Arc::new(Notify::new()),
         event_notify: events.clone(),
         node: "orchid".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: "pty".into(),
@@ -307,14 +308,15 @@ fi
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "mail".into(),
-                from: "person/avery".into(),
-                to: SEAT.into(),
-                content: "hello from the terminal owner".into(),
-                title: None,
-                in_reply_to: None,
-                tags: vec![],
-                attachments: vec![],
+            owner: None,
+            idempotency_key: "mail".into(),
+            from: "person/avery".into(),
+            to: SEAT.into(),
+            content: "hello from the terminal owner".into(),
+            title: None,
+            in_reply_to: None,
+            tags: vec![],
+            attachments: vec![],
             },
         )
         .await
@@ -601,14 +603,15 @@ async fn successor_keeps_the_mailbox(
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "successor-mail".into(),
-                from: "person/avery".into(),
-                to: SEAT.into(),
-                content: "hello to the next invocation".into(),
-                title: None,
-                in_reply_to: None,
-                tags: vec![],
-                attachments: vec![],
+            owner: None,
+            idempotency_key: "successor-mail".into(),
+            from: "person/avery".into(),
+            to: SEAT.into(),
+            content: "hello to the next invocation".into(),
+            title: None,
+            in_reply_to: None,
+            tags: vec![],
+            attachments: vec![],
             },
         )
         .await

@@ -14,8 +14,8 @@ const unknown = { _tag: 'Unknown' } as const
 const file: ResourceFile = { path: 'captured/file.ts', added: unknown, removed: unknown, lines: unknown }
 const resource: ResourceData = { kind: 'diff', label: 'Recorded capture', detail: 'Captured successful-tool excerpt', fileCount: unknown, files: [file] }
 const header = {
-  folder: 'Reported folder', title: 'Reported agent', panelOpen: false, drawerOpen: false,
-  onTogglePanel() {}, onToggleDrawer() {},
+  folder: 'Reported folder', title: 'Reported agent', panelOpen: false, terminalOpen: false,
+  onTogglePanel() {}, onToggleTerminal() {},
   nativeActions: createElement('button', { 'data-native-action': 'existing' }, 'Bound action'),
 }
 const agent: Agent = { ref: 'agent/fixture/readonly', terminal: '', name: 'Reported name', lifecycle: unknown, host: 'Reported host', connected: true, activity: 'idle', status: 'idle', usage: unknown, checkout: unknown, workspace: unknown, startedAt: unknown, endedAt: unknown, blockedOn: unknown, ask: unknown, lastActivityAt: unknown }
@@ -43,16 +43,16 @@ describe('thread header seam', () => {
     const bare = renderToStaticMarkup(createElement(ThreadHeader, header))
     expect(bare).toMatch(/data-native-action="existing"/)
     expect(bare).toMatch(/native-action-slot/)
-    expect(bare).not.toMatch(/Toggle terminal drawer|>Open|>Commit|1970|Needs you/)
+    expect(bare).not.toMatch(/Show terminal|>Open|>Commit|1970|Needs you/)
     const bound = renderToStaticMarkup(createElement(ThreadHeader, { ...header, terminalAvailable: true, onOpen() {}, onCommit() {}, status: 'working', freshness: 'stale', statusSince: 1000, now: 2000 }))
-    expect(bound).toMatch(/Toggle terminal drawer/)
+    expect(bound).toMatch(/Show terminal/)
     expect(bound).toMatch(/>Open/)
     expect(bound).toMatch(/>Commit/)
     expect(bound).toMatch(/stale observation/)
     expect(bound).not.toMatch(/Needs you/)
   })
   it.each([
-    ['waiting', 'Native waiting for tool response', false, 'Needs you'],
+    ['waiting', 'Native waiting for tool response', false, 'Waiting'],
     ['errored', 'Native tool execution errored', false, 'Failed'],
     ['working', 'Native working before connection loss', true, 'Last verified · Working'],
     ['idle', 'invalid-status', false, 'Idle'],

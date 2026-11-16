@@ -150,7 +150,21 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
 
   const staleWriter = await worker.newPage(pageOptions)
   await staleWriter.goto(base)
-  await staleWriter.evaluate(() => localStorage.setItem('prior-renderer-view', 'gone after clear'))
+  // A write's acknowledgment in the case renderer does not mean the retained
+  // audit renderer has received its storage event. Observe that renderer before
+  // taking the stale-view fixture; reset detection has not run at this point.
+  const auditClient = await worker.context.newCDPSession(baseAudit)
+  await auditClient.send('DOMStorage.enable')
+  const { promise: storageObserved, resolve: observeStorage } = Promise.withResolvers()
+  auditClient.on('DOMStorage.domStorageItemAdded', ({ storageId, key }) => {
+    if (storageId.securityOrigin === base && storageId.isLocalStorage && key === 'prior-renderer-view') observeStorage()
+  })
+  try {
+    await staleWriter.evaluate(() => localStorage.setItem('prior-renderer-view', 'gone after clear'))
+    await storageObserved
+  } finally {
+    await auditClient.detach()
+  }
   const readAudit = baseAudit.evaluate.bind(baseAudit)
   const staleSnapshot = await readAudit(() => ({
     origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),

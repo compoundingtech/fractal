@@ -106,7 +106,7 @@ async fn ready_work_happy_path_deduplicates_cohort_and_reports_publication_cut()
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let envelope: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert_eq!(envelope["snapshot"]["store_index"], publication.cut);
         assert_eq!(envelope["value"]["ready_count"], 1);
         assert_eq!(envelope["value"]["coverage"], "local-graph-cut");
@@ -304,6 +304,7 @@ async fn ready_work_person_ask_blocks_until_answered() {
     ready_count(&state, PATH, 1).await;
     claim(&state, &step);
     let ask = state.store.ask_person(&PersonAskRequest {
+        priority: None,
         deadline_ms: None, default_answer: None, legacy_request: None,
         person: "person/operator".into(), title: "Choose a planting date".into(),
         reason: "The owner must choose.".into(), actor: ASH.into(), step: Some(step.clone()),
@@ -397,28 +398,29 @@ async fn ready_work_refuses_authenticated_assistant_and_external_service_grants(
         let (_root, mut state, _) = fixture();
         state.owning_person = Some("person/operator".into());
         let id = "111111111111111111111111";
+        let principal = if profile == "assistant" { "assistant/chatgpt" } else { "plugin/test/reader" };
+        let scopes = if profile == "assistant" { &["read.assistant.summary"][..] } else { external_grants::SERVICE_SCOPES };
         grant_claim(&state, &external_grants::subject(id).unwrap(), GRANTED, json!({
-            "profile": profile, "principal": "assistant/chatgpt", "grant_id": id,
-            "session_actor": format!("assistant/chatgpt/session/{id}"), "issuer": "person/operator",
+            "profile": profile, "principal": principal, "grant_id": id,
+            "session_actor": format!("{principal}/session/{id}"), "issuer": "person/operator",
             "credential_hash": client_v0::credential_digest("ready-demand-external"),
             "expires_at_unix_ms": u64::MAX, "minimal_read_mode": "approval-once",
-            "disclosure_consent": true, "scopes": ["read.assistant.summary"]
+            "disclosure_consent": true, "scopes": scopes
         }));
-        if profile == "assistant" {
-            // Prove this bearer authenticates: refusal is the explicit route allowlist,
-            // not an absent, malformed, expired, or otherwise unusable grant.
-            let session = external_grants::authenticate(&state,
-                &client_v0::credential_digest("ready-demand-external"), "unix").unwrap().unwrap();
-            assert_eq!(session.authority_actor, "assistant/chatgpt");
-        }
+        // Both bearers authenticate: refusal must come from their closed route
+        // registries, not malformed principals, scopes or unusable grants.
+        let session = external_grants::authenticate(&state,
+            &client_v0::credential_digest("ready-demand-external"), "unix").unwrap().unwrap();
+        assert_eq!(session.authority_actor, principal);
+        assert_eq!(external_grants::is_service(&session), profile == "service");
         let response = router(state).oneshot(Request::builder().uri(PATH)
             .header("authorization", "Bearer ready-demand-external")
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let error: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(error["code"], "forbidden");
-        assert!(error["message"].as_str().unwrap().contains(if profile == "assistant" {
-            "explicit proof-bearing read projections"
-        } else { "service grant issuance is disabled" }), "{error}");
+        assert_eq!(error["message"], if profile == "assistant" {
+            "assistants may access only explicit proof-bearing read projections"
+        } else { "service requires a registered pure GET and its exact read scope" }, "{error}");
     }
 }

@@ -237,6 +237,7 @@ impl Ui {
             answer_error: None,
             chat: None,
             form: Default::default(),
+            overriding: None,
         };
         let doc = screens::home_detail(&self.world, Some(subject), 120, &drafts);
         let mut items = vec![(
@@ -667,6 +668,7 @@ mod tests {
                     answer_error: None,
                     chat: None,
                     form: Default::default(),
+                    overriding: None,
                 },
             );
             for target in doc.targets {
@@ -860,6 +862,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         peer.write_all(&encode_packet(

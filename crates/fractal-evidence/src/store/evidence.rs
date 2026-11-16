@@ -432,26 +432,33 @@ impl EvidenceStore for Store {
         } else {
             format!("({})", crate::store::gate_runners::FROM_CLAIMS)
         };
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h16daeb7e7a0e owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT DISTINCT subject, origin, owner FROM {source}"
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha3d84de9cc54 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT DISTINCT runner.subject,
+                    COALESCE(json_extract(request.body, '$.fields.host'), runner.origin),
+                    runner.owner,
+                    COALESCE(json_extract(request.body, '$.fields.dispatch.owner_attempt'),
+                        json_extract(request.body, '$.fields.attempt'))
+             FROM {source} runner JOIN claims request ON request.id=runner.claim_id"
         ))?;
-        let mut requests = BTreeMap::<String, Vec<(String, String)>>::new();
+        let mut requests = BTreeMap::<String, Vec<(String, String, Option<u32>)>>::new();
         for row in statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<u32>>(3)?,
             ))
         })? {
-            let (subject, host, owner) = row?;
+            let (subject, host, owner, attempt) = row?;
             // A runner leaves this list once its stop is observed on it.
             smallclaims::touched::note_read(|| subject.clone());
-            requests.entry(owner).or_default().push((subject, host));
+            requests.entry(owner).or_default().push((subject, host, attempt));
         }
         // New requests, and owners that finish or move on.
         for kind in [
             "gate.requested",
             "step-run.state",
+            "step-run.retried",
             "mission-run.state",
             "run-generation.state",
         ] {
@@ -467,7 +474,7 @@ impl EvidenceStore for Store {
                     step.status IN ('completed','failed','cancelled')
                     OR generation.status IN ('completed','failed','cancelled','superseded')
                     OR run.phase='terminal' OR run.phase LIKE 'cleanup-%'
-                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%'
+                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%', step.attempt
              FROM step_runs step
              JOIN mission_runs run ON run.id=step.run_id
              JOIN mission_runs root ON root.id=run.root_run_id
@@ -476,7 +483,7 @@ impl EvidenceStore for Store {
              SELECT 'mission-run/' || run.id, 'mission-run/' || run.id,
                     run.phase IN ('final-cancelled','terminal') OR run.phase LIKE 'cleanup-%'
                     OR run.status IN ('completed','failed','cancelled')
-                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%'
+                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%', 1
              FROM mission_runs run
              JOIN mission_runs root ON root.id=run.root_run_id",
         )?;
@@ -486,17 +493,18 @@ impl EvidenceStore for Store {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, bool>(2)?,
+                row.get::<_, u32>(3)?,
             ))
         })? {
-            let (owner, owner_run, retired) = row?;
+            let (owner, owner_run, retired, current_attempt) = row?;
             for key in [owner.clone(), format!("legacy:{}", owner.replace('/', "."))] {
                 if let Some(requests) = requests.get(&key) {
-                    runners.extend(requests.iter().map(|(subject, host)| MissionGateRunner {
+                    runners.extend(requests.iter().map(|(subject, host, attempt)| MissionGateRunner {
                         subject: subject.clone(),
                         host: host.clone(),
                         owner_run: owner_run.clone(),
                         owner_step: owner.starts_with("step-run/").then(|| owner.clone()),
-                        retired,
+                        retired: retired || attempt.is_some_and(|attempt| attempt != current_attempt),
                     }));
                 }
             }

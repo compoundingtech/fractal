@@ -1741,7 +1741,7 @@ impl Store {
         let mut ordinary_claims = BTreeSet::new();
         loop {
             loans += 1;
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let roots = self.trust_roots(&transaction, &self.origin)?;
@@ -2396,6 +2396,47 @@ mod paced_verdict_tests {
             Some("roots-before-a-membership-change")
         );
         assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), 0);
+    }
+
+    #[test]
+    fn bootstrap_verdict_loans_revalidate_changed_roots_before_activation() {
+        let store = root_linked(REQUEUE_PAGE + 1);
+        store.connection.write().execute(
+            "UPDATE claim_signature_migration SET phase='judging' WHERE id=1",
+            [],
+        ).unwrap();
+        // Skip the optional root-check preflight: bootstrap must revalidate inside each
+        // bounded loan, including the transaction that eventually activates the fold.
+        store.judge_claims_inner(false, Some(1), false).unwrap();
+        let before = fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap().unwrap();
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
+        assert_eq!(store.signature_migration().unwrap().phase, "judging");
+        {
+            let connection = store.connection.write();
+            set_meta_tx(&connection, OWN_NODE_KEY, "changed-between-verdict-loans").unwrap();
+        }
+        let expected = {
+            let connection = store.readers.get();
+            crate::hash::canonical_hash(&store.trust_roots(&connection, &store.origin).unwrap())
+                .unwrap()
+        };
+        assert_ne!(before, expected);
+        store.judge_claims_inner(false, Some(1), false).unwrap();
+        assert_eq!(
+            fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap(),
+            Some(expected.clone()),
+        );
+        // The changed roots restart dependency paging rather than continue past the first
+        // page under a digest that no longer describes the current authority.
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
+        assert_eq!(store.signature_migration().unwrap().phase, "judging");
+        store.judge_claims_inner(false, None, false).unwrap();
+        assert_eq!(store.signature_migration().unwrap().phase, "done");
+        assert_eq!(cursor(&store, "root"), None);
+        assert_eq!(
+            fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap(),
+            Some(expected),
+        );
     }
 
     #[test]

@@ -131,6 +131,10 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
     let cookie = request.headers().get(header::COOKIE).and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("fractal_local=")))
         .map(str::to_owned);
+    if (cookie.is_some() || token.is_some()) && request.headers().contains_key(header::AUTHORIZATION) {
+        // Browser admission requires a single credential source.
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let mut expires_at = None;
     let result = {
         let mut credentials = web.credentials.lock().expect("web credentials poisoned");
@@ -163,7 +167,6 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
         }
     };
     if let Some(response) = result { response } else {
-        request.headers_mut().remove(header::AUTHORIZATION);
         request.headers_mut().remove("x-fractal-person");
         request.headers_mut().remove("x-st3-person");
         request.extensions_mut().insert(crate::api::client_v0::LocalWebSession {
@@ -243,7 +246,7 @@ mod tests {
         }).layer(middleware::from_fn_with_state(web.clone(), admission));
         let call = |uri: &str, method: &str, host: &str, cookie: Option<&str>, origin: Option<&str>, upgrade: bool| {
             let mut request = Request::builder().uri(uri).method(method).header(header::HOST, host)
-                .header("x-st3-person", "person/other").header(header::AUTHORIZATION, "Bearer forged");
+                .header("x-st3-person", "person/other");
             if let Some(cookie) = cookie { request = request.header(header::COOKIE, cookie); }
             if let Some(origin) = origin { request = request.header(header::ORIGIN, origin); }
             if upgrade { request = request.header(header::UPGRADE, "websocket"); }
@@ -264,5 +267,49 @@ mod tests {
         assert_eq!(accepted.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(accepted.into_body(), 1024).await.unwrap();
         assert_eq!(&bytes[..], b"person/robin");
+    }
+
+    #[tokio::test]
+    async fn admitted_browser_cookie_and_bearer_are_refused_before_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let web = Web {
+            port:7410, person:"person/robin".into(), dist:root.path().into(),
+            policy:policy("",7410), credential_path:root.path().join("web-launch-url"),
+            credentials:Arc::new(Mutex::new(Credentials {
+                token:"once".into(), sessions:VecDeque::from([("admitted".into(),Instant::now())]),
+            })),
+        };
+        let dispatched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = dispatched.clone();
+        let app = Router::new().fallback(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }).layer(middleware::from_fn_with_state(web.clone(),admission));
+        for method in ["GET","POST","PUT","PATCH","DELETE"] {
+            let response = app.clone().oneshot(Request::builder()
+                .method(method).uri("/v1/client/actions")
+                .header(header::HOST,"127.0.0.1:7410")
+                .header(header::ORIGIN,"http://127.0.0.1:7410")
+                .header(header::COOKIE,"fractal_local=admitted")
+                .header(header::AUTHORIZATION,"Bearer service-credential")
+                .body(Body::from("{}")).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::FORBIDDEN,"{method}");
+        }
+        for cookie in [Some("fractal_local=admitted"),None] {
+            let mut login = Request::builder().uri("/?token=once")
+                .header(header::HOST,"127.0.0.1:7410")
+                .header(header::AUTHORIZATION,"Bearer service-credential");
+            if let Some(cookie) = cookie { login = login.header(header::COOKIE,cookie); }
+            let response = app.clone().oneshot(login.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::FORBIDDEN);
+            let credentials = web.credentials.lock().unwrap();
+            assert_eq!(credentials.token,"once");
+            assert_eq!(credentials.sessions.len(),1);
+            assert!(!web.credential_path.exists());
+        }
+        assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst),0);
     }
 }

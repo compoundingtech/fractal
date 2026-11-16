@@ -31,6 +31,11 @@ pub type LegacyDigestTable = (
 #[derive(Debug, PartialEq, Eq)]
 pub enum IncrementalProjection {
     Projected,
+    /// The frontier advanced, retaining a visible diagnostic without requesting replay.
+    ProjectedWithContext {
+        code: &'static str,
+        details: serde_json::Map<String, Value>,
+    },
     Replay(&'static str),
     /// The same replay decision, with identifiers from the guard that requested it.
     ReplayWithContext {
@@ -109,6 +114,19 @@ pub trait Runtime: Send + Sync {
         false
     }
 
+    /// Admit a write whose claim names no actor but whose writer is known, such as a document
+    /// binding: the runtime's actor-keyed decisions see the writer as they see an actor.
+    fn admit_writer_tx(
+        &self,
+        _transaction: &Transaction<'_>,
+        _origin: &str,
+        _writer: &str,
+        _kind: &str,
+        _subject: &str,
+    ) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
     /// Check a replicated claim's kind and fields once the graph has verified its hash and batch.
     fn classify_replicated_claim(
         &self,
@@ -159,6 +177,12 @@ pub trait Runtime: Send + Sync {
         forced_batch: Option<&str>,
     ) -> Result<ClaimRecord>;
 
+    /// Whether a claim kind has no graph effect. Discovery fences only operations whose
+    /// retained or checkpoint history contains a graph-projecting kind.
+    fn operation_claim_is_graph_neutral(&self, _kind: &str) -> bool {
+        false
+    }
+
     /// Project newly admitted replicated claims from a healthy frontier through `through`.
     /// The store commits that frontier before lending the writer to the next chunk. Aggregates
     /// may rebuild from their complete history. `Replay(reason)` asks for a replay from nothing.
@@ -168,6 +192,27 @@ pub trait Runtime: Send + Sync {
         origin: &str,
         through: u64,
     ) -> Result<IncrementalProjection, Error>;
+
+    /// Defer expensive aggregate rebuilds across bounded replication chunks. Implementations
+    /// must persist their pending work in this transaction and suppress updates to that work.
+    fn project_incremental_chunk(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        through: u64,
+    ) -> Result<IncrementalProjection, Error> {
+        self.project_incremental(transaction, origin, through)
+    }
+
+    /// Whether committed chunks still have aggregate work, including after a restart.
+    fn projection_work_pending(&self, _connection: &Connection) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    /// Finish at most one pending aggregate, deleting its marker atomically with its rebuild.
+    fn finish_projection_work(&self, _transaction: &Transaction<'_>) -> Result<(), Error> {
+        Ok(())
+    }
 
     /// Clear every shared projection and fold the claims into it again in canonical order.
     fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), Error>;

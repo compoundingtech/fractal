@@ -22,7 +22,10 @@ const MAX_REASONS: usize = 8;
 const MAX_SUBJECTS: usize = 12;
 const MAX_CONDITIONS: usize = 6;
 const MAX_LINE: usize = 600;
-const MAX_TEXT: usize = 8_000;
+/// The longest text an update asks to have spoken; the notice `speech` field has the same limit.
+const MAX_SPEECH: usize = 300;
+/// The longest answer text a person may give, in characters.
+pub const MAX_TEXT: usize = 8_000;
 const SUBJECT_KINDS: &[&str] = &[
     "pull_request",
     "issue",
@@ -84,6 +87,9 @@ pub struct StructuredRequest {
     pub about: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// An update's words to speak aloud, set only when the person asked to be told the outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
     /// Absent means the asker makes no recommendation.
@@ -207,11 +213,24 @@ impl StructuredRequest {
                 "about (the run, step or message where the person asked)",
                 self.about.as_deref().unwrap_or_default(),
             )?;
+            if let Some(speech) = &self.speech {
+                if speech.trim().is_empty() {
+                    return Err(invalid("speech must not be empty"));
+                }
+                if speech.chars().count() > MAX_SPEECH {
+                    return Err(invalid(format!(
+                        "speech must be at most {MAX_SPEECH} characters"
+                    )));
+                }
+            }
         } else {
             line("question", self.question.as_deref().unwrap_or_default())?;
             line("why_person", self.why_person.as_deref().unwrap_or_default())?;
             if self.about.is_some() {
                 return Err(invalid("only an update names what it is about"));
+            }
+            if self.speech.is_some() {
+                return Err(invalid("only an update carries speech"));
             }
         }
         if let Some(summary) = &self.summary {
@@ -847,6 +866,37 @@ mod tests {
             answers,
             about_on_decision,
             decision_without_question,
+        ] {
+            assert_eq!(
+                StructuredRequest::parse(&request).unwrap_err().code,
+                "invalid-person-request",
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_update_carries_speech_of_one_to_three_hundred_characters() {
+        let update = |speech: &str| json!({
+            "version": 1, "type": "update", "about": "mission-run/example/report/1",
+            "speech": speech,
+        });
+        let longest = "a".repeat(MAX_SPEECH);
+        let (request, canonical) = StructuredRequest::parse(&update(&longest)).unwrap();
+        assert_eq!(request.speech.as_deref(), Some(longest.as_str()));
+        assert_eq!(canonical, update(&longest));
+        let (silent, canonical) = StructuredRequest::parse(&json!({
+            "version": 1, "type": "update", "about": "mission-run/example/report/1",
+        })).unwrap();
+        assert_eq!(silent.speech, None);
+        assert!(canonical.get("speech").is_none());
+        let mut speech_on_decision = decision();
+        speech_on_decision["speech"] = json!("Decide now.");
+        for request in [
+            update(""),
+            update("   "),
+            update(&"a".repeat(MAX_SPEECH + 1)),
+            speech_on_decision,
         ] {
             assert_eq!(
                 StructuredRequest::parse(&request).unwrap_err().code,

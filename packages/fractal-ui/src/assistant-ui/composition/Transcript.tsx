@@ -1,10 +1,11 @@
+import { markdownBlock } from './markdown-text'
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar, VisuallyHidden } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
-import { EmbraceScrollViewport, historyBatchSize, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
+import { EmbraceScrollViewport, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
@@ -12,7 +13,7 @@ import { SyncLine } from '../sync-presentation/SyncLine'
 import { syncLine } from '../sync-presentation/sync-line'
 import type { SyncStatus } from '../sync-presentation/sync-status'
 import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
-import { HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
+import { completeStreamingTail, HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
 import { ThinkingRun } from './ThinkingEntry'
 import { SendStatus, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import type { ComposerAvailability } from '../embrace-composer/send'
@@ -22,12 +23,14 @@ import { MailMessage, type MailParticipants } from './MailMessage'
 import { UnsupportedRecord } from './UnsupportedRecord'
 import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Icon } from './Icons'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m, geometryNumbers } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
 import { Tooltip } from './Controls'
 import { useCopyFeedback, type CopyAction } from './useCopyFeedback'
 import { observeUserMessageOverflow, TranscriptActiveContext } from './user-message-overflow'
 import { TranscriptSearch } from './TranscriptSearch'
+import { TranscriptFind, type TranscriptFindMemory } from './TranscriptFind'
+import { createTranscriptRevealStore, TranscriptRevealContext, useRevealOpen } from './transcript-reveal'
 import { useClockLabel } from '../../time/clock'
 import { LiveRing } from './LiveRing'
 import { transcriptInitialSourceRowCount } from './transcript-window'
@@ -133,8 +136,15 @@ function TranscriptMessage() {
   if (item._tag === 'Unsupported') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><UnsupportedRecord item={item} /></MessagePrimitive.Root>
   if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" showTime={false} /></MessagePrimitive.Root>
   if (item._tag === 'UnknownEvent' && item.mixedContent === true) return <MixedContentMessage item={item} />
+  if (item._tag === 'Text' || item._tag === 'Event') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic, styles.semanticProse)}><SemanticProse item={item} /></MessagePrimitive.Root>
   return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
 }
+/** Mail delivered to the seat and harness messages are written as Markdown; an event's title is a label. */
+function SemanticProse({ item }: { readonly item: Extract<ConversationItem, { _tag: 'Text' | 'Event' }> }) {
+  return <>{item._tag === 'Event' && <span {...stylex.props(styles.semanticText)}>{item.title}</span>}<Markdown text={markdownBlock(item.text)} tone="muted" /></>
+}
+/** A message's text parts are Markdown by the transcript's contract. */
+const MESSAGE_PARTS = { Text: ({ text }: { readonly text: string }) => <Markdown text={markdownBlock(text)} /> }
 const messageComponents = { Message: TranscriptMessage }
 /** Keep mixed bodies out of the collapsed DOM, using the same raw disclosure as tool inspection. */
 function MixedContentMessage({ item }: { readonly item: Extract<ConversationItem, { _tag: 'UnknownEvent' }> }) {
@@ -149,17 +159,20 @@ function MixedContentMessage({ item }: { readonly item: Extract<ConversationItem
 export function UserMessage({ item }: { readonly item: TextItem & { readonly role: 'user' } }) {
   const onRetrySend = React.useContext(RetrySend)
   const [expanded, setExpanded] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === item.id, expanded, setExpanded)
   const active = React.useContext(TranscriptActiveContext)
   const [overflows, setOverflows] = React.useState(false)
-  const text = React.useRef<HTMLSpanElement>(null)
+  const text = React.useRef<HTMLDivElement>(null)
   const textId = React.useId()
   const long = item.text.length > 600 || item.text.split('\n').length > 8
+  // The cut can land inside a construct; close it so the collapsed prompt keeps its formatting.
+  const collapsed = React.useMemo(() => item.text.length > 600 ? completeStreamingTail(item.text.slice(0, 600)) : item.text, [item.text])
   React.useLayoutEffect(() => {
     const element = text.current
     if (element === null || expanded || !active) return
     return observeUserMessageOverflow(element, setOverflows)
   }, [item.text, expanded, active])
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={markdownBlock(expanded ? item.text : collapsed)} tone={item.sendState?._tag === 'Pending' ? 'muted' : 'foreground'} hardBreaks /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
 }
 /**
  * The callback must resolve only after the host has successfully copied the answer. Only a fulfilled copy sets
@@ -198,27 +211,32 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
       {!streaming && <span {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer visible={hovered} />{rowTimes && Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
-    {item._tag === 'Text' ? <><Markdown text={item.text} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
+    {item._tag === 'Text' ? <><Markdown text={markdownBlock(item.text)} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={MESSAGE_PARTS} />}
   </MessagePrimitive.Root>
 }
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. A host's semantic detail stands in for the summary line; the raw disclosure always remains. */
 export function ToolDetailPreview({ call, onOpen, semantic }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void; readonly semantic?: React.ReactNode }) {
   const [rawOpen, setRawOpen] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, rawOpen, setRawOpen)
+  // A match past the preview's first lines has to be on screen to be highlighted in place.
+  const [wholeOutput, setWholeOutput] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, wholeOutput, setWholeOutput)
   const output = call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')
   const lines = output.split('\n')
   const remaining = Math.max(0, lines.length - Number(output.endsWith('\n')) - 4)
   const command = readableCommand(call)
   const showOutput = (call.detail ?? '') !== '' || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
-    {semantic ?? <p>{call.summary ?? call.title} · {call.status}</p>}
+    {semantic ?? <p>{call.summary === undefined ? call.title : <span data-search-tool-summary>{call.summary}</span>} · {call.status}</p>}
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>
       <DisclosurePanel>{rawOpen && <>
-        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}
+        {semantic != null && call.summary !== undefined && <p data-search-tool-summary>{call.summary}</p>}
+        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" data-search-tool-input {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}
         {command !== undefined ? <pre data-testid="tool-command" {...stylex.props(styles.output, styles.command)}><code>{command}</code></pre> : call.rawInput === undefined && call.argsSummary !== undefined && <pre {...stylex.props(styles.output)}>{call.argsSummary}</pre>}
-        {showOutput && <pre {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>}
-        {onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}
+        {showOutput && <pre data-search-tool-output={call.detail !== undefined && call.detail !== '' ? true : undefined} {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined || wholeOutput ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>}
+        {onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && !wholeOutput && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}
       </>}</DisclosurePanel>
     </Disclosure>
   </div>
@@ -242,6 +260,7 @@ const strandedText = (item: ConversationItem): string | undefined => {
 function StrandedItem({ item }: { readonly item: ConversationItem }) {
   if (item._tag === 'Unsupported') return <UnsupportedRecord item={item} />
   if (item._tag === 'Event' && item.notice !== undefined) return <HarnessNotice item={{ ...item, notice: item.notice }} weight="row" />
+  if ((item._tag === 'Text' && item.role === 'system') || item._tag === 'Event') return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic, styles.semanticProse)}><SemanticProse item={item} /></div>
   const text = strandedText(item)
   return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{text === undefined || text.trim() === '' ? 'Couldn\u2019t display this entry' : text}</span></div>
 }
@@ -404,19 +423,14 @@ function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedR
   return mounted.map(turn => <PreparedTurn key={turn.id} newDay={days.get(turn.id)} startedAt={starts.get(turn.id)} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
 }
 /**
- * The window of rendered source rows, kept outside the scroll body so its warning and recovery stay visible at the tail.
- * Browser Find only sees rendered rows, so the one-line summary leads with that limit (truncation only ever cuts the
- * count) while a polite status carries the full range. Both actions stay mounted and focusable while rows are
- * materializing (repeat presses are ignored). Once every row is rendered the actions leave but the line keeps its
- * height, so the viewport never resizes mid-prepend; focus that was on an action moves to the conversation history.
+ * The window of rendered source rows takes no height: scrolling up prepends earlier rows, and this polite status tells
+ * assistive tech what browser Find can reach. Show all prepares every loaded row for it, as a skip link that appears only
+ * on keyboard focus. Once every row is rendered focus on the action moves to the conversation history.
  */
-function HistoryRange({ total, start, shown, materializing, earlierId, firstId, revealRow, scrollId }: { readonly total: number; readonly start: number; readonly shown: number; readonly materializing: boolean; readonly earlierId: string; readonly firstId: string; readonly revealRow: (id: string, preservePosition?: boolean) => void; readonly scrollId: string }) {
-  const [request, setRequest] = React.useState<'earlier' | 'all'>()
+function HistoryRange({ total, start, shown, materializing, firstId, revealRow, scrollId }: { readonly total: number; readonly start: number; readonly shown: number; readonly materializing: boolean; readonly firstId: string; readonly revealRow: (id: string, preservePosition?: boolean) => void; readonly scrollId: string }) {
   const focusWithin = React.useRef(false)
   const statusId = React.useId()
   const complete = start === 0 && !materializing
-  const showingAll = materializing && request !== 'earlier'
-  if (!materializing && request !== undefined) setRequest(undefined)
   React.useLayoutEffect(() => {
     if (!complete || !focusWithin.current) return
     focusWithin.current = false
@@ -425,19 +439,12 @@ function HistoryRange({ total, start, shown, materializing, earlierId, firstId, 
   const hidden = total - shown
   const status = complete
     ? `All ${total} entries shown. Browser Find searches all loaded messages.`
-    : showingAll
+    : materializing
       ? `Showing all ${total} entries… Browser Find may miss earlier entries until this finishes.`
       : `Latest ${shown} of ${total} entries shown. Browser Find misses ${hidden} earlier ${hidden === 1 ? 'entry' : 'entries'} until you choose Show all messages.`
-  const reveal = (next: 'earlier' | 'all') => {
-    if (materializing) return
-    setRequest(next)
-    revealRow(next === 'all' ? firstId : earlierId, true)
-  }
-  return <div role="group" aria-label="Conversation history range" aria-describedby={statusId} aria-busy={materializing} data-testid="transcript-history-controls" data-state={complete ? 'complete' : showingAll ? 'materializing' : 'deferred'} onFocus={() => { focusWithin.current = true }} onBlur={event => { focusWithin.current = event.currentTarget.contains(event.relatedTarget) }} {...stylex.props(styles.historyBar)}>
+  return <div role="group" aria-label="Conversation history range" aria-describedby={statusId} aria-busy={materializing} data-testid="transcript-history-controls" data-state={complete ? 'complete' : materializing ? 'materializing' : 'deferred'} onFocus={() => { focusWithin.current = true }} onBlur={event => { focusWithin.current = event.currentTarget.contains(event.relatedTarget) }} {...stylex.props(styles.historyBar)}>
     <span id={statusId} role="status" aria-live="polite" data-testid="transcript-history-range" {...stylex.props(styles.visuallyHidden)}>{status}</span>
-    <span aria-hidden="true" title={status} data-testid="transcript-history-summary" {...stylex.props(styles.historyNote, styles.historySummary)}><span {...stylex.props(styles.historyLead)}>{complete ? 'Find: all loaded' : showingAll ? 'Find: preparing' : 'Find: shown only'}</span><span {...stylex.props(styles.historyCount)}> · {complete ? `All ${total} entries shown` : `${shown}/${total} entries`}</span></span>
-    {!complete && <><Button aria-label="Show earlier messages" data-testid="transcript-history-earlier" onPress={() => reveal('earlier')} {...stylex.props(styles.historyLoad)}>Earlier</Button>
-      <Button aria-label="Show all messages" data-testid="transcript-history-all" onPress={() => reveal('all')} {...stylex.props(styles.historyLoad)}>Show all</Button></>}
+    {!complete && <Button aria-label="Show all messages" data-testid="transcript-history-all" onPress={() => { if (!materializing) revealRow(firstId, true) }} {...stylex.props(styles.historyLoad, styles.historySkip)}>Show all</Button>}
   </div>
 }
 /** One in-lane row: one button changes label across idle, loading and failed, so focus stays on it. */
@@ -451,6 +458,20 @@ function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHist
       if (boundary !== null && boundary.contains(boundary.ownerDocument.activeElement)) boundary.closest<HTMLElement>('[data-testid="transcript-scroll"]')?.focus({ preventScroll: true })
     }
   }, [])
+  const load = loading || failed ? undefined : history.onLoadEarlier
+  // A reader who has moved off the live tail and can see this row gets the next page. Opening a conversation sits at the tail,
+  // so it fetches nothing; a failure waits for Retry, and the button stays for a lane with nothing to scroll.
+  React.useEffect(() => {
+    const boundary = node.current
+    const lane = boundary?.closest<HTMLElement>('[data-testid="transcript-scroll"]')
+    if (load === undefined || boundary == null || lane == null) return
+    const scrolled = () => {
+      const offTail = lane.scrollHeight - lane.clientHeight - lane.scrollTop > geometryNumbers.scrollEndTolerance
+      if (offTail && boundary.getBoundingClientRect().bottom >= lane.getBoundingClientRect().top) load()
+    }
+    lane.addEventListener('scroll', scrolled, { passive: true })
+    return () => lane.removeEventListener('scroll', scrolled)
+  }, [load])
   return <div ref={node} data-testid="history-boundary" data-state={loading ? 'loading' : failed ? 'failed' : 'idle'} aria-busy={loading} {...stylex.props(styles.historyBoundary)}>
     <span aria-live="polite" data-testid="history-boundary-note" {...stylex.props(styles.historyNote)}>{failed ? "Couldn't load earlier messages" : 'Earlier messages not loaded'}</span>
     {/* Not RAC `isPending`: its focus announcement points a live-region `role="img"` at this button's id, which dangles once Complete removes the button. */}
@@ -460,6 +481,8 @@ function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHist
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
 export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
   const scrollId = React.useId()
+  const [reveal] = React.useState(createTranscriptRevealStore)
+  const [findMemory] = React.useState<TranscriptFindMemory>(() => new Map())
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. A child effect runs before its provider's adoption effect, so
@@ -546,14 +569,16 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
     {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
     {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} inline={!showHeader} />}
   </>
-  return <TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
+  return <TranscriptRevealContext.Provider value={reveal}><TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
       renderHeader={(startIndex, revealRow, materializing) => {
-        if (rows.length <= transcriptInitialSourceRowCount) return null
         const bound = sourceWindow(sourceRows, startIndex)
-        return <HistoryRange total={rows.length} start={bound.start} shown={bound.shown} materializing={materializing} earlierId={rowIds[Math.max(0, bound.start - historyBatchSize)]!} firstId={rowIds[0]!} revealRow={revealRow} scrollId={scrollId} />
+        return <>
+          {rows.length > transcriptInitialSourceRowCount && <HistoryRange total={rows.length} start={bound.start} shown={bound.shown} materializing={materializing} firstId={rowIds[0]!} revealRow={revealRow} scrollId={scrollId} />}
+          <TranscriptFind key={viewportKey ?? ''} memoryKey={viewportKey ?? ''} memory={findMemory} scrollId={scrollId} turns={committed} rowIds={rowIds} revealRow={revealRow} history={history} active={active} reveal={reveal} />
+        </>
       }}>
       {(startIndex, revealRow) => {
         const bound = sourceWindow(sourceRows, startIndex)
@@ -565,7 +590,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
         </>
       }}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
-  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider>
+  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider></TranscriptRevealContext.Provider>
 }
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
@@ -577,8 +602,9 @@ const styles = stylex.create({
   // The shared reading column keeps rows and a reading-column composer on the same bounds.
   content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
-  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
-  userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
+  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere' },
+  // Eight prose lines, as the disclosure contract promises; padding and its optional button are outside this box.
+  userClamp: { maxHeight: `calc(${t.bodyLeading} * 8)`, overflow: 'hidden' },
   userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
   // The outcome is what the reader came for: full contrast, never dimmer than the prompt.
   answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fg, flexShrink: 0 },
@@ -590,6 +616,7 @@ const styles = stylex.create({
   sender: { margin: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   semanticText: { minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  semanticProse: { flexDirection: 'column', gap: s.xs2, overflowWrap: 'anywhere' },
   mixed: { minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   mixedSummary: { display: 'flex', alignItems: 'center', gap: s.xs },
   mixedTrigger: { minHeight: g.toolRow, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: g.focusOffset } },
@@ -609,11 +636,9 @@ const styles = stylex.create({
   emptyBody: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.sm, padding: s.xl, textAlign: 'center' },
   historyBoundary: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: s.md, minHeight: g.controlMd, flexShrink: 0 },
   historyNote: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
-  // One line under the header with a fixed height: the Find limit leads, the count truncates first, actions never wrap.
-  historyBar: { position: 'relative', display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlMd, minHeight: g.controlMd, paddingInline: s.lg, flexShrink: 0, whiteSpace: 'nowrap', borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
-  historySummary: { display: 'flex', flex: '1 1 0', minWidth: 0 },
-  historyLead: { flexShrink: 0 },
-  historyCount: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums' },
+  historyBar: { position: 'relative', height: 0, flexShrink: 0, zIndex: 1 },
+  // A skip link: off screen until keyboard focus lands on it.
+  historySkip: { position: 'absolute', top: s.xs, left: s.lg, whiteSpace: 'nowrap', overflow: { default: 'hidden', ':focus': 'visible' }, width: { default: 1, ':focus': 'auto' }, height: { default: 1, ':focus': 'auto' }, clipPath: { default: 'inset(50%)', ':focus': 'none' }, backgroundColor: { default: surface.transparent, ':focus': surface.raised } },
   visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
   historyLoad: { minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   historyPending: { cursor: 'progress', color: ink.fgMuted, ':hover': { color: ink.fgMuted } },

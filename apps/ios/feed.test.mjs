@@ -378,6 +378,37 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   feed.close();
 }
 
+{
+  // Read positions: each frame of the person's collection says re-list; a reconnect subscribes again.
+  const { client, sockets } = fakeClient();
+  const { handlers } = watch();
+  const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
+  let changed = 0;
+  const follow = feed.followReadPositions('person/avery', { onChanged: () => changed++ });
+  await settle();
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'subscribe', id: 'read-positions', collection: 'read-positions', person: 'person/avery', limit: 100 });
+  sockets[0].frame({ kind: 'snapshot', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(1), items: [], order: [], has_more: false });
+  sockets[0].frame({ kind: 'changes', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(2), upserts: [], removes: [], order: [], has_more: false });
+  assert.equal(changed, 2);
+  sockets[0].frame({ kind: 'resync', id: 'read-positions', retryable: true });
+  assert.equal(sockets[0].sent.filter(command => command.id === 'read-positions').length, 1, 'daemon retries temporary resync itself');
+  sockets[0].frame({ kind: 'resync', id: 'read-positions', retryable: false });
+  assert.equal(sockets[0].sent.filter(command => command.id === 'read-positions').length, 2, 'a final resync subscribes again');
+  sockets[0].frame({ kind: 'error', id: 'read-positions', code: 'remote-unavailable', message: 'busy' });
+  await settle(40);
+  assert.equal(sockets[0].sent.filter(command => command.id === 'read-positions').length, 3, 'a transient error subscribes again later');
+  sockets[0].drop(new Error('test drop'));
+  await settle(40);
+  assert.deepEqual(sockets[1].sent.filter(command => command.id === 'read-positions').at(-1), { kind: 'subscribe', id: 'read-positions', collection: 'read-positions', person: 'person/avery', limit: 100 });
+  sockets[1].frame({ kind: 'snapshot', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(3), items: [], order: [], has_more: false });
+  assert.equal(changed, 3);
+  follow.close();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'unsubscribe', id: 'read-positions' });
+  sockets[1].frame({ kind: 'snapshot', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(4), items: [], order: [], has_more: false });
+  assert.equal(changed, 3, 'nothing is heard after closing');
+  feed.close();
+}
+
 // ---- A socket that never opens is a failed try, not a wait without end: the feed says reconnecting and tries again.
 test('a collections socket that never opens is given up on and tried again', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });

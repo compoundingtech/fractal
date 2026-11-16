@@ -547,6 +547,100 @@ fn mission_step_actor_references_conform_without_accepting_other_id_families() {
 }
 
 #[tokio::test]
+async fn auto_resolved_read_and_override_round_trip() {
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    state.store.set_ask_deadlines(true);
+    let asked_at = fractal_daemon::api::client_now_ms().saturating_sub(120_000);
+    let clock = Clock;
+    smallclaims::store::set_thread_clock(Some(asked_at));
+    state.store.graph.set_write_clock_at(asked_at).unwrap();
+    let intent = fractal_daemon::graph::parse_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }", state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "override-contract-agent").unwrap();
+    let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        priority: None, deadline_ms: Some(60_000), default_answer: Some("hold".into()), legacy_request: None,
+        person: "person/avery".into(), title: "Ship?".into(), reason: "Release choice".into(),
+        actor: format!("agent/{}.asker", state.store.origin()), step: None, new_run: Some("override-contract".into()),
+        incarnation: None, idempotency_key: "override-contract-ask".into(),
+        request: Some(serde_json::json!({"version": 1, "type": "choice", "question": "Ship?",
+            "why_person": "Release choice", "answers": [{"id":"hold","label":"Hold","consequence":"The release waits."}, {"id":"ship","label":"Ship","consequence":"The release ships."}]})),
+    }).unwrap();
+    state.store.reconcile_person_asks_at(asked_at).unwrap();
+    smallclaims::store::set_thread_clock(Some(asked_at + 60_001));
+    state.store.graph.set_write_clock_at(asked_at + 60_001).unwrap();
+    assert!(state.store.reconcile_person_asks_at(asked_at + 60_001).unwrap().changed);
+    drop(clock);
+    state.store.graph.set_write_clock_at(fractal_daemon::api::client_now_ms()).unwrap();
+    let app = fractal_daemon::api::router(state.clone());
+    let (status, rows) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/avery").await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    assert_conforms(&contract_validator("AutoResolvedAsks"), "auto-resolved", &rows["value"]);
+    let decoded: fractal_client::AutoResolvedAsks = serde_json::from_value(rows["value"].clone()).unwrap();
+    assert_eq!(decoded.items.len(), 1);
+    assert_eq!(decoded.items[0].default_answer.as_ref().unwrap().id, "hold");
+    let row = &rows["value"]["items"][0];
+    let (_, other) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/blair").await;
+    assert_eq!(other["value"]["items"], serde_json::json!([]));
+    let (status, _) = client_json_person(app.clone(), "/v1/client/auto-resolved", "agent/example").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let action = serde_json::json!({"api_version":"st3.client.v0", "id":format!("action/person-override:{}:ship", row["episode"].as_str().unwrap()),
+        "type":"work.override", "idempotency_key":format!("person-override:{}:ship", row["episode"].as_str().unwrap()),
+        "fence":{"snapshot_id":rows["snapshot"]["id"],"subject_revisions":{}},
+        "parameters":{"target_id":ask.subject,"episode":row["episode"],"answer":{"id":"ship"}}});
+    assert_conforms(&contract_validator("ActionRequest"), "override action", &action);
+    let (status, wrong) = client_post_json_person(app.clone(), "/v1/client/actions", "person/blair", action.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{wrong}");
+    let (status, accepted) = client_post_json_person(app.clone(), "/v1/client/actions", "person/avery", action.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["value"]["status"], "completed", "{accepted}");
+    let (status, replay) = client_post_json_person(app.clone(), "/v1/client/actions", "person/avery", action.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["value"], accepted["value"]);
+    let (_, after) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/avery").await;
+    assert_eq!(after["value"]["items"], serde_json::json!([]));
+    let old = asked_at - 8 * 24 * 60 * 60_000;
+    let closed_root = tempfile::tempdir().unwrap();
+    let state = test_state(closed_root.path());
+    state.store.set_ask_deadlines(true);
+    let clock = Clock;
+    smallclaims::store::set_thread_clock(Some(old));
+    state.store.graph.set_write_clock_at(old).unwrap();
+    state.store.apply_internal(&intent, "closed-override-contract-agent").unwrap();
+    let app = fractal_daemon::api::router(state.clone());
+    let closed = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        priority: None, deadline_ms: Some(60_000), default_answer: Some("hold".into()), legacy_request: None,
+        person: "person/avery".into(), title: "Old choice".into(), reason: "Release choice".into(),
+        actor: format!("agent/{}.asker", state.store.origin()), step: None, new_run: Some("closed-override-contract".into()),
+        incarnation: None, idempotency_key: "closed-override-contract-ask".into(),
+        request: Some(serde_json::json!({"version": 1, "type": "choice", "question": "Ship?",
+            "why_person": "Release choice", "answers": [{"id":"hold","label":"Hold","consequence":"The release waits."}, {"id":"ship","label":"Ship","consequence":"The release ships."}]})),
+    }).unwrap();
+    let episode = state.store.claims_for_subject_kind_at(&closed.subject, "work.person-asked", None, true, 1).unwrap().claims[0].id.clone();
+    state.store.reconcile_person_asks_at(old).unwrap();
+    smallclaims::store::set_thread_clock(Some(old + 60_001));
+    state.store.graph.set_write_clock_at(old + 60_001).unwrap();
+    assert!(state.store.reconcile_person_asks_at(old + 60_001).unwrap().changed);
+    drop(clock);
+    state.store.graph.set_write_clock_at(fractal_daemon::api::client_now_ms()).unwrap();
+    let (_, current) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/avery").await;
+    assert_eq!(current["value"]["items"], serde_json::json!([]));
+    let closed_action = serde_json::json!({"api_version":"st3.client.v0","id":"action/closed-override",
+        "type":"work.override","idempotency_key":"closed-override-contract",
+        "fence":{"snapshot_id":current["snapshot"]["id"],"subject_revisions":{}},
+        "parameters":{"target_id":closed.subject,"episode":episode,"answer":{"id":"ship"}}});
+    let (status, refused) = client_post_json_person(app, "/v1/client/actions", "person/avery", closed_action).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["code"], "stale-fence", "{refused}");
+    assert_eq!(refused["retryable"], false, "{refused}");
+}
+
+#[tokio::test]
 async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
@@ -557,6 +651,7 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     .unwrap();
     state.store.apply_internal(&intent, "contract-person-asker").unwrap();
     let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -1003,6 +1098,137 @@ fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
 }
 
 #[test]
+fn availability_fixtures_conform_and_refuse_identity_and_unknown_values() {
+    let read = json(asset_root().join("fixtures/person-availability.json"));
+    assert_conforms(&contract_validator("Envelope"), "availability read", &read);
+    assert_conforms(&contract_validator("PersonAvailabilities"), "availability people", &read["value"]);
+    let written = json(asset_root().join("fixtures/availability-set-result.json"));
+    assert_conforms(&contract_validator("Envelope"), "availability write", &written);
+    assert_conforms(&contract_validator("PersonAvailability"), "availability own view", &written["value"]);
+    let person = contract_validator("PersonAvailability");
+    let mut agent = written["value"].clone();
+    agent["person"] = serde_json::json!("agent/worker");
+    assert!(!person.is_valid(&agent));
+    let mut missing = written["value"].clone();
+    missing.as_object_mut().unwrap().remove("presence");
+    assert!(!person.is_valid(&missing), "every key is always present");
+
+    let set = contract_validator("AvailabilitySet");
+    assert!(set.is_valid(&json(asset_root().join("fixtures/availability-set.json"))));
+    assert!(set.is_valid(&serde_json::json!({"status": {"value": null}})));
+    for invalid in [
+        serde_json::json!({"person": "person/avery", "status": {"value": "away"}}),
+        serde_json::json!({"status": {"until": "2026-11-12T12:00:00Z"}}),
+        serde_json::json!({"interruptions": {"value": "focus"}}),
+    ] {
+        assert!(!set.is_valid(&invalid), "{invalid}");
+    }
+    let report = contract_validator("PresenceReport");
+    assert!(report.is_valid(&json(asset_root().join("fixtures/presence-report.json"))));
+    for invalid in [
+        serde_json::json!({"state": "idle", "observed_at": "2026-11-12T09:58:00Z"}),
+        serde_json::json!({"presence": "present", "observed_at": "2026-11-12T09:58:00Z"}),
+        serde_json::json!({"state": "active", "observed_at": "2026-11-12T09:58:00Z", "source": "custom/client/forged"}),
+    ] {
+        assert!(!report.is_valid(&invalid), "{invalid}");
+    }
+    let reported = json(asset_root().join("fixtures/presence-report-result.json"));
+    assert_conforms(&contract_validator("Envelope"), "presence result", &reported);
+    assert_conforms(&contract_validator("PresenceReportResult"), "presence result", &reported["value"]);
+    // Response words are open: a word a later daemon adds still conforms for a consumer, while
+    // this daemon may emit only the declared words.
+    let mut future = written["value"].clone();
+    future["status_source"] = serde_json::json!("calendar");
+    future["presence"] = serde_json::json!("in-call");
+    assert!(consumer_validator("PersonAvailability").is_valid(&future));
+    assert!(!person.is_valid(&future));
+}
+
+#[tokio::test]
+async fn daemon_availability_routes_conform_to_client_v0() {
+    let root = tempfile::tempdir().unwrap();
+    let app = fractal_daemon::api::router(test_state(root.path()));
+    let send = |method: &'static str, uri: &'static str, person: &'static str, body: Option<Value>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().method(method).uri(uri).header("x-st3-person", person);
+            if body.is_some() {
+                request = request.header("content-type", "application/json");
+            }
+            let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
+            let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
+            let status = response.status();
+            (status, serde_json::from_slice::<Value>(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap())
+        }
+    };
+    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let (status, reported) = send("POST", "/v1/client/presence", "person/ada", Some(serde_json::json!({
+        "state": "active", "last_input_at": observed_at, "observed_at": observed_at,
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{reported}");
+    assert_conforms(&contract_validator("Envelope"), "presence report", &reported);
+    assert_conforms(&contract_validator("PresenceReportResult"), "presence report", &reported["value"]);
+    assert!(reported["value"]["report_again_at"].is_string(), "{reported}");
+    // The fixture's change, with an expiry still in the future whenever the test runs.
+    let mut body = json(asset_root().join("fixtures/availability-set.json"));
+    body["status"]["until"] = serde_json::json!("2999-01-01T00:00:00Z");
+    let (status, set) = send("PUT", "/v1/client/availability", "person/ada", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_conforms(&contract_validator("PersonAvailability"), "availability set", &set["value"]);
+    let typed: fractal_client::Envelope<fractal_client::PersonAvailability> = serde_json::from_value(set.clone()).unwrap();
+    assert_eq!((typed.value.status, typed.value.presence), (fractal_client::AvailabilityStatus::Away, Some(fractal_client::AvailabilityPresence::Present)));
+    for (reader, presence) in [("person/ada", serde_json::json!("present")), ("person/avery", Value::Null)] {
+        let uri = if reader == "person/ada" { "/v1/client/availability" } else { "/v1/client/availability?person=person/ada" };
+        let (status, read) = send("GET", uri, reader, None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_conforms(&contract_validator("Envelope"), "availability read", &read);
+        assert_conforms(&contract_validator("PersonAvailabilities"), "availability read", &read["value"]);
+        assert_eq!(read["value"]["people"][0]["presence"], presence, "{reader}");
+    }
+}
+
+/// The GitHub plugin's reads: each fixture conforms to its read definition, and an envelope
+/// carrying it (as the client-v0 middleware serves it) conforms to `Envelope`.
+#[test]
+fn github_plugin_fixtures_conform_to_their_reads_and_the_envelope() {
+    let root = asset_root();
+    let manifest = json(root.join("fixtures/manifest.json"));
+    let envelope = contract_validator("Envelope");
+    let mut seen = 0;
+    for entry in manifest["fixtures"].as_array().unwrap() {
+        let file = entry["file"].as_str().unwrap();
+        if !file.starts_with("github-plugin-") {
+            continue;
+        }
+        seen += 1;
+        let value = json(root.join("fixtures").join(file));
+        let definition = entry["definition"].as_str().unwrap();
+        let errors = contract_validator(definition).iter_errors(&value).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} as {definition}: {errors:?}");
+        assert!(contract_validator("GithubPluginRead").is_valid(&value), "{file}");
+        let wrapped = serde_json::json!({
+            "api_version": "st3.client.v0",
+            "request_id": "request/example",
+            "snapshot": {
+                "id": "snapshot/example/1/0000000000000000",
+                "host_id": "host/example",
+                "store_index": 1,
+                "projection_version": "client-projection.v0",
+                "created_at": "2026-01-01T00:00:00.000Z"
+            },
+            "value": value,
+        });
+        let errors = envelope.iter_errors(&wrapped).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} in an Envelope: {errors:?}");
+    }
+    assert_eq!(seen, 12);
+    // A URL is never an item: a found read whose item misses fields does not conform.
+    assert!(!contract_validator("GithubPullRequestRead").is_valid(&serde_json::json!({
+        "status": "found", "fetched_at": "2026-11-07T06:40:00Z", "stale": false, "item": { "url": "https://github.com/acme/garden/pull/7" }
+    })));
+}
+
+#[test]
 fn manifest_names_existing_json_fixtures_and_schema_definitions() {
     let root = asset_root();
     let manifest = json(root.join("fixtures/manifest.json"));
@@ -1098,6 +1324,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "timeline.list",
         "events.list",
         "terminal.screen",
+        "read-positions.list",
     ] {
         assert!(
             read_ids.contains(required),
@@ -1108,6 +1335,9 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
     let actions = operations["actions"].as_object().unwrap();
     for required in [
         "attention.resolve",
+        "attention.seen",
+        "attention.snooze",
+        "attention.dismiss",
         "review.approve",
         "review.reject",
         "message.send",
@@ -1149,6 +1379,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "terminal.attach",
         "terminal.detach",
         "pairing.revoke",
+        "read-position.advance",
     ] {
         assert!(
             actions.contains_key(required),
@@ -1365,6 +1596,7 @@ fn test_state(root: &Path) -> AppState {
     notify: Arc::new(Notify::new()),
     event_notify: watch::channel(0_u64).0,
     node: "client-v0-baseline".into(),
+    api_socket: root.join("api.sock"),
     state_dir: root.to_path_buf(),
     pty_root: root.join("pty"),
     pty_binary: PathBuf::from("pty"),
@@ -1560,6 +1792,7 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -1718,7 +1951,7 @@ async fn client_v0_read_routes_conform_to_the_manifest() {
     assert_eq!(response.status(), StatusCode::OK);
     let envelope: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(envelope["api_version"], "st3.client.v0");
+    assert_eq!(envelope["api_version"], "fractal.client.v0");
     assert_eq!(
         envelope["snapshot"]["projection_version"],
         "client-projection.v0"
@@ -2566,6 +2799,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let ask = |person: &str| {
         store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
@@ -2970,6 +3204,7 @@ async fn read_only_pairing_reads_projections_and_arrangements_but_is_denied_acti
     store.apply_internal(&intent, "read-only-asker").unwrap();
     let step = store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -3580,7 +3815,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
             client_json(app.clone(), &format!("/v1/client/{collection}")).await;
         assert_eq!(status, StatusCode::OK, "{collection}: {envelope}");
         assert_conforms(&validator, collection, &envelope);
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert_eq!(envelope["value"]["kind"], "page");
         assert_eq!(envelope["value"]["collection"], collection);
         assert!(envelope["value"]["items"].is_array());
@@ -3646,7 +3881,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
     ];
     let steps = states
         .iter()
-        .map(|(internal, _)| format!("step {internal:?} {{ assigned-to \"agent/builder\" }}"))
+        .map(|(internal, _)| format!("step {internal:?} {{ assigned-to \"agent/client-v0-baseline.builder\" }}"))
         .collect::<Vec<_>>()
         .join("\n");
     let source = format!(
@@ -3738,6 +3973,18 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .unwrap();
         }
     }
+    // Older stores can retain slash-qualified assignees without the actor prefix.
+    let legacy_step = run.steps.iter().find(|step| step.step == "ready").unwrap();
+    let connection = rusqlite::Connection::open(root.path().join("claims.sqlite3")).unwrap();
+    smallclaims::store::projection_digest::register(&connection).unwrap();
+    assert_eq!(
+        connection.execute(
+            "UPDATE step_runs SET assignee = ?1 WHERE subject = ?2",
+            rusqlite::params!["legacy/builder", legacy_step.subject],
+        ).unwrap(),
+        1
+    );
+    drop(connection);
     let app = fractal_daemon::api::router(state);
     for path in ["/v1/client/missions", "/v1/client/missions/state-contract"] {
         let (status, response) = client_json(app.clone(), path).await;
@@ -3763,6 +4010,30 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                 .unwrap()
                 .iter()
                 .any(|step| step["state"] == "claimed")
+        );
+        // Use the same presentation emitter as the published mission cards, not a hand-built
+        // presentation fixture, and validate the enclosing resource including /presentation.
+        let mut card = mission.clone();
+        fractal_daemon::api::published_lists::present(&mut card, &[], Some(&Default::default()));
+        assert!(card["presentation"].is_object(), "{card}");
+        assert_conforms(&contract_validator("Mission"), path, &card);
+        let presented_steps = card["presentation"]["steps"].as_array().unwrap();
+        assert_eq!(presented_steps.len(), states.len());
+        for step in presented_steps {
+            assert_eq!(step["owner"]["kind"], "agent", "{step}");
+            assert_conforms(
+                &contract_validator("AgentId"),
+                "/presentation/steps/*/owner/agent",
+                &step["owner"]["agent"],
+            );
+        }
+        let legacy = presented_steps.iter().find(|step| step["path"] == "ready").unwrap();
+        assert_eq!(legacy["owner"]["agent"], "agent/legacy/builder");
+        let mut invalid = card.clone();
+        invalid["presentation"]["steps"][0]["owner"]["agent"] = serde_json::json!("legacy/builder");
+        assert!(
+            !contract_validator("Mission").is_valid(&invalid),
+            "strict /presentation AgentId contract must reject an unprefixed actor"
         );
     }
     let (status, response) = client_json(app.clone(), "/v1/client/work?history=true").await;
@@ -3805,7 +4076,7 @@ version 2
 agent "ios-owner" { workspace "/tmp"; command "true" }
 mission "ios-proof" state="ready" {
   goal "Run the physical simulator proof."
-  step "automated-proof" { assigned-to "agent/ios-owner" }
+  step "automated-proof" { assigned-to "agent/client-v0-baseline.ios-owner" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -3853,6 +4124,7 @@ mission "ios-proof" state="ready" {
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -3919,7 +4191,7 @@ version 2
 agent "release-owner" { workspace "/tmp"; command "true" }
 mission "release-proof" state="ready" {
   goal "Publish the release."
-  step "tag-proof" { assigned-to "agent/release-owner"; goal "Prove the published tag builds." }
+  step "tag-proof" { assigned-to "agent/client-v0-baseline.release-owner"; goal "Prove the published tag builds." }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -3972,6 +4244,7 @@ mission "release-proof" state="ready" {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
@@ -4086,7 +4359,7 @@ agent "queue-seat" { workspace "/tmp"; command "true" }
 mission "queued-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step in each run."
-  step "work" { assigned-to "agent/queue-seat" }
+  step "work" { assigned-to "agent/client-v0-baseline.queue-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-baseline").unwrap();
@@ -4933,6 +5206,88 @@ mission "timing/run" state="ready" {
     }).unwrap();
     let (status, denied) = client_json_auth(fractal_daemon::api::fabric_router(state), path, credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+}
+
+#[tokio::test]
+async fn mission_detail_projects_a_program_steps_journal_and_its_fault() {
+    use sha2::Digest as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let bundle = b"export default {}";
+    let hash = hex::encode(sha2::Sha256::digest(bundle));
+    state.store.put_blob(bundle).unwrap();
+    let source = format!(
+        r#"version 2
+mission "program/land" state="ready" {{
+  goal "Land one change by program."
+  step "land" {{ program "/bundles/land.mjs" sha256="{hash}" stalled-after="10m" }}
+}}
+"#
+    );
+    let intent = fractal_daemon::graph::parse_intent(&source, state.store.origin()).unwrap();
+    let planned = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.clone(),
+        source_name: None,
+    }).unwrap();
+    state.store.apply(&intent, &planned.subject_tokens, "program-definition").unwrap();
+    let run = state.store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "program/land".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/avery".into()),
+        mode: Some("run".into()),
+        inputs: Default::default(),
+        idempotency_key: "program-run".into(),
+    }).unwrap();
+    let land = run.steps.iter().find(|step| step.step == "land").unwrap().subject.clone();
+    state.store.set_step_state(&land, "working", None).unwrap();
+    let append = |kind: &str, fields: Value| {
+        state.store.append_claim(&fractal_daemon::model::ClaimInput {
+            subject: land.clone(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    for (key, status, extra) in [
+        ("merge", "started", serde_json::json!({})),
+        ("merge", "failed", serde_json::json!({"ms": 900, "error": {"_tag": "Conflict"}})),
+        ("review", "started", serde_json::json!({"child": "mission-run/program/review"})),
+    ] {
+        let mut fields = serde_json::json!({"key": key, "status": status, "attempt": 1, "program": hash});
+        fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        append("program.step", fields);
+    }
+    append("reconcile.fault", serde_json::json!({
+        "scope": "program/stalled", "status": "faulted", "reason": "no journal entry for 10m; open key `review`",
+    }));
+
+    let app = fractal_daemon::api::router(state.clone());
+    let path = "/v1/client/missions/mission%2Fprogram%2Fland";
+    let (status, response) = client_json(app, path).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_conforms(&contract_validator("Envelope"), path, &response);
+    let envelope: fractal_client::Envelope<fractal_client::Resource> =
+        serde_json::from_value(response.clone()).unwrap();
+    let fractal_client::Resource::Mission(mission) = envelope.value else {
+        panic!("mission detail must be a mission resource");
+    };
+    let detail = &mission.run_details[0];
+    let step = detail.steps.as_ref().unwrap().iter().find(|step| step.path == "land").unwrap();
+    let program = step.program.as_ref().expect("a program step carries its journal");
+    assert_eq!(program.open_key.as_deref(), Some("review"));
+    assert_eq!((program.stalled_after_ms, program.truncated), (600_000, false));
+    let entries = program.entries.iter().map(|entry| (entry.key.as_str(), entry.status.as_str())).collect::<Vec<_>>();
+    assert_eq!(entries, [("merge", "failed"), ("review", "started")]);
+    assert_eq!((program.entries[0].ms, program.entries[0].error.as_deref()), (Some(900), Some(r#"{"_tag":"Conflict"}"#)));
+    assert_eq!(program.entries[1].child.as_deref(), Some("mission-run/program/review"));
+    let fault = program.fault.as_ref().unwrap();
+    assert_eq!(fault.scope, "program/stalled");
+    let blocker = &response["value"]["run_details"][0]["blocker"];
+    assert_eq!((blocker["step"].as_str(), blocker["scope"].as_str()), (Some(land.as_str()), Some("program/stalled")));
 }
 
 #[tokio::test]

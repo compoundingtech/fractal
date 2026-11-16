@@ -1,6 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Link, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Link, VisuallyHidden } from 'react-aria-components'
+import { HoverCard } from '../entity/HoverCard'
+import { ResourceEntityCard } from '../entity/ResourceCard'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
 import type { Root } from 'hast'
@@ -12,6 +14,8 @@ import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
+import { remarkHardBreaks, remarkVisibleHtml, splitMarkdownBlocks } from './markdown-source'
+import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -27,12 +31,16 @@ export interface MarkdownImageOptions {
 }
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
-/** `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes. */
-export interface MarkdownProps { text: string; streaming?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
+/**
+ * `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes.
+ * `hardBreaks` keeps each line break, for text written as lines (prompts) rather than paragraphs.
+ */
+export interface MarkdownProps { text: MarkdownBlock; streaming?: boolean; hardBreaks?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
-const REMARK_PLUGINS = [remarkGfm]
+const REMARK_PLUGINS = [remarkGfm, remarkVisibleHtml]
+const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkVisibleHtml, remarkHardBreaks]
 const STREAMING_PLUGINS = [markStreamingTail]
-type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'tone'>
+type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'tone' | 'hardBreaks'>
 const EMPTY_REFERENCES: ReferenceOptions = {}
 const ReferenceContext = React.createContext<ReferenceOptions>(EMPTY_REFERENCES)
 const MutedTone = React.createContext(false)
@@ -54,16 +62,18 @@ function markStreamingTail() {
   }
 }
 /** Policy/reference context can change without invalidating the Markdown parser. */
-const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming }: { readonly source: string; readonly streaming: boolean }) {
-  return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>
+const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean }) {
+  return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>
 })
 const markdownUrlTransform = (url: string, key: string) => key === 'src' ? url : defaultUrlTransform(url)
 
-export const Markdown = React.memo(function Markdown({ text, streaming = false, tone = 'default', resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
+export const Markdown = React.memo(function Markdown({ text: markdown, streaming = false, hardBreaks = false, tone = 'default', resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
   const inherited = React.useContext(MarkdownImagePolicy)
   const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference: renderInlineReference ?? inherited.renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
-  const source = React.useMemo(() => streaming ? completeStreamingTail(text) : text, [text, streaming])
-  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}><ParsedMarkdown source={source} streaming={streaming} /></div></MutedTone.Provider></ReferenceContext.Provider>
+  const text = markdownSource(markdown)
+  const blocks = React.useMemo(() => splitMarkdownBlocks(text), [text])
+  const tail = blocks.length - 1
+  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}>{/* Settled blocks keep their parse while the tail grows; only the tail is completed and parsed again. */}{blocks.map((block, index) => <ParsedMarkdown key={index} source={streaming && index === tail ? completeStreamingTail(block) : block} streaming={streaming && index === tail} hardBreaks={hardBreaks} />)}</div></MutedTone.Provider></ReferenceContext.Provider>
 })
 
 function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
@@ -82,7 +92,7 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
-  const link = <Link href={href} target="_blank" rel="noopener noreferrer" render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const link = <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
   return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{imageLink ? <span>{children}{' '}{link}</span> : link}</ReferenceContext.Provider>
 }
 
@@ -261,8 +271,41 @@ const MARKDOWN_COMPONENTS: Components = {
   th: ({ children, style }) => <th {...stylex.props(styles.cell, styles.tableHeading, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
   td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
 }
+const INLINE_ELEMENTS = ['strong', 'em', 'del', 'code', 'a', 'img', 'x-text']
+/** Wraps each run of prose (not code) so a host can render it, for example to quiet ids and paths. */
+function rehypeTextRuns() {
+  type Node = { type: string; tagName?: string; children?: Node[] }
+  const visit = (parent: Node): void => {
+    if (parent.children === undefined || parent.tagName === 'code') return
+    parent.children = parent.children.map(child => child.type === 'text' ? { type: 'element', tagName: 'x-text', properties: {}, children: [child] } : (visit(child), child))
+  }
+  return (tree: Node) => visit(tree)
+}
+const TEXT_RUN_PLUGINS = [rehypeTextRuns]
+const INLINE_BASE: Components = { strong: MARKDOWN_COMPONENTS.strong, em: MARKDOWN_COMPONENTS.em, code: InlineCode, img: ({ alt }) => <>{alt}</> }
+const INLINE_COMPONENTS: Components = { ...INLINE_BASE, a: ({ children }) => <>{children}</> }
+const INLINE_ANCHOR_COMPONENTS: Components = { ...INLINE_BASE, a: MarkdownLink }
+export interface InlineMarkdownProps {
+  readonly text: MarkdownInline
+  /** `label` (default) draws a link as its words, legal inside buttons and rows. `anchor` is for where no ancestor is interactive. */
+  readonly links?: 'label' | 'anchor'
+  /** The text was cut to a length: close whatever the cut left open. */
+  readonly clipped?: boolean
+  /** Renders each run of prose; inline code is left alone. Keep it a stable function. */
+  readonly renderText?: (text: string) => React.ReactNode
+}
+/** One line of text as phrasing content, with no wrapper element, so it fits headings, table cells and clamped rows. Block syntax keeps its words only. */
+export const InlineMarkdown = React.memo(function InlineMarkdown({ text: markdown, links = 'label', clipped = false, renderText }: InlineMarkdownProps) {
+  const line = markdownSource(markdown).replace(/\s*\n\s*/g, ' ')
+  const base = links === 'anchor' ? INLINE_ANCHOR_COMPONENTS : INLINE_COMPONENTS
+  const components = React.useMemo(() => renderText === undefined ? base : { ...base, 'x-text': ({ children }: { readonly children?: React.ReactNode }) => <>{renderText(String(children ?? ''))}</> } as Components, [base, renderText])
+  return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={REMARK_PLUGINS} rehypePlugins={renderText === undefined ? undefined : TEXT_RUN_PLUGINS} allowedElements={INLINE_ELEMENTS} unwrapDisallowed components={components}>{clipped ? completeStreamingTail(line) : line}</ReactMarkdown>
+})
+/** A file the agent touched, mentioned in prose: its hover is the resource's canonical card. */
 export function ResourceChip({ resource, onOpen }: { resource: InlineResource; onOpen?: (path?: string) => void }) {
-  return <TooltipTrigger delay={300}><Button onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button><Tooltip {...stylex.props(styles.hoverCard)}><div {...stylex.props(styles.resourceTitle)}>{resource.path}<span {...stylex.props(styles.added)}>+{resource.added}</span><span {...stylex.props(styles.removed)}>−{resource.removed}</span></div>{resource.preview ? <pre {...stylex.props(styles.preview)}>{resource.preview}</pre> : null}</Tooltip></TooltipTrigger>
+  return <HoverCard placement="bottom start" content={() => <ResourceEntityCard id={resource.path} title={resource.path} kind="File" icon="attach" summary={[`+${resource.added} \u2212${resource.removed}`]} {...(resource.preview ? { preview: resource.preview.split('\n'), previewKind: 'diff' as const } : {})} />}>
+    <Button data-search-content onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button>
+  </HoverCard>
 }
 /** Complete only the unfinished prose tail; fenced code and settled literal punctuation are untouched. */
 export function completeStreamingTail(source: string): string {
@@ -377,9 +420,11 @@ const styles = stylex.create({
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
-  syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
+  // Hosts that tint rows under highlighted source (inspector frames, diff washes) raise
+  // `--fractal-syntax-muted` so muted tokens keep AA contrast on the tint.
+  syntaxComment: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})`, fontStyle: 'italic' },
   syntaxKeyword: { color: status.runningFg },
-  syntaxString: { color: textColor.fgMuted },
+  syntaxString: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})` },
   syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
   syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
   syntaxDeleted: { color: status.dangerFg },
@@ -402,5 +447,5 @@ const styles = stylex.create({
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
   link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
-  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } },
 })

@@ -485,19 +485,27 @@ registry/file inventory and deterministic newest-first ordering. A public build 
 entries and private source imports; the UI is not the privacy boundary. The emitted
 `changelog.v1.json` describes precisely the entries included in that build.
 
-The Changes disclosure lazily loads prose and acknowledges included IDs on opening. The
-device-local cursor is scoped by origin, product, and deployment channel; `live`, `main`,
-and `stable` do not share cursors. Seen IDs survive rollbacks and skipped builds. No version
-string or timestamp comparison decides whether a change is new. First visits show “Recent
-changes”; subsequent visits show “New since you last looked” followed by “Recent”.
-The Changes trigger is the `changelog` segment of the shared developer bar, next to the build
-version. When the bar overflows, the kit's +N control mirrors its unread dot.
-Its React Aria popover anchors to the visible bar with an 8px gap and restores focus
-on dismissal. It uses the shared light/dark theme, glass surface, and change-kind pills.
+Build identity and recent changes share one entry of the shared developer bar, the `build`
+segment. Its trigger shows the short build identity (revision, age, `*` for uncommitted
+changes) and, while this build lists an entry the device has not acknowledged, an unread dot;
+when the bar overflows, the kit's +N control mirrors that dot. Hovering or focusing the trigger
+shows the kit's identity tooltip and warms the changelog chunk; it never acknowledges.
+The trigger opens the kit's anchored native popover: one build line (full identity in a
+disclosure) above "What's new", which lazily loads prose. Escape closes it and returns focus to
+the trigger.
+
+Changes are acknowledged, and the dot clears in the same commit, when the first readable item
+(the first entry's title, or the empty notice) is wholly visible inside the open popover. The
+kit bounds the popover to the space beside the bar, so on short viewports that item can start
+below the fold; it is then acknowledged once scrolled into view. Loading and failed states
+acknowledge nothing. The device-local cursor is scoped by origin, product, and deployment
+channel; `live`, `main`, and `stable` do not share cursors. Seen IDs survive rollbacks and
+skipped builds. No version string or timestamp comparison decides whether a change is new.
+First visits show “Recent changes”; subsequent visits show “New since you last looked” followed
+by “Recent”, diffed against the cursor as it was when the popover opened.
 The contract and compiler do not depend on a status-bar package or disclosure slot.
 The button names unread changes directly for assistive technology; its dot is decorative.
-Popover dimensions and spacing use composition tokens. Story fixtures are synthetic, and
-already-open story disclosures seed the acknowledged cursor while retaining the opening baseline.
+Popover dimensions and spacing use composition tokens; story fixtures are synthetic.
 
 The `fractal-changelog` PR check requires a newly added entry for product UI source changes
 under `apps/fractal-web` or `packages/fractal-ui`. The `no-changelog` label explicitly opts

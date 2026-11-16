@@ -264,7 +264,8 @@
         "scripts/script-test-supervisor",
         "scripts/script_process.py",
         "scripts/sqlite_large_values.py",
-        "slo/targets.toml",
+        "slo/fractal-ci.kdl",
+        "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
         "wit"
       ],
@@ -500,7 +501,8 @@
         "scripts/script-test-supervisor",
         "scripts/script_process.py",
         "scripts/sqlite_large_values.py",
-        "slo/targets.toml",
+        "slo/fractal-ci.kdl",
+        "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
         "wit"
       ],
@@ -881,6 +883,7 @@
         "apps/fractal-web/.gitignore",
         "apps/fractal-web/scripts/devnet",
         "apps/fractal-web/src/changelog/seen.ts",
+        "apps/ios/modules/fractal-fabric/build.sh",
         "apps/ios/scripts/release_delivery.py",
         "apps/ios/scripts/test_release_delivery.py",
         "crates/fractal/tests/daemon_load.rs",

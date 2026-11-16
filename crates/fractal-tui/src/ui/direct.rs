@@ -354,6 +354,7 @@ mod tests {
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
             node: "attach-node".into(),
+            api_socket: root.join("daemon").join("api.sock"),
             state_dir: root.join("daemon"),
             pty_root: root.join("pty"),
             pty_binary: root.join("bin/pty"),
