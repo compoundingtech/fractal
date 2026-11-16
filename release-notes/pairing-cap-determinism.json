@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make pairing tests independent of the expired legacy allowance cap; no user-visible change.",
+  "replay": {"status": "none", "detail": "Test fixtures only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No rule change."},
+  "compatibility": {"status": "none", "detail": "Production pairing admission and the fixed legacy allowance expiry are unchanged."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "No recovery change."}
+}
