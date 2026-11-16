@@ -356,6 +356,30 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             );
         }
     }
+    let tag_reader_scopes = vec!["read.projections".to_owned(), "read.glasses".to_owned(), "read.arrangements".to_owned()];
+    for json in [false, true] {
+        let challenge = local.pairing_begin_person(&PersonPairingBegin {
+            api_version: fractal_client::API_VERSION.into(), device_name: "Tag reader".into(),
+            person_id: "person/avery".into(), full_control: None,
+            scopes: Some(tag_reader_scopes.clone()), fabric_gateway: None,
+        }).await.unwrap().value;
+        let mut args = vec![
+            "devices".into(), "complete".into(), base.clone(), challenge.pairing_id,
+            "--profile".into(), profile.to_str().unwrap().into(),
+            "--fingerprint".into(), challenge.person_root_fingerprint.unwrap(),
+        ];
+        if json { args.push("--json".into()); }
+        let output = run(args, challenge.code).await.unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        if json {
+            assert_eq!(value(&output)["scopes"], serde_json::json!(tag_reader_scopes));
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains(
+                "Granted scopes: read.projections, read.glasses, read.arrangements"
+            ));
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("terminal.read"));
+        }
+    }
     let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
     device_name: "Display".into(),
     person_id: "person/avery".into(),
