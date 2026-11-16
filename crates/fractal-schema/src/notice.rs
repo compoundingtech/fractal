@@ -9,6 +9,8 @@ use std::{collections::BTreeMap, sync::LazyLock};
 
 pub const SOURCE_PREFIX: &str = "custom/attention/source/";
 pub const SNAPSHOT_PREFIX: &str = "custom/attention/snapshot/";
+pub const DIGEST_SOURCE_PREFIX: &str = "custom/attention/source/digest/";
+pub const DIGEST_SNAPSHOT_PREFIX: &str = "custom/attention/snapshot/digest/";
 /// The v1 control family's prefix stays reserved without a manifest, so generic rows written
 /// there before the namespace was reserved stay hidden and nothing can register it again.
 pub const RETIRED_CONTROL_PREFIX: &str = "custom/attention/control/";
@@ -42,6 +44,24 @@ pub fn manifests() -> &'static [custom::Manifest; 2] {
     static MANIFESTS: LazyLock<[custom::Manifest; 2]> = LazyLock::new(|| [build("source"), build("snapshot")]);
     &MANIFESTS
 }
+
+/// Digest snapshots carry daemon provenance, outside the producer-owned manifest's actor
+/// domain. Keep immutable reviewed registrations unchanged; validate every field with the
+/// same schema and only widen this native producer reference. Store admission additionally
+/// requires the exact runtime actor, digest source lineage and notice-owner origin fence.
+pub fn validate_digest_snapshot_fields(fields: &BTreeMap<String, serde_json::Value>) -> Result<(), ValidationError> {
+    static SCHEMA: LazyLock<custom::ClaimSchema> = LazyLock::new(|| {
+        let snapshot = &manifests()[1];
+        let mut schema = snapshot.claims[&snapshot.creation_kind].clone();
+        schema.fields.get_mut("producer").expect("snapshot producer")
+            .reference_families.push("daemon".into());
+        schema
+    });
+    custom::validate_fields(&SCHEMA, fields)
+}
+
+/// Payload schema versions are independent from immutable registration manifest versions.
+pub const PAYLOAD_VERSION: u32 = 1;
 
 /// A candidate identity selects a reviewed pin, never a caller-provided hash.
 pub fn pinned_hash(manifest: &custom::Manifest) -> Option<&'static str> {

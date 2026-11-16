@@ -97,7 +97,7 @@ or live daemon is involved. Existing output archives are not overwritten.
 
 
 Home Manager enables the daemon's web listener at `127.0.0.1:7410` by default.
-Set `services.smalltalk.webListen = null;` to disable it, or set an explicit
+Set `services.fractal.webListen = null;` to disable it, or set an explicit
 listener address. Home Manager passes its package's immutable assets explicitly
 when copying the daemon into its stable state-directory bin path. Externally
 managed binaries retain the release's executable-relative asset layout.

@@ -420,6 +420,11 @@ enum Fetched {
     Slo { generation: u64, outcome: Result<(Vec<fractal_client::SloRow>, Option<String>), String> },
     /// What was left of one objective or budget across the chart period.
     SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
+    /// The person's asks that resolved by themselves, or why st could not say.
+    AutoResolved { generation: u64, outcome: Result<fractal_client::AutoResolvedAsks, String> },
+    /// st answered the person's own answer to the auto-resolved ask of `episode`; accepted, the
+    /// list is read again.
+    Overridden { episode: String, accepted: bool },
     /// st's conversation search for the palette's query, or why st could not say.
     Said(String, Result<fractal_client::ConversationSearch, String>),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
@@ -662,6 +667,12 @@ pub fn run(context: Context) -> Result<()> {
     let mut slo_stale = false;
     let mut slo_reading = false;
     let mut slo_history_asked = BTreeSet::<(String, u64)>::new();
+    // The person's auto-resolved asks are a read, not a window: read when Now opens, when the
+    // attention window changes (an ask that resolves by itself leaves it) and after an override
+    // is accepted, while Now shows; never on a timer.
+    let mut auto_shown = false;
+    let mut auto_stale = true;
+    let mut auto_reading = false;
     let mut legacy_requested = BTreeSet::new();
     // When each polled inventory first failed on this run of failures: a read that fails for a
     // moment (a daemon catching up) is not said; one that keeps failing is.
@@ -750,6 +761,7 @@ pub fn run(context: Context) -> Result<()> {
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
                     // Another member's objectives are not this one's: drop them until it answers.
                     extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
+                    auto_stale = true; auto_reading = false; extras.auto_resolved = Load::Loading;
                     extras.reset_connection();
                     ui.availability.connected();
                     attached = None;
@@ -859,6 +871,7 @@ pub fn run(context: Context) -> Result<()> {
                         Window::Attention => {
                             model.now = collection;
                             extras.attention_live = true;
+                            auto_stale = true;
                         }
                         Window::Missions => {
                             model.missions = collection;
@@ -1277,6 +1290,22 @@ pub fn run(context: Context) -> Result<()> {
                         Err(why) => { extras.slo_history.insert(id, Load::Failed(why)); }
                     }
                 }
+                Fetched::AutoResolved { generation, outcome } => {
+                    auto_reading = false;
+                    if generation != resources_generation { continue; }
+                    match outcome {
+                        Ok(asks) => extras.auto_resolved = Load::Ready(asks),
+                        // The rows read last stay: a failed refresh is not an empty list.
+                        Err(why) if matches!(extras.auto_resolved, Load::Ready(_)) => {
+                            ui.flash(format!("Could not read your auto-resolved asks again: {why}"));
+                        }
+                        Err(why) => extras.auto_resolved = Load::Failed(why),
+                    }
+                }
+                Fetched::Overridden { episode, accepted } => {
+                    ui.finish_override(&episode, accepted);
+                    auto_stale |= accepted;
+                }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::ReadPositions { generation, outcome } => {
                     if generation == resources_generation {
@@ -1424,6 +1453,25 @@ pub fn run(context: Context) -> Result<()> {
             runtime.spawn(async move {
                 let outcome = reader.slo_list().await.map(|reply| (reply.value.rows, reply.value.otel_ui_url)).map_err(|error| super::objectives::error(&error));
                 let _ = tx.send(Fetched::Slo { generation, outcome });
+            });
+        }
+        let now_shown = ui.tab() == 0;
+        if now_shown && !auto_shown { auto_stale = true; }
+        auto_shown = now_shown;
+        if now_shown && extras.live && auto_stale && !auto_reading {
+            auto_stale = false; auto_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = match reader.auto_resolved_list().await {
+                    Ok(reply) => Ok(reply.value),
+                    // Only a person's own asks are listed: an agent's session, or a Fractal that
+                    // does not serve the read yet, has none to show.
+                    Err(ClientError::Api(fractal_client::ErrorCode::Forbidden | fractal_client::ErrorCode::NotFound, ..)) => {
+                        Ok(fractal_client::AutoResolvedAsks { items: Vec::new(), complete: true })
+                    }
+                    Err(error) => Err(error.human()),
+                };
+                let _ = tx.send(Fetched::AutoResolved { generation, outcome });
             });
         }
         // The chart of the objective or budget selected, or open in the focused pane.
@@ -1940,6 +1988,10 @@ pub fn run(context: Context) -> Result<()> {
             };
             let optimistic_answer = alert.as_ref().is_some_and(|id| ui.pending_answers.contains_key(id));
             let shell = matches!(effect, Effect::CreateTerminal { .. });
+            let overrides = match &effect {
+                Effect::Override { episode, .. } => Some(episode.clone()),
+                _ => None,
+            };
             let client = client.clone();
             let tx = fetched_tx.clone();
             let person = person.clone();
@@ -1973,6 +2025,10 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 if shell && let Ok((_, Some(terminal))) = &outcome {
                     let _ = tx.send(Fetched::TerminalStarted(terminal.clone()));
+                }
+                // Either way st answered: the row offers `o` again, and once taken it is read anew.
+                if let Some(episode) = overrides {
+                    let _ = tx.send(Fetched::Overridden { episode, accepted: outcome.is_ok() });
                 }
                 match outcome {
                     Ok((notice, _)) => {
@@ -3013,6 +3069,11 @@ async fn perform(
                 .attention_dismiss(action, idem, fence, fractal_client::AttentionDismissParameters { attention_id: id, text })
                 .await?;
             Ok(("Dismissed".into(), None))
+        }
+        Effect::Override { target_id, episode, answer, text, label } => {
+            crate::override_ask(client, &target_id, &episode, &answer, text.as_deref(), &label)
+                .await
+                .map(|notice| (notice, None))
         }
         Effect::LaunchRevise { id, feedback } => {
             let current = client.attention_get(&id).await?;
@@ -4467,6 +4528,106 @@ mod tests {
         let refused = perform(&gate.client, "person/avery", &model, dismiss, None).await.unwrap_err();
         assert!(super::plain(&refused).contains("not an ask"), "{}", super::plain(&refused));
         assert!(gate.card().await.is_some(), "a refused dismissal leaves the gate asking");
+    }
+
+    /// o reaches st through the dispatch every action uses: the answer chosen replaces the default
+    /// an ask resolved with, so the ask leaves what st lists as resolved by itself, and another
+    /// person's answer to it is refused.
+    #[tokio::test]
+    async fn an_override_reaches_st_and_the_ask_leaves_the_auto_resolved_list() {
+        use fractal_daemon::{PersonWorkStore as _, SeatsStoreCore as _};
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-override").unwrap());
+        store.set_ask_deadlines(true);
+        let asked_at = fractal_daemon::api::client_now_ms().saturating_sub(120_000);
+        smallclaims::store::set_thread_clock(Some(asked_at));
+        store.graph.set_write_clock_at(asked_at).unwrap();
+        let intent = fractal_daemon::graph::parse_intent(
+            "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+            store.origin(),
+        )
+        .unwrap();
+        store.apply_internal(&intent, "ui-override-agent").unwrap();
+        store
+            .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
+                deadline_ms: Some(60_000),
+                default_answer: Some("hold".into()),
+                legacy_request: None,
+                person: "person/avery".into(),
+                title: "Ship?".into(),
+                reason: "Release choice".into(),
+                actor: format!("agent/{}.asker", store.origin()),
+                step: None,
+                new_run: Some("ui-override".into()),
+                incarnation: None,
+                idempotency_key: "ui-override-ask".into(),
+                request: Some(serde_json::json!({"version": 1, "type": "choice", "question": "Ship?",
+                    "why_person": "Release choice", "answers": [
+                        {"id": "hold", "label": "Hold", "consequence": "The release waits."},
+                        {"id": "ship", "label": "Ship", "consequence": "The release ships."}]})),
+            })
+            .unwrap();
+        store.reconcile_person_asks_at(asked_at).unwrap();
+        smallclaims::store::set_thread_clock(Some(asked_at + 60_001));
+        store.graph.set_write_clock_at(asked_at + 60_001).unwrap();
+        assert!(store.reconcile_person_asks_at(asked_at + 60_001).unwrap().changed);
+        smallclaims::store::set_thread_clock(None);
+        store.graph.set_write_clock_at(fractal_daemon::api::client_now_ms()).unwrap();
+        let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "ui-override".into(),
+            api_socket: root.path().join("api.sock"),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
+        let socket = root.path().join("daemon.sock");
+        let path = socket.clone();
+        let server = tokio::spawn(async move {
+            fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap();
+        });
+        for _ in 0..200 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let client = Client::unix_as(&socket, "person/avery");
+        let listed = client.auto_resolved_list().await.unwrap().value;
+        let [ask] = listed.items.as_slice() else { panic!("{:?}", listed.items) };
+        let target = &ask.action_parameters.as_ref().expect("the window is open")["work.override"];
+        let effect = Effect::Override {
+            target_id: target.target_id.clone(),
+            episode: target.episode.clone(),
+            answer: "ship".into(),
+            text: None,
+            label: "Ship".into(),
+        };
+        let model = Model::default();
+        let other = Client::unix_as(&socket, "person/blair");
+        perform(&other, "person/blair", &model, effect.clone(), None)
+            .await
+            .expect_err("only the person asked may answer instead");
+        assert_eq!(client.auto_resolved_list().await.unwrap().value.items.len(), 1);
+        let (notice, _) = perform(&client, "person/avery", &model, effect, None).await.unwrap();
+        assert_eq!(notice, "Answered “Ship” instead of the default");
+        assert!(client.auto_resolved_list().await.unwrap().value.items.is_empty());
+        server.abort();
     }
 
     #[tokio::test]

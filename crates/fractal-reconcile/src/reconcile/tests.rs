@@ -1,6 +1,325 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
 
+mod native_effect_convergence {
+    use super::*;
+    use crate::model::EffectOwner;
+    use crate::store::effects::{EffectAdmission, EffectRecord, native_message_key};
+    use serde_json::json;
+
+    const FLEET: &str = "example-effect-convergence";
+    const WORKER: &str = "agent/example/worker";
+    const INCARNATION: &str = "example-worker-one";
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        store: Arc<Store>,
+        reconciler: Reconciler<FakeRuntime>,
+        run: MissionRunView,
+        owner: EffectOwner,
+        origin: String,
+    }
+
+    impl Fixture {
+        fn new(origin: &str) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open(&root.path().join("graph.db"), origin).unwrap());
+            store.bind_fleet(FLEET).unwrap();
+            apply_source(&store, r#"version 2
+agent "example/worker" { workspace "/tmp"; harness "claude" {} }
+agent "example/reader" { workspace "/tmp"; harness "claude" {} }
+mission "example/report" state="ready" {
+  goal "Report exactly once."
+  step "report" { assigned-to "agent/example/worker" }
+}"#, "example-publish");
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "example/report".into(), revision: None, workspace: "/tmp".into(),
+                requester: Some("person/example".into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "example-run".into(),
+            }).unwrap();
+            let step = &run.steps[0].subject;
+            store.set_step_state(step, "ready", None).unwrap();
+            let claimed = store.work_action(step, "claim", &crate::model::WorkRequest {
+                wait_ms: None, actor: Some(WORKER.into()), incarnation: Some(INCARNATION.into()),
+                summary: None, reason: None, evidence: vec![], idempotency_key: "example-claim".into(),
+            }).unwrap();
+            let owner = EffectOwner {
+                mission: run.mission.clone(), key: "report-ready".into(), step: step.clone(),
+                attempt: claimed.attempt, incarnation: INCARNATION.into(),
+            };
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+                origin.into(), Arc::new(Notify::new()));
+            let fixture = Self { root, store, reconciler, run, owner, origin: origin.into() };
+            fixture.runtime("running", INCARNATION);
+            fixture
+        }
+
+        fn runtime(&self, status: &str, incarnation: &str) {
+            self.store.append_claim(&ClaimInput {
+                subject: WORKER.into(), kind: "runtime.observed".into(), actor: None,
+                fields: BTreeMap::from([("status".into(), json!(status)),
+                    ("incarnation_id".into(), json!(incarnation))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+
+        fn admit(&self) -> EffectRecord {
+            match self.store.admit_message_effect(&self.owner, WORKER, WORKER,
+                "example-payload-digest", "agent/example/reader").unwrap()
+            {
+                EffectAdmission::Originate(effect) => effect,
+                other => panic!("expected local first origination, got {other:?}"),
+            }
+        }
+
+        fn commit_message(&self) -> crate::model::ClaimRecord {
+            self.commit_message_at("message/example-report")
+        }
+
+        fn commit_message_at(&self, subject: &str) -> crate::model::ClaimRecord {
+            self.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "message.sent".into(),
+                actor: Some(WORKER.into()),
+                fields: BTreeMap::from([("from".into(), json!(WORKER)),
+                    ("to".into(), json!("agent/example/reader")),
+                    ("status".into(), json!("sent")),
+                    ("content".into(), json!("The example report is ready."))]),
+                evidence: vec![], expected_subject: None,
+                idempotency_key: Some(native_message_key(&self.owner).unwrap()),
+            }).unwrap()
+        }
+
+        fn converge(&self) {
+            self.reconciler.reconcile_effects().unwrap();
+        }
+
+        fn restart(self) -> Self {
+            let Self { root, store, reconciler, run, owner, origin } = self;
+            drop(reconciler);
+            drop(store);
+            let store = Arc::new(Store::open(&root.path().join("graph.db"), &origin).unwrap());
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+                origin.clone(), Arc::new(Notify::new()));
+            Self { root, store, reconciler, run, owner, origin }
+        }
+
+        fn assert_one_episode(&self, effect: &EffectRecord) {
+            assert_eq!(self.store.claims_for(&effect.effect_id, Some("effect.unresolved")).unwrap().len(), 1);
+            let failures = self.store.claims_for(&self.run.subject, Some("operational.failure")).unwrap();
+            assert_eq!(failures.iter().filter(|claim|
+                claim.body["fields"]["condition"] == "effect-unresolved").count(), 1);
+            let attention = self.store.attention_snapshot(Some("person/example"), now_ms()).unwrap();
+            assert_eq!(attention.iter().filter(|item| item.kind == "effect-unresolved").count(), 1);
+            let faults = self.store.fault_snapshot(now_ms()).unwrap();
+            assert_eq!(faults.iter().filter(|fault| fault.item.kind == "effect-unresolved"
+                && fault.item.person == WORKER).count(), 1);
+        }
+    }
+
+    #[test]
+    fn unrelated_wakes_do_not_read_completed_effect_history() {
+        let mut fixture = Fixture::new("example-origin");
+        let mut completed = Vec::new();
+        for index in 0..16 {
+            fixture.owner.key = format!("report-ready-{index}");
+            let effect = fixture.admit();
+            let message = fixture.commit_message_at(&format!("message/example-report-{index}"));
+            fixture.store.confirm_message_effect(&effect, &message, WORKER).unwrap();
+            completed.push(effect.effect_id);
+        }
+        let ((), bootstrap) = smallclaims::touched::record(|| fixture.converge());
+        assert!(bootstrap.contains("effect-history"));
+        assert!(completed.iter().all(|effect| bootstrap.contains(effect)));
+        for index in 0..3 {
+            fixture.store.append_claim(&ClaimInput {
+                subject: format!("resource/unrelated-{index}"), kind: "resource.observed".into(), actor: None,
+                fields: BTreeMap::from([("kind".into(), json!("vcs.repository"))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+            assert!(!reads.contains("effect-history"));
+            assert!(completed.iter().all(|effect| !reads.contains(effect)), "{reads:?}");
+        }
+    }
+
+    #[test]
+    fn live_effect_records_lease_deadline_and_due_wake_rechecks_only_that_effect() {
+        let fixture = Fixture::new("example-origin");
+        let effect = fixture.admit();
+        fixture.converge();
+        let due = fixture.reconciler.incremental.due_of(&effect.effect_id).unwrap();
+        let step = fixture.store.step_run(&effect.bound_step_run).unwrap().unwrap();
+        assert_eq!(Some(due), step.claim_expires_at_unix_ms);
+        assert_eq!(fixture.reconciler.incremental.next_due("effect/"), Some(due));
+        // Drive the scheduler's due boundary without sleeping or changing any graph
+        // input. The real lease is still live, so readback must re-arm it, not send.
+        let reads = fixture.reconciler.incremental.reads_of(&effect.effect_id);
+        fixture.reconciler.incremental.evaluated(&effect.effect_id, reads, Some(0));
+        let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+        assert!(reads.contains(&effect.effect_id));
+        assert!(!reads.contains("effect-history"));
+        assert_eq!(fixture.reconciler.incremental.due_of(&effect.effect_id), Some(due));
+        assert_eq!(fixture.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "intended");
+        assert!(fixture.store.latest_claim("message/example-report", Some("message.sent")).unwrap().is_none());
+    }
+
+    #[test]
+    fn effects_created_after_bootstrap_and_changed_runtime_raise_one_episode() {
+        let fixture = Fixture::new("example-origin");
+        fixture.converge();
+        let effect = fixture.admit();
+        fixture.converge();
+        assert!(fixture.reconciler.incremental.reads_of(&effect.effect_id).contains(WORKER));
+        fixture.runtime("stopped", INCARNATION);
+        fixture.converge();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+        assert!(!reads.contains("effect-history"));
+        assert!(!reads.contains(&effect.effect_id));
+    }
+
+    #[test]
+    fn unresolved_episode_arriving_after_bootstrap_is_discovered_once() {
+        let fixture = Fixture::new("example-origin");
+        fixture.converge();
+        let effect = fixture.admit();
+        fixture.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+    }
+
+    #[test]
+    fn dead_lease_without_receipt_parks_once_across_restart_and_lease_churn() {
+        let fixture = Fixture::new("example-origin");
+        let effect = fixture.admit();
+        fixture.store.effect_in_flight(&effect).unwrap();
+        fixture.runtime("stopped", INCARNATION);
+        fixture.converge();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        let fixture = fixture.restart();
+        fixture.runtime("running", "example-worker-replacement");
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+        fixture.reconciler.unresolved_effect_run_fence(&run).unwrap();
+        let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+        assert_eq!(run.status, "blocked");
+        assert_ne!(run.phase, "cleanup-completed");
+        assert_eq!(run.steps[0].effects.len(), 1);
+        assert_eq!(run.steps[0].effects[0].state, "unresolved");
+        assert!(run.steps[0].effects[0].provider_ref.is_none());
+        let wire = serde_json::to_value(&run).unwrap();
+        assert!(wire["steps"][0]["effects"][0].get("provider_ref").is_none());
+        assert!(fixture.store.latest_claim("message/example-report", Some("message.sent")).unwrap().is_none());
+        let variables = BTreeMap::new();
+        let product = crate::model::ProductSpec {
+            subject: effect.effect_id.clone(),
+            fields: BTreeMap::from([("delivered".into(), json!(true))]),
+        };
+        assert!(!fixture.reconciler.products_hold_with_variables(&[product], &variables).unwrap());
+    }
+
+    #[test]
+    fn dead_lease_recovers_committed_message_by_key_and_publishes_delivery_product() {
+        let fixture = Fixture::new("example-origin");
+        let effect = fixture.admit();
+        fixture.store.effect_in_flight(&effect).unwrap();
+        let message = fixture.commit_message();
+        fixture.runtime("stopped", INCARNATION);
+        fixture.converge();
+        fixture.converge();
+        let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+        let visible = &run.steps[0].effects[0];
+        assert_eq!(visible.effect_id, effect.effect_id);
+        assert_eq!(visible.state, "confirmed");
+        assert_eq!(visible.provider_ref.as_deref(), Some(message.subject.as_str()));
+        assert_eq!(fixture.store.claims_for(&message.subject, Some("message.sent")).unwrap().len(), 1);
+        assert!(fixture.store.claims_for(&effect.effect_id, Some("effect.unresolved")).unwrap().is_empty());
+        let product = crate::model::ProductSpec {
+            subject: effect.effect_id,
+            fields: BTreeMap::from([("delivered".into(), json!(true)),
+                ("provider_ref".into(), json!(message.subject))]),
+        };
+        assert!(fixture.reconciler.products_hold_with_variables(&[product], &BTreeMap::new()).unwrap());
+    }
+
+    #[test]
+    fn human_resolution_clears_attention_and_exposes_confirmed_or_abandoned_without_nulls() {
+        for outcome in ["confirmed", "abandoned"] {
+            let fixture = Fixture::new("example-origin");
+            let effect = fixture.admit();
+            fixture.store.effect_in_flight(&effect).unwrap();
+            fixture.runtime("stopped", INCARNATION);
+            fixture.converge();
+            fixture.assert_one_episode(&effect);
+            fixture.store.resolve_effect_authorized(&effect.effect_id,
+                "person/example", "person/example", crate::store::effects::EffectResolution {
+                    outcome, provider_ref: (outcome == "confirmed").then_some("message/example-manually-observed"),
+                    evidence: &["claim/example-human-observation".into()], key: "example-resolution",
+                }).unwrap();
+            fixture.converge();
+            let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+            assert_eq!(run.steps[0].effects[0].state, outcome);
+            let fields = fixture.reconciler.subject_value(&effect.effect_id).unwrap().unwrap();
+            assert_eq!(fields["fields"]["delivered"], outcome == "confirmed");
+            let product = crate::model::ProductSpec {
+                subject: effect.effect_id.clone(),
+                fields: BTreeMap::from([("delivered".into(), json!(true))]),
+            };
+            assert!(fixture.reconciler.products_hold_with_variables(&[product], &BTreeMap::new()).unwrap(),
+                "human abandonment waives the hold without inventing delivery");
+            if outcome == "abandoned" {
+                assert!(serde_json::to_value(&run.steps[0].effects[0]).unwrap().get("provider_ref").is_none());
+            }
+            assert!(fixture.store.attention_snapshot(Some("person/example"), now_ms()).unwrap()
+                .iter().all(|item| item.kind != "effect-unresolved"));
+            assert!(fixture.store.fault_snapshot(now_ms()).unwrap()
+                .iter().all(|fault| fault.item.kind != "effect-unresolved"));
+        }
+    }
+
+    #[test]
+    fn late_distinct_writer_conflict_parks_previously_confirmed_effect() {
+        let first = Fixture::new("example-first");
+        let second = Fixture::new("example-second");
+        let effect = first.admit();
+        let other = second.admit();
+        assert_eq!(effect.effect_id, other.effect_id);
+        first.store.effect_in_flight(&effect).unwrap();
+        let message = first.commit_message();
+        first.store.confirm_message_effect(&effect, &message, WORKER).unwrap();
+        first.store.set_step_state(&first.owner.step, "completed", None).unwrap();
+        first.store.set_mission_run_state(&first.run.id, "completed", "terminal", None).unwrap();
+        // Register the completed effect before replication: late operation changes,
+        // not a fresh full-history bootstrap, must invalidate this success.
+        first.converge();
+        for _ in 0..100 {
+            let exchange = second.store.export_replication_exchange(FLEET,
+                &first.store.replication_inventory().unwrap()).unwrap();
+            if exchange.envelopes.is_empty() { break; }
+            first.store.receive_replication_exchange(&second.origin, FLEET, &exchange).unwrap();
+            let admission = first.store.validate_replication_backlog().unwrap();
+            assert_eq!((admission.invalid, admission.unknown), (0, 0));
+            first.store.apply_replication_repairs().unwrap();
+            first.store.project_replication_backlog().unwrap();
+        }
+        first.converge();
+        first.converge();
+        first.assert_one_episode(&effect);
+        let run = first.store.mission_run(&first.run.id).unwrap().unwrap();
+        assert_eq!(run.status, "blocked", "late ambiguity must invalidate a previous success");
+        assert_eq!(run.phase, "normal");
+        assert_eq!(first.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "unresolved");
+        assert_eq!(first.store.claims_for(&message.subject, Some("message.sent")).unwrap().len(), 1);
+        let actual = first.reconciler.subject_value(&effect.effect_id).unwrap().unwrap();
+        assert_eq!(actual["fields"]["delivered"], false);
+    }
+}
+
     #[test]
     fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
         for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
@@ -29665,7 +29984,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn inherited_nested_work_keeps_one_parent_alert() {
-        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { executions: None, subject: subject.into(),
+        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { retry: None, executions: None, effects: Vec::new(), subject: subject.into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: path.into(),
@@ -29836,7 +30155,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn busy_agent_keeps_cross_run_work_queued_without_wake_deadline() {
-        let mut first = StepRunView { executions: None, subject: "step-run/older/work".into(),
+        let mut first = StepRunView { retry: None, executions: None, effects: Vec::new(), subject: "step-run/older/work".into(),
         run: "mission-run/older".into(),
         generation: "run-generation/older".into(),
         step: "work".into(),
@@ -30346,7 +30665,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
 
     #[test]
     fn only_the_assignee_host_arms_a_work_wake_deadline() {
-        let step = StepRunView { executions: None, subject: "step-run/run-1/work".into(),
+        let step = StepRunView { retry: None, executions: None, effects: Vec::new(), subject: "step-run/run-1/work".into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: "work".into(),
@@ -31052,6 +31371,159 @@ mission "fresh" state="ready" {
             .find(|message| message.subject == wake.subject)
             .unwrap();
         assert_eq!(after.status, "closed", "the local working report took up the wake");
+    }
+
+    fn unresolved_effect_fence_case(case: &str) {
+        struct ClockReset;
+        impl Drop for ClockReset {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = ClockReset;
+        smallclaims::store::set_thread_clock(Some(1_800_000_000_000));
+        let seat = SeatQueueFixture::new();
+        if case == "dependency-completion" {
+            apply_source(&seat.store, r#"
+version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "queued" state="ready" {
+  goal "Do not complete around an unresolved effect."
+  completion { depends-on { step "finished" completed } }
+  step "work" { assigned-to "agent/node.worker" }
+  step "finished" {
+    agentless
+    gate "wait for the test" { field "state" "resource/never" is "ready" }
+  }
+  finally {
+    step "cleanup" {
+      agentless
+      gate "wait for the test" { field "state" "resource/never" is "ready" }
+    }
+  }
+}
+"#, "effect-mission-completion");
+        }
+        // Unlike the queue-order helper, this fixture needs no sleep or distinct join times.
+        let run = seat.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "queued".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/requester".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: format!("unresolved-{case}"),
+        }).unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let step = SeatQueueFixture::step(&run, "work");
+        seat.work(&step, "claim", "effect-worker-claim").unwrap();
+        let claimed = seat.store.step_run(&step).unwrap().unwrap();
+        let owner = crate::model::EffectOwner {
+            mission: "mission/queued".into(), key: "announce".into(), step: step.clone(),
+            attempt: claimed.attempt, incarnation: "seat-one".into(),
+        };
+        let crate::store::effects::EffectAdmission::Originate(effect) =
+            seat.store.admit_message_effect(&owner, SEAT, SEAT, "original-payload", SEAT).unwrap()
+        else { panic!("the creation host must admit the original effect"); };
+        if case == "submitted" {
+            seat.work(&step, "complete", "effect-worker-submitted").unwrap();
+            assert!(seat.store.step_run(&step).unwrap().unwrap().worker_reported);
+        }
+        seat.store.unresolved_message_effect(&effect, "delivery is unknown", SEAT).unwrap();
+        let messages = seat.store.messages(None, true).unwrap().len();
+        match case {
+            "expired" => {
+                smallclaims::store::set_thread_clock(Some(claimed.claim_expires_at_unix_ms.unwrap() + 1));
+            }
+            "stopped" => {
+                let actual = seat.store.latest_claim(SEAT, Some("runtime.observed")).unwrap().unwrap();
+                let mut fields: BTreeMap<String, Value> =
+                    serde_json::from_value(actual.body["fields"].clone()).unwrap();
+                fields.insert("status".into(), serde_json::json!("stopped"));
+                seat.store.append_claim(&ClaimInput {
+                    subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
+                    fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                assert!(seat.store.work_claim_is_orphaned(&claimed).unwrap());
+            }
+            "late-projection" => {
+                // A worker submission arrives after parking, followed by a late daemon readiness
+                // decision. Neither may replace the durable fence with its own status/reason.
+                seat.store.append_claim(&ClaimInput {
+                    subject: step.clone(), kind: "work.submitted".into(), actor: Some(SEAT.into()),
+                    fields: BTreeMap::from([
+                        ("attempt".into(), serde_json::json!(claimed.attempt)),
+                        ("submitted_incarnation".into(), serde_json::json!("seat-one")),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                seat.store.append_claim(&ClaimInput {
+                    subject: step.clone(), kind: "step-run.state".into(),
+                    actor: Some("daemon/runtime".into()),
+                    fields: BTreeMap::from([("status".into(), serde_json::json!("ready"))]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            "submitted" => {}
+            "dependency-completion" => {
+                for path in ["finished", "cleanup"] {
+                    let subject = SeatQueueFixture::step(&run, path);
+                    seat.store.set_step_state(&subject, "completed", None).unwrap();
+                    assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().status, "completed");
+                }
+            }
+            _ => unreachable!(),
+        }
+        for _ in 0..3 {
+            let view = seat.store.step_run(&step).unwrap().unwrap();
+            assert_eq!(view.status, "blocked", "{case}");
+            assert_eq!(view.blocked_reason.as_deref(), Some("effect-unresolved"), "{case}");
+            seat.reconciler.evaluate_mission_runs().unwrap();
+        }
+        let view = seat.store.step_run(&step).unwrap().unwrap();
+        assert_eq!(view.status, "blocked", "{case}");
+        assert_eq!(view.blocked_reason.as_deref(), Some("effect-unresolved"), "{case}");
+        assert_eq!(seat.store.messages(None, true).unwrap().len(), messages,
+            "an unresolved effect must not originate a replacement message or work wake");
+        assert!(seat.store.claims_for(&step, Some("step-run.state")).unwrap().iter()
+            .all(|claim| claim.body["fields"]["status"] != "completed"));
+        assert_ne!(seat.store.mission_run(&run.id).unwrap().unwrap().status, "completed");
+        if case == "dependency-completion" {
+            let blocked = seat.store.mission_run(&run.id).unwrap().unwrap();
+            assert_eq!(blocked.status, "blocked");
+            assert_eq!(blocked.phase, "normal", "dependency completion must not select final");
+            for phase in ["final", "cleanup-completed"] {
+                seat.store.set_mission_run_state(&run.id, "running", phase, None).unwrap();
+                for _ in 0..3 {
+                    seat.reconciler.evaluate_mission_runs().unwrap();
+                    let blocked = seat.store.mission_run(&run.id).unwrap().unwrap();
+                    assert_eq!(blocked.status, "blocked", "{phase}");
+                    assert_eq!(blocked.phase, phase);
+                }
+            }
+            assert_eq!(seat.store.messages(None, true).unwrap().len(), messages);
+        }
+    }
+
+    #[test]
+    fn unresolved_effect_fences_expired_work_lease() {
+        unresolved_effect_fence_case("expired");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_stopped_worker_incarnation() {
+        unresolved_effect_fence_case("stopped");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_submitted_step_completion() {
+        unresolved_effect_fence_case("submitted");
+    }
+
+    #[test]
+    fn late_work_and_step_state_projections_preserve_unresolved_effect_fence() {
+        unresolved_effect_fence_case("late-projection");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_dependency_completion_and_final_success() {
+        unresolved_effect_fence_case("dependency-completion");
     }
 
     #[test]

@@ -326,6 +326,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'slo.history': return ['objective/example', {}, options];
             case 'attention-budget': return ['mission/example', undefined, undefined, options];
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
+            case 'auto-resolved.list': return [options];
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': case 'usage-hub.quota': return [options];
             case 'arrangements.list': case 'read-positions.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
@@ -450,6 +451,32 @@ test('notesList reads the typed advisory current notes endpoint', async () => {
     assert.equal(calls[0][0], 'https://example.test/v1/client/capabilities');
     assert.equal(calls[1][0], 'https://example.test/v1/client/notes');
     assert.equal(calls[1][1].headers.Authorization, 'Bearer test-credential');
+});
+
+test('auto-resolved read and override preserve exact episode and retry identity', async () => {
+    const read = require('../../../docs/st3/client-v0/fixtures/auto-resolved.json');
+    const calls = [];
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(read);
+        },
+    });
+    assert.deepEqual(await client.autoResolvedList(), read);
+    const input = {
+        id: 'action/person-override:claim/example:ship',
+        idempotency_key: 'person-override:claim/example:ship',
+        fence: { snapshot_id: 'snapshot/example', subject_revisions: {} },
+        parameters: { target_id: 'step-run/example', episode: 'claim/example', answer: { id: 'ship' } },
+    };
+    await client.workOverride(input);
+    const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
+    assert.equal(sent[0][0], 'https://example.test/v1/client/auto-resolved');
+    assert.equal(sent[1][0], 'https://example.test/v1/client/actions');
+    assert.deepEqual(JSON.parse(sent[1][1].body), { api_version: 'st3.client.v0', type: 'work.override', ...input });
 });
 
 test('availability reads select a person and writes send the session person nothing but the change', async () => {

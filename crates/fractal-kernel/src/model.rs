@@ -2621,6 +2621,16 @@ pub struct AttachmentInput {
     pub name: Option<String>,
 }
 
+/// The mission step attempt and runtime incarnation that own a native effect.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EffectOwner {
+    pub mission: String,
+    pub key: String,
+    pub step: String,
+    pub attempt: u32,
+    pub incarnation: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MessageSendRequest {
     pub idempotency_key: String,
@@ -2635,6 +2645,68 @@ pub struct MessageSendRequest {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentInput>,
+    /// Absent for ordinary messages; binds a native effect to its mission owner when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<EffectOwner>,
+}
+
+#[cfg(test)]
+mod message_send_request_tests {
+    use super::{EffectOwner, MessageSendRequest};
+    use serde_json::json;
+
+    #[test]
+    fn unbound_owner_is_omitted_and_preserves_the_original_wire_shape() {
+        let wire = json!({
+            "idempotency_key": "message-example",
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Example message",
+            "title": null,
+            "in_reply_to": null,
+            "tags": []
+        });
+        let request: MessageSendRequest = serde_json::from_value(wire.clone()).unwrap();
+
+        assert!(request.owner.is_none());
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+    }
+
+    #[test]
+    fn populated_owner_roundtrips_with_all_fields_required() {
+        let owner = EffectOwner {
+            mission: "mission/example".into(),
+            key: "notify-reviewer".into(),
+            step: "notify".into(),
+            attempt: 2,
+            incarnation: "incarnation/example".into(),
+        };
+        let wire = json!({
+            "idempotency_key": "message-example",
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Example message",
+            "title": null,
+            "in_reply_to": null,
+            "tags": [],
+            "owner": {
+                "mission": "mission/example",
+                "key": "notify-reviewer",
+                "step": "notify",
+                "attempt": 2,
+                "incarnation": "incarnation/example"
+            }
+        });
+        let request: MessageSendRequest = serde_json::from_value(wire.clone()).unwrap();
+
+        assert_eq!(request.owner.as_ref(), Some(&owner));
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        for field in ["mission", "key", "step", "attempt", "incarnation"] {
+            let mut incomplete = wire.clone();
+            incomplete["owner"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<MessageSendRequest>(incomplete).is_err());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3261,6 +3333,15 @@ pub struct LoopRoundView {
     pub recorded_at_unix_ms: u128,
 }
 
+/// Durable native effect evidence attached to a step, including explicit abandonment.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EffectRunView {
+    pub effect_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ref: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StepRunView {
     pub subject: String,
@@ -3270,6 +3351,8 @@ pub struct StepRunView {
     /// Detail-read execution evidence; absent on lean work reads and older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executions: Option<Vec<crate::step_execution::StepExecution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectRunView>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3279,6 +3362,9 @@ pub struct StepRunView {
     pub definition_hash: String,
     pub status: String,
     pub attempt: u32,
+    /// The pinned step's native retry policy; omitted when no retries are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
     pub assigned_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_to: Vec<String>,

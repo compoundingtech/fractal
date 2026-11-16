@@ -16,6 +16,25 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn health_reports_read_only_supervisor_failure_and_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let failure = json!({"reason":"launchd-unresponsive", "since_unix_ms":1000,
+        "retry_after_unix_ms":6000, "consecutive_timeouts":1});
+    let current = Arc::new(std::sync::Mutex::new(Some(failure.clone())));
+    let observed = current.clone();
+    let app = router(state).layer(Extension(SupervisorHealth(Arc::new(move || {
+        observed.lock().unwrap().clone()
+    }))));
+    let (status, health) = get_request(app.clone(), "/v1/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["service_manager"], failure);
+    *current.lock().unwrap() = None;
+    let (_, health) = get_request(app, "/v1/health").await;
+    assert!(health.get("service_manager").is_none());
+}
+
 #[test]
 fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
     assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
@@ -4452,14 +4471,15 @@ async fn only_work_wake_messages_wake_the_reconciler() {
     let mut events = state.event_notify.subscribe();
     let send = |key: &str, tags: &[&str]| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: "person/example".into(),
-            to: "agent/receiver".into(),
-            content: "A note.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: "person/example".into(),
+        to: "agent/receiver".into(),
+        content: "A note.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -5855,7 +5875,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let health_of = |state: &AppState| {
         let state = state.clone();
-        async move { health(State(state)).await.unwrap().0 }
+        async move { health(State(state), None).await.unwrap().0 }
     };
     assert!(health_of(&state).await.get("messages_store_index").is_none(), "no shard, no stream index");
     crate::store::messages_shard::open(&state.store, root.path()).unwrap();
@@ -8490,14 +8510,15 @@ async fn message_ingress_rejects_empty_content_before_it_enters_the_fifo() {
         app,
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "empty-message".into(),
-            from: "agent/sender".into(),
-            to: "agent/receiver".into(),
-            content: " \n".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "empty-message".into(),
+        from: "agent/sender".into(),
+        to: "agent/receiver".into(),
+        content: " \n".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -8514,14 +8535,15 @@ async fn a_runtime_work_message_uses_a_valid_daemon_sender() {
         app,
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "runtime-work-message".into(),
-            from: "daemon/runtime".into(),
-            to: "agent/worker".into(),
-            content: "A durable mission step is ready.".into(),
-            title: Some("Mission step ready".into()),
-            in_reply_to: None,
-            tags: vec!["st3-work:step-run/run/build@1@1@incarnation".into()],
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "runtime-work-message".into(),
+        from: "daemon/runtime".into(),
+        to: "agent/worker".into(),
+        content: "A durable mission step is ready.".into(),
+        title: Some("Mission step ready".into()),
+        in_reply_to: None,
+        tags: vec!["st3-work:step-run/run/build@1@1@incarnation".into()],
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -8539,14 +8561,15 @@ async fn a_requester_message_uses_a_full_person_subject() {
         app,
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "requester-message".into(),
-            from: "requester".into(),
-            to: "agent/worker".into(),
-            content: "Please do the work.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "requester-message".into(),
+        from: "requester".into(),
+        to: "agent/worker".into(),
+        content: "Please do the work.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -8570,14 +8593,15 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
             app.clone(),
             "/v1/messages",
             serde_json::to_value(MessageSendRequest {
-                idempotency_key: format!("replay-original-{transport}"),
-                from: "agent/sender".into(),
-                to: "agent/receiver".into(),
-                content: "Please answer once.".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: format!("replay-original-{transport}"),
+            from: "agent/sender".into(),
+            to: "agent/receiver".into(),
+            content: "Please answer once.".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             })
             .unwrap(),
         )
@@ -8608,14 +8632,15 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
             assert_eq!(status, StatusCode::OK, "{claim}");
         }
         let reply = serde_json::to_value(MessageSendRequest {
-            idempotency_key: format!("replay-reply-{transport}"),
-            from: "agent/receiver".into(),
-            to: "agent/sender".into(),
-            content: "Answered.".into(),
-            title: None,
-            in_reply_to: Some(subject.into()),
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: format!("replay-reply-{transport}"),
+        from: "agent/receiver".into(),
+        to: "agent/sender".into(),
+        content: "Answered.".into(),
+        title: None,
+        in_reply_to: Some(subject.into()),
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap();
         let (status, sent) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
@@ -8776,14 +8801,15 @@ async fn reading_a_persons_message_says_who_signed_it_and_an_agents_says_nothing
     let app = router(state(root.path()));
     let send = |key: &str, from: &str| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: from.into(),
-            to: "agent/receiver".into(),
-            content: "Hello.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: from.into(),
+        to: "agent/receiver".into(),
+        content: "Hello.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -8806,14 +8832,15 @@ async fn a_sender_followup_does_not_settle_the_recipient_message() {
     let app = router(state(root.path()));
     let send = |key: &str, from: &str, to: &str, parent: Option<String>| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: from.into(),
-            to: to.into(),
-            content: "Please respond.".into(),
-            title: None,
-            in_reply_to: parent,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: from.into(),
+        to: to.into(),
+        content: "Please respond.".into(),
+        title: None,
+        in_reply_to: parent,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -8854,14 +8881,15 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
     let app = router(state.clone());
     let message = |key: &str, from: &str, to: &str, in_reply_to: Option<&str>| {
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: key.into(),
-            from: from.into(),
-            to: to.into(),
-            content: "Hello".into(),
-            title: None,
-            in_reply_to: in_reply_to.map(str::to_owned),
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: key.into(),
+        from: from.into(),
+        to: to.into(),
+        content: "Hello".into(),
+        title: None,
+        in_reply_to: in_reply_to.map(str::to_owned),
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap()
     };
@@ -8933,14 +8961,15 @@ async fn message_lifecycle_requires_the_exact_recipient_actor() {
         app.clone(),
         "/v1/messages",
         serde_json::to_value(MessageSendRequest {
-            idempotency_key: "recipient-authority-message".into(),
-            from: "agent/sender".into(),
-            to: "agent/receiver".into(),
-            content: "Please review this.".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "recipient-authority-message".into(),
+        from: "agent/sender".into(),
+        to: "agent/receiver".into(),
+        content: "Please review this.".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .unwrap(),
     )
@@ -13395,14 +13424,15 @@ fn silent_send_retry_keeps_original_kind_and_rejects_changed_input() {
         .apply(&intent, &planned.subject_tokens, "seat-retry")
         .unwrap();
     let request = || MessageSendRequest {
-        idempotency_key: "silent-retry".into(),
-        from: "agent/example/writer".into(),
-        to: "agent/example/reader".into(),
-        content: "An update".into(),
-        title: None,
-        in_reply_to: None,
-        tags: vec![crate::silent::SILENT_TAG.into()],
-        attachments: vec![],
+    owner: None,
+    idempotency_key: "silent-retry".into(),
+    from: "agent/example/writer".into(),
+    to: "agent/example/reader".into(),
+    content: "An update".into(),
+    title: None,
+    in_reply_to: None,
+    tags: vec![crate::silent::SILENT_TAG.into()],
+    attachments: vec![],
     };
     let first = accept_message(&state, request(), None, None).unwrap().0;
     assert!(crate::silent::is_held(&first));
@@ -14345,6 +14375,26 @@ version 2
         })
         .unwrap();
     let store = state.store.clone();
+    // Attention links use the full step-run identity, not the review's display path.
+    let resources = client_attention_resources(&store, Some("person/alex"), false).unwrap();
+    let gate = resources
+        .iter()
+        .find(|item| item["source_id"] == step.subject)
+        .unwrap();
+    let step_id = gate["step_run_id"].as_str().unwrap();
+    fractal_schema::registry().validate_subject(step_id).unwrap();
+    assert!(step_id.starts_with("step-run/"));
+    assert_eq!(step_id, step.subject);
+    assert_eq!(gate["step_run_id"], gate["source_id"]);
+    let items = store.mission_run_attention_items(Some("person/alex")).unwrap();
+    let item = items.iter().find(|item| item.subject == step.subject).unwrap();
+    let projected = crate::store::attention_ivm::resource(item).unwrap();
+    assert_eq!(projected["step_run_id"], gate["step_run_id"]);
+    let mission_gate = resources
+        .iter()
+        .find(|item| item["source_id"] == run.subject)
+        .unwrap();
+    assert!(mission_gate.get("step_run_id").is_none());
     let app = router(state);
     let (status, listed) = get_request(app.clone(), "/v1/reviews").await;
     assert_eq!(status, StatusCode::OK, "{listed}");

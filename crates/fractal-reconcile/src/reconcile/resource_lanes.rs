@@ -146,6 +146,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.store.resource_context_for_run(run)?.is_some_and(|context| context.request == request)
         } else { false };
         anyhow::ensure!(direct || inherited, "resource context must belong to the actual execution owner");
+        if direct {
+            let Some(view) = self.store.step_run(&request.owner.step)? else { return Ok(false); };
+            // A stale desired snapshot must not admit a failed attempt's queued membership.
+            if view.attempt != request.owner.attempt
+                || matches!(view.status.as_str(), "completed" | "failed" | "cancelled" | "skipped")
+                || !self.retire_previous_step_resources(&request.owner.run, &view)?
+            {
+                return Ok(false);
+            }
+        }
         smallclaims::touched::note_read(|| crate::store::resource_membership::dependency(&request.host, &request.name));
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         let fit = self.resource_lane_fit(&request.id, request.capacity)?;
