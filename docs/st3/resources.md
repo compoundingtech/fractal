@@ -122,8 +122,26 @@ withdraw   cancel       uncertain      cancel tree       descendants remain
 The host evaluates holds, logical occupancy and physical fit in its writer transaction, preserving
 FIFO membership order. Waiters register a host/lane wake dependency before rechecking. Release,
 hold resolution, preparation cleanup and authority changes wake the affected work; there is no
-mission reserve-probe loop. Seat FIFO, burst reserve, scoped raises and delayed memory lowering
-retain their existing meanings; declared priority/budget metadata is not activated by this API.
+mission reserve-probe loop. Host-memory observations use the existing admission observation path:
+changed outside bytes invalidate fit and wake waiters, never grant capacity on elapsed time alone.
+Seat FIFO, scoped raises and delayed memory lowering retain their existing meanings; declared
+priority/budget metadata is not activated by this API.
+
+Seat starts, bursts and finite lanes share one ARC-aware host accountant:
+`reclaimable_arc = max(0, arc.size - arc.c_min)` (zero without ZFS),
+`unreclaimable_used = max(0, MemTotal - MemAvailable - reclaimable_arc)`, and
+`outside = max(0, unreclaimable_used - live_lane_usage)`. Live lane usage is the hierarchical
+`anon + kernel` counter of `app-lanes.slice`, counted once for seats and finite members.
+System services and other unlaned consumers therefore count without double charging lane members.
+Free memory is host lane room minus declared held footprints, outside, and the kept burst reserve.
+Finite lanes keep a burst reserve only while a live laned seat could ask for a burst; a finite
+request is not itself a burst-capable seat.
+
+A footprint exceeding host lane room is refused with code `impossible`, never left in FIFO.
+With no admitted members, granted bursts or host hold, the head fits exactly when its footprint
+fits room minus outside (and any reserve required by live seats). Waits expose `blockedBy` as
+`holder`, `hold`, `outside`, `reserve` or `fifo`; outside reasons include measured bytes.
+The existing resource-lane phase telemetry carries the same attribution.
 
 The host persists `queuedAt`, `admittedAt`, `payloadReleasedAt`, `executionEndedAt` and `retiredAt`.
 Admission/preparation, payload execution and retirement are separate intervals. `admissionTimeout`

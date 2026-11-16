@@ -147,7 +147,7 @@ impl LaneTelemetry {
                 &opentelemetry::Context::new(),
             ))
         } else { None };
-        let guard = LanePhase { phase, identity: identity.clone(), started: Instant::now(), prior_elapsed: Duration::ZERO, clock_uncertain: false, instruments: self.instruments.clone(), span, finished: false };
+        let guard = LanePhase { phase, identity: identity.clone(), started: Instant::now(), prior_elapsed: Duration::ZERO, clock_uncertain: false, blocked_by: None, instruments: self.instruments.clone(), span, finished: false };
         guard.log("started", None);
         guard
     }
@@ -167,6 +167,7 @@ pub struct LanePhase {
     started: Instant,
     prior_elapsed: Duration,
     clock_uncertain: bool,
+    blocked_by: Option<String>,
     instruments: Option<Arc<Instruments>>,
     span: Option<opentelemetry::global::BoxedSpan>,
     finished: bool,
@@ -174,6 +175,17 @@ pub struct LanePhase {
 
 impl LanePhase {
     pub fn finish(mut self, outcome: LaneOutcome) { self.complete(outcome); }
+
+    /// Attribute admission waiting to the latest measured blocking authority.
+    pub fn set_blocked_by(&mut self, blocked_by: Option<&str>) {
+        if let Some(blocked_by) = blocked_by {
+            self.blocked_by = Some(blocked_by.to_owned());
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new("st.resource.blocked_by", blocked_by.to_owned()));
+            }
+            self.log("waiting", None);
+        }
+    }
 
     /// Queue entry precedes generation assignment; bind it when admission commits.
     pub fn set_generation(&mut self, generation: &str) {
@@ -201,6 +213,7 @@ impl LanePhase {
         let span_id = self.span.as_ref().map(|span| span.span_context().span_id().to_string());
         tracing::info!(target: "fractal.resource", event = "resource.lane.phase",
             phase = self.phase.label(), outcome, elapsed_seconds = elapsed, clock_uncertain = self.clock_uncertain,
+            st.resource.blocked_by = self.blocked_by.as_deref(),
             st.resource.lane = %self.identity.lane, st.resource.membership = %self.identity.membership,
             st.run = %self.identity.run, st.step = %self.identity.step, st.attempt = self.identity.attempt,
             st.resource.generation = %self.identity.generation, st.invocation.id = self.identity.invocation.as_deref(),
@@ -214,6 +227,7 @@ impl LanePhase {
             histogram.record(elapsed, &[
                 KeyValue::new("st.resource.lane", self.identity.lane.clone()),
                 KeyValue::new("st.resource.outcome", outcome.label()),
+                KeyValue::new("st.resource.blocked_by", self.blocked_by.clone().unwrap_or_default()),
             ]);
         }
         self.log(outcome.label(), Some(elapsed));

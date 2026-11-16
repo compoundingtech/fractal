@@ -114,23 +114,23 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(Fit::default());
         }
         smallclaims::touched::note_read(|| "seat-admission".into());
+        smallclaims::touched::note_read(|| "host-lane-memory".into());
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         // Finite custody is summed atomically by the store writer, not from this snapshot.
         let held_bytes = self.lanes_held(candidate, now, true, false)?;
-        let reserve = self.burst_reserve(candidate, capacity)?;
+        let reserve = self.finite_burst_reserve(candidate)?;
         let outside_bytes = (host.outside)().context("UnsupportedCoverage: outside-lane host observation unavailable")?;
         let impossible = capacity.cores > host.room.cores || capacity.memory > host.room.memory;
-        let reserve_wait = capacity.memory > host.room.memory.saturating_sub(reserve.full);
         let head = self.seat_admission.status.lane_head(now).filter(|head| head != candidate);
         if self.seat_admission.status.lane_wait(candidate,
-            "finite execution waits for native admission".into(), !impossible && !reserve_wait, now)
+            "finite execution waits for native admission".into(), !impossible, now)
         {
             self.incremental.touch("seat-admission");
             self.signal_changed();
         }
         Ok(Fit {
             room: Some(host.room), held_bytes, outside_bytes, reserve_bytes: reserve.kept,
-            fifo_predecessor: if reserve_wait && !impossible { Some("burst reserve".into()) } else { head },
+            fifo_predecessor: head,
         })
     }
 
@@ -216,6 +216,47 @@ impl<R: RuntimeControl> Reconciler<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn arc_observation_unwedges_twenty_zero_holder_requests_without_a_seat_reserve() {
+        use super::super::tests::FakeRuntime;
+        use fractal_runtime::{Capacity, host};
+        const GIB: u64 = 1 << 30;
+        fn outside() -> Option<u64> {
+            host::outside_memory(
+                "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n",
+                Some("size 4 37258870784\nc_min 4 4187593114\n"), None)
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let mut reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let room = host::for_lanes(Capacity { cores: 32, memory: 125 * GIB });
+        reconciler.seat_admission.lanes = Some(seat_admission::LaneHost {
+            room, outside, burst_lane: Some(seat_admission::BURST_LANE),
+        });
+        let capacity = Capacity { cores: 4, memory: 15 * GIB };
+        let requests: Vec<_> = (0..20).map(|index| LaneRequest {
+            id: format!("queued-{index:02}"), name: "checks".into(), host: "node".into(),
+            max_members: 1, capacity: Some(capacity), coverage: Coverage::Logical,
+            admission_timeout_ms: None,
+            owner: Owner { run: "run".into(), step: "step".into(), attempt: 1, invocation: None },
+        }).collect();
+        // Raw MemAvailable alone reproduces the no-holder wedge: not even the head fits.
+        let raw_outside = host::outside_memory(
+            "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n", None, None).unwrap();
+        for request in &requests {
+            let fit = Fit { room: Some(room), outside_bytes: raw_outside, ..Fit::default() };
+            assert!(matches!(store.request_resource_membership(request, fit, 1).unwrap(), Admission::Queued { .. }));
+        }
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 0);
+        let head = &requests[0];
+        let fit = reconciler.resource_lane_fit(&head.id, head.capacity).unwrap();
+        assert_eq!(fit.reserve_bytes, 0, "a finite member is not a burst-capable seat");
+        assert_eq!(fit.outside_bytes, outside().unwrap());
+        assert!(matches!(store.request_resource_membership(head, fit, 2).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 15 * GIB);
+    }
+
     #[test]
     fn inherited_exec_retries_keep_distinct_roots_in_parent_retirement_custody() {
         use super::super::tests::{FakeRuntime, apply_source};

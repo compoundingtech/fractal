@@ -81,7 +81,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Why a step that is ready to be delivered must wait, if it must: its seat is one of this
     /// host's laned seats and the lane the step raises it to does not fit beside the host's other
-    /// lanes and what its seats outside lanes hold, or the step would lower the seat's lane (a seat
+    /// lanes and host memory outside lanes, or the step would lower the seat's lane (a seat
     /// declared outside the step's publication is checked here). Every reason starts `step lane`.
     pub(super) fn step_lane_wait(&self, raise: Option<fractal_runtime::Raise>, agent: Option<&str>) -> Result<Option<String>> {
         let (Some(host), Some(raise), Some(agent)) = (self.seat_admission.lanes, raise, agent) else {
@@ -107,6 +107,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let held = self.held_lanes(agent, now)?;
+        smallclaims::touched::note_read(|| "host-lane-memory".into());
         let outside = (host.outside)().unwrap_or(0);
         let free = room.memory.saturating_sub(held).saturating_sub(outside);
         if lane.memory <= free {
@@ -121,7 +122,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         smallclaims::touched::note_due(now_ms() + 30_000);
         Ok(Some(format!(
-            "step lane {} for {agent} does not fit: {} free of the {} this host gives lanes (other lanes hold {}, seats outside lanes {})",
+            "step lane {} for {agent} does not fit: {} free of the {} this host gives lanes (other lanes hold {}, host outside lanes {})",
             show_lane(lane), show_memory(free), show_memory(room.memory), show_memory(held), show_memory(outside))))
     }
 
