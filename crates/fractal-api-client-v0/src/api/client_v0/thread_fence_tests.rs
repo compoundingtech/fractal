@@ -692,9 +692,13 @@ pub(crate) mod retained_discussion {
                     InboxOrigin { source_id:opening.subject, episode:opening.id }
                 } else {
                     if availability == "stopped" {
-                        let intent = crate::graph::parse_intent("version 2\nstop \"agent/garden/seed\"",
-                            state.store.origin()).unwrap();
-                        state.store.apply_internal(&intent, "offline-original-stop").unwrap();
+                        state.store.append_claim(&ClaimInput {
+                            subject:AGENT.into(), kind:"runtime.observed".into(), actor:Some(AGENT.into()),
+                            fields:serde_json::from_value(json!({
+                                "status":"stopped", "incarnation_id":"offline-original",
+                            })).unwrap(),
+                            evidence:vec![], expected_subject:None, idempotency_key:None,
+                        }).unwrap();
                     }
                     origin
                 };
@@ -704,14 +708,97 @@ pub(crate) mod retained_discussion {
                 assert_eq!(start(&state, &owner, refused).await.unwrap_err().status, StatusCode::NOT_FOUND);
                 let mut original = request(&state, &origin, "thread/availability-original", "availability-original");
                 original.parameters["agent_id"] = json!(original_agent);
-                let result = start(&state, &owner, original).await.unwrap();
-                assert_eq!(result["affected_ids"][0], "thread/availability-original");
-                assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/availability-original").unwrap().agent_id,
-                    original_agent);
+                if availability == "undeclared" {
+                    assert_eq!(start(&state, &owner, original).await.unwrap_err().status, StatusCode::NOT_FOUND);
+                } else {
+                    let result = start(&state, &owner, original).await.unwrap();
+                    assert_eq!(result["affected_ids"][0], "thread/availability-original");
+                    assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/availability-original").unwrap().agent_id,
+                        original_agent);
+                }
                 assert!(state.store.claims_for("thread/availability-fallback", None).unwrap().is_empty());
                 assert_eq!(state.store.attention_items(Some(PERSON)).unwrap().iter()
                     .any(|item| item.subject == origin.source_id), !resolved);
             }
         }
+    }
+
+    async fn opening_preview(state: &AppState, person: &str, origin: &InboxOrigin) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let response = crate::api::router(state.clone()).oneshot(
+            axum::http::Request::builder().uri(format!(
+                "/v1/client/threads/start-context?source_id={}&episode={}",
+                urlencoding::encode(&origin.source_id), urlencoding::encode(&origin.episode),
+            )).header(LOCAL_PERSON_HEADER, person).body(axum::body::Body::empty()).unwrap(),
+        ).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn thread_start_context_previews_current_and_retained_terminal_recipient_without_writes() {
+        for resolved in [false, true] {
+            let (_root, state, origin) = fixture(resolved);
+            let before = state.store.read_snapshot(Ok).unwrap();
+            let (status, original) = opening_preview(&state, PERSON, &origin).await;
+            assert_eq!(status, StatusCode::OK, "{original}");
+            assert_eq!(original["value"]["kind"], "thread-start-context");
+            assert_eq!(original["value"]["start_recipient"]["agent_id"], AGENT);
+            assert_eq!(original["value"]["start_recipient"]["basis"]["_tag"], "original");
+            assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+            retire_original_with_fallback(&state);
+            let before = state.store.read_snapshot(Ok).unwrap();
+            let (status, fallback) = opening_preview(&state, PERSON, &origin).await;
+            assert_eq!(status, StatusCode::OK, "{fallback}");
+            let recipient = &fallback["value"]["start_recipient"];
+            assert_eq!(recipient["agent_id"], "agent/garden/fallback");
+            assert_eq!(recipient["basis"]["_tag"], "fallback");
+            assert_eq!(recipient["basis"]["original_agent_id"], AGENT);
+            assert_eq!(recipient["basis"]["retirement"]["kind"], "agent.retired");
+            assert_eq!(recipient["basis"]["retirement"]["state"], "retired");
+            let claim = state.store.claims_for(AGENT, Some("agent.retired")).unwrap().pop().unwrap();
+            assert_eq!(recipient["basis"]["retirement"]["claim_id"], claim.id);
+            let owner = ClientSession::local(Some(PERSON)).unwrap();
+            let mismatch = request(&state, &origin, "thread/preview-old-packet", "preview-old-packet");
+            assert_eq!(start(&state, &owner, mismatch).await.unwrap_err().status, StatusCode::NOT_FOUND);
+            assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+            assert_eq!(state.store.attention_items(Some(PERSON)).unwrap().iter()
+                .any(|item| item.subject == SOURCE), !resolved);
+        }
+    }
+
+    #[tokio::test]
+    async fn thread_start_context_denied_and_unknown_keys_have_the_same_response() {
+        let (_root, state, origin) = fixture(true);
+        let before = state.store.read_snapshot(Ok).unwrap();
+        let (wrong_status, wrong) = opening_preview(&state, "person/other", &origin).await;
+        let fabricated = InboxOrigin { episode:"claim/never-opened-preview".into(), ..origin.clone() };
+        let (unknown_status, unknown) = opening_preview(&state, PERSON, &fabricated).await;
+        assert_eq!(wrong_status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown_status, wrong_status);
+        assert_eq!(wrong["code"], unknown["code"]);
+        assert_eq!(wrong["message"], unknown["message"]);
+        assert_eq!(wrong["code"], "not-found");
+        assert!(!wrong.to_string().contains(AGENT));
+        assert!(!wrong.to_string().contains(&origin.episode));
+        assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn thread_start_context_unconfigured_terminal_fallback_uses_declared_recipient_retired_error() {
+        let (_root, state, origin) = fixture(true);
+        retire_original_with_fallback(&state);
+        state.store.configure_inbox_fallback_agent(None).unwrap();
+        let before = state.store.read_snapshot(Ok).unwrap();
+        let (status, refused) = opening_preview(&state, PERSON, &origin).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert_eq!(refused["code"], "recipient-retired");
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let refused = start(&state, &owner,
+            request(&state, &origin, "thread/no-retirement-fallback", "no-retirement-fallback")).await.unwrap_err();
+        assert_eq!(refused.code, "recipient-retired");
+        assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+        assert_not_in_attention(&state);
     }
 }

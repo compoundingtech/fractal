@@ -5016,10 +5016,15 @@ pub fn client_attention_resources_at(
     _history: bool,
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
+    let mut contexts = BTreeMap::<_, Vec<_>>::new();
     let current = crate::performance::task("attention_collection/snapshot", || {
-        store.attention_snapshot(person, at_unix_ms)
+        store.attention_snapshot_with_context(person, at_unix_ms, |item| {
+            let context = crate::store::attention::discussion_context_at(&store.readers.get(), item)?;
+            contexts.entry((item.subject.clone(), item.person.clone(), item.episode.clone())).or_default().push(context);
+            Ok(())
+        })
     })?;
-    client_attention_resources_from_items(store, current)
+    client_attention_resources_from_items(store, current, contexts)
 }
 
 pub fn client_attention_resources_fenced_at(
@@ -5027,15 +5032,21 @@ pub fn client_attention_resources_fenced_at(
     person: Option<&str>,
     at_unix_ms: u128,
 ) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
+    let mut contexts = BTreeMap::<_, Vec<_>>::new();
     let (current, valid_until) = crate::performance::task("attention_collection/snapshot", || {
-        store.attention_collection_snapshot(person, at_unix_ms)
+        store.attention_collection_snapshot_with_context(person, at_unix_ms, |item| {
+            let context = crate::store::attention::discussion_context_at(&store.readers.get(), item)?;
+            contexts.entry((item.subject.clone(), item.person.clone(), item.episode.clone())).or_default().push(context);
+            Ok(())
+        })
     })?;
-    Ok((client_attention_resources_from_items(store, current)?, valid_until))
+    Ok((client_attention_resources_from_items(store, current, contexts)?, valid_until))
 }
 
 fn client_attention_resources_from_items(
     store: &Store,
     current: Vec<crate::model::AttentionItemView>,
+    mut contexts: BTreeMap<(String, String, String), Vec<serde_json::Map<String, Value>>>,
 ) -> anyhow::Result<Vec<Value>> {
     let mut resources = Vec::new();
     for item in current {
@@ -5058,7 +5069,9 @@ fn client_attention_resources_from_items(
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
         }
-        crate::store::inbox::annotate_resource_at(&store.readers.get(), &item, &mut resource)?;
+        let context = contexts.get_mut(&(item.subject.clone(), item.person.clone(), item.episode.clone())).and_then(Vec::pop)
+            .context("current attention discussion context is missing")?;
+        resource.as_object_mut().context("attention resource is not an object")?.extend(context);
         // An ask resolves by itself at its deadline, with its default answer if it has one.
         if let Some(deadline) = item.deadline_unix_ms {
             resource["deadline_at"] = json!(client_timestamp(deadline));

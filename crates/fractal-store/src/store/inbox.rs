@@ -55,15 +55,17 @@ pub fn start_recipient_at(
     };
     let original = identities::resolve_reference_conn(connection, &original)?;
     if let Some(claim) = retirements::terminal_retirement_at(connection, Some(&original))? {
-        return configured_agent_at(connection).map_err(internal)?.map(|agent|
-            identities::resolve_reference_conn(connection, &agent).map(|agent_id| StartRecipient {
-                agent_id,
-                basis: StartRecipientBasis::Fallback {
-                    original_agent_id: original,
-                    retirement: RetirementProof { claim_id: claim.id, kind: "agent.retired", state: "retired" },
-                },
-            })
-        ).transpose();
+        let Some(agent) = configured_agent_at(connection).map_err(internal)? else {
+            // Preserve the already-declared native refusal, not a new error taxonomy.
+            return Err(retirements::retired(&original, &claim));
+        };
+        return identities::resolve_reference_conn(connection, &agent).map(|agent_id| Some(StartRecipient {
+            agent_id,
+            basis: StartRecipientBasis::Fallback {
+                original_agent_id: original,
+                retirement: RetirementProof { claim_id: claim.id, kind: "agent.retired", state: "retired" },
+            },
+        }));
     }
     Ok(Some(StartRecipient { agent_id: original, basis: StartRecipientBasis::Original }))
 }
@@ -84,7 +86,7 @@ pub fn responsible_agent_at(connection: &Connection, item: &AttentionItemView) -
     match start_recipient_at(connection, item) {
         Ok(recipient) => Ok(recipient.map(|recipient| recipient.agent_id)),
         // Ambiguous lifecycle keeps the historical association visible, never retargets it.
-        Err(error) if error.code == "lifecycle-unavailable" => {
+        Err(error) if matches!(error.code, "lifecycle-unavailable" | "recipient-retired") => {
             let candidate = original_agent_at(connection, item)?.or(configured_agent_at(connection)?);
             candidate.map(|agent| presentation_identity_at(connection, &agent)
                 .map(|(identity, _)| identity)).transpose()
@@ -98,6 +100,7 @@ fn discussion_unavailable_at(connection: &Connection, item: &AttentionItemView) 
         Ok(Some(recipient)) => agent_unavailable_at(connection, &recipient.agent_id),
         Ok(None) => Ok(Some("inbox-agent-not-configured".into())),
         Err(error) if error.code == "lifecycle-unavailable" => Ok(Some("lifecycle-unavailable".into())),
+        Err(error) if error.code == "recipient-retired" => Ok(Some("inbox-agent-not-configured".into())),
         Err(error) => Err(error.into()),
     }
 }

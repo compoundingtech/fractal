@@ -33,7 +33,7 @@ pub async fn project_with_context(
     match projection {
         "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
             conversation_reads::project_bound_with_context(state, snapshot, projection, parameters, max_bytes, binding, context).await,
-        "threads" | "thread-detail" | "thread-timeline" =>
+        "threads" | "thread-detail" | "thread-timeline" | "thread-start-context" =>
             thread_read(state, projection, parameters, max_bytes, binding, context).await,
         "conversation-content" => {
             let mut parameters = parameters.clone();
@@ -61,8 +61,11 @@ async fn thread_read(
 
     let list = projection == "threads";
     let timeline = projection == "thread-timeline";
+    let start_context = projection == "thread-start-context";
     let mut fields = vec!["agent_id", "session_id", "max_response_bytes"];
-    if !list {
+    if start_context {
+        fields.extend(["source_id", "episode"]);
+    } else if !list {
         fields.push("thread_id");
     }
     if list || timeline {
@@ -75,7 +78,13 @@ async fn thread_read(
     }
     let session = required(parameters, "session_id")?.to_owned();
     let unavailable = || ApiError::not_found("the thread is unavailable");
-    let id = (!list).then(|| required(parameters, "thread_id")).transpose()?;
+    let origin = start_context.then(|| {
+        Ok::<_, ApiError>(thread_metadata::InboxOrigin {
+            source_id: required(parameters, "source_id")?.to_owned(),
+            episode: required(parameters, "episode")?.to_owned(),
+        })
+    }).transpose()?;
+    let id = (!list && !start_context).then(|| required(parameters, "thread_id")).transpose()?;
     if let Some(id) = id {
         let Some(suffix) = id.strip_prefix("thread/") else {
             return Err(unavailable());
@@ -130,7 +139,18 @@ async fn thread_read(
                     cursor.map(|cursor| conversation_reads::bind_cursor(cursor, &collection)).transpose()
                 };
                 let snapshot = client_snapshot_at(&state, index);
-                let value = if let Some(id) = id.as_deref() {
+                let value = if let Some(origin) = origin.as_ref() {
+                    let preview = thread_metadata::start_context(&state.store, &person, origin)
+                        .map_err(store_error)?;
+                    if preview.start_recipient.agent_id != agent {
+                        return Err(unavailable());
+                    }
+                    let value = json!(preview);
+                    if context.value_envelope_size(&snapshot, &value)? > max_bytes {
+                        return Err(budget_exceeded("the thread start context cannot fit the approved response byte budget"));
+                    }
+                    value
+                } else if let Some(id) = id.as_deref() {
                     let summary = thread_metadata::summary_for_conversation(&state.store, &person, &agent, id)
                         .map_err(store_error)?;
                     if timeline {

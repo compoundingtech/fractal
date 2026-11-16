@@ -39,6 +39,17 @@
   ],
   "reads": [
     {"id": "thread.list", "method": "GET", "path": "/v1/client/threads", "response": "ThreadSummaryPage", "scope": "read.projections", "query": {"agent_id": "one exact agent conversation", "origin_source": "exact Inbox source, paired with origin_episode", "origin_episode": "opaque source episode, paired with origin_source", "mission_id": "exact mission", "recently_closed": "true for the current person, ordered newest close first", "marked_unread": "true for the current person's threads with an active unread reminder, newest operation time first (earliest accepted_at among validated equivalent receipts for each stable operation ID); mutually exclusive with every other selector", "cursor": "optional opaque cursor scoped to the person and selector", "limit": "optional page size"}, "query_model": "ThreadListQuery"},
+    {
+      "id": "thread.start-context",
+      "method": "GET",
+      "path": "/v1/client/threads/start-context",
+      "response": "ThreadStartContext",
+      "scope": "read.projections",
+      "query": {
+        "source_id": "required exact Inbox source ID already known to the client",
+        "episode": "required exact opaque episode, paired with source_id"
+      }
+    },
     {"id": "thread.get", "method": "GET", "path": "/v1/client/threads/{id}", "response": "ThreadSummary", "scope": "read.projections"},
     {"id": "thread.timeline", "method": "GET", "path": "/v1/client/threads/{id}/timeline", "response": "ThreadTimelinePage", "scope": "read.projections", "query": {"cursor": "optional opaque older or newer cursor; mutually exclusive with around", "around": "optional exact message ID to seek around; unavailable requires retained signed routing proof for the same owner/thread; pending requires an authenticated signed Mark intent of the same owner/thread with all observed-mark dependencies validated and resolved, and the anchor as the only missing proof; unresolved observed references return thread-unavailable; pending exposes no body, grants no new read authority and activates no badge before membership is known; around never acknowledges anything", "limit": "optional page size"}},
     {"id": "harness-questions.list", "method": "GET", "path": "/v1/client/harness-questions", "response": "Page", "scope": "read.projections"},

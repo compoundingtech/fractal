@@ -65,6 +65,20 @@ declaration, reversible stop and other admission refusals never select a replace
 There is no inferred role or default agent. Existing threads retain their frozen audience;
 they are never retargeted and the retired agent is never revived.
 
+Before first send, read the current Inbox row's optional `start_recipient`, or request
+`GET /v1/client/threads/start-context?source_id=...&episode=...` for an exact opening key
+already known from an Inbox card, a bounded existing history read or source context.
+This is not a retained-source discovery list. Successful preview returns that same
+`start_recipient` union: `original`, `configured` for a source without an original agent,
+or `fallback` with the original agent and authoritative terminal retirement claim reference.
+On current rows, `conversation_id` equals its `agent_id`. Denied/missing openings share
+the unknown-source 404; an unconfigured fallback after terminal retirement returns the
+already-declared `recipient-retired` conflict. Source and pairing authority are rechecked.
+The Start request still carries its displayed `agent_id` and optional signature; a recipient
+mismatch refuses without rewriting the signed packet. Refresh the preview before confirming
+a changed recipient. The scoped MCP thread-read family mirrors this metadata-only preview
+under its existing exact conversation binding; MCP remains read-only.
+
 Authored human steps are not covered: their retained `step-run.state` opening does not
 carry the recipient at opening. Harness prompts, seat login, planning, revision proposals
 and operational faults likewise have no supported retained proof. An unknown, fabricated

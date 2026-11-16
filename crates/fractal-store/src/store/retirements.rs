@@ -78,7 +78,7 @@ pub fn retired_subjects_at(
         .collect::<rusqlite::Result<BTreeSet<_>>>()?)
 }
 
-fn retired(recipient: &str, claim: &ClaimRecord) -> FractalError {
+pub(super) fn retired(recipient: &str, claim: &ClaimRecord) -> FractalError {
     MessageSendRefusal::Retired {
         recipient: recipient.into(),
         successor: claim.body["fields"]["successor"]

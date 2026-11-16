@@ -706,6 +706,7 @@ fn mcp_output_schemas_pin_envelopes_and_value_contracts() {
         (THREADS_LIST, None, vec!["items","next_cursor"]),
         (THREAD_TIMELINE, None, vec!["items","next_cursor"]),
         (THREAD_GET, None, vec!["id","agent_id","title","title_revision","revision","state"]),
+        (THREAD_START_CONTEXT, Some("thread-start-context"), vec!["kind","source_id","episode","start_recipient"]),
     ];
     let tools = tool_definitions(Profile::Mcp);
     assert_eq!(tools.len(), expected.len());
@@ -797,6 +798,7 @@ async fn mcp_dispatches_tools_over_the_paired_gateway_routes() {
         (THREAD_GET,"thread-detail",json!({"agent_id":"agent/example","session_id":"session/example","thread_id":"thread/example","max_response_bytes":16384})),
         (THREADS_LIST,"threads",json!({"agent_id":"agent/example","session_id":"session/example","limit":1})),
         (THREAD_TIMELINE,"thread-timeline",json!({"agent_id":"agent/example","session_id":"session/example","thread_id":"thread/example","limit":1})),
+        (THREAD_START_CONTEXT,"thread-start-context",json!({"agent_id":"agent/example","session_id":"session/example","source_id":"step-run/example","episode":"claim/example","max_response_bytes":16384})),
         (ALERTS_LIST,"attention-rich",json!({})),
         (ALERT_GET,"attention-content",json!({"alert_id":"alert/example"})),
         (ALERT_ANSWER,"propose",json!({"action_id":"action/example-answer","idempotency_key":"example-answer-key",
@@ -855,6 +857,16 @@ async fn mcp_dispatches_tools_over_the_paired_gateway_routes() {
         (&adapter, THREAD_GET, "thread/a/b", "invalid-arguments"),
     ] {
         assert_eq!(call(adapter, name, &json!({"thread_id":id})).await.unwrap_err()["code"], code);
+    }
+    assert_eq!(call(&chatgpt, THREAD_START_CONTEXT, &json!({
+        "agent_id":"agent/example","session_id":"session/example","source_id":"step-run/example","episode":"claim/example"
+    })).await.unwrap_err()["code"], "unknown-tool");
+    for args in [
+        json!({"agent_id":"agent/example","session_id":"session/example","source_id":"step-run/example"}),
+        json!({"agent_id":"agent/example","session_id":"session/example","episode":"claim/example"}),
+        json!({"agent_id":"agent/example","session_id":"session/example","source_id":"step-run/example","episode":"claim/example","thread_id":"thread/example"}),
+    ] {
+        assert_eq!(call(&adapter, THREAD_START_CONTEXT, &args).await.unwrap_err()["code"], "invalid-arguments");
     }
     assert!(received.try_recv().is_err());
     server.abort();

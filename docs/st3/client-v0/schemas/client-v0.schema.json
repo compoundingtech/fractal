@@ -1381,6 +1381,10 @@
             "urgent": { "type": "boolean", "description": "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." },
             "thread_unread": { "type": "boolean", "description": "True when the authenticated person has an unread incoming reply in a thread for this exact ask episode. Absent otherwise." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
+            "start_recipient": {
+              "$ref": "#/$defs/ThreadStartRecipient",
+              "description": "Exact daemon-selected first-Start recipient and basis. When present, conversation_id equals agent_id. Fallback requires terminal agent.retired evidence; absence grants no recipient inference."
+            },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
             "launch_id": { "$ref": "#/$defs/Id" },
@@ -3012,6 +3016,55 @@
         "resolution": { "type": "string", "enum": ["resolved", "unresolved", "not-applicable"], "description": "URI locator availability. Subject references use not-applicable; this is not a subject existence check." },
         "uri": { "type": "string", "description": "The exact absolute URI, any scheme. Present only for resolved URI references." },
         "reason": { "type": ["string", "null"] }
+      }
+    },
+    "ThreadStartRecipient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "basis"],
+      "properties": {
+        "agent_id": { "$ref": "#/$defs/Id" },
+        "basis": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["_tag"],
+              "properties": { "_tag": { "const": "original" } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["_tag"],
+              "properties": { "_tag": { "const": "configured" } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["_tag", "original_agent_id", "retirement"],
+              "properties": {
+                "_tag": { "const": "fallback" },
+                "original_agent_id": { "$ref": "#/$defs/Id" },
+                "retirement": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["claim_id", "kind", "state"],
+                  "properties": {
+                    "claim_id": { "$ref": "#/$defs/Id" },
+                    "kind": { "const": "agent.retired" },
+                    "state": { "const": "retired" }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ThreadStartContext": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "source_id", "episode", "start_recipient"],
+      "properties": {
+        "kind": { "const": "thread-start-context" },
+        "source_id": { "$ref": "#/$defs/Id" },
+        "episode": { "$ref": "#/$defs/Revision" },
+        "start_recipient": { "$ref": "#/$defs/ThreadStartRecipient" }
       }
     },
     "ThreadUnreadMark": {"type":"object","additionalProperties":false,"required":["mark_id","anchor_message_id"],"properties":{"mark_id":{"type":"string","description":"Opaque stable signed operation ID. Never a claim ID, timestamp, or local retry counter."},"anchor_message_id":{"$ref":"#/$defs/Id"}}},

@@ -719,6 +719,104 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
 }
 
+#[tokio::test]
+async fn thread_start_context_is_metadata_only_and_exact_conversation_bound() {
+    let mut fixture = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
+    let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
+    fixture.state.store.ask_person(&serde_json::from_value(json!({
+        "person": OWNER, "actor": "agent/reads-codex",
+        "title": "PRIVATE source title", "reason": "PRIVATE source prose",
+        "new_run": "start-context", "idempotency_key": "start-context"
+    })).unwrap()).unwrap();
+    let item = fixture.state.store.attention_items(Some(OWNER)).unwrap().into_iter()
+        .find(|item| item.title == "PRIVATE source title").unwrap();
+    let query = format!(
+        "?agent_id=agent%2Freads-codex&session_id={}&source_id={}&episode={}&max_response_bytes=16384",
+        urlencoding::encode(&session), urlencoding::encode(&item.subject), urlencoding::encode(&item.episode),
+    );
+    let payload = fixture.payload("thread-start-context", &query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, value, bytes) = fixture.request(
+        &format!("/v1/client/assistant/thread-start-context{query}"), Some(&header),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"], json!({
+        "kind": "thread-start-context", "source_id": item.subject, "episode": item.episode,
+        "start_recipient": {"agent_id": "agent/reads-codex", "basis": {"_tag": "original"}}
+    }));
+    assert!(!value.to_string().contains("PRIVATE"));
+    assert!(bytes <= MAX_RESPONSE_BYTES);
+
+    projection_read_mode(&mut fixture, "caller-bound-allow").await;
+    let endpoint = format!("/v1/client/assistant/thread-start-context{query}");
+    assert_eq!(fixture.request(&endpoint, None).await.0, StatusCode::OK);
+    let unknown = endpoint.replace(&urlencoding::encode(&item.subject).to_string(), "step-run%2Funknown");
+    let (_, unknown_body, _) = fixture.request(&unknown, None).await;
+    for denied in [
+        unknown,
+        endpoint.replace(&urlencoding::encode(&item.episode).to_string(), "claim%2Funknown"),
+        endpoint.replace(&urlencoding::encode(&session).to_string(), "session%2Fstale"),
+        endpoint.replace("agent%2Freads-codex", "agent%2Funobserved"),
+    ] {
+        let (status, value, _) = fixture.request(&denied, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+        assert_eq!(value["error"], unknown_body["error"]);
+        assert!(value.get("value").is_none());
+        assert!(!value.to_string().contains("PRIVATE"));
+    }
+    // A valid current conversation must still not read another recipient's source.
+    fixture.state.store.ask_person(&serde_json::from_value(json!({
+        "person": OWNER, "actor": "agent/other",
+        "title": "PRIVATE other source", "reason": "PRIVATE other prose",
+        "new_run": "other-start-context", "idempotency_key": "other-start-context"
+    })).unwrap()).unwrap();
+    let other = fixture.state.store.attention_items(Some(OWNER)).unwrap().into_iter()
+        .find(|item| item.title == "PRIVATE other source").unwrap();
+    let mismatched = endpoint
+        .replace(&urlencoding::encode(&item.subject).to_string(), &urlencoding::encode(&other.subject))
+        .replace(&urlencoding::encode(&item.episode).to_string(), &urlencoding::encode(&other.episode));
+    let (status, value, _) = fixture.request(&mismatched, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+    assert_eq!(value["error"], unknown_body["error"]);
+    fixture.state.store.ask_person(&serde_json::from_value(json!({
+        "person": "person/other", "actor": "agent/reads-codex",
+        "title": "PRIVATE foreign source", "reason": "PRIVATE foreign prose",
+        "new_run": "foreign-start-context", "idempotency_key": "foreign-start-context"
+    })).unwrap()).unwrap();
+    let foreign = fixture.state.store.attention_items(Some("person/other")).unwrap().into_iter()
+        .find(|item| item.title == "PRIVATE foreign source").unwrap();
+    let foreign_endpoint = endpoint
+        .replace(&urlencoding::encode(&item.subject).to_string(), &urlencoding::encode(&foreign.subject))
+        .replace(&urlencoding::encode(&item.episode).to_string(), &urlencoding::encode(&foreign.episode));
+    let (status, value, _) = fixture.request(&foreign_endpoint, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+    assert_eq!(value["error"], unknown_body["error"]);
+
+    for missing in ["source_id", "episode"] {
+        let omitted = query.split('&').filter(|part| !part.starts_with(&format!("{missing}=")))
+            .collect::<Vec<_>>().join("&");
+        assert_eq!(fixture.request(&format!("/v1/client/assistant/thread-start-context{omitted}"), None).await.0,
+            StatusCode::BAD_REQUEST);
+    }
+    let (status, _, _) = fixture.request(
+        &format!("/v1/client/threads/start-context{query}"), None,
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    for denied in [
+        fixture_principal(&["read.assistant.summary"], true, MCP_PRINCIPAL).await,
+        fixture_principal(SCOPES, true, PRINCIPAL).await,
+    ] {
+        let payload = denied.payload("thread-start-context", &query);
+        let header = denied.header(&payload, &denied.attestor);
+        let (status, value, _) = denied.request(
+            &format!("/v1/client/assistant/thread-start-context{query}"), Some(&header),
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+        assert!(value.get("value").is_none());
+    }
+}
+
 fn thread_fixture_message(
     state: &AppState,
     id: &str,

@@ -95,6 +95,25 @@ pub(in crate::store) fn resolve(
     Ok(ResolvedSource { item, evidence })
 }
 
+/// Compose unchanged live admission with the single durable-opening qualifier.
+/// The boolean distinguishes retained starts for recipient-scoped coalescing.
+pub(in crate::store) fn resolve_discussion(
+    store: &Store, connection: &Connection, person: &str, origin: &InboxOrigin, at: u128,
+) -> Result<(ResolvedSource, bool), FractalError> {
+    match resolve(store, connection, person, origin, at) {
+        Ok(source) => Ok((source, false)),
+        Err(error) if error.code == "thread-unavailable" => {
+            let key = thread_metadata::request_history::SourceEpisode {
+                source_id: origin.source_id.clone(), episode: origin.episode.clone(),
+            };
+            let source = discussion_source::qualify(connection, person, &key, at)?
+                .ok_or_else(unavailable)?.into_resolved();
+            Ok((source, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn source_evidence(
     store: &Store,
     connection: &Connection,
@@ -164,7 +183,8 @@ impl ResolvedSource {
         connection: &Connection,
         selected: &str,
     ) -> Result<String, FractalError> {
-        let canonical = store.inbox_responsible_agent_at(connection, &self.item).map_err(internal)?
+        let canonical = store.inbox_responsible_agent_at(connection, &self.item)
+            .map_err(|error| error.downcast::<FractalError>().unwrap_or_else(internal))?
             .ok_or_else(|| FractalError::new(
             "thread-responsibility-unassigned",
             "this Inbox source has no configured responsible agent",

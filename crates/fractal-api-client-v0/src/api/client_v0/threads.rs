@@ -101,6 +101,25 @@ fn resolve_context(selection: &ThreadCollectionContext) -> Result<ThreadContext<
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StartContextQuery {
+    source_id: String,
+    episode: String,
+}
+
+pub(super) async fn start_context(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<StartContextQuery>,
+) -> ReadResult<thread_metadata::StartContext> {
+    with_person(state, session, move |store, person, _| {
+        thread_metadata::start_context(store, person, &thread_metadata::InboxOrigin {
+            source_id: query.source_id, episode: query.episode,
+        }).map_err(store_error)
+    }).await
+}
+
 pub(super) async fn detail(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,

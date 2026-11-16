@@ -103,6 +103,7 @@ pub const CONVERSATION_READ: &str = "fractal_conversation_read";
 pub const THREADS_LIST: &str = "fractal_threads_list";
 pub const THREAD_TIMELINE: &str = "fractal_thread_timeline";
 pub const THREAD_GET: &str = "fractal_thread_get";
+pub const THREAD_START_CONTEXT: &str = "fractal_thread_start_context";
 pub const MESSAGE_SEND: &str = "fractal_message_send";
 pub const SLO_LIST: &str = "fractal_slo_list";
 pub const SLO_HISTORY: &str = "fractal_slo_history";
@@ -112,7 +113,7 @@ pub const SLO_HISTORY: &str = "fractal_slo_history";
 // advertising duplicate tools to refreshed connectors. No allocation on either path.
 fn canonical_tool_name(name: &str) -> &str {
     let Some(rest) = name.strip_prefix("st_") else { return name };
-    TOOLS.iter().filter(|(canonical, _, _)| !matches!(*canonical, THREADS_LIST | THREAD_GET | THREAD_TIMELINE)).find_map(|(canonical, _, _)|
+    TOOLS.iter().filter(|(canonical, _, _)| !matches!(*canonical, THREADS_LIST | THREAD_GET | THREAD_TIMELINE | THREAD_START_CONTEXT)).find_map(|(canonical, _, _)|
         (canonical.strip_prefix("fractal_") == Some(rest)).then_some(*canonical))
         .unwrap_or(name)
 }
@@ -135,6 +136,7 @@ const TOOLS: &[(&str, &str, bool)] = &[
     (THREADS_LIST, "List threads for one exact conversation. Use the agent and current session returned by conversation discovery, and next_cursor from the previous page.", true),
     (THREAD_TIMELINE, "Page messages and accepted rename, close and reopen events for one exact thread, newest first. Messages can include thread_quote_id. Use next_cursor for older events. If a message has next_content_cursor, call this tool with that value as cursor, the same agent, session and thread, and no limit to fetch the remaining text.", true),
     (THREAD_GET, "Read the title and lifecycle state of one known thread under the existing conversation read grant. Use its exact thread ID. Content may be sensitive.", true),
+    (THREAD_START_CONTEXT, "Read metadata-only first-Start recipient proof for an exact already-known source_id and episode. Select the recipient's exact current agent_id and session_id from conversation discovery. This preview does not authorize a send or expose source prose.", true),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
@@ -169,16 +171,19 @@ fn schema(name: &str) -> Value {
         MESSAGE_SEND => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
         AVAILABILITY_GET => json!({"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         ALERT_GET => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        THREADS_LIST | THREAD_GET | THREAD_TIMELINE => {
+        THREADS_LIST | THREAD_GET | THREAD_TIMELINE | THREAD_START_CONTEXT => {
             let mut props = json!({
                 "agent_id":{"type":"string","description":"Exact agent ID from the conversation."},
                 "session_id":{"type":"string","description":"Exact current session ID from the same conversation."},
                 "max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}
             });
-            if name != THREADS_LIST {
+            if name == THREAD_START_CONTEXT {
+                props["source_id"] = json!({"type":"string"});
+                props["episode"] = json!({"type":"string"});
+            } else if name != THREADS_LIST {
                 props["thread_id"] = json!({"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$","maxLength":135});
             }
-            if name != THREAD_GET {
+            if matches!(name, THREADS_LIST | THREAD_TIMELINE) {
                 props["cursor"] = json!({"type":"string"});
                 props["limit"] = json!({"type":"integer","minimum":1,"maximum":50});
             }
@@ -199,6 +204,7 @@ fn schema(name: &str) -> Value {
         ALERT_GET => vec!["alert_id"],
         THREADS_LIST => vec!["agent_id","session_id"],
         THREAD_GET | THREAD_TIMELINE => vec!["agent_id","session_id","thread_id"],
+        THREAD_START_CONTEXT => vec!["agent_id","session_id","source_id","episode"],
         CONVERSATION_DETAIL | CONVERSATION_TIMELINE => vec!["agent_id"],
         CONVERSATION_SEARCH => vec!["text"],
         CONVERSATION_READ => vec!["agent_id","session_id","reference","revision","start","end"],
@@ -275,7 +281,7 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     Ok(())
 }
 fn tool_definitions(profile: Profile) -> Vec<Tool> {
-    TOOLS.iter().filter(|(name, _, _)| !matches!(*name, THREADS_LIST | THREAD_GET | THREAD_TIMELINE) || profile == Profile::Mcp).map(|(name,description,read)| {
+    TOOLS.iter().filter(|(name, _, _)| !matches!(*name, THREADS_LIST | THREAD_GET | THREAD_TIMELINE | THREAD_START_CONTEXT) || profile == Profile::Mcp).map(|(name,description,read)| {
         let mut definition = json!({
             "name":name,"description":profile.description(name, description),"inputSchema":schema(name),
             "annotations":{"readOnlyHint":read,"destructiveHint":*name==ALERT_ANSWER,"idempotentHint":true,"openWorldHint":*name==MESSAGE_SEND}
@@ -329,6 +335,12 @@ fn output_schema(name: &str) -> Value {
             "id":{"type":"string"},"agent_id":{"type":"string"},"title":{"type":"string"},
             "title_revision":{"type":"string"},"revision":{"type":"string"},"state":{"enum":["open","closed"]}
         },"required":["id","agent_id","title","title_revision","revision","state"]}),
+        THREAD_START_CONTEXT => json!({"type":"object","properties":{
+            "kind":{"const":"thread-start-context"},"source_id":{"type":"string"},"episode":{"type":"string"},
+            "start_recipient":{"type":"object","properties":{
+                "agent_id":{"type":"string"},"basis":{"type":"object"}
+            },"required":["agent_id","basis"]}
+        },"required":["kind","source_id","episode","start_recipient"]}),
         CONVERSATION_READ => json!({"type":"object","properties":{
             "kind":{"const":"assistant-conversation-content"},"agent_id":{"type":"string"},
             "session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},
@@ -448,7 +460,7 @@ async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value
     result
 }
 async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut CallObservation) -> Result<Value,Value> {
-    if matches!(name, THREADS_LIST | THREAD_GET | THREAD_TIMELINE) && adapter.profile != Profile::Mcp {
+    if matches!(name, THREADS_LIST | THREAD_GET | THREAD_TIMELINE | THREAD_START_CONTEXT) && adapter.profile != Profile::Mcp {
         return Err(json!({"code":"unknown-tool"}));
     }
     validate_arguments(name, args)?;
@@ -464,6 +476,7 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         THREAD_GET => "thread-detail",
         THREAD_TIMELINE => "thread-timeline",
         THREADS_LIST => "threads",
+        THREAD_START_CONTEXT => "thread-start-context",
         CONVERSATION_DETAIL => "conversation-detail",
         CONVERSATION_TIMELINE => "conversation-timeline",
         CONVERSATION_SEARCH => "conversation-search",

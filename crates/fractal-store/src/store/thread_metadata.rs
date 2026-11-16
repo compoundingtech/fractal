@@ -1190,6 +1190,38 @@ pub fn history(
     })())).map_err(internal)?
 }
 
+#[derive(serde::Serialize)]
+pub struct StartContext {
+    pub kind: &'static str,
+    pub source_id: String,
+    pub episode: String,
+    pub start_recipient: inbox::StartRecipient,
+}
+
+/// Preview one already-known exact opening; this is not retained-source discovery.
+pub fn start_context(
+    store: &Store, person: &str, origin: &InboxOrigin,
+) -> Result<StartContext, FractalError> {
+    store.graph.read_snapshot_unindexed(|| Ok((|| {
+        let connection = store.readers.get();
+        let (selected, _) = inbox_source::resolve_discussion(
+            store, &connection, person, origin, now_ms(),
+        )?;
+        let start_recipient = inbox::start_recipient_at(&connection, &selected.item)?
+            .ok_or_else(|| FractalError::new(
+                "thread-responsibility-unassigned",
+                "this Inbox source has no configured responsible agent",
+            ))?;
+        selected.require_agent(store, &connection, &start_recipient.agent_id)?;
+        Ok(StartContext {
+            kind: "thread-start-context",
+            source_id: origin.source_id.clone(),
+            episode: origin.episode.clone(),
+            start_recipient,
+        })
+    })())).map_err(internal)?
+}
+
 pub struct StartFromInbox<'a> {
     pub thread: &'a str,
     pub title: &'a str,
@@ -1319,18 +1351,7 @@ pub fn start_from_inbox_as(
             let mut creation_body = creation_body.clone();
             creation_body["fields"]["person"] = json!(identities::resolve_reference_conn(tx, person)?);
             creation_body["fields"]["agent"] = json!(identities::resolve_reference_conn(tx, agent)?);
-            let (selected, retained) = match inbox_source::resolve(store, tx, person, origin, now_ms()) {
-                Ok(selected) => (selected, false),
-                Err(error) if error.code == "thread-unavailable" => {
-                    let key = request_history::SourceEpisode {
-                        source_id: source.into(), episode: episode.into(),
-                    };
-                    let selected = discussion_source::qualify(tx, person, &key, now_ms())?
-                        .ok_or_else(unavailable)?.into_resolved();
-                    (selected, true)
-                }
-                Err(error) => return Err(error),
-            };
+            let (selected, retained) = inbox_source::resolve_discussion(store, tx, person, origin, now_ms())?;
             selected.require_agent(store, tx, agent)?;
             if retained
                 && let Some(existing) = newest_owned_origin(tx, person, source, episode, agent)?
