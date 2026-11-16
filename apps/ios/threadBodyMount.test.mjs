@@ -11,7 +11,7 @@ import { markdown } from './markdown.ts';
 import { threadClock, threadExactTime, threadRelativeTime } from './threadClock.ts';
 import * as threadVisibility from './threadVisibility.ts';
 import { applyVisitEffect, pendingUnreadAPI, UnreadVisitController } from './unreadActions.ts';
-import { unreadClient as bindUnreadClient } from './unreadClient.ts';
+import { unreadClient as bindUnreadClient, unreadSupported } from './unreadClient.ts';
 import { anchorPresentation, reminderFromSummary, unreadVisit } from './unreadVisit.ts';
 
 // react-dom decides whether it runs in a DOM when it is first loaded, so the document exists first.
@@ -146,11 +146,11 @@ function deliveryStore(thread) {
   const ledger = () => deliveriesByClient.current.get(member) ?? new Map();
   const unreadPorts = { current: undefined };
   const store = {
-    actor: 'person/one', data: { agents: [] }, status: 'online', threadRefresh: 0, threadDeliveries: new Map(), reads: [],
+    actor: 'person/one', data: { agents: [] }, status: 'online', threadRefresh: 0, threadDeliveries: new Map(), reads: [], unreadEnabled: true,
     threadActions: new Set(['thread.read', 'thread.clear-unread', 'thread.mark-unread']),
     actions: { markThreadRead: async (_summary, messageIds) => { store.reads.push([...messageIds]); return { how: 'sent' }; } },
   };
-  const capsRef = { current: { capabilities: ['thread.clear-unread', 'thread.mark-unread'].map(id => ({ id, state: 'granted' })) } };
+  const capsRef = { current: { capabilities: [{ id: 'threads-v1', version: 3, state: 'granted' }, ...['thread.clear-unread', 'thread.mark-unread'].map(id => ({ id, state: 'granted' }))] } };
   const dependencies = {
     threadClient: member, threadActions: store.threadActions, status: 'online', proof: undefined,
     selected: { route: { kind: 'tailscale' } }, fabricMember: undefined, url: 'https://gateway.example', carrier: { snapshot: null },
@@ -159,13 +159,15 @@ function deliveryStore(thread) {
     actionReceiptCheck, sendBoundAction, resendBoundAction, setThreadRefresh: () => {}, ClientError,
     threadActionErrorText: error => error instanceof Error ? error.message : String(error),
     deliveriesByClient, setThreadDeliveryRevision: () => { store.threadDeliveries = new Map(ledger()); changed(); },
-    unreadPorts, client: member, capsRef, actions: store.actions,
+    unreadPorts, client: member, capsRef, capsClient: { current: member }, unreadSupported, actions: store.actions,
     // Only the lost-reply repeat waits; it need not take a real second here.
     setTimeout: callback => setImmediate(callback),
   };
   const { trackThreadDelivery } = new Function(...Object.keys(dependencies), `${storeDelivery}\nreturn { trackThreadDelivery };`)(...Object.values(dependencies));
   store.unreadClient = bindUnreadClient(member, unreadPorts.current);
-  return { store, member, ledger, track: trackThreadDelivery, onChange: next => { changed = next; } };
+  return { store, member, ledger, track: trackThreadDelivery, onChange: next => { changed = next; },
+    setVersion(version) { capsRef.current.capabilities.find(capability => capability.id === 'threads-v1').version = version; store.unreadEnabled = unreadSupported(capsRef.current); changed(); },
+  };
 }
 
 const settle = async (turns = 12) => { for (let turn = 0; turn < turns; turn++) await new Promise(resolve => setImmediate(resolve)); };
@@ -329,4 +331,19 @@ test('an unconfirmed Mark unread is recovered after remount and retried with its
     assert.equal(button('Retry original change'), undefined);
     assert.equal(button('Mark unread').disabled, false);
   } finally { await view.unmount(); }
+});
+
+test('bound unread retries never send after negotiated threads-v1 falls back to v2', async () => {
+  for (const edit of [{ kind: 'mark', anchor_message: 'message/reply', observed_marks: ['mark/one'] }, { kind: 'clear', observed_marks: ['mark/one'] }]) {
+    const thread = unconfirmedThread(), harness = deliveryStore(thread);
+    const result = await harness.store.unreadClient.forThread(thread).actions.edit(edit);
+    assert.equal(result.how, 'unconfirmed');
+    const before = structuredClone(harness.member.sends);
+    harness.setVersion(2);
+    harness.member.outcome = 'confirmed';
+    const retried = await result.retry();
+    assert.equal(retried.how, 'unconfirmed', 'a downgrade cannot resolve the earlier unknown outcome');
+    assert.deepEqual([...harness.ledger().keys()], [`unread/${thread.id}`], 'retain the bound request until it can be confirmed');
+    assert.deepEqual(harness.member.sends, before, 'no original or refreshed unread write is sent to v2');
+  }
 });

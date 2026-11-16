@@ -87,6 +87,11 @@ that exact request, ahead of a held rename/close/reopen, and new edits wait unti
 is confirmed. Action operation IDs never become reminder mark IDs. Read-only clients
 have no mark controls. Reminders are canonically decoded from the summary; seek
 metadata cannot create a badge.
+The new reminder list, around reads and mark/clear writes require a granted
+`threads-v1 >= 3`. Version 2 keeps the existing thread and natural-read experience
+but hides reminder UI and sends none of the new queries or actions. An already-open
+menu or retained retry also re-checks the negotiated version before sending; an
+explicit unsupported read reports Upgrade required locally, never a fetch failure.
 Generic `thread-unavailable` seek refusal maps to unavailable, not Pending. Only an
 explicit Pending response can show that state; neither exposes an unrelated body.
 Seeking itself never acknowledges a message.

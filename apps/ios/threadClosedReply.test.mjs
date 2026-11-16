@@ -3,11 +3,12 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadEdits } from './threadEdits.ts';
-import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
+import { ClientError, FractalClient } from '../../clients/typescript/fractal-client/index.ts';
 import { threadClock, threadExactTime, threadRelativeTime } from './threadClock.ts';
 import { anchorPresentation, reminderFromSummary } from './unreadVisit.ts';
 import { pendingUnreadAPI } from './unreadActions.ts';
 import { nativeVisitPorts } from './unreadVisitTestPorts.mjs';
+import { unreadClient as bindUnreadClient, unreadSupported } from './unreadClient.ts';
 
 const React = { createElement: (type, props, ...children) => ({ type, props, children: children.flat() }) };
 const find = (node, type) => findBy(node, candidate => candidate.type === type);
@@ -1157,7 +1158,7 @@ test('a marked row opens around its reminder anchor; only a current anchor shows
     let effectIndex = 0;
     const acknowledge = () => assert.fail('seeking around a reminder never reads or clears');
     // One stable store service, as the store memoizes it per connection.
-    const store = { unreadClient: { forThread: () => ({ state: 'ready', actions: { read: acknowledge, edit: acknowledge, seek: async id => {
+    const store = { unreadEnabled: true, unreadClient: { forThread: () => ({ state: 'ready', actions: { read: acknowledge, edit: acknowledge, seek: async id => {
       seeks.push(id); return results.shift();
     } } }) } };
     const body = compile('ReminderThreadBody', 'export function ThreadScreen', {
@@ -1227,4 +1228,42 @@ test('a marked row opens around its reminder anchor; only a current anchor shows
   assert.equal(view.first.type, 'ThreadBody', 'without a reminder the thread opens at its latest history');
   assert.equal(view.first.props.around, undefined);
   assert.deepEqual(view.seeks, []);
+});
+
+test('threads-v1 v2 hides reminder UI and never requests the new list, seek or actions', async () => {
+  const requests = [];
+  const caps = { capabilities: [
+    { id: 'threads-v1', version: 2, state: 'granted' },
+    ...['thread.read', 'thread.mark-unread', 'thread.clear-unread'].map(id => ({ id, version: 1, state: 'granted' })),
+  ] };
+  const client = new FractalClient({ baseUrl: 'https://v2.invalid', fetchImpl: async (...args) => { requests.push(args); assert.fail('new v3 requests must not reach v2'); } });
+  const service = bindUnreadClient(client, {
+    supported: () => unreadSupported(caps), canRead: () => true, canWrite: () => true,
+    read: async () => ({ how: 'sent' }), submit: () => assert.fail('no reminder write on v2'),
+  });
+  const store = { unreadEnabled: unreadSupported(caps), unreadClient: service, threadClient: client,
+    actor: 'person/one', status: 'online', data: { agents: [] }, actions: {},
+    threadActions: new Set(caps.capabilities.filter(c => c.id.startsWith('thread.')).map(c => c.id)),
+  };
+  const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: true, unread_reminder: reminderOn('message/reply') };
+  const group = compile('ThreadGroup', 'function ContextThreadList', {
+    useStore: () => store, SystemText: 'SystemText', ContextThreadList: () => assert.fail('v2 must not mount the marked list reader'),
+  });
+  assert.equal(group({ context: { marked_unread: true }, title: 'Marked unread', openThread() {} }), null);
+  assert.ok(group({ context: { agent_id: 'agent/one' }, openThread() {} }), 'legacy thread lists still work on v2');
+  const tree = compile('ThreadBody', 'type Quote', bodyDependencies(store))({ client, thread, placement: 'thread:thread/one' });
+  assert.equal(button(tree, 'Mark unread'), undefined);
+  assert.ok(button(tree, 'Mark read'), 'legacy natural read remains available');
+  assert.ok(!texts(tree).some(text => /Marked unread|Couldn't load/.test(text)));
+  const effects = [];
+  const reminderBody = compile('ReminderThreadBody', 'export function ThreadScreen', {
+    ...hooks(), useRef: current => ({ current }), useStore: () => store, useEffect: effect => effects.push(effect),
+    ThreadBody: 'ThreadBody', T: 'T', View: 'View', Button: 'Button',
+  });
+  assert.equal(reminderBody({ client, thread, placement: 'context:marked', onOpen() {} }).type, 'ThreadBody');
+  for (const effect of effects) effect();
+  const upgrade = await service.listMarked();
+  const issue = compile('unreadReadIssue', 'function markedUnreadIssue', { errorText: String })(upgrade.error.reason, 'marked threads');
+  assert.equal(issue, 'Upgrade the connected Fractal to use unread reminders.');
+  assert.deepEqual(requests, []);
 });

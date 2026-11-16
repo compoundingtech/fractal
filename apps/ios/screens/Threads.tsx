@@ -147,7 +147,8 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
 /** Typed read failures name their subject; no failure may read as an empty list. */
 function unreadReadIssue(error: UnreadReadError, subject: string): string {
   switch (error.kind) {
-    case 'refused': return error.code === 'forbidden' ? `This connection can't read ${subject}.` : `The connected Fractal refused to load ${subject} (${error.code}).`;
+    case 'refused': return error.code === 'upgrade-required' ? 'Upgrade the connected Fractal to use unread reminders.'
+      : error.code === 'forbidden' ? `This connection can't read ${subject}.` : `The connected Fractal refused to load ${subject} (${error.code}).`;
     case 'invalid-response': return `The connected Fractal returned an invalid response for ${subject}.`;
     case 'failed': return `Couldn't load ${subject}. ${errorText(error.cause)}`;
   }
@@ -218,7 +219,8 @@ export function AgentThreads({ agentId, openThread }: { agentId: string; openThr
 export function ThreadGroup({ context, openThread, title = 'Threads', excludeId }: {
   context: ThreadCollectionContext; openThread: OpenThread; title?: string; excludeId?: string;
 }) {
-  const { threadClient } = useStore();
+  const { threadClient, unreadEnabled } = useStore();
+  if ('marked_unread' in context && !unreadEnabled) return null;
   // Embedded thread groups read in system text on every host, as the thread screen does.
   return threadClient ? <SystemText><ContextThreadList client={threadClient} context={context} openThread={openThread} title={title} excludeId={excludeId} /></SystemText> : null;
 }
@@ -322,10 +324,10 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
 }
 
 function ContextThreadHeader({ thread, open, toggle }: { thread: ThreadSummary; open: boolean; toggle: () => void }) {
-  const { threadEdits } = useStore();
+  const { threadEdits, unreadEnabled } = useStore();
   const displayed = threadEdits?.project(thread) ?? thread;
-  return <ThreadRow title={displayed.title} label={`${displayed.title}, ${threadSummaryLine(displayed, ', ')}`}
-    unread={displayed.unread} reminder={!!reminderFromSummary(displayed)} trailing={displayed.state === 'closed' ? 'Closed' : undefined} expanded={open} toggle={toggle} />;
+  return <ThreadRow title={displayed.title} label={`${displayed.title}, ${threadSummaryLine(displayed, ', ', true, unreadEnabled)}`}
+    unread={displayed.unread} reminder={!!unreadEnabled && !!reminderFromSummary(displayed)} trailing={displayed.state === 'closed' ? 'Closed' : undefined} expanded={open} toggle={toggle} />;
 }
 
 function ExpandedContextThread({ client, initial, refresh, placement, seekReminder, onSummary, toggle, onOpen, revealComposer }: {
@@ -354,8 +356,8 @@ function ExpandedContextThread({ client, initial, refresh, placement, seekRemind
 function ReminderThreadBody({ client, thread, placement, onOpen, revealComposer }: {
   client: ThreadClient; thread: ThreadSummary; placement: string; onOpen: () => void; revealComposer?: (row: View) => void;
 }) {
-  const { unreadClient } = useStore();
-  const anchorId = reminderFromSummary(thread)?.anchor_message_id;
+  const { unreadClient, unreadEnabled } = useStore();
+  const anchorId = unreadEnabled ? reminderFromSummary(thread)?.anchor_message_id : undefined;
   const [attempt, setAttempt] = useState(0);
   const [seek, setSeek] = useState<{ anchor: string; attempt: number; result?: UnreadSeek }>();
   const latest = useRef(thread);
@@ -374,7 +376,7 @@ function ReminderThreadBody({ client, thread, placement, onOpen, revealComposer 
     return () => { current = false; };
   }, [anchorId, attempt, unreadClient]);
   // Clearing the reminder during this visit keeps the page it opened around.
-  const target = anchorId ?? seek?.anchor;
+  const target = unreadEnabled ? anchorId ?? seek?.anchor : undefined;
   if (!target) return <ThreadBody client={client} thread={thread} placement={placement} onOpen={onOpen} revealComposer={revealComposer} />;
   const result = seek && seek.anchor === target && seek.attempt === attempt ? seek.result : undefined;
   if (!result) return <T dim>Finding the return message…</T>;
@@ -430,7 +432,7 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, placement
   thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; placement: string; onOpen?: () => void; start?: ThreadStartDraft; embedded?: boolean; frame?: ThreadFrame;
 }) {
   const [expanded, setExpanded] = useState(true);
-  const { threadEdits } = useStore();
+  const { threadEdits, unreadEnabled } = useStore();
   const navigation = useNavigation();
   const displayed = thread && (threadEdits?.project(thread) ?? thread);
   const title = displayed?.title ?? start?.title;
@@ -439,8 +441,8 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, placement
   useEffect(() => { if (standalone && title) navigation.setOptions({ title }); }, [navigation, standalone, title]);
   if (thread || start) {
     const pending = start?.accepted ? 'Loading history…' : 'draft';
-    const summary = standalone ? <T dim>{displayed ? threadSummaryLine(displayed, ' · ', displayed.state !== 'closed') : pending}</T>
-      : <ThreadRow bold title={title!} label={`${title}, ${displayed ? threadSummaryLine(displayed, ', ') : pending}`} unread={displayed?.unread} reminder={!!reminderFromSummary(displayed)}
+    const summary = standalone ? <T dim>{displayed ? threadSummaryLine(displayed, ' · ', displayed.state !== 'closed', unreadEnabled) : pending}</T>
+      : <ThreadRow bold title={title!} label={`${title}, ${displayed ? threadSummaryLine(displayed, ', ', true, unreadEnabled) : pending}`} unread={displayed?.unread} reminder={!!unreadEnabled && !!reminderFromSummary(displayed)}
         trailing={displayed ? displayed.state === 'closed' ? 'Closed' : undefined : pending} expanded={expanded} toggle={() => setExpanded(value => !value)} />;
     // A framed (docked) thread puts its summary line at the top of the scrolling history.
     if (frame) return <ThreadBody client={client} thread={thread} start={start} placement={placement} onOpen={onOpen} frame={(content, dock) => frame(<>{summary}{content}</>, dock)} />;
@@ -456,13 +458,13 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, placement
   return frame ? frame(status) : status;
 }
 
-function threadSummaryLine(thread: ThreadSummary, separator = ' · ', includeState = true): string {
+function threadSummaryLine(thread: ThreadSummary, separator = ' · ', includeState = true, includeReminder = true): string {
   const count = thread.message_count;
   return [
     count === undefined ? undefined : `${count} message${count === 1 ? '' : 's'}`,
     includeState ? thread.state : undefined,
     thread.unread ? 'unread' : undefined,
-    reminderFromSummary(thread) ? 'marked unread reminder' : undefined,
+    includeReminder && reminderFromSummary(thread) ? 'marked unread reminder' : undefined,
   ].filter(Boolean).join(separator);
 }
 
@@ -719,10 +721,10 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
   };
   const canMarkRead = !!thread?.unread && !!actor && threadActions.has('thread.read');
   // Live grants from the current capability set, re-checked again when an edit is sent.
-  const canClearReminder = !!actor && threadActions.has('thread.clear-unread');
-  const canMarkUnread = canClearReminder && threadActions.has('thread.mark-unread');
   const unreadAPI = thread ? unreadClient.forThread(thread) : pendingUnreadAPI;
-  const reminder = reminderFromSummary(thread);
+  const canClearReminder = unreadAPI.state === 'ready' && !!actor && threadActions.has('thread.clear-unread');
+  const canMarkUnread = canClearReminder && threadActions.has('thread.mark-unread');
+  const reminder = unreadAPI.state === 'ready' ? reminderFromSummary(thread) : undefined;
   const readCandidates = canMarkRead ? page.items.filter((event): event is ThreadMessage =>
     event.kind === 'message' && !!event.content.trim() && !ownMessage(event.actor_id)) : [];
   // Rendered body lines, as laid out; a body without them is never visible evidence.

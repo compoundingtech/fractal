@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { API_VERSION, FractalClient } from '../../clients/typescript/fractal-client/index.ts';
-import { unreadClient } from './unreadClient.ts';
+import { unreadClient, unreadSupported } from './unreadClient.ts';
 import { reminderFromSummary } from './unreadVisit.ts';
 
 const snapshot = { id: 'snapshot/1', host_id: 'host/a', store_index: 1, projection_version: 'client-projection.v0' };
@@ -18,6 +18,7 @@ const setup = (response, grants = {}) => {
     return value instanceof Response ? value : Response.json({ api_version: API_VERSION, snapshot, value });
   } });
   const ports = {
+    supported: () => unreadSupported({ capabilities: [{ id: 'threads-v1', version: grants.version ?? 3, state: grants.state ?? 'granted' }] }),
     canRead: () => grants.read !== false, canWrite: () => grants.write !== false,
     read: async (_thread, ids) => { reads.push(ids); return { how: 'sent' }; },
     submit: async (target, kind, send) => { deliveries.push({ target, kind }); await send(client, bound); return { how: 'sent' }; },
@@ -102,4 +103,28 @@ test('read-only refuses before any mutation or request and reevaluates revoked g
   assert.equal((await s.api.actions.seek('message/a')).error.code, 'forbidden');
   assert.equal((await s.service.listMarked()).error.reason.code, 'forbidden');
   assert.deepEqual(s.requests, []); assert.deepEqual(s.deliveries, []); assert.deepEqual(s.reads, []);
+});
+
+test('threads-v1 v2 never sends marked_unread, around, mark or clear, including an already-open v3 menu', async () => {
+  const grants = { version: 3 }, s = setup(() => assert.fail('v2 must not send new wire operations'), grants);
+  const openMenu = s.api;
+  grants.version = 2;
+  assert.equal(s.service.forThread(thread).state, 'pending-api', 'v2 offers no reminder actions');
+  assert.deepEqual(await s.service.listMarked(), {
+    kind: 'error', items: [], error: { kind: 'read-failed', reason: { kind: 'refused', code: 'upgrade-required' } },
+  });
+  assert.deepEqual(await openMenu.actions.seek('message/a'), { state: 'error', error: { kind: 'refused', code: 'upgrade-required' } });
+  for (const edit of [{ kind: 'mark', anchor_message: 'message/a', observed_marks: ['opaque/one'] }, { kind: 'clear', observed_marks: ['opaque/one'] }]) {
+    const result = await openMenu.actions.edit(edit);
+    assert.equal(result.how, 'failed'); assert.match(result.error, /Upgrade/);
+  }
+  assert.deepEqual(s.requests, []); assert.deepEqual(s.deliveries, []);
+});
+
+test('reminder capability negotiation requires a granted threads-v1 version >=3', () => {
+  assert.equal(unreadSupported(undefined), false);
+  assert.equal(unreadSupported({ capabilities: [] }), false);
+  for (const version of [1, 2, 3, 4]) for (const state of ['granted', 'denied']) {
+    assert.equal(unreadSupported({ capabilities: [{ id: 'threads-v1', version, state }] }), version >= 3 && state === 'granted');
+  }
 });
