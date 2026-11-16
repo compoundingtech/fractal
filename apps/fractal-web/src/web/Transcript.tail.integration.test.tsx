@@ -32,6 +32,8 @@ let frames: Map<number, FrameRequestCallback>
 let observers: Set<{ callback: ResizeObserverCallback; elements: Set<Element> }>
 let spanHeight: number
 let spanScrollHeight: number
+/** The prompt's clamped body, the element the overflow observer measures. */
+const isPromptBody = (element: HTMLElement): boolean => element.parentElement?.getAttribute('data-testid') === 'user-message' && element === element.parentElement.firstElementChild
 let originalScrollIntoView: PropertyDescriptor | undefined
 let viewportHeight: number
 let viewportWidth: number
@@ -66,11 +68,11 @@ beforeEach(() => {
     disconnect() { observers.delete(this.entry) }
   })
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
-    return this.tagName === 'SPAN' ? spanHeight : viewportHeight
+    return isPromptBody(this) ? spanHeight : viewportHeight
   })
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => viewportWidth)
   vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
-    return this.tagName === 'SPAN' ? spanScrollHeight : renderedRows(this).length * 100
+    return isPromptBody(this) ? spanScrollHeight : renderedRows(this).length * 100
   })
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     const lane = this.closest<HTMLElement>('[data-testid="transcript-scroll"]')
@@ -765,7 +767,7 @@ describe('batched message measurements', () => {
     })
     await flushHistory(turns.length)
     const messages = [...container.querySelectorAll<HTMLElement>('[data-testid="user-message"]')]
-    const texts = messages.map(message => message.querySelector('span')!)
+    const texts = messages.map(message => message.firstElementChild as HTMLElement)
     const readHeight = vi.fn(() => 180)
     texts.forEach(text => Object.defineProperty(text, 'scrollHeight', { configurable: true, get: readHeight }))
     await act(async () => {
@@ -791,7 +793,7 @@ describe('batched message measurements', () => {
   it('updates the overflow disclosure after ResizeObserver reports a narrower and then wider message', async () => {
     await render(transcript(turns.slice(-1)))
     const message = container.querySelector<HTMLElement>('[data-testid="user-message"]')!
-    const text = message.querySelector('span')!
+    const text = message.firstElementChild as HTMLElement
     expect(message.textContent).not.toContain('Show full message')
     const resizeText = async () => {
       await act(async () => {
