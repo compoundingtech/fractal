@@ -1,7 +1,7 @@
 //! Person asks are runtime steps. The immutable asking claim supplies their ownership fence;
 //! step_runs supplies their state. No separate attention record is created.
 use super::*;
-use crate::model::PersonRenameRequest;
+use crate::model::{PersonAskRequest, PersonRenameRequest};
 
 use crate::person_request::StructuredRequest;
 
@@ -9,6 +9,8 @@ use crate::person_request::StructuredRequest;
 mod reconcile_candidates_tests;
 #[cfg(test)]
 mod revision_provenance_tests;
+pub mod continuity;
+pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
 /// The structured request an ask claim carries. An ask from a newer build whose request this
 /// build cannot read is refused rather than answered as free text.
@@ -721,7 +723,7 @@ pub fn enrich_responses(
         )
         SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
           EXISTS(SELECT 1 FROM sources WHERE sources.subject=json_extract(request.body,'$.fields.origin_step')), resolution.kind,
-          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution JOIN claims request
+          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution LEFT JOIN claims request
         ON request.subject=resolution.subject AND request.kind='work.person-asked'
         WHERE resolution.kind IN ('work.person-done','work.person-cancelled','work.person-override')
           AND (resolution.kind!='work.person-override' OR (

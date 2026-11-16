@@ -20,6 +20,20 @@ fn stable_run_evidence(run: &MissionRunView) -> Result<Value, FractalError> {
     Ok(evidence)
 }
 
+fn native_person_evidence_tx(connection: &Connection, step: &StepRunView) -> Result<Vec<Value>, FractalError> {
+    person_work::continuity::person_evidence_tx(connection, step).map_err(internal)?
+        .into_iter().map(|request| {
+            let gate_answer = if request.kind == "gate.requested" {
+                human_review_answer_tx(connection, &request.id).map_err(internal)?
+            } else {
+                None
+            };
+            let legacy_unbound = request.body["fields"]["continuity"].is_null();
+            Ok(json!({"request": request, "gate_answer": gate_answer,
+                "legacy_unbound": legacy_unbound}))
+        }).collect()
+}
+
 fn recovery_runs(
     connection: &Connection,
     run: &str,
@@ -60,25 +74,53 @@ fn recovery_preview_tx(connection: &Connection, run: &str) -> Result<Value, Frac
     let workspace_matches = target.workspace == workspace;
     let target_active = target.ended().is_none();
     let target_idle = mission_supersession::supersession_idle(connection, &target.id)?;
-    let work: Vec<Value> = source.steps.iter()
-        .filter(|step| step.status == "completed" || !step.person_answers.is_empty())
-        .map(|step| json!({
+    let mut work = Vec::new();
+    for step in &source.steps {
+        let person_evidence = native_person_evidence_tx(connection, step)?;
+        if step.status != "completed" && step.person_answers.is_empty() && person_evidence.is_empty() {
+            continue;
+        }
+        work.push(json!({
+            "kind": "step", "evidence_id": step.subject,
             "source_step_run": step.subject, "step": step.step, "status": step.status,
             "definition_hash": step.definition_hash, "attempt": step.attempt,
-            "answered_asks": step.person_answers,
+            "answered_asks": step.person_answers, "person_evidence": person_evidence,
             "eligibility": if !target_active { "successor-terminal" }
                 else if !target_idle { "successor-has-active-work" }
                 else if declaration_refusal.is_some() { "declaration-transfer-refused" }
                 else if ordinary.contains(&step.subject) { "eligible" }
                 else if confirmed.contains(&step.subject) { "requires-person-confirmation" }
                 else { "binding-or-state-ineligible" },
-        })).collect();
+        }));
+    }
+    let root_requests = person_work::continuity::root_gate_evidence_tx(connection, &source).map_err(internal)?;
+    let root_ids = root_requests.iter().map(|request| request.id.clone()).collect();
+    let bound_roots: BTreeSet<String> = person_work::continuity::eligible_root_gate_requests_tx(
+        connection, &source, &pending, &BTreeSet::new(),
+    ).map_err(internal)?.into_iter().map(|request| request.id).collect();
+    let confirmed_roots: BTreeSet<String> = person_work::continuity::eligible_root_gate_requests_tx(
+        connection, &source, &pending, &root_ids,
+    ).map_err(internal)?.into_iter().map(|request| request.id).collect();
+    let mut root_evidence = Vec::new();
+    for request in root_requests {
+        let answer = human_review_answer_tx(connection, &request.id).map_err(internal)?;
+        root_evidence.push(json!({
+            "kind": "run-human-gate", "evidence_id": request.id,
+            "eligibility": if !target_active { "successor-terminal" }
+                else if !target_idle { "successor-has-active-work" }
+                else if bound_roots.contains(&request.id) { "eligible" }
+                else if confirmed_roots.contains(&request.id) { "requires-person-confirmation" }
+                else { "binding-or-state-ineligible" },
+            "request": request, "answer": answer,
+        }));
+    }
     let mut preview = json!({
         "source_run": source.subject, "source_generation": source.generation,
         "target_run": target.subject, "target_generation": target.generation,
         "current_resolved_workspace": workspace, "target_workspace": target.workspace,
         "workspace_matches": workspace_matches, "target_active": target_active, "target_idle": target_idle,
-        "original_work": work, "recovery_refusal": declaration_refusal,
+        "original_work": work, "original_root_gates": root_evidence,
+        "recovery_refusal": declaration_refusal,
         // The complete observed source and target bind answers, input claim references,
         // authorities and execution state, not just their presentation labels.
         "source_evidence": stable_run_evidence(&source)?, "target_evidence": stable_run_evidence(&target)?,
@@ -102,7 +144,7 @@ impl Store {
         run: &str,
         expected_preview_hash: &str,
         actor: &str,
-        confirmed_legacy_steps: &[String],
+        confirmed_legacy_evidence: &[String],
     ) -> Result<Value, FractalError> {
         self.with_all_runs_fenced_internal(|transaction| {
             let preview = recovery_preview_tx(transaction, run)?;
@@ -126,17 +168,19 @@ impl Store {
                 return Err(FractalError::new("continuity-target-ineligible",
                     "recovery requires an active successor with no executing work"));
             }
-            if !confirmed_legacy_steps.is_empty()
+            if !confirmed_legacy_evidence.is_empty()
                 && !actor.strip_prefix("person/").is_some_and(|name| !name.is_empty())
             {
                 return Err(FractalError::new("person-confirmation-required",
                     "only an explicit person may confirm legacy unbound answers"));
             }
-            let confirmations: BTreeSet<String> = confirmed_legacy_steps.iter().cloned().collect();
+            let confirmations: BTreeSet<String> = confirmed_legacy_evidence.iter().cloned().collect();
             for original in &confirmations {
-                if !preview["original_work"].as_array().into_iter().flatten().any(|work| {
-                    work["source_step_run"].as_str() == Some(original.as_str())
-                        && work["eligibility"] == "requires-person-confirmation"
+                if !["original_work", "original_root_gates"].into_iter().any(|collection| {
+                    preview[collection].as_array().into_iter().flatten().any(|evidence| {
+                        evidence["evidence_id"].as_str() == Some(original.as_str())
+                            && evidence["eligibility"] == "requires-person-confirmation"
+                    })
                 }) {
                     return Err(FractalError::new("invalid-legacy-confirmation",
                         "confirmations must name previewed eligible unbound original evidence"));
@@ -150,14 +194,35 @@ impl Store {
             let fresh = self.create_superseding_mission_run_tx(
                 transaction, &target, &publication, Some(&target.revision),
             )?;
+            let step_confirmations = confirmations.iter().filter(|id| {
+                preview["original_work"].as_array().into_iter().flatten()
+                    .any(|evidence| evidence["evidence_id"].as_str() == Some(id.as_str()))
+            }).cloned().collect();
             missions::carry_completed_run_steps_with_legacy_tx(
-                transaction, &self.origin, actor, &source, &fresh, &confirmations,
+                transaction, &self.origin, actor, &source, &fresh, &step_confirmations,
             )?;
+            let root_confirmations = confirmations.iter().filter(|id| {
+                preview["original_root_gates"].as_array().into_iter().flatten()
+                    .any(|evidence| evidence["evidence_id"].as_str() == Some(id.as_str()))
+            }).cloned().collect();
+            let root_references = person_work::continuity::carry_root_gate_answers_tx(
+                transaction, &self.origin, &source, &fresh, actor, &root_confirmations,
+            ).map_err(internal)?;
+            for evidence in preview["original_root_gates"].as_array().into_iter().flatten() {
+                let Some(id) = evidence["evidence_id"].as_str() else { continue };
+                if (evidence["eligibility"] == "eligible" || confirmations.contains(id))
+                    && !root_references.iter().any(|reference| reference == id)
+                {
+                    return Err(FractalError::new("continuity-root-gate-ineligible",
+                        "a previewed original root approval could not be referenced by the fresh successor"));
+                }
+            }
             cancel_mission_run_tx(transaction, &self.origin, &target.subject,
                 &format!("continuity recovered by reference into {}", fresh.subject),
                 None, now_ms())?;
             Ok(json!({"source_run": source.subject, "recovered_run": fresh.subject,
-                "preview_hash": expected_preview_hash, "confirmed_legacy_steps": confirmations}))
+                "preview_hash": expected_preview_hash, "confirmed_legacy_evidence": confirmations,
+                "root_gate_references": root_references}))
         })
     }
 
@@ -194,10 +259,21 @@ impl Store {
                 }
                 let automatic = mission_supersession::automatic_supersession_policy(&transaction, &source)?.is_some();
                 let idle = mission_supersession::supersession_idle(&transaction, &id)?;
+                let mut person_evidence = Vec::new();
+                for step in &source.steps {
+                    person_evidence.extend(native_person_evidence_tx(&transaction, step)?);
+                }
+                let mut root_gate_evidence = Vec::new();
+                for request in person_work::continuity::root_gate_evidence_tx(&transaction, &source).map_err(internal)? {
+                    let answer = human_review_answer_tx(&transaction, &request.id).map_err(internal)?;
+                    root_gate_evidence.push(json!({"kind": "run-human-gate", "evidence_id": request.id,
+                        "request": request, "answer": answer}));
+                }
                 runs.push(json!({"source_run": source.subject, "source_revision": source.revision,
                     "target_revision": revision, "publication": publication,
                     "current_resolved_workspace": missions::resolved_supersession_workspace(&transaction, &source)?,
-                    "automatic_policy_allows": automatic, "idle": idle,
+                    "automatic_policy_allows": automatic, "idle": idle, "person_evidence": person_evidence,
+                    "root_gate_evidence": root_gate_evidence,
                     "completed_work": source.steps.iter().filter(|step| step.status == "completed").map(|step| &step.subject).collect::<Vec<_>>(),
                     "answered_asks": source.steps.iter().flat_map(|step| &step.person_answers).collect::<Vec<_>>() }));
             }

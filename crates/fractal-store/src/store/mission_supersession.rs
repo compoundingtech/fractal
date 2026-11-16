@@ -559,7 +559,7 @@ fn supersession_owned_runs(connection: &Connection, subject: &str) -> Result<Vec
     Ok(owners)
 }
 
-fn runtime_execution_quiescent(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
+pub(super) fn runtime_execution_quiescent(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
     smallclaims::touched::note_read(|| subject.to_owned());
     let actual = latest_actual_fields_at(connection, subject, None, &["status", "reachability"])
         .map_err(internal)?;
@@ -814,6 +814,8 @@ fn supersession_has_evidence(
     connection: &Connection,
     source: &MissionRunView,
 ) -> Result<bool, FractalError> {
+    // Retain any answered human gate, even if its authority was later revoked:
+    // automatic replacement is not authorization to discard an earlier decision.
     let mut query = connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM step_runs step WHERE step.run_id=?1
          AND (step.status='completed' OR EXISTS(
@@ -822,7 +824,17 @@ fn supersession_has_evidence(
              AND response.subject IN (
                SELECT subject FROM claims WHERE kind='work.person-asked'
                  AND json_extract(body,'$.fields.origin_step')=step.subject
-               UNION SELECT step.subject))))",
+               UNION SELECT step.subject))))
+         OR EXISTS(SELECT 1 FROM claims request
+           JOIN claims response INDEXED BY claims_human_gate_answer_request_index
+             ON response.kind='gate.result'
+               AND json_extract(response.body,'$.fields.request')=request.id
+               AND response.subject=request.subject
+           WHERE request.kind='gate.requested'
+             AND json_extract(request.body,'$.fields.reviewer') IS NOT NULL
+             AND json_extract(request.body,'$.fields.owner') IN (
+               SELECT subject FROM step_runs WHERE run_id=?1
+               UNION SELECT 'mission-run/'||?1))",
     ).map_err(internal)?;
     if query.query_row([&source.id], |row| row.get::<_, bool>(0)).map_err(internal)? {
         return Ok(true);

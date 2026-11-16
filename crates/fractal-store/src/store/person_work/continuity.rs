@@ -1,7 +1,8 @@
 use super::*;
+mod human_gates;
+mod root_gates;
+pub use root_gates::{root_gate_evidence_tx, eligible_root_gate_requests_tx, carry_root_gate_answers_tx};
 
-#[cfg(test)]
-mod tests;
 
 /// Immutable native ask identity; absent legacy bindings require explicit recovery.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -22,12 +23,16 @@ pub struct AskContinuityBinding {
 }
 
 pub fn continuity_step_binding_tx(connection: &Connection, step: &StepRunView) -> Result<(String, String, String)> {
-    let mission = fractal_store::store::pinned_generation_mission_tx(connection, &step.generation)?
+    continuity_context_binding_tx(connection, &step.run, &step.generation, Some(&step.step))
+}
+
+fn continuity_context_binding_tx(connection: &Connection, run_id: &str, generation: &str, path: Option<&str>) -> Result<(String, String, String)> {
+    let mission = crate::store::pinned_generation_mission_tx(connection, generation)?
         .ok_or_else(|| anyhow::anyhow!("missing pinned mission for ask continuity"))?;
-    let run = fractal_store::store::mission_run_header_tx(connection, &step.run)?;
-    let hashes = fractal_store::store::step_hashes(&mission);
-    let dependencies = fractal_store::store::flattened_dependencies(&mission);
-    let mut pending = vec![step.step.clone()];
+    let run = crate::store::mission_run_header_tx(connection, run_id)?;
+    let hashes = crate::store::step_hashes(&mission);
+    let dependencies = crate::store::flattened_dependencies(&mission);
+    let mut pending: Vec<String> = path.map_or_else(|| hashes.keys().cloned().collect(), |path| vec![path.to_owned()]);
     let mut contracts = BTreeMap::new();
     while let Some(path) = pending.pop() {
         if contracts.contains_key(&path) { continue; }
@@ -38,14 +43,19 @@ pub fn continuity_step_binding_tx(connection: &Connection, step: &StepRunView) -
     let digest = |value: Value| -> Result<String> {
         Ok(hex::encode(Sha256::digest(serde_json::to_vec(&value)?)))
     };
-    Ok((digest(json!(contracts))?,
+    let contract = if path.is_none() {
+        json!({"steps":contracts,"gates":mission.gates,"completion":mission.completion,
+            "constraints":mission.constraints,"agent_constraints":mission.agent_constraints,
+            "declarations":mission.declarations_kdl,"work_selector":mission.work_selector})
+    } else { json!(contracts) };
+    Ok((digest(contract)?,
         digest(json!({"mission":mission.subject,"inputs":run.inputs,"workspace":run.workspace}))?,
         digest(json!({"authority":mission.authority,"owners":mission.revision_owners,
             "human_only":mission.revisions_human_only,"reviewer":mission.revision_reviewer,
             "requester":run.requester}))?))
 }
 
-pub(super) fn ask_binding_tx(connection: &Connection, step: &StepRunView, input: &PersonAskRequest, request: &Value) -> Result<AskContinuityBinding> {
+pub fn ask_binding_tx(connection: &Connection, step: &StepRunView, input: &PersonAskRequest, request: &Value) -> Result<AskContinuityBinding> {
     let (contract_hash, input_digest, authority_digest) = continuity_step_binding_tx(connection, step)?;
     Ok(AskContinuityBinding {
         version: 1, step: step.step.clone(), contract_hash, input_digest, authority_digest,
@@ -55,7 +65,17 @@ pub(super) fn ask_binding_tx(connection: &Connection, step: &StepRunView, input:
     })
 }
 
-fn origin_asks_tx(connection: &Connection, source: &StepRunView) -> Result<Vec<ClaimRecord>> {
+pub fn direct_person_binding_tx(connection: &Connection, step: &StepRunView, actor: &str) -> Result<AskContinuityBinding> {
+    let (contract_hash, input_digest, authority_digest) = continuity_step_binding_tx(connection, step)?;
+    Ok(AskContinuityBinding {
+        version: 1, step: step.step.clone(), contract_hash, input_digest, authority_digest,
+        asker: actor.into(), person: step.assigned_to.clone().unwrap_or_else(|| actor.into()),
+        title: step.title.clone().unwrap_or_else(|| step.step.clone()), question: step.goals.join("\n"),
+        request: json!({"kind":"authored-person-step"}), deadline_ms: None, default_answer: None,
+    })
+}
+
+pub fn person_evidence_tx(connection: &Connection, source: &StepRunView) -> Result<Vec<ClaimRecord>> {
     connection.prepare_cached(&canonical_sql(
         "WITH RECURSIVE sources(subject,attempt) AS (
            SELECT ?1,?2 UNION SELECT json_extract(c.body,'$.fields.source_step_run'),
@@ -63,9 +83,15 @@ fn origin_asks_tx(connection: &Connection, source: &StepRunView) -> Result<Vec<C
            FROM sources JOIN claims c ON c.subject=sources.subject AND c.kind='step-run.carried'
              AND json_extract(c.body,'$.fields.attempt')=sources.attempt)
          SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-         FROM claims WHERE kind='work.person-asked' AND EXISTS(SELECT 1 FROM sources
+         FROM claims WHERE (kind='work.person-asked' AND EXISTS(SELECT 1 FROM sources
            WHERE json_extract(body,'$.fields.origin_step')=sources.subject
-             AND json_extract(body,'$.fields.origin_attempt')=sources.attempt)
+             AND json_extract(body,'$.fields.origin_attempt')=sources.attempt))
+           OR (kind='work.person-done' AND EXISTS(SELECT 1 FROM sources
+             WHERE claims.subject=sources.subject AND json_extract(body,'$.fields.attempt')=sources.attempt)
+             AND NOT EXISTS(SELECT 1 FROM claims request WHERE request.subject=claims.subject AND request.kind='work.person-asked'))
+           OR (kind='gate.requested' AND json_type(body,'$.fields.reviewer')='text'
+             AND EXISTS(SELECT 1 FROM sources WHERE json_extract(body,'$.fields.owner')=sources.subject
+               AND json_extract(body,'$.fields.attempt')=sources.attempt))
          ORDER BY CANONICAL_ASC(claims)"
     ))?.query_map(params![source.subject, source.attempt], claim_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
@@ -104,11 +130,14 @@ pub fn step_answers_bound_tx(connection: &Connection, source: &StepRunView, targ
 
 /// Explicit recovery confirms absent legacy bindings, never invalidated answers.
 pub fn step_answers_eligible_tx(connection: &Connection, source: &StepRunView, target: &StepRunView, allow_legacy: bool) -> Result<bool> {
-    let asks = origin_asks_tx(connection, source)?;
+    let asks = person_evidence_tx(connection, source)?;
     if asks.is_empty() { return Ok(true); }
     let (contract, inputs, authority) = continuity_step_binding_tx(connection, target)?;
     for ask in asks {
-        if !reusable_answer_tx(connection, &ask)? { return Ok(false); }
+        if ask.kind == "gate.requested" {
+            let Some(answer) = crate::store::human_review_answer_tx(connection, &ask.id)? else { return Ok(false); };
+            if answer.body["fields"]["verdict"] != "pass" { return Ok(false); }
+        } else if !reusable_answer_tx(connection, &ask)? { return Ok(false); }
         let Some(value) = ask.body["fields"].get("continuity") else {
             if allow_legacy { continue; }
             return Ok(false);
@@ -116,13 +145,14 @@ pub fn step_answers_eligible_tx(connection: &Connection, source: &StepRunView, t
         let Ok(binding) = serde_json::from_value::<AskContinuityBinding>(value.clone()) else { return Ok(false); };
         if binding.version != 1 || binding.step != target.step || binding.contract_hash != contract
             || binding.input_digest != inputs || binding.authority_digest != authority
-            || ask.actor.as_deref() != Some(binding.asker.as_str())
-            || ask.body["fields"]["person"] != binding.person { return Ok(false); }
+            || (ask.kind != "gate.requested" && ask.actor.as_deref() != Some(binding.asker.as_str()))
+            || (ask.kind == "gate.requested" && ask.body["fields"]["reviewer"] != binding.person)
+            || (ask.kind == "work.person-asked" && ask.body["fields"]["person"] != binding.person) { return Ok(false); }
     }
     Ok(true)
 }
 
-pub(super) fn equivalent_answer_tx(connection: &Connection, origin: &StepRunView, binding: &AskContinuityBinding) -> Result<Option<ClaimRecord>> {
+pub fn equivalent_answer_tx(connection: &Connection, origin: &StepRunView, binding: &AskContinuityBinding) -> Result<Option<ClaimRecord>> {
     let mut query = connection.prepare_cached(&canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
          FROM claims WHERE kind='work.person-asked' AND actor=?1

@@ -82,6 +82,58 @@ fn assert_queue_converged(store: &Store) {
 }
 
 #[test]
+fn mission_supersession_answered_human_gates_retain_sources_and_owned_descendants() {
+    for descendant in [false, true] {
+        for step_owned in [false, true] {
+            let store = Store::open_memory("owner").unwrap();
+            publish_mission(&store, ORIGINAL, "human-gate-original");
+            let source = start_source(&store, None);
+            let owner = if descendant {
+                store.create_child_mission_run(&MissionRunRequest {
+                    mission: "retry-work".into(), revision: Some(source.revision.clone()),
+                    workspace: source.workspace.clone(), requester: source.requester.clone(),
+                    mode: source.mode.clone(), inputs: source.inputs.clone(),
+                    idempotency_key: "human-gate-child".into(),
+                }, &source, &source.steps[0].subject, None).unwrap()
+            } else { source.clone() };
+            let step = &owner.steps[0];
+            let request = store.append_claim(&ClaimInput {
+                subject: "gate-operation/continuity-human".into(), kind: "gate.requested".into(),
+                actor: None, fields: BTreeMap::from([
+                    ("owner".into(), json!(if step_owned { &step.subject } else { &owner.subject })),
+                    ("reviewer".into(), json!("person/requester")),
+                    ("question".into(), json!("Approve unchanged work?")),
+                    ("operation".into(), json!("gate-operation/continuity-human")),
+                    ("mission_revision".into(), json!(owner.revision)),
+                    ("step_definition".into(), json!(step.definition_hash)),
+                    ("attempt".into(), json!(step.attempt)),
+                ]), evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some("human-gate-request".into()),
+            }).unwrap();
+            let answer = store.append_claim(&ClaimInput {
+                subject: request.subject.clone(), kind: "gate.result".into(),
+                actor: Some("person/requester".into()), fields: BTreeMap::from([
+                    ("request".into(), json!(request.id)), ("verdict".into(), json!("pass")),
+                ]), evidence: vec![request.id.clone()], expected_subject: None,
+                idempotency_key: Some("human-gate-answer".into()),
+            }).unwrap();
+            assert_eq!(store.human_review_answer(&request.id).unwrap().unwrap().id, answer.id);
+            assert!(current(&store, &source).steps.iter().all(|step| step.status != "completed"));
+            assert!(current(&store, &owner).steps.iter().all(|step| step.status != "completed"));
+            publish_mission(&store, &ORIGINAL.replace("Prepare.", "Prepare the same work."), "human-gate-prose");
+            requeue_heads(&store);
+            store.supersede_mission_publications().unwrap();
+            assert!(current(&store, &source).superseded_by.is_none());
+            assert!(current(&store, &owner).superseded_by.is_none());
+            assert!(!store.supersede_current_mission_run(&current(&store, &source)).unwrap());
+            assert_eq!(store.human_review_answer(&request.id).unwrap().unwrap().id, answer.id);
+            assert_eq!(store.claims_for(&request.subject, Some("gate.requested")).unwrap().len(), 1);
+            assert_queue_converged(&store);
+        }
+    }
+}
+
+#[test]
 fn mission_supersession_completed_work_waits_across_reopen_and_replay() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");

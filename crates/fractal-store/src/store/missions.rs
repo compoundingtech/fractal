@@ -110,6 +110,7 @@ pub(super) fn plan_continuity_declarations_tx(
         transaction, source, &next, &paths, &target.generation,
     )?;
     let specs = flatten_mission_step_specs(&next);
+    let mut declared_subjects = BTreeMap::new();
     for (desired, previous_step) in &mut planned {
         let previous = source.steps.iter().find(|step| Some(&step.subject) == previous_step.as_ref())
             .ok_or_else(|| FractalError::new("unsafe-completed-declaration-carry", "the declaring evidence is unavailable"))?;
@@ -135,6 +136,23 @@ pub(super) fn plan_continuity_declarations_tx(
         {
             return Err(FractalError::new("unsafe-completed-declaration-carry",
                 "the completed declaration changes under the successor run's bindings"));
+        }
+        if !declared_subjects.contains_key(&previous.step) {
+            let declarations = spec.declarations_kdl.as_deref().ok_or_else(|| {
+                FractalError::new("unsafe-completed-declaration-carry", "the declaring contract is unavailable")
+            })?;
+            let declarations = crate::mission::interpolate_kdl(declarations, &successor_variables)?;
+            let host = desired.member.as_ref().map(|member| member.host.as_str()).unwrap_or("local");
+            let intent = crate::graph::parse_execution_intent(&declarations, host, &target.id)?;
+            declared_subjects.insert(previous.step.clone(), intent.subjects.into_keys().collect::<BTreeSet<_>>());
+        }
+        if !declared_subjects[&previous.step].contains(&desired.subject) {
+            return Err(FractalError::new("unsafe-completed-declaration-carry",
+                "the completed declaration has a different resolved identity in the successor run"));
+        }
+        if !mission_supersession::runtime_execution_quiescent(transaction, &desired.subject)? {
+            return Err(FractalError::new("unsafe-completed-declaration-carry",
+                "a completed declaration must have confirmed runtime quiescence before cross-run transfer"));
         }
         desired.owner_run = Some(target.subject.clone());
         if let Some(member) = &mut desired.member {

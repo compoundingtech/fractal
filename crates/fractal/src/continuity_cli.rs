@@ -39,22 +39,22 @@ pub(super) struct RecoverArgs {
     /// Exact hash returned by continuity preview; stale previews are refused.
     #[arg(long, value_name = "HASH")]
     preview_hash: String,
-    /// Confirm an unbound legacy person answer using the exact source_step_run
-    /// subject from preview's original_work (repeatable; authenticated person only).
-    #[arg(long = "confirm-legacy-step", value_name = "STEP")]
-    confirmed_legacy_steps: Vec<String>,
+    /// Confirm legacy person evidence using the exact source step-run subject or
+    /// root gate.requested claim ID from preview (repeatable; authenticated person only).
+    #[arg(long = "confirm-legacy-evidence", value_name = "EVIDENCE")]
+    confirmed_legacy_evidence: Vec<String>,
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
 }
 
 fn recovery_body(args: &RecoverArgs) -> Result<Value> {
-    if !args.confirmed_legacy_steps.is_empty() {
+    if !args.confirmed_legacy_evidence.is_empty() {
         parse_person_subject(&args.actor).map_err(anyhow::Error::msg)?;
     }
     Ok(json!({
         "run": args.run,
         "preview_hash": args.preview_hash,
-        "confirmed_legacy_steps": args.confirmed_legacy_steps,
+        "confirmed_legacy_evidence": args.confirmed_legacy_evidence,
     }))
 }
 
@@ -112,6 +112,10 @@ mod tests {
         assert!(Cli::try_parse_from(base).is_err());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--as", "person/example"])).is_err());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--preview-hash", "snapshot"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain([
+            "--as", "person/example", "--preview-hash", "snapshot",
+            "--confirm-legacy-step", "step-run/example",
+        ])).is_err());
     }
 
     #[test]
@@ -119,7 +123,7 @@ mod tests {
         let command = parse_command(&[
             "fractal", "missions", "run", "continuity", "recover", "mission-run/example",
             "--preview-hash", "snapshot", "--as", "person/example",
-            "--confirm-legacy-step", "first", "--confirm-legacy-step", "second",
+            "--confirm-legacy-evidence", "step-run/example", "--confirm-legacy-evidence", "claim/example",
         ]);
         assert_eq!(command.actor(), Some("person/example"));
         let RunCommand::Continuity { command: ContinuityCommand::Recover(mut args) } = command else {
@@ -128,11 +132,11 @@ mod tests {
         assert_eq!(recovery_body(&args).expect("person confirmation"), json!({
             "run": "mission-run/example",
             "preview_hash": "snapshot",
-            "confirmed_legacy_steps": ["first", "second"],
+            "confirmed_legacy_evidence": ["step-run/example", "claim/example"],
         }));
         args.actor = "agent/example".to_owned();
         assert!(recovery_body(&args).is_err());
-        args.confirmed_legacy_steps.clear();
+        args.confirmed_legacy_evidence.clear();
         assert!(recovery_body(&args).is_ok());
     }
 
@@ -147,7 +151,7 @@ mod tests {
         let help = Cli::try_parse_from([
             "fractal", "missions", "run", "continuity", "recover", "--help",
         ]).err().expect("help response").to_string();
-        for option in ["--preview-hash <HASH>", "--confirm-legacy-step <STEP>", "--as"] {
+        for option in ["--preview-hash <HASH>", "--confirm-legacy-evidence <EVIDENCE>", "--as"] {
             assert!(help.contains(option), "missing {option}");
         }
     }

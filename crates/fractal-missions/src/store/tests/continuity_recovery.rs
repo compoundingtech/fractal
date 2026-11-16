@@ -6,6 +6,10 @@ fn damaged_run(store: &Store) -> (MissionRunView, String) {
     let source = start(store);
     let original = source.steps.iter().find(|step| step.step == "prepare").unwrap();
     store.set_step_state(&original.subject, "completed", None).unwrap();
+    supersede_and_damage(store, &source)
+}
+
+fn supersede_and_damage(store: &Store, source: &MissionRunView) -> (MissionRunView, String) {
     let current = store.mission_run(&source.subject).unwrap().unwrap();
     let target = store.with_all_runs_fenced_internal(|transaction| {
         store.supersede_mission_run_at_revision_tx(transaction, &current, &current.revision)
@@ -94,4 +98,82 @@ fn recovery_rejects_unpreviewed_legacy_confirmation_without_writing() {
     assert_eq!(store.recover_mission_continuity(&source.subject, hash,
         "person/operator", &unknown).unwrap_err().code, "invalid-legacy-confirmation");
     assert_eq!(store.index().unwrap(), index);
+}
+
+#[test]
+fn direct_person_answer_preview_names_bound_and_legacy_originals() {
+    use crate::store::person_work::PersonWorkStore;
+
+    for legacy in [false, true] {
+        let store = Store::open_memory("owner").unwrap();
+        let authored = ORIGINAL.replace("step \"prepare\" {", "step \"prepare\" { assigned-to \"person/test\";");
+        publish_mission(&store, &authored, "direct-original");
+        let source = start(&store);
+        let original = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+        store.set_step_state(&original.subject, "ready", None).unwrap();
+        store.finish_person_step(&crate::model::PersonStepResponse {
+            subject: original.subject.clone(), actor: "person/test".into(), summary: "Proceed".into(),
+            delegation: None, evidence: Vec::new(), episode: None, answer: None,
+            idempotency_key: "direct-answer".into(),
+        }, false).unwrap();
+        let answer = store.claims_for(&original.subject, Some("work.person-done")).unwrap().remove(0);
+        if legacy {
+            // Historical responses predate native binding fields; preserve their original identity.
+            store.connection.write().execute(
+                "UPDATE claims SET body=json_remove(body,'$.fields.continuity') WHERE id=?1", [&answer.id],
+            ).unwrap();
+        }
+        let (source, _) = supersede_and_damage(&store, &source);
+        let index = store.index().unwrap();
+        let preview = store.mission_continuity_preview(&source.subject).unwrap();
+        assert_eq!(store.index().unwrap(), index);
+        let work = preview["original_work"].as_array().unwrap().iter()
+            .find(|work| work["source_step_run"] == original.subject).unwrap();
+        assert_eq!(work["person_evidence"][0]["request"]["id"], answer.id);
+        assert_eq!(work["person_evidence"][0]["legacy_unbound"], legacy);
+        assert_eq!(work["eligibility"], if legacy { "requires-person-confirmation" } else { "eligible" });
+    }
+}
+
+#[test]
+fn legacy_root_approval_is_previewed_and_recovered_only_by_explicit_reference() {
+    let store = Store::open_memory("owner").unwrap();
+    let authored = ORIGINAL.replace("  goal \"Retry independent work.\"", 
+        "  gate \"approval\" type=\"human\" { reviewer \"person/test\"; question \"Approve?\"; }\n  goal \"Retry independent work.\"");
+    publish_mission(&store, &authored, "root-original");
+    let source = start(&store);
+    let work = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    store.set_step_state(&work.subject, "completed", None).unwrap();
+    let request = store.append_claim(&ClaimInput {
+        subject: "gate-operation/root-recovery/approval".into(), kind: "gate.requested".into(), actor: None,
+        fields: BTreeMap::from([
+            ("owner".into(), json!(source.subject)), ("reviewer".into(), json!("person/test")),
+            ("mode".into(), json!("approve")), ("question".into(), json!("Approve?")),
+            ("decisions".into(), json!(["approved", "rejected"])),
+            ("review_targets".into(), json!([])), ("attempt".into(), json!(1)),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: Some("root-request".into()),
+    }).unwrap();
+    let answer = store.append_claim(&ClaimInput {
+        subject: request.subject.clone(), kind: "gate.result".into(), actor: Some("person/test".into()),
+        fields: BTreeMap::from([("request".into(), json!(request.id)), ("verdict".into(), json!("pass"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: Some("root-answer".into()),
+    }).unwrap();
+    let (source, _) = supersede_and_damage(&store, &source);
+    let index = store.index().unwrap();
+    let preview = store.mission_continuity_preview(&source.subject).unwrap();
+    assert_eq!(store.index().unwrap(), index);
+    let root = &preview["original_root_gates"][0];
+    assert_eq!(root["kind"], "run-human-gate");
+    assert_eq!(root["evidence_id"], request.id);
+    assert_eq!(root["answer"]["id"], answer.id);
+    assert_eq!(root["eligibility"], "requires-person-confirmation");
+    let result = store.recover_mission_continuity(&source.subject,
+        preview["preview_hash"].as_str().unwrap(), "person/operator", &[request.id.clone()]).unwrap();
+    let recovered = result["recovered_run"].as_str().unwrap();
+    let references = store.claims_for(recovered, Some("mission-run.gate-carried")).unwrap();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].body["fields"]["source_request"], request.id);
+    assert_eq!(references[0].body["fields"]["source_answer"], answer.id);
+    assert!(store.claims_for(recovered, Some("gate.result")).unwrap().is_empty());
 }

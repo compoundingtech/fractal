@@ -13,7 +13,7 @@ pub struct RecoverRequest {
     run: String,
     preview_hash: String,
     #[serde(default)]
-    confirmed_legacy_steps: Vec<String>,
+    confirmed_legacy_evidence: Vec<String>,
 }
 
 pub async fn preview(
@@ -46,7 +46,7 @@ pub async fn recover(
     // request body nor an agent's person-shaped header can authenticate a person.
     let actor = principal.as_ref().map_or(session.authority_actor.as_str(), |principal| principal.0.actor()).to_owned();
     if !(actor.starts_with("person/") || actor.starts_with("agent/") || actor.starts_with("mission-run/"))
-        || (!request.confirmed_legacy_steps.is_empty()
+        || (!request.confirmed_legacy_evidence.is_empty()
             && (session.local_peer || session.assistant_write.is_some()
                 || !actor.starts_with("person/") || actor != session.authority_actor))
     {
@@ -54,7 +54,7 @@ pub async fn recover(
     }
     let store = state.store.clone();
     let result = blocking_action(move || store.recover_mission_continuity(
-        &request.run, &request.preview_hash, &actor, &request.confirmed_legacy_steps,
+        &request.run, &request.preview_hash, &actor, &request.confirmed_legacy_evidence,
     )).await?;
     signal_changed(&state);
     Ok(Json(result))
@@ -87,7 +87,7 @@ mod tests {
             (Some("agent/helper"), json!(["approval"]), StatusCode::FORBIDDEN),
         ] {
             let (status, _) = post(router(state.clone()), path, person, json!({
-                "run":"absent", "preview_hash":"stale", "confirmed_legacy_steps":confirmations,
+                "run":"absent", "preview_hash":"stale", "confirmed_legacy_evidence":confirmations,
             })).await;
             assert_eq!(status, expected);
         }
@@ -126,7 +126,7 @@ mod tests {
             .header("x-st3-person", "person/operator")
             .extension(BoundAgent("agent/helper".into()))
             .body(Body::from(json!({"run":"absent", "preview_hash":"stale",
-                "confirmed_legacy_steps":["approval"]}).to_string())).unwrap()).await.unwrap();
+                "confirmed_legacy_evidence":["approval"]}).to_string())).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(state.store.index().unwrap(), before);
     }

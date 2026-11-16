@@ -7,7 +7,10 @@ pub use fractal_delivery::store::person_work::*;
 pub use fractal_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod revision_provenance_tests;
-mod continuity;
+pub use fractal_store::store::person_work::continuity;
+#[cfg(test)]
+#[path = "person_work/continuity/tests.rs"]
+mod continuity_tests;
 pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
 /// A person may replace a deadline resolution for seven days after it was recorded.
@@ -751,6 +754,11 @@ impl PersonWorkStore for Store {
             let evidence = ask.as_ref().map(|a| vec![a.id.clone()]).unwrap_or_default();
             let mut body = json!({"fields": {"attempt": view.attempt, "status": if cancel { "cancelled" } else { "completed" },
                 "summary": summary, "key": input.idempotency_key, "episode": ask.as_ref().map(|a| a.id.clone()).unwrap_or_else(|| format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch))}, "evidence": input.evidence});
+            if ask.is_none() && !cancel && !super::adhoc_work::is_adhoc(tx, &view.run).map_err(internal)? {
+                body["fields"]["continuity"] = serde_json::to_value(
+                    continuity::direct_person_binding_tx(tx, &view, response_actor).map_err(internal)?
+                ).map_err(internal)?;
+            }
             if let Some(answer) = &answer {
                 body["fields"]["answer"] = answer.clone();
             }

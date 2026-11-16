@@ -162,7 +162,7 @@ fractal missions retry mission-run/garden/readme/one \
 
 Inspect the returned run with `fractal missions show`. Its `retry_of` and the source's `retried_by` retain both executions. Retry leaves source history unchanged and carries matching completed work by reference. Changed step/dependency contracts, resolved inputs, authority, effects, or withdrawn answers refuse adoption.
 
-Inputs retain their exact resolution. A schedule or subscription run resolves workspace from its current launching declaration; explicit and historical unbound workspaces stay explicit. Incompatible inputs refuse with both revisions and the reason. Unfinished work restarts, so external effects must still be idempotent. For an already-superseded source use `fractal missions run continuity preview RUN`, then `recover RUN --preview-hash HASH --as ACTOR`; named legacy unbound steps require explicit person confirmation with `--confirm-legacy-step STEP`. Preview writes nothing and stale recovery snapshots refuse.
+Inputs retain their exact resolution. A schedule or subscription run resolves workspace from its current launching declaration; explicit and historical unbound workspaces stay explicit. Incompatible inputs refuse with both revisions and the reason. Unfinished work restarts, so external effects must still be idempotent. For an already-superseded source use `fractal missions run continuity preview RUN`, then `recover RUN --preview-hash HASH --as ACTOR`; historical unbound step or run-level gate evidence requires authentic person confirmation with `--confirm-legacy-evidence EVIDENCE`. Preview writes nothing and stale recovery snapshots refuse.
 
 ## Queue follow-on work
 

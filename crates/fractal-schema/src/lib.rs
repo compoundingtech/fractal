@@ -1897,6 +1897,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "mission-run.gate-carried",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
             "mission-run.state",
             &["mission-run"],
             WritePolicy::SystemOnly,
@@ -3602,6 +3611,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("replacement", required_reference_to(&["mission-run"])),
             ("publication", required_string()),
         ],
+        "mission-run.gate-carried" => &[
+            ("source_run", required_reference_to(&["mission-run"])),
+            ("source_request", required_string()),
+            ("source_answer", required_string()),
+            ("target_generation", required_reference_to(&["run-generation"])),
+            ("continuity", required_object()),
+            ("legacy_confirmed", boolean()),
+        ],
         "mission-run.state" => &[
             ("status", string()),
             ("phase", string()),
@@ -3684,6 +3701,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source_step_run", reference()),
             ("source_generation", reference()),
             ("source_attempt", integer()),
+            ("source_gate_request", string()),
             ("definition_hash", string()),
             ("status", string()),
             ("attempt", integer()),
@@ -3729,6 +3747,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("priority", enumeration(availability::PRIORITIES)),
         ],
         "work.person-done" | "work.person-cancelled" => &[
+            ("continuity", object()),
             ("attempt", integer()),
             ("status", string()),
             ("summary", string()),
@@ -3791,6 +3810,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("waits", array()),
         ],
         "gate.requested" => &[
+            ("continuity", object()),
             ("status", string()),
             ("owner", reference()),
             ("reviewer", reference()),
