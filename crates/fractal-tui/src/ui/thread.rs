@@ -539,8 +539,10 @@ pub fn panel(
             theme::SAPPHIRE,
         ));
     }
-    // Mark read also clears an active reminder, even once the natural history is read.
-    if (unread || reminder) && state.can_mark_read {
+    // Mark read also clears an active reminder, even once the natural history is read. It stays
+    // offered while a pending or refused seek withholds the body: the host clears the observed
+    // reminder without needing drawn history, and never marks unseen messages read.
+    if (summary.unread || state.has_reminder) && state.can_mark_read {
         actions.push((
             keycap("v", "alt+v"),
             "Mark read",
@@ -1141,7 +1143,11 @@ mod tests {
         assert!(!lines.iter().any(|line| line.contains("Atlas Builder")), "{lines:?}");
         assert!(!lines.iter().any(|line| line == "No messages yet."), "{lines:?}");
         assert!(doc.messages.is_empty() && doc.entries.is_empty());
-        assert!(mark_taps(&doc).is_empty(), "nothing visible to mark");
+        assert_eq!(
+            mark_taps(&doc),
+            [Tap::MarkVisibleRead("thread/1".into())],
+            "Mark read clears the observed reminder; Mark unread needs drawn history"
+        );
 
         let (_, lines) = client_lines(
             &summary,
@@ -1213,6 +1219,71 @@ mod tests {
         assert!(!lines.iter().any(|line| line.contains("message/9")), "{lines:?}");
         assert!(!lines.iter().any(|line| line == "No messages yet."), "{lines:?}");
         assert!(doc.messages.is_empty() && doc.entries.is_empty());
-        assert!(mark_taps(&doc).is_empty(), "nothing visible to mark");
+        assert_eq!(
+            mark_taps(&doc),
+            [Tap::MarkVisibleRead("thread/1".into())],
+            "Mark read clears the observed reminder; Mark unread needs drawn history"
+        );
+    }
+
+    #[test]
+    fn withheld_body_still_offers_mark_read_for_a_reminder_only_thread() {
+        // History is already read; only the reminder makes the thread markable.
+        let summary = client_summary(false, &[("operation/7", "message/9")]);
+        let pending = anchor("message/9", "pending");
+        let events = client_events();
+        let seek = |refused: bool, can_mark_read: bool| State {
+            anchor: (!refused).then_some(&pending),
+            seek_refused: refused,
+            can_mark_read,
+            ..markable()
+        };
+        for refused in [false, true] {
+            for body in [&events[..], &[][..]] {
+                let render = |state: &State<'_>| {
+                    client_panel(
+                        &summary,
+                        body,
+                        state,
+                        "person/operator",
+                        |id| (id == "agent/atlas").then(|| "Atlas Builder".to_owned()),
+                        "1970-01-01T00:04:00Z",
+                        120,
+                    )
+                    .unwrap()
+                };
+                let doc = render(&seek(refused, true));
+                let lines: Vec<_> = doc.lines.iter().map(Line::to_string).collect();
+                assert_eq!(
+                    lines[0], "▾ Worker test · 1 message",
+                    "a withheld body lights neither badge nor reminder marker"
+                );
+                assert!(!lines.iter().any(|line| line.contains("CI passed.")), "{lines:?}");
+                assert!(doc.messages.is_empty() && doc.entries.is_empty());
+                assert_eq!(
+                    mark_taps(&doc),
+                    [Tap::MarkVisibleRead("thread/1".into())],
+                    "{lines:?}"
+                );
+                let mark_read = doc
+                    .targets
+                    .iter()
+                    .find(|target| target.hit == Tap::MarkVisibleRead("thread/1".into()))
+                    .unwrap();
+                assert!(lines[mark_read.line].contains("Mark read"), "{lines:?}");
+                assert!(!lines.iter().any(|line| line.contains("Mark unread")), "{lines:?}");
+
+                let read_only = render(&seek(refused, false));
+                assert!(mark_taps(&read_only).is_empty(), "read-only hosts never mark read");
+            }
+        }
+        let (doc, _) = client_lines(
+            &client_summary(false, &[]),
+            &State {
+                seek_refused: true,
+                ..markable()
+            },
+        );
+        assert!(mark_taps(&doc).is_empty(), "nothing unread and no reminder to clear");
     }
 }

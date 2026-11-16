@@ -41,13 +41,18 @@ thread mutations are enabled or sent. The writable composer, reply and
 lifecycle controls are deliberately not demonstrated: those require the live
 client's mutation receipt driver. Closed history remains readable.
 
-Live threads mark incoming replies read only after meaningful message content stays visible for
-500 ms in the active pane of a focused terminal: at least two full-width body lines, including
-the trailing body. Scrolling past, hovering a list, cached history and background tabs do not
-count. **Mark read** (`v`, or `alt+v` where letters type) explicitly reads visible replies.
+Live threads mark incoming replies read only after meaningful message content stays unchanged
+for 500 ms in the active pane of a terminal confirmed focused by a foreground signal. The final
+two nonblank body lines (or the only line of a one-line body) must be fully visible across their
+width. Content, scroll or layout changes restart the dwell; unknown focus, scrolling past,
+hovering a list, cached history and background tabs do not count. **Mark read** (`v`, or `alt+v`
+where letters type) explicitly clears all currently observed private reminders, including
+offscreen or unavailable anchors; without reminders it reads only visible replies.
 **Mark unread** (`u` / `alt+u`) keeps a private reminder and return anchor without undoing natural
 read history. It stays unread during this visit; on a later visit, each captured reminder clears
 only when its own anchor is viewed. Concurrent marks at other anchors remain.
+The marked-unread list and anchor return require `threads-v1` version 3; older members show
+the existing upgrade-required state without requesting these endpoints.
 Moving a thread between an embedded panel and its tab does not start a new visit. Reminders
 that arrive after an unknown entry stay sticky until a later visit. Both mark actions also
 appear in `Ctrl+K`. Inbox's **Marked unread** section uses a distinct private reminder marker,

@@ -494,7 +494,7 @@ pub(super) struct Threads {
     completion_notice: Option<String>,
     visits: BTreeMap<String, super::unread_visit::Visit>,
     reading_host: Option<String>,
-    read_dwell: BTreeMap<String, BTreeMap<String, std::time::Instant>>,
+    read_dwell: BTreeMap<String, BTreeMap<String, (super::BodyGeometry, std::time::Instant)>>,
     anchor_scroll: std::cell::RefCell<BTreeMap<String, String>>,
     seek_pages: BTreeMap<String, fractal_client::ThreadTimelinePage>,
     seeks: Vec<Seek>,
@@ -1630,7 +1630,8 @@ impl Threads {
                     hit: Hit::Thread(host.into(), thread::Tap::MessageHeader(message.clone())),
                 });
             }
-            doc.append(shell_doc(rendered, host, id), 0);
+            let base = doc.lines.len();
+            doc.append(shell_doc(rendered, host, id, base), 0);
             if open {
                 self.panel_feedback(
                     doc,
@@ -2338,7 +2339,6 @@ impl Threads {
     pub(super) fn can_mark_read(&self, id: &str) -> bool {
         self.access.mark_read
             && !self.has_edit(id)
-            && !self.seek_pending.contains_key(id) && !self.seek_refused.contains(id)
             && self
                 .summary(id)
                 .is_some_and(|summary| summary.unread == Some(true)
@@ -2407,7 +2407,7 @@ impl Threads {
     }
 
     /// Only the successfully presented, active foreground mount supplies this evidence.
-    pub(super) fn presented(&mut self, host: &str, shown: &BTreeMap<String, HashSet<String>>, now: std::time::Instant) {
+    pub(super) fn presented(&mut self, host: &str, shown: &BTreeMap<String, BTreeMap<String, super::BodyGeometry>>, now: std::time::Instant) {
         if self.reading_host.as_deref() != Some(host) {
             self.stop_reading();
             self.reading_host = Some(host.into());
@@ -2426,18 +2426,27 @@ impl Threads {
                 visit.begin(id, reminder);
                 let anchor = reminder.map(|reminder| reminder.anchor_message_id.clone());
                 self.visits.insert(id.clone(), visit);
-                if let Some(anchor) = anchor && !visible.contains(&anchor) {
+                if let Some(anchor) = anchor && !visible.contains_key(&anchor) {
                     let key = uuid::Uuid::now_v7().to_string();
                     self.seek_pending.insert(id.clone(), key.clone());
                     self.seeks.push(Seek { id: id.clone(), anchor, key });
                 }
             }
             let dwell = self.read_dwell.entry(id.clone()).or_default();
-            dwell.retain(|message, _| visible.contains(message));
-            let stable: HashSet<_> = visible.iter().filter(|message| {
-                let since = dwell.entry((*message).clone()).or_insert(now);
-                now.saturating_duration_since(*since) >= std::time::Duration::from_millis(500)
-            }).cloned().collect();
+            dwell.retain(|message, _| visible.contains_key(message));
+            let stable: HashSet<_> = visible.iter().filter_map(|(message, geometry)| {
+                if let Some((previous, since)) = dwell.get_mut(message) {
+                    if previous != geometry {
+                        *previous = *geometry;
+                        *since = now;
+                    }
+                    (now.saturating_duration_since(*since) >= std::time::Duration::from_millis(500))
+                        .then(|| message.clone())
+                } else {
+                    dwell.insert(message.clone(), (*geometry, now));
+                    None
+                }
+            }).collect();
             if self.seek_pending.contains_key(id) || self.seek_refused.contains(id) || self.has_edit(id) { continue; }
             if self.read_natural(host, id.clone(), &stable) { continue; }
             if !self.access.mark_read { continue; }
@@ -2496,7 +2505,6 @@ impl Threads {
         if !self.can_mark_read(&id) { return false; }
         let captured: Vec<_> = self.summary(&id).and_then(|summary| summary.unread_reminder.as_ref())
             .into_iter().flat_map(|reminder| &reminder.marks)
-            .filter(|mark| visible.contains(&mark.anchor_message_id))
             .map(|mark| mark.mark_id.clone()).collect();
         if !captured.is_empty() {
             return self.queue_reading(host, &id, Mutation::ClearUnread(ThreadClearUnreadParameters {
@@ -2785,7 +2793,7 @@ fn metadata_fence(observed: &Envelope<ThreadSummary>) -> Fence {
     }
 }
 
-fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
+fn shell_doc(doc: thread::Doc, host: &str, thread: &str, base: usize) -> Doc {
     let mut targets: Vec<_> = doc
         .targets
         .into_iter()
@@ -2797,24 +2805,35 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
         })
         .collect();
     for (message, body) in doc.messages {
-        let trailing = body.clone().rev().find(|line| {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for line in body.clone() {
+            for span in &doc.lines[line].spans {
+                hash.update(span.content.as_bytes());
+            }
+            hash.update(b"\n");
+        }
+        let digest: [u8; 32] = hash.finalize().into();
+        let nonblank = body.clone().filter(|line| {
             doc.lines[*line].spans.iter().any(|span| !span.content.trim().is_empty())
         });
-        for line in body {
-            let width = doc.lines[line].width() as u16;
-            if width > 0 && doc.lines[line].spans.iter().any(|span| !span.content.trim().is_empty()) {
-                targets.push(super::doc::Target {
-                    line,
-                    column: 0,
-                    width,
-                    hit: Hit::ThreadBody {
-                        host: host.into(),
-                        thread: thread.into(),
-                        message: message.clone(),
-                        trailing: trailing == Some(line),
-                    },
-                });
-            }
+        let body_rows = nonblank.clone().count();
+        for (body_row, line) in nonblank.enumerate() {
+            targets.push(super::doc::Target {
+                line,
+                column: 0,
+                width: doc.lines[line].width() as u16,
+                hit: Hit::ThreadBody {
+                    host: host.into(),
+                    thread: thread.into(),
+                    message: message.clone(),
+                    body_row,
+                    body_rows,
+                    body_start: base + body.start,
+                    body_end: base + body.end,
+                    digest,
+                },
+            });
         }
     }
     Doc {

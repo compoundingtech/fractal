@@ -1417,8 +1417,8 @@ impl Ui {
         };
         if let Some(target) = self.glasses.palette.as_ref().and_then(|palette| palette.thread_reading.as_ref()) {
             for (unread, allowed, label, detail) in [
-                (false, self.threads.can_mark_read(&target.id), "Mark read", "mark visible thread replies read"),
-                (true, self.threads.can_mark_unread(&target.id), "Mark unread", "private reminder at a visible thread message"),
+                (false, self.threads.can_mark_read(&target.id), "Mark read", "clear private reminders or mark visible thread replies read"),
+                (true, !target.visible.is_empty() && self.threads.can_mark_unread(&target.id), "Mark unread", "private reminder at a visible thread message"),
             ] {
                 if allowed {
                     choices.push(start(label.into(), detail, format!("{label} thread reminder"),
@@ -3720,12 +3720,12 @@ impl Ui {
     }
 
     pub(crate) fn open_palette(&mut self, section: Option<usize>, enter: Open) {
-        let thread_reading = self.terminal_foreground.then(|| self.focused_pane()).flatten()
+        let thread_reading = self.focused_pane()
             .and_then(|pane| {
                 let id = self.threads.reading_target(&pane)?;
                 let host = pane.key();
                 let visible = self.frame.borrow().visible_thread_messages(&host, &id);
-                (!visible.is_empty()).then_some(ThreadReading { host, id, visible })
+                Some(ThreadReading { host, id, visible })
             });
         self.glasses.palette = Some(Palette {
             section,

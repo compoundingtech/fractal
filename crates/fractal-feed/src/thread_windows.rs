@@ -303,7 +303,7 @@ mod socket_budget_tests {
                     caps["api_version"] = json!(fractal_client::API_VERSION);
                     caps["value"]["capabilities"] = json!([
                         {"id":"collections","version":1,"state":"granted"},
-                        {"id":"threads-v1","version":2,"state":"granted"},
+                        {"id":"threads-v1","version":3,"state":"granted"},
                         {"id":"thread-summary-feed","version":1,"state":"granted"},
                         {"id":"inventory-collections","version":1,"state":"granted"},
                         {"id":"summary","version":1,"state":"granted"},

@@ -17,6 +17,7 @@ fn event(id: &str, content: &str) -> ThreadTimelineEvent {
 
 fn fixture(unread: bool, marks: &[(&str, &str)]) -> Ui {
     let mut ui = Ui::new(super::super::demo::test_world());
+    ui.input_event(Event::FocusGained);
     ui.open_in_glass(Pane::Thread(ID.into()), Open::Tab);
     ui.threads.enable(true);
     ui.threads.set_access(ThreadAccess { mark_read: true, ..ThreadAccess::default() });
@@ -198,7 +199,7 @@ fn unread_auto_read_requires_500ms_and_scroll_past_resets_the_clock() {
     present_at(&mut ui, now + std::time::Duration::from_millis(499));
     assert!(ui.threads.writes().is_empty());
     // No qualifying body at this presentation breaks continuous visibility.
-    ui.threads.presented(HOST, &[(ID.into(), HashSet::new())].into(),
+    ui.threads.presented(HOST, &[(ID.into(), BTreeMap::new())].into(),
         now + std::time::Duration::from_millis(499));
     present_at(&mut ui, now + std::time::Duration::from_millis(500));
     assert!(ui.threads.writes().is_empty());
@@ -214,7 +215,7 @@ fn unread_unknown_entry_and_placement_changes_do_not_recapture_marks() {
     let mut ui = fixture(false, &[(mark.as_str(), "message/visible")]);
     let summary = ui.threads.summaries.remove(ID).unwrap();
     let now = std::time::Instant::now();
-    let shown = [(ID.into(), ["message/visible".into()].into())].into();
+    let shown = [(ID.into(), [("message/visible".into(), super::super::BodyGeometry::default())].into())].into();
     ui.threads.presented("home:attention/item", &shown, now);
     ui.threads.put_summary(summary);
     ui.threads.presented("chat:agent/example/atlas/builder", &shown, now);
@@ -283,7 +284,7 @@ fn unread_stable_reading_rule_is_shared_by_all_thread_placements() {
     for host in [HOST, "home:attention/item", "chat:agent/example/atlas/builder", "mission:mission/test"] {
         let mut ui = fixture(true, &[]);
         let now = std::time::Instant::now();
-        let shown = [(ID.into(), ["message/visible".into()].into())].into();
+        let shown = [(ID.into(), [("message/visible".into(), super::super::BodyGeometry::default())].into())].into();
         ui.threads.presented(host, &shown, now);
         assert!(ui.threads.writes().is_empty(), "{host}: initial frame is not a read");
         ui.threads.presented(host, &shown, now + std::time::Duration::from_millis(499));
@@ -293,4 +294,153 @@ fn unread_stable_reading_rule_is_shared_by_all_thread_placements() {
         let Mutation::MarkRead(read) = write.mutation else { panic!("expected natural read") };
         assert_eq!(read.seen_message_ids, ["message/visible"]);
     }
+}
+
+#[test]
+fn unread_unknown_foreground_never_automatically_consumes_content() {
+    let mut ui = fixture(true, &[]);
+    ui.terminal_foreground = None;
+    present(&mut ui);
+    assert!(ui.threads.writes().is_empty());
+    ui.input_event(Event::FocusGained);
+    present(&mut ui);
+    assert_eq!(ui.threads.writes().len(), 1);
+}
+
+#[test]
+fn unread_fully_visible_single_line_qualifies_after_the_dwell() {
+    let mut ui = fixture(true, &[]);
+    ui.threads.histories.get_mut(ID).unwrap().head =
+        vec![event("message/visible", "One meaningful line")];
+    present(&mut ui);
+    assert_eq!(ui.threads.writes().len(), 1);
+}
+
+#[test]
+fn unread_body_change_with_same_message_id_restarts_the_dwell() {
+    let mut ui = fixture(true, &[]);
+    let now = std::time::Instant::now();
+    present_at(&mut ui, now);
+    ui.threads.histories.get_mut(ID).unwrap().head =
+        vec![event("message/visible", "Changed content\n\nSecond meaningful line")];
+    present_at(&mut ui, now + std::time::Duration::from_millis(499));
+    present_at(&mut ui, now + std::time::Duration::from_millis(500));
+    assert!(ui.threads.writes().is_empty());
+    present_at(&mut ui, now + std::time::Duration::from_millis(999));
+    assert_eq!(ui.threads.writes().len(), 1);
+}
+
+#[test]
+fn unread_explicit_read_clears_all_observed_marks_without_reading_unseen_history() {
+    for refused in [false, true] {
+        let one = smallclaims::store::operation_id_for_key("unread/explicit-one");
+        let two = smallclaims::store::operation_id_for_key("unread/explicit-two");
+        let mut ui = fixture(true, &[
+            (one.as_str(), "message/offscreen-one"),
+            (two.as_str(), "message/offscreen-two"),
+        ]);
+        if refused {
+            ui.threads.seek_refused.insert(ID.into());
+        } else {
+            ui.threads.seek_pending.insert(ID.into(), "seek/pending".into());
+        }
+        assert!(ui.threads.mark_visible_read(HOST, ID.into(), &HashSet::new()));
+        let writes = ui.threads.writes();
+        assert_eq!(writes.len(), 1);
+        let Mutation::ClearUnread(clear) = &writes[0].mutation else {
+            panic!("explicit clear must not mark unseen history read")
+        };
+        assert_eq!(clear.observed_marks, [one, two]);
+    }
+}
+
+#[test]
+fn unread_geometry_change_with_same_message_id_restarts_the_dwell() {
+    let mut ui = fixture(true, &[]);
+    let now = std::time::Instant::now();
+    let mut proof = super::super::BodyGeometry::default();
+    let shown = |proof| [(ID.into(), [("message/visible".into(), proof)].into())].into();
+    ui.threads.presented(HOST, &shown(proof), now);
+    proof.scroll_top = 1;
+    ui.threads.presented(HOST, &shown(proof), now + std::time::Duration::from_millis(499));
+    ui.threads.presented(HOST, &shown(proof), now + std::time::Duration::from_millis(500));
+    assert!(ui.threads.writes().is_empty());
+    ui.threads.presented(HOST, &shown(proof), now + std::time::Duration::from_millis(999));
+    assert_eq!(ui.threads.writes().len(), 1);
+}
+
+#[tokio::test]
+async fn unread_v2_peer_requires_upgrade_without_querying_new_thread_endpoints() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let queries = Arc::new(AtomicUsize::new(0));
+    let observed = queries.clone();
+    let app = axum::Router::new()
+        .route("/v1/client/capabilities", axum::routing::get(|| async {
+            let mut caps: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../../../docs/st3/client-v0/fixtures/capabilities.json"
+            )).unwrap();
+            caps["api_version"] = serde_json::json!(fractal_client::API_VERSION);
+            caps["value"]["capabilities"] = serde_json::json!([
+                {"id":"collections","version":1,"state":"granted"},
+                {"id":"threads-v1","version":2,"state":"granted"},
+                {"id":"thread-summary-feed","version":1,"state":"granted"}
+            ]);
+            axum::Json(caps)
+        }))
+        .fallback(move |uri: axum::http::Uri| {
+            let observed = observed.clone();
+            async move {
+                if uri.path().starts_with("/v1/client/threads") {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+                axum::http::StatusCode::NOT_FOUND
+            }
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = fractal_client::Client::fabric_loopback(
+        format!("http://{}", listener.local_addr().unwrap()), "controlled-transport-receiver");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let (updates, received) = std::sync::mpsc::channel();
+    let (_commands, requests) = tokio::sync::mpsc::unbounded_channel();
+    let feed = tokio::spawn(fractal_feed::run_members_with_sidebar(
+        vec![client], false, true, true, Some("person/fixture".into()), updates, requests));
+    let (available, access, upgrade_required) = tokio::task::spawn_blocking(move || {
+        loop {
+            match received.recv_timeout(std::time::Duration::from_secs(5)).unwrap() {
+                fractal_feed::Update::ThreadSupport { available, access, upgrade_required } =>
+                    break (available, access, upgrade_required),
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    assert!(!available);
+    assert!(upgrade_required);
+    let mut ui = fixture(false, &[]);
+    ui.threads.enable(available);
+    ui.threads.set_access(access);
+    assert!(ui.threads.marked_due(&Pane::Home(None)).is_none());
+    present(&mut ui);
+    assert!(ui.threads.seeks.is_empty());
+    assert_eq!(queries.load(Ordering::SeqCst), 0);
+    feed.abort();
+    server.abort();
+}
+
+#[test]
+fn unread_action_menu_keeps_explicit_clear_available_with_no_visible_body() {
+    let mark = smallclaims::store::operation_id_for_key("unread/menu-offscreen");
+    let mut ui = fixture(false, &[(mark.as_str(), "message/offscreen")]);
+    ui.threads.seek_refused.insert(ID.into());
+    // No automatic foreground signal and no drawn body are needed for an explicit clear.
+    ui.terminal_foreground = None;
+    present(&mut ui);
+    ui.open_palette(None, Open::Here);
+    ui.paste("Mark read".into());
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let writes = ui.threads.writes();
+    assert_eq!(writes.len(), 1);
+    let Mutation::ClearUnread(clear) = &writes[0].mutation else {
+        panic!("menu must clear the reminder, not unseen history")
+    };
+    assert_eq!(clear.observed_marks, [mark]);
 }
