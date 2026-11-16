@@ -9,6 +9,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -22,7 +23,7 @@ const actor = 'person/operator'
 const original = 'agent/build-host-a/worker-tests'
 const fallback = 'agent/build-host-b/release-desk'
 const sourceId = 'step-run/start-recipient/review'
-const episode = 'claim/start-recipient/review'
+const episode = Native.decodeUnknownSync(Native.Revision)('claim/start-recipient/review')
 const existingId = 'thread/release-checklist'
 
 type Scenario = 'original' | 'fallback' | 'mismatch' | 'unconfigured' | 'offline' | 'existing-reply'
@@ -113,7 +114,7 @@ const StartRecipientStory = ({ scheme, viewport, scenario }: Args) => {
       <DataSourceProvider source={fixture.source} registry={fixture.registry}>
         <div data-start-recipient-scene={scenario} {...stylex.props(styles.pane)}>
           <h2 {...stylex.props(styles.title)}>{fixture.alert.title}</h2>
-          <p {...stylex.props(styles.detail)}>{fixture.alert.detail}</p>
+          <div {...stylex.props(styles.detail)}><Markdown text={fixture.alert.detail} /></div>
           <LiveInboxThreads alert={fixture.alert} />
         </div>
       </DataSourceProvider>
@@ -145,6 +146,7 @@ type Story = StoryObj<Args>
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
   'ExistingReply:contract-fixture',
   'Fallback:contract-fixture',
   'FallbackLight:contract-fixture',
@@ -233,6 +235,16 @@ export const ExistingReply: Story = {
     await expect(panel.querySelector('[data-start-recipient]')).toBeNull()
     await expect(panel.textContent).toContain('Rollback steps still need a second look.')
   },
+}
+
+/** Compare every first-send contract and the unchanged existing reply in one gallery. */
+export const AllStates: Story = {
+  render: args => <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+    {scenarios.map(scenario => <section key={scenario} aria-label={scenario}>
+      <h2>{scenario}</h2>
+      <StartRecipientStory {...args} scenario={scenario} viewport={390} />
+    </section>)}
+  </div>,
 }
 
 const styles = stylex.create({
