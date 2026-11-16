@@ -45,6 +45,32 @@ test('thread read accepts only receipts for the exact action and a subset of vis
   await assert.rejects(confirm(async () => result({ ...value, affected_ids: [messageId], action_id: 'action/other' })), outcomeUnknown);
 });
 
+test('unread mark and clear require completed receipts for the exact action and thread', async () => {
+  for (const action of ['mark-unread', 'clear-unread']) {
+    const actionId = `action/${action}`;
+    const receipt = { ...value, action_id: actionId, affected_ids: [targetId] };
+    for (const stage of ['terminal', 'transport']) {
+      const confirm = actionReceiptCheck({ kind: 'unread', actionId, targetId }, stage);
+      const confirmed = await confirm(async () => result(receipt));
+      assert.equal(confirmed.value, receipt);
+      // Receipt operation IDs confirm the action; no mark ID is inferred from them.
+      assert.equal(confirmed.value.operation_id, 'operation/one');
+      for (const payload of [
+        null,
+        { ...receipt, status: 'accepted' },
+        { ...receipt, action_id: 'action/other' },
+        { ...receipt, operation_id: '' },
+        { ...receipt, snapshot_id: '' },
+        { ...receipt, affected_ids: [] },
+        { ...receipt, affected_ids: ['thread/other'] },
+        { ...receipt, affected_ids: [targetId, messageId] },
+      ]) {
+        await assert.rejects(confirm(async () => result(payload)), outcomeUnknown);
+      }
+    }
+  }
+});
+
 test('an ambiguous reply keeps the signed action and key until its matching receipt arrives', async () => {
   const received = [];
   const sdk = new FractalClient({
