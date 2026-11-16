@@ -84,7 +84,7 @@ fn bursts_wait_in_the_order_they_asked_and_one_that_can_never_fit_is_refused() {
     reconciler.reconcile_lane_bursts().unwrap();
     let wait = |subject: &str| status.state().lane_bursts.iter().find(|burst| burst.subject == subject).unwrap().clone();
     assert_eq!(wait("agent/node.first").wait.as_deref(), Some(
-        "burst lane 2 cores/24.0G for agent/node.first does not fit: 4.0G free of the 54.0G this host gives lanes (other lanes hold 48.0G, seats outside lanes 2.0G)"));
+        "burst lane 2 cores/24.0G for agent/node.first does not fit: 4.0G free of the 54.0G this host gives lanes (other lanes hold 48.0G, host outside lanes 2.0G)"));
     assert_eq!(wait("agent/node.second").wait.as_deref(), Some(
         "burst lane 2 cores/6.0G for agent/node.second waits behind agent/node.first, first in line for room"));
     assert_eq!(wait("agent/node.huge").refused.as_deref(), Some(

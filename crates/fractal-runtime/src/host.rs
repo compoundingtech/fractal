@@ -10,36 +10,60 @@ pub fn size() -> Option<Capacity> {
     Some(Capacity { cores, memory: installed_memory_bytes()? })
 }
 
-/// What the seats outside lanes hold that the kernel cannot take back: the anonymous and kernel
-/// memory (`memory.stat`) of the outermost seat scopes below the user manager's cgroup.
-/// Hierarchical counters already include nested scopes. Page cache is left out, since it is
-/// reclaimed under pressure. `app-lanes.slice` is excluded: its seats count at their declared size
-/// instead. `None` where there is no cgroup tree to read.
-pub fn unlaned_seat_memory() -> Option<u64> {
-    Some(scopes_memory(&crate::lane::user_manager_cgroup()?))
+/// Host memory unavailable to lanes, excluding reclaimable ZFS ARC and live lane usage.
+/// `app-lanes.slice` has hierarchical counters for both finite members and laned seats: read it
+/// once, never add its children again. Admission charges their declared capacities separately.
+/// An absent ARC or lane slice contributes zero; unreadable or malformed host data returns `None`.
+pub fn outside_lane_memory() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let arcstats = optional_stat(std::path::Path::new("/proc/spl/kstat/zfs/arcstats"))?;
+    let lane_stat = optional_stat(
+        &crate::lane::app_slice_cgroup()?.join(crate::lane::LANES_SLICE).join("memory.stat"),
+    )?;
+    outside_memory(&meminfo, arcstats.as_deref(), lane_stat.as_deref())
 }
 
-fn scopes_memory(cgroup: &std::path::Path) -> u64 {
-    std::fs::read_dir(cgroup)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name == crate::lane::LANES_SLICE {
-                0
-            } else if name.starts_with("st3-") && name.ends_with(".scope") {
-                // memory.stat includes descendants: never charge a nested seat again.
-                std::fs::read_to_string(entry.path().join("memory.stat"))
-                    .map(|stat| unreclaimable(&stat))
-                    .unwrap_or(0)
-            } else {
-                scopes_memory(&entry.path())
-            }
-        })
-        .sum()
+fn optional_stat(path: &std::path::Path) -> Option<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(stat) => Some(Some(stat)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
+    }
+}
+
+/// Parse one host observation. Optional ARC and hierarchical lane counters are absent on hosts
+/// without ZFS or live lanes; required malformed host counters make the observation unavailable.
+pub fn outside_memory(meminfo: &str, arcstats: Option<&str>, lane_stat: Option<&str>) -> Option<u64> {
+    let total = meminfo_bytes(meminfo, "MemTotal:")?;
+    let available = meminfo_bytes(meminfo, "MemAvailable:")?;
+    let reclaimable = match arcstats {
+        Some(stat) => arc_reclaimable(stat)?,
+        None => 0,
+    };
+    let lane_memory = lane_stat.map_or(0, unreclaimable);
+    Some(total.saturating_sub(available).saturating_sub(reclaimable).saturating_sub(lane_memory))
+}
+
+/// ARC's `size` and `c_min` are bytes, unlike `/proc/meminfo`'s KiB fields.
+fn arc_reclaimable(stat: &str) -> Option<u64> {
+    let mut size = None;
+    let mut minimum = None;
+    for line in stat.lines() {
+        let mut fields = line.split_whitespace();
+        let field = match fields.next() {
+            Some("size") => &mut size,
+            Some("c_min") => &mut minimum,
+            _ => continue,
+        };
+        if fields.next()? != "4" {
+            return None;
+        }
+        *field = Some(fields.next()?.parse::<u64>().ok()?);
+        if fields.next().is_some() {
+            return None;
+        }
+    }
+    Some(size?.saturating_sub(minimum?))
 }
 
 /// `anon` plus `kernel` from a cgroup's `memory.stat`.
@@ -62,23 +86,22 @@ pub fn for_lanes(size: Capacity) -> Capacity {
 
 #[cfg(target_os = "linux")]
 pub fn installed_memory_bytes() -> Option<u64> {
-    meminfo_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?)
+    meminfo_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemTotal:")
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn meminfo_bytes(meminfo: &str) -> Option<u64> {
+fn meminfo_bytes(meminfo: &str, key: &str) -> Option<u64> {
     let mut fields = meminfo
         .lines()
-        .find(|line| line.starts_with("MemTotal:"))?
+        .find(|line| line.split_whitespace().next() == Some(key))?
         .split_whitespace();
-    if fields.next()? != "MemTotal:" {
+    if fields.next()? != key {
         return None;
     }
     let kib: u64 = fields.next()?.parse().ok()?;
     if fields.next()? != "kB" || fields.next().is_some() {
         return None;
     }
-    kib.checked_mul(1024).filter(|bytes| *bytes > 0)
+    kib.checked_mul(1024).filter(|bytes| key != "MemTotal:" || *bytes > 0)
 }
 
 #[cfg(target_os = "macos")]
@@ -107,71 +130,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_what_seat_scopes_cannot_give_back_counts() {
-        assert_eq!(unreclaimable("anon 100\nfile 5000\nkernel 20\nkernel_stack 7\nshmem 3\n"), 120);
-        let app = std::env::temp_dir().join(format!("host-scopes-{}", std::process::id()));
-        for (scope, stat) in [
-            ("st3-fleet.worker-run-1-0.scope", "anon 1000\nfile 90000\nkernel 24\n"),
-            ("st3-pty-server-fleet.worker-2.scope", "anon 300\nkernel 0\n"),
-            ("app-git.scope", "anon 777777\n"),
-            ("app-lanes.slice", "anon 888888\n"),
-        ] {
-            std::fs::create_dir_all(app.join(scope)).unwrap();
-            std::fs::write(app.join(scope).join("memory.stat"), stat).unwrap();
-        }
-        assert_eq!(scopes_memory(&app), 1324);
-        std::fs::remove_dir_all(&app).unwrap();
+    fn lane_memory_counts_only_anon_and_kernel_once() {
+        // The parent counter already includes finite member and seat descendants.
+        let parent = "anon 100\nfile 5000\nkernel 20\nkernel_stack 7\nshmem 3\n";
+        assert_eq!(unreclaimable(parent), 120);
+        assert_eq!(
+            outside_memory("MemTotal: 1024 kB\nMemAvailable: 512 kB\n", None, Some(parent)),
+            Some(512 * 1024 - 120)
+        );
     }
 
     #[test]
-    fn nested_scopes_count_once_across_reparenting() {
-        let app = std::env::temp_dir().join(format!("host-nested-scopes-{}", std::process::id()));
-        for (scope, memory) in [
-            ("intermediary.slice/st3-parent.scope", 120),
-            ("intermediary.slice/st3-parent.scope/st3-child.scope", 20),
-            ("intermediary.slice/st3-sibling.scope", 30),
-            ("other.slice/st3-other.scope", 40),
-            ("app-lanes.slice/st3-laned.scope", 9000),
-            ("app-lanes.slice/app-lanes-seat.slice/st3-harness.scope", 8000),
-        ] {
-            let path = app.join(scope);
-            std::fs::create_dir_all(&path).unwrap();
-            std::fs::write(path.join("memory.stat"), format!("anon {memory}\nkernel 0\n")).unwrap();
-        }
-        // Parent includes its child; siblings and seats below intermediary slices count too.
-        assert_eq!(scopes_memory(&app), 190);
-        std::fs::rename(
-            app.join("intermediary.slice/st3-parent.scope/st3-child.scope"),
-            app.join("other.slice/st3-child.scope"),
-        ).unwrap();
-        // After reparenting, the old parent's hierarchical total no longer includes the child.
-        std::fs::write(
-            app.join("intermediary.slice/st3-parent.scope/memory.stat"), "anon 100\nkernel 0\n",
-        ).unwrap();
-        assert_eq!(scopes_memory(&app), 190);
-        std::fs::remove_dir_all(&app).unwrap();
+    fn fictional_host_excludes_available_memory_arc_above_minimum_and_live_lanes() {
+        // Approximately 125 GiB total, 14.6 GiB available, 34.7 GiB ARC and 3.9 GiB c_min.
+        let meminfo = "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n";
+        let arcstats = "13 1 0x01 96 26112 123 456\nname type data\n\
+                        size 4 37258870784\nc_min 4 4187593114\n";
+        let lanes = "anon 7516192768\nfile 90000000000\nkernel 1073741824\n";
+        assert_eq!(arc_reclaimable(arcstats), Some(33_071_277_670));
+        assert_eq!(
+            outside_memory(meminfo, Some(arcstats), Some(lanes)),
+            Some(125 * GIB - 15_309_210 * 1024 - 33_071_277_670 - 8 * GIB)
+        );
     }
 
     #[test]
-    fn app_and_interactive_seats_share_host_memory() {
-        let manager = std::env::temp_dir().join(format!("host-manager-scopes-{}", std::process::id()));
-        // Deployment snapshot shapes and counters, with scope identities anonymized.
-        for (scope, stat) in [
-            ("app.slice/st3-app.scope", "anon 100\nkernel 0\n"),
-            ("interactive.slice/interactive-control.slice/st3-control.scope",
-                "anon 6459392\nfile 12288\nkernel 335872\n"),
-            ("interactive.slice/interactive-seats.slice/st3-seat.scope",
-                "anon 1131495424\nfile 16973824\nkernel 14209024\n"),
-            ("interactive.slice/interactive-seats.slice/st3-other.scope",
-                "anon 436752384\nfile 9162752\nkernel 7929856\n"),
-            ("app.slice/app-lanes.slice/app-lanes-seat.slice/st3-laned.scope", "anon 9000\n"),
+    fn hosts_without_zfs_or_active_lanes_still_account_for_all_other_memory() {
+        let meminfo = "MemTotal: 1024 kB\nMemAvailable: 256 kB\n";
+        assert_eq!(outside_memory(meminfo, None, None), Some(768 * 1024));
+        assert_eq!(outside_memory(meminfo, None, Some("anon 100\nkernel 20\n")), Some(768 * 1024 - 120));
+    }
+
+    #[test]
+    fn arc_below_its_minimum_is_not_reclaimable_and_outside_never_underflows() {
+        let meminfo = "MemTotal: 1024 kB\nMemAvailable: 256 kB\n";
+        let arcstats = "size 4 100\nc_min 4 200\n";
+        assert_eq!(arc_reclaimable(arcstats), Some(0));
+        assert_eq!(outside_memory(meminfo, Some(arcstats), None), Some(768 * 1024));
+        assert_eq!(outside_memory(meminfo, None, Some("anon 1048576\nkernel 1\n")), Some(0));
+        assert_eq!(outside_memory(meminfo, Some("size 4 1048576\nc_min 4 0\n"), None), Some(0));
+        assert_eq!(outside_memory("MemTotal: 1 kB\nMemAvailable: 2 kB\n", None, None), Some(0));
+    }
+
+    #[test]
+    fn missing_or_malformed_required_host_fields_are_not_zero_usage() {
+        for meminfo in [
+            "MemTotal: 1024 kB\n",
+            "MemAvailable: 512 kB\n",
+            "MemTotal: 1024 kB\nMemAvailable: x kB\n",
+            "MemTotal: 1024 kB\nMemAvailable: 512 MB\n",
         ] {
-            let path = manager.join(scope);
-            std::fs::create_dir_all(&path).unwrap();
-            std::fs::write(path.join("memory.stat"), stat).unwrap();
+            assert_eq!(outside_memory(meminfo, None, None), None, "{meminfo}");
         }
-        assert_eq!(scopes_memory(&manager), 1_597_182_052);
-        std::fs::remove_dir_all(&manager).unwrap();
+        for arcstats in [
+            "size 4 100\n",
+            "c_min 4 10\n",
+            "size 4 x\nc_min 4 10\n",
+            "size 4 100\nc_min 4 x\n",
+            "size 3 100\nc_min 4 10\n",
+            "size 4 100 extra\nc_min 4 10\n",
+        ] {
+            assert_eq!(arc_reclaimable(arcstats), None, "{arcstats}");
+        }
+        assert_eq!(outside_memory("MemTotal: 1 kB\nMemAvailable: 0 kB\n", None, None), Some(1024));
     }
 
     #[test]
@@ -188,7 +209,7 @@ mod tests {
     #[test]
     fn parses_installed_memory_without_using_free_memory_or_accepting_bad_units() {
         assert_eq!(
-            meminfo_bytes("MemFree: 5 kB\nMemTotal: 1048576 kB\n"),
+            meminfo_bytes("MemFree: 5 kB\nMemTotal: 1048576 kB\n", "MemTotal:"),
             Some(1 << 30)
         );
         for input in [
@@ -199,7 +220,7 @@ mod tests {
             "MemTotal: 18446744073709551615 kB",
             "MemTotal: 1 kB extra",
         ] {
-            assert_eq!(meminfo_bytes(input), None, "{input}");
+            assert_eq!(meminfo_bytes(input, "MemTotal:"), None, "{input}");
         }
     }
 }
