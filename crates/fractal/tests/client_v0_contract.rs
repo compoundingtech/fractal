@@ -3625,12 +3625,22 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
             .unwrap()
     };
     let app = fractal_daemon::api::router(state.clone());
+    let (_, person_capabilities) =
+        client_json_person(app.clone(), "/v1/client/capabilities", "person/operator").await;
+    let manual_snooze = person_capabilities["value"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|capability| capability["id"] == "attention-snooze-indefinite")
+        .expect("the manual-return capability is advertised");
+    assert_eq!(manual_snooze["state"], "granted");
     for agent in ["agent/example/operator", "agent/example/undeclared"] {
         let (_, capabilities) =
             client_json_person(app.clone(), "/v1/client/capabilities", agent).await;
         for capability in capabilities["value"]["capabilities"].as_array().unwrap() {
             let id = capability["id"].as_str().unwrap();
-            if id == "assistant.grants.v1" {
+            // Person-only features remain ungranted even for a free-mode agent.
+            if matches!(id, "assistant.grants.v1" | "attention-snooze-indefinite") {
                 assert_eq!(capability["state"], "ungranted", "{agent}: {capability}");
                 continue;
             }
