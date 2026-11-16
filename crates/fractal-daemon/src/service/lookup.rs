@@ -178,13 +178,19 @@ fn systemd_search_paths(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec
 
 #[cfg(target_os = "macos")]
 pub(super) fn native() -> Result<Services> {
-    let resolve = |old: &str| -> Result<ServiceStatus> {
-        let names = candidate_names(old, None);
+    let default_instance = crate::instance::current().is_none();
+    // Home Manager's legacy phase uses its own agent labels for both default-instance services.
+    let old = [
+        (service_label(), default_instance.then_some("org.nix-community.home.smalltalk")),
+        (replication_service_label(), default_instance.then_some("org.nix-community.home.smalltalk-replication")),
+    ];
+    let resolve = |(old, home_manager_name): (&str, Option<&str>)| -> Result<ServiceStatus> {
+        let names = candidate_names(old, home_manager_name);
         select(names.iter().map(|name| {
             launchd_service_status(name, &launchd_path(name)?)
         }).collect::<Result<Vec<_>>>()?)
     };
-    let services = Services { daemon: resolve(service_label())?, replication: resolve(replication_service_label())? };
+    let services = Services { daemon: resolve(old[0])?, replication: resolve(old[1])? };
     check_conflicts([&services.daemon, &services.replication])?;
     Ok(services)
 }
