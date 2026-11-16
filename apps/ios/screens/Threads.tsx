@@ -9,7 +9,6 @@ import { INLINE_MAX_BYTES, threadTitleFromAsk, utf8Bytes } from '@fractal/views'
 import { ClientError, type CollectionWindow, type Snapshot, type ThreadCollectionContext, type ThreadSummary, type ThreadTimelineEvent } from '../../../clients/typescript/fractal-client';
 import { THREAD_WINDOW_SIZE, type ThreadWindowHandlers } from '../feed';
 import { useRefresh } from '../chrome';
-import { rememberBounded } from '../boundedCache';
 import { agentName } from '../agentsView';
 import { ContextMenu } from '../menu';
 import type { RootScreen } from '../navigation';
@@ -716,7 +715,7 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   function storeDraft(next: ThreadDraft) {
     touched.current = true;
     setDraft(next);
-    if (next.text || next.quote) rememberBounded(draftCache.current, key, JSON.stringify(next), 24);
+    if (next.text || next.quote) draftCache.current.set(key, JSON.stringify(next));
     else draftCache.current.delete(key);
   }
 
