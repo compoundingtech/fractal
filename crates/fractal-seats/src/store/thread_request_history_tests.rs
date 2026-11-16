@@ -167,7 +167,7 @@ fn request_history_page_size_one_carries_predecessors_without_dangling_relations
 }
 
 #[test]
-fn request_history_cursor_is_bound_to_person_thread_limit_and_current_cut() {
+fn request_history_cursor_is_scoped_visible_keyset_with_fresh_status() {
     let (store, _, input) = fixture();
     store.configure_thread_write_rollout([]);
     let a = ask(&store, &input, "cursor-a");
@@ -176,18 +176,26 @@ fn request_history_cursor_is_bound_to_person_thread_limit_and_current_cut() {
     let b = ask(&store, &input, "cursor-b");
     attach(&store, &b, Some(&a), "cursor-edge");
     let cursor = thread_request_history(&store, PERSON, THREAD, None, 1).unwrap().next_cursor.unwrap();
+    let first = thread_request_history(&store, PERSON, THREAD, None, 1).unwrap();
+    let (_, marker) = cursor.split_once(':').unwrap();
+    assert_eq!(serde_json::from_str::<SourceEpisode>(marker).unwrap(), first.items[0].key);
+    let unrelated = ask(&store, &input, "unrelated-cursor-activity");
+    assert!(!keys(&first).contains(&unrelated));
+    assert_eq!(thread_request_history(&store, PERSON, THREAD, None, 1).unwrap().next_cursor.as_deref(), Some(cursor.as_str()));
+    thread_request_history(&store, PERSON, THREAD, Some(&cursor), 1).unwrap();
+    thread_request_history(&store, PERSON, THREAD, Some(&cursor), 2).unwrap();
     let mut tampered = cursor.clone();
     tampered.push('!');
     for (person, thread, token, limit, code) in [
         (PERSON, THREAD, tampered.as_str(), 1, "invalid-thread-cursor"),
         (PERSON, "thread/cursor-other", cursor.as_str(), 1, "invalid-thread-cursor"),
-        (PERSON, THREAD, cursor.as_str(), 2, "invalid-thread-cursor"),
+        (PERSON, THREAD, &format!("{}:{}", cursor.split_once(':').unwrap().0, serde_json::to_string(&unrelated).unwrap()), 1, "invalid-thread-cursor"),
         ("person/other", THREAD, cursor.as_str(), 1, "thread-unavailable"),
     ] {
         assert_eq!(thread_request_history(&store, person, thread, Some(token), limit).unwrap_err().code, code);
     }
     finish(&store, &b, false);
-    assert_eq!(thread_request_history(&store, PERSON, THREAD, Some(&cursor), 1).unwrap_err().code, "stale-thread-cursor");
+    thread_request_history(&store, PERSON, THREAD, Some(&cursor), 1).unwrap();
     assert_eq!(status(&page(&store), &b), "completed");
 }
 

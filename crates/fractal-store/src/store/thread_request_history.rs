@@ -102,6 +102,9 @@ pub struct RequestHistoryPage {
     pub source_episodes: Vec<SourceEpisodeGroup>,
     pub boundary_items: Vec<RequestHistoryItem>,
     pub source_support: Option<HistorySourceSupport>,
+    /// Scoped keyset over exact visible source/episode keys, not a store-index snapshot.
+    /// Every page reauthorizes its anchor and rows and reads status fresh. Items introduced
+    /// before the anchor after page one may be missed until refresh, as with `list_context`.
     pub next_cursor: Option<String>,
     /// Completeness of the authorized selection and its retained evidence. Hidden endpoints
     /// never contribute a count, cursor anchor, or an incompleteness indication.
@@ -181,18 +184,8 @@ fn read_conn(
     let scope = canonical_hash(&("thread.request-history.v1", &person, thread)).map_err(internal)?;
     let after = scoped_cursor(cursor, &scope)?.map(|marker| {
         if marker.len() > 2048 { return Err(invalid_context_cursor()); }
-        let mut parts = marker.splitn(3, ':');
-        let through = parts.next().and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(invalid_context_cursor)?;
-        if through != cut {
-            return Err(FractalError::new("stale-thread-cursor",
-                "the request history selection changed; refresh history"));
-        }
-        let selected_limit = parts.next().and_then(|value| value.parse::<usize>().ok())
-            .ok_or_else(invalid_context_cursor)?;
-        if selected_limit != limit { return Err(invalid_context_cursor()); }
-        let key: SourceEpisode = parts.next().and_then(|value| serde_json::from_str(value).ok())
-            .ok_or_else(invalid_context_cursor)?;
+        let key: SourceEpisode = serde_json::from_str(marker)
+            .map_err(|_| invalid_context_cursor())?;
         if !person_work::authorize_retained_episode(conn, &person, &key)? {
             return Err(invalid_context_cursor());
         }
@@ -226,6 +219,10 @@ fn read_conn(
     );
     let mut statement = conn.prepare_cached(&sql).map_err(internal)?;
     let after = after.as_ref();
+    let mut anchor_is_member = match after {
+        Some(key) => is_member(conn, &created, thread, key, cut)?,
+        None => true,
+    };
     let mut members = statement.query_map(params![created.id, thread, cut, person,
         after.map(|key| key.source_id.as_str()), after.map(|key| key.episode.as_str()), limit + 1],
         |row| Ok(SourceEpisode { source_id: row.get(0)?, episode: row.get(1)? }))
@@ -240,6 +237,9 @@ fn read_conn(
         let (keys, complete) = episode_keys(conn, &person, seed, cut)?;
         groups_complete = complete;
         for key in keys {
+            if after == Some(&key) && key.source_id == seed.source_id {
+                anchor_is_member = true;
+            }
             if key.source_id == seed.source_id
                 && after.is_none_or(|after| &key > after)
                 && person_work::authorize_retained_episode(conn, &person, &key)?
@@ -248,6 +248,7 @@ fn read_conn(
             }
         }
     }
+    if !anchor_is_member { return Err(invalid_context_cursor()); }
     // Revalidate each selected exact key before any content, including lookahead. The reader
     // must not return a different episode as a substitute.
     for key in members {
@@ -262,7 +263,7 @@ fn read_conn(
     let has_more = page.items.len() > limit;
     page.items.truncate(limit);
     if has_more && let Some(last) = page.items.last() {
-        page.next_cursor = Some(format!("{scope}:{cut}:{limit}:{}",
+        page.next_cursor = Some(format!("{scope}:{}",
             serde_json::to_string(&last.key).map_err(internal)?));
     }
 
