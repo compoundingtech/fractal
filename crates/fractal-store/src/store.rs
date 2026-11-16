@@ -9255,6 +9255,23 @@ fn canonical_desired_row_at(
     subject: &str,
     at_index: u64,
 ) -> Result<Option<DesiredRow>> {
+    canonical_desired_row_at_cut(connection, subject, at_index, None)
+}
+
+fn canonical_desired_row_at_claim(
+    connection: &Connection,
+    subject: &str,
+    claim: &str,
+) -> Result<Option<DesiredRow>> {
+    canonical_desired_row_at_cut(connection, subject, i64::MAX as u64, Some(claim))
+}
+
+fn canonical_desired_row_at_cut(
+    connection: &Connection,
+    subject: &str,
+    at_index: u64,
+    claim: Option<&str>,
+) -> Result<Option<DesiredRow>> {
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7ab5e25ccad4 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT id, body, predecessors FROM claims
          WHERE subject=?1 AND kind='intent.desired' AND store_index<=?2
@@ -9266,7 +9283,7 @@ fn canonical_desired_row_at(
            )
          ORDER BY CANONICAL_ASC(claims)",
     )))?;
-    let rows = statement
+    let mut rows = statement
         .query_map(params![subject, at_index], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -9275,6 +9292,18 @@ fn canonical_desired_row_at(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(claim) = claim {
+        let cut = canonical::claim_key(connection, claim)?;
+        let mut end = rows.len();
+        for (index, (id, _, _)) in rows.iter().enumerate() {
+            if canonical::claim_key(connection, id)? > cut {
+                end = index;
+                break;
+            }
+        }
+        rows.truncate(end);
+        return select_desired_row(rows);
+    }
     retirements::overlay_row(
         connection,
         subject,

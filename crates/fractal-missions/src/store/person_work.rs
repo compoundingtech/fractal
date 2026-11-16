@@ -450,9 +450,7 @@ pub trait PersonWorkStore {
     /// person's home until they open or read it, and it is refused unless `about` names the
     /// person's own run or step, or their message to the poster.
     fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
-    /// Nothing an ask waited on disappears silently: when its requester, originating step or
-    /// owning run ends, the requester hears once that the ask is gone, and the person gets one
-    /// update saying so.
+    /// When an owning episode ends, tell the requester once; history retains the withdrawal.
     fn tell_ask_ended(&self, tx: &Transaction<'_>, ask: &ClaimRecord) -> Result<()>;
     /// One update step for `person`, about the work `structured` names.
     #[allow(clippy::too_many_arguments)]
@@ -881,7 +879,7 @@ impl PersonWorkStore for Store {
     }
 
     fn reconcile_person_asks_at(&self, now: u128) -> Result<PersonAskPass> {
-        /// How many asks one pass ends, each with its cancellation, message and update.
+        /// How many asks one pass ends, each with its cancellation and requester message.
         const ENDED_ASKS_PER_PASS: usize = 32;
         let deadlines = self.ask_deadlines();
         // Off, the count restarts when deadlines are next on, so asks made meanwhile do not
@@ -921,8 +919,8 @@ impl PersonWorkStore for Store {
                 if fractal_store::store::run_projection_pending_tx(tx, &ask.subject)? {
                     continue;
                 }
-                // Each ending writes a cancellation, a message and an update while holding the
-                // single writer; the rest end on the next pass, which this one's commit wakes.
+                // Each ending holds the single writer; the rest end on the next pass,
+                // which this one's commit wakes.
                 if ended == ENDED_ASKS_PER_PASS {
                     break;
                 }
@@ -1146,14 +1144,6 @@ impl PersonWorkStore for Store {
                 "title": format!("Ask cancelled: {title}"), "in_reply_to": null,
                 "tags": [format!("st3-ask-ended:{}", ask.subject)]}}), std::slice::from_ref(&ask.id), None)?;
         }
-        if person.starts_with("person/") {
-            let update = json!({"version": 1, "type": "update", "about": ask.subject});
-            self.append_update_tx(tx, "daemon/runtime", person,
-                &format!("Cancelled: {title}"),
-                &format!("{requester} asked you \"{title}\". That ask ended because {why}, so nothing waits on your answer now."),
-                &format!("st3-ask-ended:{}", ask.id), &update)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        }
         Ok(())
     }
 
@@ -1185,10 +1175,13 @@ impl PersonWorkStore for Store {
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"update\" {{ assigned-to {:?}; goal {:?}; }} }}", title, person, reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
             let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the update mission could not be parsed"))?;
+            let owner = current_desired_row(tx, actor).map_err(internal)?;
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(actor),
                 &with_request(json!({"fields": {"run": format!("mission-run/person-update/{}", &hash[..32]),
                     "generation": format!("run-generation/{generation}"), "person": person, "title": title,
-                    "reason": reason, "key": idempotency_key, "attempt": 1, "status": "ready", "mission_spec": mission}}), structured),
+                    "reason": reason, "key": idempotency_key, "attempt": 1, "status": "ready", "mission_spec": mission,
+                    "owner_run": owner.as_ref().and_then(|row| row.owner_run.as_deref()),
+                    "owner_generation": owner.as_ref().and_then(|row| row.owner_generation.as_deref())}}), structured),
                 &[], None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the update could not be projected"))
@@ -1244,6 +1237,7 @@ impl PersonWorkStore for Store {
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}", input.title, input.person, input.reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
             let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the person mission could not be parsed"))?;
+            let owner = current_desired_row(tx, &input.actor).map_err(internal)?;
             let run = format!("mission-run/person-ask/{}", &hash[..32]);
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
@@ -1251,6 +1245,8 @@ impl PersonWorkStore for Store {
                 &with_priority(with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
                     "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
                     "attempt": 1, "status": "ready", "mission_spec": mission,
+                    "owner_run": owner.as_ref().and_then(|row| row.owner_run.as_deref()),
+                    "owner_generation": owner.as_ref().and_then(|row| row.owner_generation.as_deref()),
                     "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))

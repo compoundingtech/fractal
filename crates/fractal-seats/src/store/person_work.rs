@@ -1330,9 +1330,11 @@ mission "person-work" state="ready" {{
     }
 
     #[test]
-    fn independent_asks_outlive_managed_owner_work_and_redeclaration() {
-        for ending in ["completed", "cancelled", "failed"] {
+    fn owned_asks_withdraw_but_unowned_decisions_survive_owner_work_and_redeclaration() {
+        for ending in ["completed", "cancelled", "failed", "superseded"] {
             let (store, origin, mut input) = fixture();
+            input.step = None;
+            let genuine = store.ask_person(&input).unwrap();
             let mut owned = crate::graph::parse_internal_intent(
                 r#"version 2
 agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
@@ -1342,27 +1344,74 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             declaration.owner_run = Some(origin.run.clone());
             declaration.owner_generation = Some(origin.generation.clone());
             store.apply_internal(&owned, "managed-requester").unwrap();
-            input.step = None;
+            input.idempotency_key = "operational-episode".into();
             let ask = store.ask_person(&input).unwrap();
-            store.set_mission_run_state(&origin.run, ending, "terminal", None).unwrap();
-            store.reconcile_person_asks().unwrap();
-            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
+            let update = store.connection.batched(|tx| store.append_update_tx(
+                tx, &input.actor, &input.person, "Operational progress", "Informational",
+                "owned-update", &json!({"version": 1, "type": "update", "about": origin.run}),
+            )).unwrap().unwrap();
+            if ending == "superseded" {
+                revise_fixture(&store, &origin, true);
+            } else {
+                store.set_mission_run_state(&origin.run, ending, "terminal", None).unwrap();
+            }
             assert!(store.attention_items(Some(&input.person)).unwrap().iter()
-                .any(|item| item.subject == ask.subject));
-            // Idle managed agents can also raise another independent question.
-            input.idempotency_key = "after-work-ended".into();
-            let later = store.ask_person(&input).unwrap();
+                .all(|item| item.subject != ask.subject));
+            store.reconcile_person_asks().unwrap();
             store.apply_internal(&owned, "requester-next-turn").unwrap();
             store.replay_replication_graph().unwrap();
-            store.reconcile_person_asks().unwrap();
-            assert_eq!(store.ask_person(&input).unwrap().subject, later.subject);
-            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
-            let response = PersonStepResponse {
-                delegation: None, subject: ask.subject.clone(), actor: input.actor.clone(),
-                summary: "Withdrawn".into(), evidence: vec![], episode: None,
-                idempotency_key: "withdraw-independent".into(), answer: None,
-            };
-            assert_eq!(store.finish_person_step(&response, true).unwrap().status, "cancelled");
+            assert!(!store.reconcile_person_asks().unwrap());
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+            assert_eq!(store.step_run(&update.subject).unwrap().unwrap().status, "cancelled");
+            assert_eq!(store.step_run(&genuine.subject).unwrap().unwrap().status, "ready");
+            assert!(store.attention_items(Some(&input.person)).unwrap().iter()
+                .any(|item| item.subject == genuine.subject));
+            assert!(store.step_run(&ask.subject).unwrap().unwrap().person_answers.iter()
+                .all(|response| response.answer.is_none() && response.status == "cancelled"));
+        }
+    }
+
+    #[test]
+    fn historical_owner_uses_selected_concurrent_declaration_not_last_claim() {
+        let (store, origin, mut input) = fixture();
+        let parsed = crate::graph::parse_internal_intent(
+            r#"version 2
+agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "alder",
+        ).unwrap();
+        let mut owned = parsed.subjects[&input.actor].clone();
+        owned.owner_run = Some(origin.run.clone());
+        owned.owner_generation = Some(origin.generation.clone());
+        let mut unowned = owned.clone();
+        unowned.owner_run = None;
+        unowned.owner_generation = None;
+        let mut candidates = [owned, unowned];
+        candidates.sort_by_key(fractal_store::store::desired_revision);
+        candidates.reverse();
+        let expected = candidates[0].owner_run.clone()
+            .map(|run| (run, candidates[0].owner_generation.clone()));
+        let predecessor = current_desired_row(&store.readers.get(), &input.actor).unwrap().unwrap().claim_id;
+        let mut declarations = Vec::new();
+        for candidate in candidates {
+            declarations.push(store.connection.batched(|tx| append_claim_tx(
+                tx, "alder", &input.actor, "intent.desired", None,
+                &serde_json::to_value(candidate).unwrap(), std::slice::from_ref(&predecessor), None,
+            )).unwrap().unwrap());
+        }
+        assert!(canonical::claim_key(&store.readers.get(), &declarations[0].id).unwrap()
+            < canonical::claim_key(&store.readers.get(), &declarations[1].id).unwrap());
+        assert_ne!(current_desired_row(&store.readers.get(), &input.actor).unwrap().unwrap().claim_id,
+            declarations[1].id);
+        input.step = None;
+        let ask = store.ask_person(&input).unwrap();
+        for replay in [false, true] {
+            if replay { store.replay_replication_graph().unwrap(); }
+            let mut retained = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+            let fields = retained.body["fields"].as_object_mut().unwrap();
+            fields.remove("owner_run");
+            fields.remove("owner_generation");
+            assert_eq!(fractal_store::store::person_work::episode_owner(
+                &store.readers.get(), &retained,
+            ).unwrap(), expected);
         }
     }
 
@@ -2935,10 +2984,8 @@ mission "writer-load" state="ready" {
         );
     }
 
-    /// An ask whose requester ended does not vanish silently: the requester hears once, and the
-    /// person gets one update in place of the alert.
     #[test]
-    fn an_ask_cancelled_because_its_owner_ended_tells_the_requester_and_the_person_once() {
+    fn an_ask_cancelled_because_its_owner_ended_tells_only_the_requester_once() {
         let (store, _origin, input) = fixture();
         let ask = store.ask_person(&input).unwrap();
         let stop =
@@ -2962,21 +3009,7 @@ mission "writer-load" state="ready" {
             .filter(|item| item.request.as_ref().is_some_and(|r| r["type"] == "update"))
             .map(|item| item.title.clone())
             .collect::<Vec<_>>();
-        assert_eq!(updates, vec!["Cancelled: Choose a release date".to_owned()]);
-        let check = |store: &Store| {
-            let home = store.attention_items(Some("person/avery")).unwrap();
-            let update = home.iter().find(|item| item.title == "Cancelled: Choose a release date").unwrap();
-            assert_eq!(update.requester_id.as_deref(), Some("daemon/runtime"));
-            assert_eq!(update.conversation.as_deref(), Some("agent/alder.asker"));
-            assert_eq!(update.request.as_ref().unwrap()["about"], ask.subject);
-            assert!(!update.is_alert(), "a conversation link must not revive the cancelled ask");
-            let (indexed, _) = store.attention_collection_snapshot(Some("person/avery"), now_ms()).unwrap();
-            let indexed = indexed.iter().find(|item| item.subject == update.subject).unwrap();
-            assert_eq!(indexed.conversation, update.conversation);
-        };
-        check(&store);
-        store.replay_replication_graph().unwrap();
-        check(&store);
+        assert!(updates.is_empty());
     }
 
     #[test]
@@ -3003,15 +3036,56 @@ mission "writer-load" state="ready" {
             // A configured name is distinct from a declared, send-admissible agent.
             assert_eq!(store.inbox_responsibility_check(&[current]).unwrap().status, "warn");
         }
+        store.configure_inbox_fallback_agent(None).unwrap();
+        assert!(item(&store, &update.subject).conversation.is_none());
         let stop = crate::graph::parse_internal_intent(r#"version 2
 stop "agent/alder.asker""#, "alder").unwrap();
         store.apply_internal(&stop, "stop-fallback-origin").unwrap();
         store.reconcile_person_asks().unwrap();
-        let cancelled = store.attention_items(Some("person/avery")).unwrap().into_iter()
-            .find(|item| item.title == "Cancelled: Choose a release date").unwrap();
-        assert_eq!(cancelled.conversation.as_deref(), Some("agent/alder.asker"));
-        store.configure_inbox_fallback_agent(None).unwrap();
-        assert!(item(&store, &update.subject).conversation.is_none());
+        let home = store.attention_items(Some("person/avery")).unwrap();
+        assert!(home.iter().all(|item| item.subject != ask.subject && item.subject != update.subject));
+        assert!(home.iter().all(|item| item.title != "Cancelled: Choose a release date"));
+    }
+
+    #[test]
+    fn a_legacy_cancelled_notice_preserves_its_original_conversation_until_withdrawal() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        // Model a retained old-daemon notice, not a notice produced by today's reconciliation.
+        let notice = store.connection.batched(|tx| {
+            store.append_update_tx(tx, "daemon/runtime", "person/avery", "Cancelled: Choose a release date",
+                "A retained cancellation notice.", &format!("st3-ask-ended:{}", original.id),
+                &json!({"version": 1, "type": "update", "about": ask.subject}))
+        }).unwrap().unwrap();
+        let check = |store: &Store| {
+            let home = store.attention_items(Some("person/avery")).unwrap();
+            let item = home.iter().find(|item| item.subject == notice.subject).unwrap();
+            assert_eq!(item.requester_id.as_deref(), Some("daemon/runtime"));
+            assert_eq!(item.conversation.as_deref(), Some("agent/alder.asker"));
+            assert_eq!(item.request.as_ref().unwrap()["about"], ask.subject);
+            let (indexed, _) = store.attention_collection_snapshot(Some("person/avery"), now_ms()).unwrap();
+            assert_eq!(indexed.iter().find(|item| item.subject == notice.subject).unwrap().conversation,
+                item.conversation);
+        };
+        for recipient in ["agent/alder.fallback-a", "agent/alder.fallback-b"] {
+            store.configure_inbox_fallback_agent(Some(recipient)).unwrap();
+            check(&store);
+        }
+        store.replay_replication_graph().unwrap();
+        check(&store);
+        let stop = crate::graph::parse_internal_intent(r#"version 2
+stop "agent/alder.asker""#, "alder").unwrap();
+        store.apply_internal(&stop, "stop-legacy-notice-origin").unwrap();
+        store.reconcile_person_asks().unwrap();
+        let withdrawn = |store: &Store| {
+            let home = store.attention_items(Some("person/avery")).unwrap();
+            assert!(home.iter().all(|item| item.subject != ask.subject && item.subject != notice.subject));
+            assert!(store.claim_by_id(&original.id).unwrap().is_some());
+        };
+        withdrawn(&store);
+        store.replay_replication_graph().unwrap();
+        withdrawn(&store);
     }
 
     #[test]
@@ -3072,48 +3146,85 @@ stop "agent/alder.asker""#, "alder").unwrap();
         }
     }
 
-    /// A notice that cannot be written never undoes the cancellation: the ask still ends, and
-    /// nothing half-told is left behind.
     #[test]
-    fn a_notice_that_fails_does_not_undo_the_cancellation() {
-        let (store, _origin, input) = fixture();
-        let ask = store.ask_person(&input).unwrap();
-        let asked = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
-        // The update the notice would post already exists with other words, so posting it fails.
-        store
-            .connection
-            .batched(|tx| {
-                store
-                    .append_update_tx(
-                        tx,
-                        "daemon/runtime",
-                        "person/avery",
-                        "Something else",
-                        "Something else.",
-                        &format!("st3-ask-ended:{}", asked.id),
-                        &json!({"version": 1, "type": "update", "about": ask.subject}),
-                    )
-                    .map(|_| ())
-            })
-            .unwrap()
-            .unwrap();
-        let stop =
-            crate::graph::parse_internal_intent("version 2\nstop \"agent/alder.asker\"", "alder")
-                .unwrap();
-        store.apply_internal(&stop, "stop-asker").unwrap();
-        assert!(store.reconcile_person_asks().unwrap());
-        assert_eq!(
-            store.step_run(&ask.subject).unwrap().unwrap().status,
-            "cancelled"
-        );
-        assert!(
-            store
-                .messages(Some("agent/alder.asker"), true)
-                .unwrap()
-                .iter()
-                .all(|message| message.from != "daemon/runtime"),
-            "the message rolls back with the failed update"
-        );
+    fn frozen_inbox_withdraws_eight_operational_cards_and_preserves_six_decisions() {
+        fn retained_ask(store: &Store, input: &PersonAskRequest) -> StepRunView {
+            let generation = format!("retained-{}", input.idempotency_key);
+            let mission_id = format!("person-ask/{generation}");
+            let source = format!(
+                "version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}",
+                input.title, input.person, input.reason,
+            );
+            let mut intent = crate::graph::parse_internal_intent(&source, "alder").unwrap();
+            let mission = intent.missions.remove(&mission_id).unwrap();
+            let subject = format!("step-run/{generation}/ask");
+            store.connection.batched(|tx| -> Result<StepRunView> {
+                let asking = append_claim_tx(tx, "alder", &subject, "work.person-asked", Some(&input.actor),
+                    &json!({"fields": {
+                        "run": format!("mission-run/{mission_id}"),
+                        "generation": format!("run-generation/{generation}"),
+                        "person": input.person, "title": input.title, "reason": input.reason,
+                        "key": input.idempotency_key, "attempt": 1, "status": "ready",
+                        "mission_spec": mission
+                    }}), &[], None)?;
+                project(tx, &asking)?;
+                Ok(step(tx, &subject)?.unwrap())
+            }).unwrap().unwrap()
+        }
+        for ending in ["completed", "cancelled", "failed", "superseded"] {
+            let (store, origin, mut input) = fixture();
+            input.step = None;
+            let mut genuine = Vec::new();
+            for index in 0..6 {
+                input.idempotency_key = format!("genuine-{index}");
+                genuine.push(retained_ask(&store, &input).subject);
+            }
+            let mut owned = crate::graph::parse_internal_intent(
+                r#"version 2
+agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
+                "alder",
+            ).unwrap();
+            let declaration = owned.subjects.get_mut(&input.actor).unwrap();
+            declaration.owner_run = Some(origin.run.clone());
+            declaration.owner_generation = Some(origin.generation.clone());
+            store.apply_internal(&owned, "managed-operational-episode").unwrap();
+            let mut withdrawn = Vec::new();
+            for index in 0..4 {
+                input.idempotency_key = format!("operational-{index}");
+                let ask = retained_ask(&store, &input);
+                let update = store.connection.batched(|tx| store.append_update_tx(
+                    tx, "daemon/runtime", &input.person, "Operational notice", "Informational",
+                    &format!("notice-{index}"),
+                    &json!({"version": 1, "type": "update", "about": ask.subject}),
+                )).unwrap().unwrap();
+                withdrawn.extend([ask.subject, update.subject]);
+            }
+            store.replay_replication_graph().unwrap();
+            assert_eq!(store.attention_items(Some(&input.person)).unwrap().len(), 14);
+            if ending == "superseded" {
+                revise_fixture(&store, &origin, true);
+            } else {
+                store.set_mission_run_state(&origin.run, ending, "episode ended", None).unwrap();
+            }
+            while store.reconcile_person_asks().unwrap() {}
+            for replay in [false, true] {
+                if replay { store.replay_replication_graph().unwrap(); }
+                let mut remaining = store.attention_items(Some(&input.person)).unwrap()
+                    .into_iter().map(|item| item.subject).collect::<Vec<_>>();
+                remaining.sort();
+                genuine.sort();
+                assert_eq!(remaining, genuine);
+                for subject in &withdrawn {
+                    let history = store.step_run(subject).unwrap().unwrap();
+                    assert_eq!(history.status, "cancelled");
+                    assert!(history.person_answers.iter().all(|response|
+                        response.answer.is_none() && response.status == "cancelled"),
+                        "withdrawal must not fabricate an answer");
+                    assert!(request(&store.readers.get(), subject).unwrap().is_some());
+                }
+                assert!(!store.reconcile_person_asks().unwrap(), "completed episodes leave no residue");
+            }
+        }
     }
 
     #[test]
