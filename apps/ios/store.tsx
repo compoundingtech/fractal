@@ -1108,6 +1108,7 @@ function useAppStore(proof?: FabricProfile) {
           const prepared = await prepare(threadClient, id);
           const confirm = actionReceiptCheck(prepared.readMessageIds
             ? { kind: 'read', actionId: id, readMessageIds: prepared.readMessageIds }
+            : kind === 'mark-unread' || kind === 'clear-unread' ? { kind: 'unread', actionId: id, targetId }
             : prepared.messageId ? { kind: 'message', actionId: id, targetId, messageId: prepared.messageId } : { kind: 'metadata', actionId: id, targetId });
           submit = async request => { acceptedSnapshot = (await confirm(() => prepared.send(request))).snapshot; };
         }

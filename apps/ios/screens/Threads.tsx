@@ -379,7 +379,10 @@ function ReminderThreadBody({ client, thread, placement, onOpen, revealComposer 
   const target = unreadEnabled ? anchorId ?? seek?.anchor : undefined;
   if (!target) return <ThreadBody client={client} thread={thread} placement={placement} onOpen={onOpen} revealComposer={revealComposer} />;
   const result = seek && seek.anchor === target && seek.attempt === attempt ? seek.result : undefined;
-  if (!result) return <T dim>Finding the return message…</T>;
+  if (!result) return <View style={{ gap: 6, paddingBottom: 8 }}>
+    <T dim>Finding the return message…</T>
+    <ClearReminder thread={thread} />
+  </View>;
   switch (result.state) {
     case 'current': return <ThreadBody client={client} thread={thread} placement={placement} around={result.page} onOpen={onOpen} revealComposer={revealComposer} />;
     case 'unavailable':
@@ -390,6 +393,7 @@ function ReminderThreadBody({ client, thread, placement, onOpen, revealComposer 
     </View>;
     case 'error': return <View style={{ gap: 6, paddingBottom: 8 }}>
       <ThreadReadIssue message={unreadReadIssue(result.error, 'the return message')} />
+      <ClearReminder thread={thread} />
       <Button label="Retry" accessibilityLabel={`Retry finding the return message in ${thread.title}`} onPress={() => setAttempt(previous => previous + 1)} />
     </View>;
   }

@@ -83,7 +83,7 @@ timestamps or locally generated identifiers. Unavailable anchors keep their remi
 pending seek metadata shows no body and cannot activate a badge.
 Explicit Clear reminder is independent of seek, geometry and dwell: it clears only
 known IDs captured from the current authoritative summary, including when its
-anchor is pending, unavailable or offscreen. It never acknowledges natural messages.
+anchor is loading, failed to load, pending, unavailable or offscreen. It never acknowledges natural messages.
 
 `unreadActions.ts` is the typed action boundary; `unreadClient.ts` binds canonical
 generated `threadMarkUnread`, `threadClearUnread`, `threadTimeline({around})`, and
@@ -94,6 +94,8 @@ that exact request, ahead of a held rename/close/reopen, and new edits wait unti
 is confirmed. Action operation IDs never become reminder mark IDs. Read-only clients
 have no mark controls. Reminders are canonically decoded from the summary; seek
 metadata cannot create a badge.
+Unread delivery verifies the unread receipt shape (action ID, operation ID, snapshot
+and exact target); unlike metadata edits, it does not require a metadata claim ID.
 The new reminder list, around reads and mark/clear writes require a granted
 `threads-v1 >= 3`. Version 2 keeps the existing thread and natural-read experience
 but hides reminder UI and sends none of the new queries or actions. An already-open
