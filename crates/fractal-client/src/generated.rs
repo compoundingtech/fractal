@@ -362,6 +362,9 @@ pub enum ErrorCode {
     UnsupportedCapability,
     PeerTooOld,
     ValidationFailed,
+    UnknownObjective,
+    InvalidSloSeries,
+    UnsupportedObjectiveSeries,
     IdempotencyConflict,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
@@ -1183,6 +1186,22 @@ pub struct SloHistory {
     pub until_ms: u64,
     pub samples: u64,
     pub steps: Vec<Option<f64>>,
+}
+/// Declared objective event or completed interval sample counts, not percentiles.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloSeries {
+    pub id: String,
+    pub from: u64,
+    pub to: u64,
+    pub bucket_seconds: u64,
+    pub buckets: Vec<SloSeriesBucket>,
+}
+/// A half-open Unix millisecond bucket, clipped to the requested end.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloSeriesBucket {
+    pub start: u64,
+    pub end: u64,
+    pub count: u64,
 }
 /// Token spend over a period, one row per agent, mission run, step, model, account and host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

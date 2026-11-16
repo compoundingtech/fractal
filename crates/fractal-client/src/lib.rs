@@ -1284,6 +1284,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::UnknownObjective
+        | ErrorCode::InvalidSloSeries
+        | ErrorCode::UnsupportedObjectiveSeries
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
         | ErrorCode::AttentionDismissUnsupported
@@ -2457,6 +2460,19 @@ impl Client {
             path.push_str(&format!("&steps={steps}"));
         }
         self.get(&path).await
+    }
+    pub async fn slo_series(
+        &self,
+        id: &str,
+        from: u64,
+        to: u64,
+        bucket_seconds: u64,
+    ) -> Result<Envelope<SloSeries>, ClientError> {
+        self.get(&format!(
+            "/v1/client/slo/series?id={}&from={from}&to={to}&bucket_seconds={bucket_seconds}",
+            percent_encode(id)
+        ))
+        .await
     }
     pub async fn usage_period(
         &self,
