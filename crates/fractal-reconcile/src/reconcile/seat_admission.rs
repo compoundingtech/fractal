@@ -11,17 +11,18 @@ pub struct Controller {
     pub status: Arc<Status>,
     dirty: Arc<AtomicBool>,
     checked: Mutex<Option<u64>>,
+    outside_observation: Mutex<Option<Option<fractal_runtime::host::HostMemoryObservation>>>,
     _watcher: Option<notify::RecommendedWatcher>,
     /// What admission by fit reads of this host; none where lanes are off.
     pub lanes: Option<LaneHost>,
 }
 
-/// The room a host gives lanes, and how to read what its seats outside lanes hold
+/// The room a host gives lanes, and how to read unreclaimable host memory outside lanes
 /// (docs/st3/seat-lanes.md, "Admission by fit").
 #[derive(Clone, Copy)]
 pub struct LaneHost {
     pub room: fractal_runtime::Capacity,
-    pub outside: fn() -> Option<u64>,
+    pub outside: fn() -> Option<fractal_runtime::host::HostMemoryObservation>,
     /// The lane a burst raises a seat to: admission keeps room for one such raise from starts
     /// ([`BURST_LANE`]; none keeps none).
     pub burst_lane: Option<fractal_runtime::Capacity>,
@@ -61,7 +62,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
         }
         self.seat_admission = Controller {
-            config, status, dirty, checked: Mutex::new(None), _watcher: watcher, lanes: self.seat_admission.lanes,
+            config, status, dirty, checked: Mutex::new(None), outside_observation: Mutex::new(None),
+            _watcher: watcher, lanes: self.seat_admission.lanes,
         };
         self
     }
@@ -72,6 +74,21 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
+        if let Some(host) = admission.lanes {
+            let observation = (host.outside)();
+            let mut previous = admission.outside_observation.lock().unwrap_or_else(PoisonError::into_inner);
+            if *previous != Some(observation) {
+                *previous = Some(observation);
+                self.incremental.touch("host-lane-memory");
+                self.signal_changed();
+            }
+            // Reuse the admission observation deadline, including hosts without an envelope file.
+            // A deadline observes memory; only a measured fit can grant capacity.
+            if admission.config.is_none() {
+                self.arm_deadline_at("seat-admission", u128::from(now.saturating_add(30)) * 1000,
+                    crate::reconcile_telemetry::WakeCause::Other);
+            }
+        }
         let Some(config) = &admission.config else { return };
         let mut checked = admission.checked.lock().unwrap_or_else(PoisonError::into_inner);
         let due = checked.is_none_or(|at| now.saturating_sub(at) >= 30 || now < at);
