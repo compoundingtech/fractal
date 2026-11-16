@@ -64,6 +64,32 @@ it('publishes full one-line body only after 500ms, without polling', () => {
   expect(vi.getTimerCount()).toBe(0)
 })
 
+it('does not starve an unchanged body when unrelated external text streams at 499ms', async () => {
+  const view = placement()
+  const external = document.createElement('aside')
+  external.textContent = 'Unrelated clock'
+  document.body.append(external)
+  await Promise.resolve()
+  vi.advanceTimersByTime(499)
+  external.firstChild!.textContent = 'Unrelated streaming update'
+  await Promise.resolve()
+  vi.advanceTimersByTime(1)
+  expect(view.snapshot().visibleMessageIds).toEqual(['message/a'])
+})
+
+it('restarts the dwell when the relevant body content changes without changing its geometry', async () => {
+  const view = placement()
+  vi.advanceTimersByTime(499)
+  view.body.firstChild!.textContent = 'Changed message content'
+  await Promise.resolve()
+  vi.advanceTimersByTime(1)
+  expect(view.snapshot().visibleMessageIds).toEqual([])
+  vi.advanceTimersByTime(498)
+  expect(view.snapshot().visibleMessageIds).toEqual([])
+  vi.advanceTimersByTime(1)
+  expect(view.snapshot().visibleMessageIds).toEqual(['message/a'])
+})
+
 it.each([
   ['one pixel', new DOMRect(10, window.innerHeight - 1, 100, 20)],
   ['header only', new DOMRect(10, window.innerHeight + 10, 100, 20)],
@@ -83,7 +109,7 @@ it('qualifies the final two lines of a long body', () => {
 it.each(['scroll', 'layout', 'focus', 'visibility'] as const)('restarts 499ms dwell on %s', event => {
   const view = placement(); vi.advanceTimersByTime(499)
   if (event === 'scroll') document.dispatchEvent(new Event('scroll'))
-  if (event === 'layout') view.layout()
+  if (event === 'layout') { view.rect(new DOMRect(10, 20, 100, 20)); view.layout() }
   if (event === 'focus') { view.focus(false); vi.advanceTimersByTime(500); expect(view.snapshot().foreground).toBe(false); view.focus(true) }
   if (event === 'visibility') { view.visibility('hidden'); vi.advanceTimersByTime(500); expect(view.snapshot().foreground).toBe(false); view.visibility('visible') }
   vi.advanceTimersByTime(499); expect(view.snapshot().visibleMessageIds).toEqual([])

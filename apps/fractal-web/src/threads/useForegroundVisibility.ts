@@ -14,11 +14,20 @@ const hidden: ForegroundSnapshot = { foreground: false, visibleMessageIds: [] }
 // one cancellable placement timer, followed by a fresh body measurement.
 const dwellMs = 500
 
+interface VisibleCandidate {
+  readonly id: string
+  readonly body: HTMLElement
+  readonly content: string
+  readonly geometry: string
+}
+
 export const foregroundVisibility = (container: HTMLElement | null, active: boolean): Atom.Atom<ForegroundSnapshot> => Atom.make(get => {
   if (!active || container === null) return hidden
   let current: ForegroundSnapshot = hidden
   let timer: number | undefined
   const tracked = new Set<Element>()
+  let measured: readonly VisibleCandidate[] = []
+  let measuredForeground = false
   const foreground = () => document.visibilityState === 'visible' && document.hasFocus()
     && container.isConnected && shown(container)
     && ![...document.querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"]')].some(dialog =>
@@ -30,7 +39,7 @@ export const foregroundVisibility = (container: HTMLElement | null, active: bool
     get.setSelf(current)
   }
   const measure = () => {
-    const candidates: { id: string; body: HTMLElement; geometry: string }[] = []
+    const candidates: VisibleCandidate[] = []
     if (!foreground()) return candidates
     for (const row of container.querySelectorAll<HTMLElement>('[data-thread-message]')) {
       const body = row.querySelector<HTMLElement>('[data-thread-message-content]')
@@ -42,29 +51,38 @@ export const foregroundVisibility = (container: HTMLElement | null, active: bool
       const clips = viewportClips(body, container)
       const region = meaningfulBodyRegion(rect, Number.isFinite(lineHeight) ? lineHeight : renderedLineHeight(body), clips)
       if (region === undefined || !exposed(body, region)) continue
-      candidates.push({ id, body, geometry: [rect.left, rect.right, rect.top, rect.bottom, region.top,
+      candidates.push({ id, body, content: body.innerHTML, geometry: [rect.left, rect.right, rect.top, rect.bottom, region.top,
         ...clips.flatMap(clip => [clip.left, clip.right, clip.top, clip.bottom])].join(',') })
     }
     return candidates
   }
+  const sameCandidates = (before: readonly VisibleCandidate[], after: readonly VisibleCandidate[]) =>
+    before.length === after.length && before.every((candidate, index) => {
+      const next = after[index]
+      return next !== undefined && candidate.id === next.id && candidate.body === next.body
+        && candidate.content === next.content && candidate.geometry === next.geometry
+    })
   const cancel = () => { window.clearTimeout(timer); timer = undefined }
   const restart = () => {
     cancel()
-    publish(foreground() ? { foreground: true, visibleMessageIds: [] } : hidden)
+    measuredForeground = foreground()
+    publish(measuredForeground ? { foreground: true, visibleMessageIds: [] } : hidden)
     const before = measure()
+    measured = before
     if (before.length === 0) return
     timer = window.setTimeout(() => {
       timer = undefined
       const after = measure()
-      if (before.length !== after.length || before.some((candidate, index) => {
-        const next = after[index]
-        return next === undefined || candidate.id !== next.id || candidate.body !== next.body || candidate.geometry !== next.geometry
-      })) { restart(); return }
+      if (!sameCandidates(before, after)) { restart(); return }
       publish(foreground() ? { foreground: true, visibleMessageIds: [...new Set(after.map(candidate => candidate.id))].slice(-50) } : hidden)
     }, dwellMs)
   }
-  const intersections = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(restart, { threshold: [0, 1] })
-  const resize = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(restart)
+  // Global overlay discovery must not require silence in unrelated streaming panes.
+  const refresh = () => {
+    if (foreground() !== measuredForeground || !sameCandidates(measured, measure())) restart()
+  }
+  const intersections = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(refresh, { threshold: [0, 1] })
+  const resize = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(refresh)
   const sync = () => {
     const elements = new Set<Element>([container, ...container.querySelectorAll('[data-thread-message], [data-thread-message-content]')])
     for (let ancestor = container.parentElement; ancestor !== null; ancestor = ancestor.parentElement) elements.add(ancestor)
@@ -72,7 +90,7 @@ export const foregroundVisibility = (container: HTMLElement | null, active: bool
     for (const element of panel?.querySelectorAll('[data-thread-read-heading], [data-thread-composer], [data-testid="conversation-composer-dock"], textarea, form') ?? []) elements.add(element)
     for (const element of tracked) if (!elements.has(element)) { resize?.unobserve(element); intersections?.unobserve(element); tracked.delete(element) }
     for (const element of elements) if (!tracked.has(element)) { tracked.add(element); resize?.observe(element); intersections?.observe(element) }
-    restart()
+    refresh()
   }
   const mutations = new MutationObserver(sync)
   mutations.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true,
