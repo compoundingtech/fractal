@@ -807,6 +807,8 @@ export type AssistantConversationTimelineRequest = {
 };
 
 export type AssistantGrant = {
+  cleared_conflicts?: Array<ClearedGrantProfileConflictWitness>;
+  conflict?: (GrantProfileConflictWitness | null);
   consent_evidence: string;
   device_id: Id;
   disclosure_consent: boolean;
@@ -1401,6 +1403,11 @@ export type Capability = {
   id: string;
   state: "granted" | "ungranted" | "unavailable" | "unsupported";
   version: number;
+};
+
+export type ClearedGrantProfileConflictWitness = {
+  cause: GrantProfileConflictCause;
+  grants: Array<GrantProfileWitness>;
 };
 
 export type ClientConnection = {
@@ -2042,6 +2049,8 @@ export type ErrorCode = (
   | "peer-too-old"
   | "validation-failed"
   | "idempotency-conflict"
+  | "grant-profile-conflict"
+  | "assistant-grant-authority-not-ready"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
   | "pairing-origin-required"
@@ -2119,6 +2128,8 @@ export type ExchangeTransport = {
   carrier: string;
   fabric_route?: string;
 };
+
+export type ExternalGrantProfile = "assistant" | "service";
 
 export type FabricGrant = {
   detail?: string;
@@ -2502,6 +2513,18 @@ export type GlassTab = {
 export type GoldenResourceSet = Array<Resource>;
 
 export type GoldenResponseEvidence = Array<TimelineUsageBody>;
+
+export type GrantProfileConflictCause = "revoked" | "expired";
+
+export type GrantProfileConflictWitness = {
+  grants: Array<GrantProfileWitness>;
+};
+
+export type GrantProfileWitness = {
+  grant_id: string | null;
+  origin: string;
+  profile: ExternalGrantProfile;
+};
 
 export type HarnessAnswerInput = {
   positions: Array<number>;

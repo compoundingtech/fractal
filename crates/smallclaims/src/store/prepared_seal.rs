@@ -349,6 +349,9 @@ pub(crate) fn write_sealed_batch_tx(
             ],
         )?;
     }
+    super::assistant_grant_authority::refresh_envelope(
+        transaction, &batch.writer, batch.sequence, &sealed.envelope_hash,
+    )?;
     Ok(())
 }
 
@@ -617,6 +620,9 @@ impl Store {
                         signature,
                         now
                     ],
+                )?;
+                super::assistant_grant_authority::refresh_envelope(
+                    transaction, &self.origin, envelope.0, &envelope.1,
                 )?;
             }
         }

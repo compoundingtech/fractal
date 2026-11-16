@@ -100,6 +100,26 @@ pub fn register_metrics(meter: &Meter, summary: Arc<RwLock<Summary>>) {
         }).build();
 }
 
+/// Cached task counts, ordered as proof invalidations then retractions. `None` means
+/// no successful authority refresh yet; it must not be exported as an empty queue.
+pub fn register_authority_queue_metrics(meter: &Meter, summary: Arc<RwLock<Option<[u64; 2]>>>) {
+    let attributes = [
+        [KeyValue::new("st.assistant_grant.queue", "proof_invalidations")],
+        [KeyValue::new("st.assistant_grant.queue", "retractions")],
+    ];
+    meter.u64_observable_gauge("st.assistant_grant.pending_tasks")
+        .with_unit("{task}")
+        .with_description("Pending assistant-grant proof invalidation and retraction tasks")
+        .with_callback(move |observer| {
+            let summary = summary.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(counts) = *summary {
+                for (count, attributes) in counts.into_iter().zip(&attributes) {
+                    observer.observe(count, attributes);
+                }
+            }
+        }).build();
+}
+
 /// One refresh at a time, followed by at least 30 seconds of rest (or its elapsed cost if
 /// longer). Failures keep the last complete summary, never a partial count or false zero.
 pub fn start(store: &Arc<Store>) {
@@ -109,22 +129,38 @@ pub fn start(store: &Arc<Store>) {
     let store = Arc::downgrade(store);
     tokio::spawn(async move {
         let summary = Arc::new(RwLock::new(Summary::default()));
+        let authority_queues = Arc::new(RwLock::new(None));
+        register_authority_queue_metrics(
+            &opentelemetry::global::meter("st3"), Arc::clone(&authority_queues));
         let mut registered = false;
         loop {
             let Some(store) = store.upgrade() else { return; };
             let started = Instant::now();
             let result = tokio::task::spawn_blocking(move || {
-                crate::task_cpu::profiled_blocking("mailbox_metrics/refresh", || summarize(&store))
+                crate::task_cpu::profiled_blocking("mailbox_metrics/refresh", || {
+                    (summarize(&store), store.assistant_grant_pending_task_counts())
+                })
             }).await;
             match result {
-                Ok(Ok(next)) => {
-                    *summary.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
-                    if !registered {
-                        register_metrics(&opentelemetry::global::meter("st3"), Arc::clone(&summary));
-                        registered = true;
+                Ok((mailbox, queues)) => {
+                    match queues {
+                        Ok(next) => {
+                            *authority_queues.write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(next);
+                        }
+                        Err(error) => eprintln!("st3: WARN assistant-grant queue metrics refresh failed: {error:#}"),
+                    }
+                    match mailbox {
+                        Ok(next) => {
+                            *summary.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+                            if !registered {
+                                register_metrics(&opentelemetry::global::meter("st3"), Arc::clone(&summary));
+                                registered = true;
+                            }
+                        }
+                        Err(error) => eprintln!("st3: WARN mailbox metrics refresh failed: {error:#}"),
                     }
                 }
-                Ok(Err(error)) => eprintln!("st3: WARN mailbox metrics refresh failed: {error:#}"),
                 Err(error) => eprintln!("st3: WARN mailbox metrics refresh task failed: {error}"),
             }
             tokio::time::sleep(REFRESH_PAUSE.max(started.elapsed())).await;

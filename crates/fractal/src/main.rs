@@ -6070,7 +6070,12 @@ fn plain_error(error: &anyhow::Error) -> String {
 }
 
 fn render_client_error(error: &anyhow::Error, mode: ClientMessage) -> String {
-    let full = format!("{error:#}");
+    let mut full = format!("{error:#}");
+    // Keep the operation heading separate from the server's actual rejection
+    // reason without discarding its typed cause or stable error code.
+    if full.starts_with("Couldn't revoke this grant.: ") {
+        full.replace_range("Couldn't revoke this grant.".len().."Couldn't revoke this grant.: ".len(), "\n");
+    }
     let Some(api) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<fractal_client::ClientError>())
@@ -8174,6 +8179,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             spawn_publication_evidence(store.clone());
             tokio::spawn(build_transport_observation_index(store.clone()));
             tokio::spawn(build_operation_claim_digests(store.clone()));
+            tokio::spawn(build_assistant_grant_authority(store.clone()));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -10339,7 +10345,8 @@ async fn run_devices(
             let response = match command {
                 AssistantGrantCommand::Inspect { grant } => client.assistant_grant(&grant).await?,
                 AssistantGrantCommand::Revoke { grant } => {
-                    client.assistant_grant_revoke(&grant).await?
+                    client.assistant_grant_revoke(&grant).await
+                        .context("Couldn't revoke this grant.")?
                 }
                 AssistantGrantCommand::Policy { grant, terms, recipients } => {
                     let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
@@ -21672,6 +21679,71 @@ async fn build_transport_observation_index(store: Arc<Store>) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// Continue the persisted authority cursor after serving begins, then reconcile
+/// compatibility-trigger work on commits. Subscribe before checking readiness so
+/// an older-build append between the check and the wait cannot be lost.
+async fn build_assistant_grant_authority(store: Arc<Store>) {
+    AssistantGrantAuthorityMaintenance::new(store).run().await;
+}
+
+/// Own the subscription for exactly the maintenance task's lifetime. Splitting
+/// one page from the wait also makes the drain-to-wait boundary explicit.
+struct AssistantGrantAuthorityMaintenance {
+    store: Arc<Store>,
+    changes: tokio::sync::watch::Receiver<()>,
+    _observer: smallclaims::sqlite::CommitObserver,
+}
+
+impl AssistantGrantAuthorityMaintenance {
+    fn new(store: Arc<Store>) -> Self {
+        let (changed, changes) = tokio::sync::watch::channel(());
+        let observer = store.observe_commits(move |connection| {
+            if connection.is_autocommit() {
+                changed.send_replace(());
+            }
+        });
+        Self { store, changes, _observer: observer }
+    }
+
+    async fn advance(&mut self) -> Result<bool> {
+        // Consume before the read, not after draining: a commit between the
+        // read/drain and changed().await must remain an unseen generation.
+        self.changes.borrow_and_update();
+        let worker = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            if !worker.assistant_grant_authority_maintenance_pending()? {
+                return Ok(true);
+            }
+            worker.advance_assistant_grant_authority_backfill()
+        }).await?
+    }
+
+    async fn run(mut self) {
+        loop {
+            match self.advance().await {
+                Ok(true) => {
+                    if self.changes.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) if maintenance_contention(&error) => {}
+                error => {
+                    stderr_message("st", format_args!("assistant grant authority backfill stopped: {error:?}; restart resumes its committed cursor"));
+                    return;
+                }
+            }
+            // Each page releases the writer. Yield scheduling, never time-based
+            // pacing: persisted work resumes immediately in another transaction.
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod assistant_grant_authority_wake_tests;
 
 /// This starts only after both APIs serve. Each page reads up to 32 operation claims on a
 /// reader, then joins the managed background writer queue only to insert their keys, and
