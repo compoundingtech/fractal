@@ -208,6 +208,8 @@ case $command in
     trap 'rm -rf "$stage"' EXIT
     mkdir -p "$stage/seed/renders" "$stage/out"
     cp "$gallery/bin/fractal-mac-gallery" "$stage/seed/FractalMacGallery"
+    # Bundle.module resolves the template glyphs beside the unbundled gallery executable.
+    cp -R "$gallery/bin/"*.bundle "$stage/seed/"
     # The gallery merges into the manifest it finds: a --only run keeps every other entry.
     [[ -f $renders/capture.json ]] && cp "$renders/capture.json" "$stage/seed/renders/"
     tar -c -f - -C "$stage/seed" . | on_host capture "$@" | tar -x -f - -C "$stage/out"
