@@ -221,13 +221,33 @@ cannot enable it. On macOS, run:
 fractal service permissions
 ```
 
-Follow the instructions for the OS permissions you must grant, including Full Disk
-Access and Developer Tools. Fractal does not automate those approval prompts.
+Do not grant the daemon or agents Full Disk Access, Developer Tools, Accessibility,
+or Screen Recording. Keep work roots outside Desktop, Documents, Downloads,
+iCloud Drive and removable volumes. A protected-folder access may fail with
+`Operation not permitted` or cause a macOS privacy prompt; do not approve broad
+access to bypass it. Move the work or selected input to an unprotected workspace.
+See the [protected-operation contract](st3/macos-installation.md#protected-operation-helper-contract)
+for the empty helper allowlist and the first-real-operation gate.
 
 For an upgrade, `fractal service install` refreshes definitions and restarts services;
 `fractal service restart` suffices when definitions already point at the intended binaries.
 Coordinate that restart with active work and any continuous health checks. Replacing
 archive files alone does not restart running services.
+
+On macOS every `launchctl` RPC has a three-second deadline, including installation
+and migration commands. This is a local supervisor RPC, not a network operation;
+three seconds allows transient scheduling delays without letting a stalled GUI
+domain retain children indefinitely. A timed-out child is killed and reaped.
+Each process admits at most one launchctl invocation at a time; overlapping
+callers skip the probe rather than spawning or queuing another child.
+
+After a timeout, the daemon's `/v1/health` response includes `service_manager`
+with `reason: "launchd-unresponsive"`, `since_unix_ms`, `retry_after_unix_ms` and
+`consecutive_timeouts`. Health reads expose the recorded state without waiting
+for an in-flight RPC. Further requests skip launchctl until a monotonic backoff
+expires: 5, 10, 20, 40, then at most 60 seconds after each completed timeout.
+The next completed RPC clears the failure, including a service-not-found reply.
+This bounds resource use; it does not claim to repair the underlying launchd stall.
 
 State lives in `~/.local/state/st3`. The local API uses a Unix socket. On Linux it
 normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/fractal.sock` linking to it; on macOS

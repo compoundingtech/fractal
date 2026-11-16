@@ -562,3 +562,39 @@ mission "program-test" state="ready" {{
     fixture.until("the fresh program completes", || fixture.status(&step) == "completed");
     assert_eq!(fixture.store.mission_run(&replacement.id).unwrap().unwrap().inputs, source.inputs);
 }
+
+#[test]
+fn automatic_step_retry_starts_a_fresh_attempt_journal() {
+    let fixture = fixture(Liveness::default());
+    let bundle = fixture.dir.path().join("program.mjs");
+    let hash = fixture.store.put_blob(BUNDLE.as_bytes()).unwrap();
+    apply_source(&fixture.store, &format!(r#"version 2
+mission "program-retry" state="ready" {{
+  goal "Retry the program with a fresh journal."
+  input "mode" kind="text"
+  input "pids" kind="text"
+  input "gate" kind="text"
+  step "program" {{
+    program "{}" sha256="{hash}"
+    retry {{ attempts 2; on "Broken" }}
+  }}
+}}"#, bundle.display()), "program-retry-definition");
+    let started = fixture.start_mission("program-retry", "automatic-retry", "retry-failure");
+    fixture.until("both program attempts fail", || {
+        fixture.store.mission_run(&started.run).unwrap().unwrap().status == "failed"
+    });
+    let claims = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap();
+    for attempt in [1, 2] {
+        let first = claims.iter().find(|claim| {
+            let fields = &claim.body["fields"];
+            fields["attempt"] == attempt && fields["key"] == "first" && fields["status"] == "completed"
+        }).expect("each attempt runs the inner effect instead of replaying its predecessor");
+        assert_eq!(first.body["fields"]["value"]["attempt"], attempt);
+        assert!(claims.iter().any(|claim| {
+            let fields = &claim.body["fields"];
+            fields["attempt"] == attempt && fields["key"] == RESULT_KEY
+                && fields["status"] == "failed" && fields["error"]["_tag"] == "Broken"
+        }));
+    }
+    assert_eq!(fixture.store.step_run(&started.step).unwrap().unwrap().attempt, 2);
+}

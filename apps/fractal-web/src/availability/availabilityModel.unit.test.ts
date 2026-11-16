@@ -1,6 +1,6 @@
 import type { PersonAvailability } from '@fractal/client'
 import { describe, expect, it } from 'vitest'
-import { availabilityFacts, formatInstant } from './availabilityModel.ts'
+import { availabilityFacts, formatInstant, untilFor } from './availabilityModel.ts'
 
 const zone = { locale: 'en-GB', timeZone: 'Europe/Berlin' }
 // 10:00 in Berlin on a Thursday.
@@ -65,5 +65,33 @@ describe('availabilityFacts', () => {
       { label: 'Deadline clock', value: 'hold-weekend · since 9:45' },
       { label: 'Note', value: 'No note' },
     ])
+  })
+})
+
+describe('untilFor', () => {
+  // Local wall time: the presets are the person's clock, wherever the test runs.
+  const local = (day: number, hour: number, minute = 0) => new Date(2026, 10, day, hour, minute)
+
+  it('adds the fixed spans to now', () => {
+    const at = local(12, 14, 10)
+    expect(untilFor('open', at)).toBe('open')
+    expect(untilFor('30m', at)).toEqual(local(12, 14, 40))
+    expect(untilFor('1h', at)).toEqual(local(12, 15, 10))
+    expect(untilFor('2h', at)).toEqual(local(12, 16, 10))
+  })
+
+  it('takes tomorrow 9:00 literally: the next calendar day, even before 9:00 today', () => {
+    expect(untilFor('tomorrow', local(12, 7, 30))).toEqual(local(13, 9))
+    expect(untilFor('tomorrow', local(12, 23, 59))).toEqual(local(13, 9))
+    expect(untilFor('tomorrow', local(30, 18))).toEqual(new Date(2026, 11, 1, 9))
+  })
+
+  it('reads a custom datetime-local value as local time and requires the future', () => {
+    const at = local(12, 14)
+    expect(untilFor('custom', at, '2026-11-12T16:45')).toEqual(local(12, 16, 45))
+    expect(untilFor('custom', at, '2026-11-12T13:00')).toBe('invalid')
+    expect(untilFor('custom', at, '2026-11-12T14:00')).toBe('invalid')
+    expect(untilFor('custom', at, '')).toBe('invalid')
+    expect(untilFor('custom', at, '2026-11-12T16:45Z')).toBe('invalid')
   })
 })

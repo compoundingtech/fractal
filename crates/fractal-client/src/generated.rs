@@ -28,6 +28,34 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AutoResolvedAsk {
+    pub resolution_id: String,
+    pub title: String,
+    pub requester_id: String,
+    pub resolved_at: String,
+    pub target_id: String,
+    pub episode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<AskDefaultAnswer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<StructuredRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_parameters: Option<BTreeMap<String, PersonOverrideTarget>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonOverrideTarget {
+    pub target_id: String,
+    pub episode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AutoResolvedAsks {
+    pub items: Vec<AutoResolvedAsk>,
+    pub complete: bool,
+}
+
 /// Set or clear the session person's own note; `text: None` clears it and is sent as `null`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DirectiveNoteSet {
@@ -1205,6 +1233,14 @@ pub struct UsageRow {
     pub mission_run: Option<String>,
     #[serde(default)]
     pub step: Option<String>,
+    /// Immutable work-claim accounting key, not a native process identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    /// Exact durable launch/turn receipt identity; absent means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -1971,6 +2007,8 @@ pub struct StepExecution {
     pub id: String,
     pub step_subject: String,
     pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     pub agent: String,
     pub incarnation_id: Option<String>,
     pub declared_model: Option<String>,
@@ -3771,6 +3809,12 @@ pub enum TimelineUsageSemantics {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TimelineAttribution {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     pub mission_run_id: Option<String>,
     pub generation_id: Option<String>,
     pub step_id: Option<String>,
@@ -3960,6 +4004,8 @@ pub enum ActionType {
     WorkAsk,
     #[serde(rename = "work.done")]
     WorkDone,
+    #[serde(rename = "work.override")]
+    WorkOverride,
     #[serde(rename = "work.cancel-ask")]
     WorkCancelAsk,
     #[serde(rename = "work.claim")]
@@ -4866,6 +4912,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn work_override(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PersonOverrideParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::WorkOverride,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn work_progress(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -4965,6 +5025,20 @@ pub struct PersonStepParameters {
     pub evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<PersonAnswerInput>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PersonOverrideParameters {
+    pub target_id: String,
+    pub episode: String,
+    pub answer: PersonOverrideAnswer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PersonOverrideAnswer {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 /// A typed question with named answers: a `decision`, a `choice` or `feedback`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

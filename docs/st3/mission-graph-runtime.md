@@ -1212,7 +1212,39 @@ none.
 [asks]
 deadlines = true           # off by default; turn on once every member runs this build
 default_deadline = "24h"   # 1m to 30d
+digest_at = "09:00"        # daily auto-resolution digest, strict local HH:MM
+digest_timezone = "UTC"    # fleet fallback IANA timezone, e.g. Europe/Berlin
 ```
+
+The daily auto-resolution digest uses `digest_at` (default `09:00`) in
+`digest_timezone` (default `UTC`). Person declarations and availability records do not
+currently store a timezone, and there was no fleet timezone setting; this explicit fleet
+fallback supplies it rather than using the daemon host's timezone. Configure the same IANA
+zone on fleet members. Both settings reload without a restart; an invalid time or timezone
+keeps the previously installed digest policy (an invalid timezone also refuses startup).
+Each local date's digest becomes due at its exact local boundary, including across
+23-hour and 25-hour DST days. Replicated `covered_through` records the actual prior
+boundary; reloading the time or timezone selects only the next boundary, never
+reinterprets the already-covered instants. After downtime the owner catches up missed
+nonempty dates even before today's wake. Resolution claim identities prevent repeats;
+late-replicated, previously unreported resolutions are carried into the next unissued
+date rather than lost behind a frozen source. Empty dates write nothing.
+A missing local minute advances to the first real minute after it; a repeated minute
+uses its first instant. The reconciler arms the next local boundary rather than polling.
+Arrival discovery, history indexing and large-day staging use bounded 128-item pages
+with immediate work continuations; rebuildable local indexes avoid rescanning lifetime
+ask history on empty days. A future digest for one person never blocks another
+person's due digest. Historical owner declarations and same-writer supersession fences
+preserve eligible prior-owner history; sources awaiting replicated owner dependencies
+are retried when those dependencies arrive rather than forgotten.
+
+Digest notices are informational views derived from replicated graph data. Existing
+replica envelopes have no cross-writer causal frontier, so they cannot prove whether
+a former owner had imported another writer's handover before emitting a source.
+Readers therefore show at most one digest per person and date, preferring a source
+written by the currently bound owner and then the lowest claim ID. An offline former
+owner's late emission may remain hidden history, but cannot create a second visible
+notice. No cross-writer causal authority proof is claimed.
 
 At the deadline the member that took the ask writes `work.person-done` as `daemon/runtime` with
 `resolved_by: "deadline"`. The ask leaves the person's home and its origin resumes as it would
@@ -1261,6 +1293,35 @@ the answer reaches the ask's member, it sends the asker one "Answered before its
 because the step may already have resumed on the default. A `--new-run` asker, which hears of
 answers by message, then has three: "Timed out" from the ask's member, the person's answer from
 the member they answered on, and that notice, which says the answer replaced the default.
+
+After a deadline resolution the asked person can explicitly re-answer with
+`fractal work override ASK --as person/operator --answer ID` (and `--text` when the answer requires words), or
+`POST /v1/work/override` with the same person-step response fields: `subject`, `actor`,
+`episode` (the exact asking claim ID), and required `answer`. Only that ask's person may
+override, within seven days of the deadline resolution claim's accepted time. The CLI
+recovers the current episode unless `--episode` is supplied. An ordinary late `work done`
+still fails its cutoff fence; this is a separate explicit action.
+
+The append-only `work.person-override` claim records `answer`, `summary`, `episode`,
+`overrides` (the deadline resolution claim ID), and
+`key: person-override:{ask.id}:{answer.id}`. Every member admits a valid override past the
+cutoff and shows it instead of the default. Repeating that answer is idempotent; a later
+different answer is allowed within the same seven-day window, and the latest override
+in canonical claim order stands. Duplicate keys admitted independently on offline members
+use their first canonical receipt for both standing answers and retry admission. A retry
+must match that receipt's answer and summary; conflicting offline submissions do not
+change which payload is accepted. Retrying an earlier answer's key after a later override
+succeeds without selecting the earlier answer again, including after the window closes.
+Claims with a mismatching episode, deadline link, or person
+do not stand. The ask's origin member notifies the asker once per override key, including
+overrides submitted on another member and replicated later. Disabling new deadlines does
+not stop notifications for already-resolved asks. Once an explicit override stands,
+a delayed pre-cutoff person answer does not produce a contradictory replacement notice.
+
+An override does not reopen the origin step or roll back effects already taken on the
+default. The asker decides whether and how to compensate those effects. The explicit CLI
+and endpoint operation does not require a digest or client revert control, and does not
+change the off-by-default deadline setting.
 
 An ask made by a build without deadlines, or while they were off, carries none. Its deadline is
 the fleet default counted from the first reconcile pass on this member that saw deadlines on (the
@@ -2598,7 +2659,7 @@ Mission execution uses these important claim kinds:
 - `step-run.carried`, `step-run.state`, and `step-run.retried` record generation-specific step history.
 - `mission.produced` binds a generated mission to one producing attempt.
 - `gate.requested` and `gate.result` record gate operations and evidence.
-- `work.person-asked`, `work.person-done`, and `work.person-cancelled` record person work.
+- `work.person-asked`, `work.person-done`, `work.person-override`, and `work.person-cancelled` record person work.
 - `operational.failure` and `operational.recovered` record observed source failure episodes.
 
 Evidence is a list of claim IDs or immutable graph references that support a result. The evidence does not replace the gate. The gate definition says what must be decided; evidence records why the result is trustworthy.

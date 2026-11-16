@@ -83,6 +83,7 @@ mod availability;
 mod directive_note;
 mod completion;
 mod doctor_cli;
+mod effects_cli;
 mod fractal;
 mod release_version;
 #[cfg(test)]
@@ -348,6 +349,11 @@ enum Command {
         #[command(subcommand)]
         command: MissionViewCommand,
     },
+    /// Inspect durable native effects or explicitly resolve an uncertain outcome.
+    Effects {
+        #[command(subcommand)]
+        command: effects_cli::EffectsCommand,
+    },
     /// List locally replicated schedule declarations and their knowledge limits.
     Schedules {
         #[command(subcommand)]
@@ -365,7 +371,7 @@ enum Command {
     #[command(
         name = "alerts",
         alias = "attention",
-        after_help = "Messages never appear here; read them with `fractal conversations`.\nFaults never appear here; fractal sends each one to the agent that owns it, which asks a person with `fractal work ask` only if it needs to."
+        after_help = "Messages never appear here; read them with `fractal conversations`.\nOperational faults go to their owning agent, which asks a person with `fractal work ask` when needed. Unresolved native effects also appear here because only explicit person resolution can clear their fence."
     )]
     Attention {
         #[command(subcommand)]
@@ -1302,6 +1308,18 @@ enum MissionViewCommand {
         #[arg(long, add = ArgValueCompleter::new(Complete(Entity::Mission)))]
         mission: Option<String>,
     },
+    /// List bounded run and step summaries for a mission ID prefix.
+    Runs {
+        /// Literal mission ID prefix to select.
+        #[arg(long)]
+        mission_prefix: String,
+        /// Only include active runs.
+        #[arg(long)]
+        active: bool,
+        /// Maximum runs to return (1 through 500).
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+    },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
     /// What one run waits on: each open step, whom it waits on and since when, open asks, the
@@ -2080,16 +2098,20 @@ enum UsageBy {
     Agent,
     Mission,
     Step,
+    Attempt,
+    Invocation,
     Model,
     Account,
     Host,
 }
 
 impl UsageBy {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Agent,
         Self::Mission,
         Self::Step,
+        Self::Attempt,
+        Self::Invocation,
         Self::Model,
         Self::Account,
         Self::Host,
@@ -2101,6 +2123,8 @@ impl UsageBy {
             Self::Agent => "agent",
             Self::Mission => "mission_run",
             Self::Step => "step",
+            Self::Attempt => "attempt",
+            Self::Invocation => "invocation_id",
             Self::Model => "model",
             Self::Account => "account",
             Self::Host => "host",
@@ -2110,6 +2134,7 @@ impl UsageBy {
     fn label(self) -> &'static str {
         match self {
             Self::Mission => "mission",
+            Self::Invocation => "invocation",
             other => other.field(),
         }
     }
@@ -2613,12 +2638,8 @@ enum ServiceCommand {
     },
     /// Show whether the daemon and replication services are installed and running.
     Status,
-    /// Explain the one-time macOS permissions for service-owned work.
-    Permissions {
-        /// Open the matching System Settings pages on macOS.
-        #[arg(long)]
-        open: bool,
-    },
+    /// Explain the macOS protected-folder boundary for agent work.
+    Permissions,
     /// Restart fractal after configuration or binary changes.
     Restart {
         #[arg(long)]
@@ -4422,6 +4443,8 @@ enum WorkCommand {
     Update(WorkUpdateArgs),
     /// Complete a person-assigned step with a response.
     Done(WorkDoneArgs),
+    /// Replace a deadline-applied default within seven days. Already taken effects are not undone.
+    Override(WorkOverrideArgs),
     /// Cancel your own ask and resume its live origin.
     CancelAsk(WorkDoneArgs),
     /// List current actionable work; use --as to filter one agent or --all for history.
@@ -4651,6 +4674,26 @@ struct WorkDoneArgs {
     episode: Option<String>,
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+struct WorkOverrideArgs {
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
+    subject: String,
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_name = "PERSON", value_parser = parse_person_subject)]
+    actor: String,
+    /// The ID of one of the ask's named answers.
+    #[arg(long, value_name = "ID")]
+    answer: String,
+    /// Text accompanying the selected answer.
+    #[arg(long)]
+    text: Option<String>,
+    #[arg(long)]
+    summary: Option<String>,
+    /// Fence the original ask; recovered from its latest ask claim when omitted.
+    #[arg(long)]
+    episode: Option<String>,
 }
 
 #[derive(Args)]
@@ -6351,6 +6394,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Clients => run_clients(&endpoint, cli.json).await,
         Command::Work { command } => run_work(&client, &endpoint, command, cli.json).await,
+        Command::Effects { command } => effects_cli::run(&endpoint, command, cli.json).await,
         Command::Changes(arguments) => {
             let client = if matches!(
                 &arguments.command,
@@ -6476,6 +6520,7 @@ async fn run(cli: Cli) -> Result<()> {
             run_replication(&client, &config, command, cli.json).await
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
+        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
         Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
@@ -6489,7 +6534,6 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Claims { command } => run_claims(&client, command, cli.json).await,
-        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -6595,10 +6639,10 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
-        Command::Apply(args) => args.actor.as_deref(),
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
+        Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
@@ -6676,9 +6720,14 @@ fn guard_mutating_cli_actor(
                 anyhow::anyhow!("a harness person rename needs explicit --as {own}")
             })?),
         },
+        Command::Effects { command } => match command {
+            effects_cli::EffectsCommand::Resolve(args) => Some(args.actor.as_str()),
+            effects_cli::EffectsCommand::Status { .. } => None,
+        },
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
             WorkCommand::Done(args) | WorkCommand::CancelAsk(args) => Some(args.actor.as_str()),
+            WorkCommand::Override(args) => Some(args.actor.as_str()),
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
@@ -7765,6 +7814,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             (
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
+                    "mission_resource_lane": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7890,6 +7940,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
+    reconciler.set_ask_digest_policy(&config.asks)?;
     fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -9448,7 +9499,7 @@ async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()>
     if args.exec {
         let st = match args.st {
             Some(st) => std::path::absolute(st)?,
-            None => std::env::current_exe().context("find this st executable")?,
+            None => std::env::current_exe().context("find this Fractal executable")?,
         };
         let pty_root = std::path::absolute(
             config
@@ -11860,10 +11911,13 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
     for by in groups {
         let mut totals = BTreeMap::<String, Vec<&Value>>::new();
         for row in rows {
-            let label = row[by.field()]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .unwrap_or("unknown");
+            let attempt_label = match (by, row["step"].as_str(), row["attempt"].as_u64()) {
+                (UsageBy::Attempt, Some(step), Some(attempt)) if !step.is_empty() =>
+                    Some(format!("{step} attempt {attempt}")),
+                _ => None,
+            };
+            let label = attempt_label.as_deref().or_else(|| row[by.field()].as_str())
+                .filter(|value| !value.is_empty()).unwrap_or("unknown");
             let label = match (by, declared.get(label)) {
                 (UsageBy::Account, Some(name)) => format!("{name} ({label})"),
                 _ => label.to_owned(),
@@ -13687,22 +13741,18 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
                 Ok(())
             }
         }
-        ServiceCommand::Permissions { open } => {
+        ServiceCommand::Permissions => {
             if json_output {
                 let guidance = fractal_daemon::service::permissions_guidance()?;
-                if open {
-                    fractal_daemon::service::open_permissions_settings()?;
-                }
                 print_value(
                     &serde_json::json!({
                         "platform": std::env::consts::OS,
                         "guidance": guidance,
-                        "settings_opened": open && cfg!(target_os = "macos"),
                     }),
                     true,
                 )
             } else {
-                fractal_daemon::service::permissions(open)
+                fractal_daemon::service::permissions()
             }
         }
         ServiceCommand::Restart { config } => {
@@ -16312,14 +16362,15 @@ async fn send_message(
         return Ok(None);
     }
     let mut request = MessageSendRequest {
-        idempotency_key: String::new(),
-        from,
-        to,
-        content: body,
-        title: args.subject,
-        in_reply_to: args.in_reply_to,
-        tags: args.tags,
-        attachments,
+    owner: None,
+    idempotency_key: String::new(),
+    from,
+    to,
+    content: body,
+    title: args.subject,
+    in_reply_to: args.in_reply_to,
+    tags: args.tags,
+    attachments,
     };
     request.idempotency_key = match args.idempotency_key {
         Some(key) => key,
@@ -19526,7 +19577,8 @@ fn admission_diagnostic(
         subject: subject.into(),
         kind: "harness.diagnostic".into(),
         actor: Some(subject.into()),
-        fields: BTreeMap::from([
+        fields: {
+            let mut fields = BTreeMap::from([
             (
                 "severity".into(),
                 json!(if failure.driver == Driver::Omp {
@@ -19546,7 +19598,16 @@ fn admission_diagnostic(
             ("code".into(), json!("harness-admission-failed")),
             ("reason".into(), json!(reason)),
             ("incarnation_id".into(), json!(incarnation)),
-        ]),
+            ]);
+            fields.insert("driver".into(), json!(failure.driver.as_str()));
+            if let Some(version) = &failure.producer_version {
+                fields.insert("producer_version".into(), json!(version));
+            }
+            if let Ok(invocation) = std::env::var(fractal_schema::invocation::ENV) {
+                fields.insert("invocation_id".into(), json!(invocation));
+            }
+            fields
+        },
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: Some(format!(
@@ -21171,6 +21232,9 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
                 store.set_ask_deadlines(asks.deadlines);
+                if let Err(error) = reconciler.set_ask_digest_policy(&asks) {
+                    tracing::warn!("the ask digest policy keeps its last config: {error:#}");
+                }
                 limits = reloaded;
                 last_error = None;
             }

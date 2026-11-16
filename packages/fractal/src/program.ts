@@ -4,13 +4,16 @@
  * the daemon resolves), `Fractal.command`, `Fractal.env` and `Fractal.cwd`.
  * See docs/st3/program-engine.md §11.
  */
-import { Context, Effect, Layer, Schedule, Schema, SchemaAST } from 'effect'
+import { Context, Effect, Layer, Option, Schedule, Schema, SchemaAST } from 'effect'
 import { Activity, DurableDeferred, type Workflow } from 'effect/workflow'
 
 import { mission as dataMission, type MissionIntent } from './define.ts'
 import type { Authority, PersonReference } from './mod.ts'
 import {
   keyed,
+  CommandResultSchema,
+  ResourceError,
+  ResourceCommandScope,
   Program,
   programEntry,
   ProgramEntry,
@@ -83,6 +86,17 @@ export interface ProgramIntent<
   readonly timeout?: string
   /** How long the program may go without a journal entry before its run reports it stalled. */
   readonly stalledAfter?: string
+  /** Engine-side retries start a fresh attempt with a fresh journal and cancel old children. */
+  readonly retry?: {
+    /** Typed error tags eligible for retry; empty matches every failure. */
+    readonly on: readonly string[]
+    /** Total attempts including the first (1..100). */
+    readonly attempts: number
+    /** Delay before each retry; the final delay repeats. */
+    readonly delays?: readonly string[]
+    /** Whole-policy window from the first attempt's start. */
+    readonly within?: string
+  }
   /** At most this many runs at once (`concurrent-runs max=N`). */
   readonly concurrentRuns?: number
   /** What the mission's runs may do as `mission-run/RUN` (docs/st3/program-engine.md §3). */
@@ -266,7 +280,7 @@ export function step(
         name: key,
         success: success ?? Schema.Void,
         error: options.error ?? TaggedFailure,
-        execute: success === undefined ? Effect.asVoid(effect) : effect,
+        execute: Effect.provideService(success === undefined ? Effect.asVoid(effect) : effect, ResourceCommandScope, key),
         interruptRetryPolicy: noInterruptRetry,
       }),
     )
@@ -345,15 +359,27 @@ export function run(
 /**
  * Runs a command as its own process group, which the host ends when the program is cancelled.
  * `priority: 'background'` runs it as background work. Commands are not journaled: run them
- * inside a step.
+ * inside a step. In a lane-bound run, repeated commands in one fiber use successive keys within
+ * their durable activity. Concurrent branches must use separate steps (or explicit lane.exec ids).
  */
 export const command = (
   argv: readonly string[],
   options?: CommandOptions,
-): Effect.Effect<CommandResult, never, Program> =>
-  Effect.flatMap(Effect.service(Program), (program) =>
-    Effect.promise(() => program.host.spawn(argv, options)),
-  )
+): Effect.Effect<CommandResult, ResourceError, Program> =>
+  Effect.gen(function* () {
+    const program = yield* Program
+    if (program.host.resourceMembership === undefined)
+      return yield* Effect.promise(() => program.host.spawn(argv, options))
+    const scope = Option.getOrElse(yield* Effect.serviceOption(ResourceCommandScope), () => 'program')
+    return yield* keyed(`resource.command/${scope}`, (key) =>
+      Effect.flatMap(Effect.promise((signal) => program.host.resource({
+        key, operation: 'resource.lane.exec',
+        payload: { membership: program.host.resourceMembership, argv, options: options ?? {} },
+      }, signal)), (exit) => exit._tag === 'Success'
+        ? Effect.orDie(Schema.decodeUnknownEffect(CommandResultSchema)(exit.value))
+        : Effect.flatMap(Effect.orDie(Schema.decodeUnknownEffect(ResourceError)(exit.error)), Effect.fail)),
+    )
+  })
 
 /** The run's `ST_*` variables (`ST_MISSION_RUN`, `ST_STEP_RUN`, …). */
 export const env: Effect.Effect<Readonly<Record<string, string>>, never, Program> = Effect.map(

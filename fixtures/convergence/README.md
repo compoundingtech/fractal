@@ -394,3 +394,37 @@ Hosted [burst run 43535467419](https://github.com/compoundingtech/fractal/action
 observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk).
 The exact v29 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
 no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
+
+`claims-v30.json` adds durable native invocation receipts (the `harness.invocation` kind)
+on top of v29 notice-owner registry entry. Versions 1 through 29 stay frozen; v29 is main`s
+notice-owner corpus. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v30.json`;
+do not hand-edit it. It remains the historical v30 corpus.
+
+`claims-v31.json` adds explicit deadline-answer replacements (`work.person-override`).
+Versions 1 through 30 remain byte-identical. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v31.json`;
+the simulation and audit reports now select v32.
+
+The v31 fixed sweep observed only seed 179 without a checkpoint trim; it still trims on
+every modern node after its old build is excused and the next cut falls due. The exact
+v31 `NEVER_TRIMS` set is `[179]`.
+
+`claims-v32.json` adds the durable, system-only append receipts `effect.intended`,
+`effect.in-flight`, `effect.confirmed`, and `effect.unresolved` on dedicated
+`effect/OPERATION_ID` subjects. Versions 1 through 31 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v32.json`;
+do not hand-edit it. Effect draws bind operation identity, payload digest, step attempt,
+and admitting lease; confirmed draws include a provider reference and evidence.
+
+The v32 fixed sweep retains the exact `NEVER_TRIMS` set `[179]`. That seed still
+trims on every modern node after its old build is excused and the next cut falls due;
+all other fixed seeds trim. The per-seed and majority trim-coverage assertions remain enforced.
+
+`claims-v33.json` registers the optional `resolution: "human"` and
+`outcome: "abandoned"` fields on existing native effect receipt kinds. No kind is
+added. Versions 1 through 32 remain byte-identical. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v33.json`;
+do not hand-edit it. The simulation and audit reports select v33. Ordinary effect
+draws retain their explicit immutable binding and confirmation-evidence mapping;
+human resolution is exercised by focused effect API and reconciliation tests.

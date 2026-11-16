@@ -24,6 +24,7 @@ const ATTENTION_KINDS: &[&str] = &[
     "host-hold",
     "human-gate", "launch-approval", "revision-approval", "unread-message", "person-step",
     "agent-request", "fault", "harness-login", "harness-prompt", "model-drift",
+    "host-hold",
 ];
 pub const AGENT_STATES: &[&str] = &[
     "desired", "starting", "running", "waiting", "stopped", "failed", "suspended",

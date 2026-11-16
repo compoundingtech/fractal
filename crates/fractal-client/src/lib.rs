@@ -2234,6 +2234,9 @@ impl Client {
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
+    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {
+        self.get("/v1/client/auto-resolved").await
+    }
     pub async fn availability_list(
         &self,
         person: Option<&str>,
@@ -3819,6 +3822,17 @@ impl Client {
         parameters: TargetParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::work_fail(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn work_override(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PersonOverrideParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::work_override(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -6588,6 +6602,33 @@ mod tests {
             }
             lines
         })
+    }
+
+    #[test]
+    fn auto_resolved_models_decode_and_override_omits_absent_summary() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/auto-resolved.json"
+        ))
+        .unwrap();
+        let rows: Envelope<AutoResolvedAsks> = serde_json::from_value(wire.clone()).unwrap();
+        assert!(rows.value.complete);
+        assert_eq!(
+            rows.value.items[0].default_answer.as_ref().unwrap().id,
+            "hold"
+        );
+        assert_eq!(serde_json::to_value(rows).unwrap(), wire);
+        let parameters = PersonOverrideParameters {
+            target_id: "step-run/example".into(),
+            episode: "claim/example".into(),
+            answer: PersonOverrideAnswer {
+                id: "ship".into(),
+                text: None,
+            },
+            summary: None,
+        };
+        let wire = serde_json::to_value(parameters).unwrap();
+        assert!(wire.get("summary").is_none());
+        assert!(wire["answer"].get("text").is_none());
     }
 
     #[test]

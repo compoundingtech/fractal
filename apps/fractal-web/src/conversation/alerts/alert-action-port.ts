@@ -1,4 +1,4 @@
-import { ClientError, plainError, type FractalClient } from '@fractal/client'
+import { ClientError, plainError, type AutoResolvedAsk, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
 
 /** One answer to an alert: sent, or refused in words a person reads. */
@@ -30,8 +30,20 @@ export type AlertAction =
   | { readonly type: 'launch.approve' | 'launch.cancel' }
   | { readonly type: 'launch.revise'; readonly feedback: string }
 
+/** The person's own named answer in place of the default that answered an ask at its deadline; a request for changes carries their words. */
+export type OverrideAction = { readonly type: 'work.override'; readonly answer: { readonly id: string; readonly text?: string } }
+
+/** The asks a default answered at their deadline, as Fractal serves them to the person they asked. */
+export type AutoResolvedRead =
+  | { readonly _tag: 'Observed'; readonly asks: readonly AutoResolvedAsk[]; readonly complete: boolean }
+  /** `absent`: this session has no asks of its own (not a person), or this Fractal serves no such read. */
+  | { readonly _tag: 'Unavailable'; readonly reason: 'absent' | 'failed'; readonly detail: string }
+
 export interface AlertActionPort {
   readonly act: (request: { readonly alert: AlertAnswered; readonly action: AlertAction }) => Promise<AlertActionResult>
+  /** Reads the auto-resolved asks again; never polled, only on open, attention changes and accepted overrides. */
+  readonly autoResolved: () => Promise<AutoResolvedRead>
+  readonly override: (request: { readonly ask: AutoResolvedAsk; readonly action: OverrideAction }) => Promise<AlertActionResult>
 }
 
 const refused = (detail: string): AlertActionResult => ({ _tag: 'Refused', detail })
@@ -167,6 +179,44 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
         error instanceof ClientError
           ? `${plainError(error)}.`
           : 'The answer could not be confirmed; check the alert before answering again. It was not sent again.',
+      )
+    }
+  },
+  autoResolved: async () => {
+    try {
+      const read = await client.autoResolvedList()
+      return { _tag: 'Observed', asks: read.value.items, complete: read.value.complete }
+    } catch (error) {
+      // An agent session is refused (it asks nobody); an older Fractal has no such route or capability.
+      const absent = error instanceof ClientError && ['forbidden', 'not-found', 'unsupported', 'unsupported-capability'].includes(error.response.code)
+      return { _tag: 'Unavailable', reason: absent ? 'absent' : 'failed', detail: plainError(error) }
+    }
+  },
+  /**
+   * Reads the auto-resolved asks again for the snapshot the override is fenced on, then submits once. The episode is
+   * the fence: an ask whose window closed, that was answered since, or that no longer offers an override is not sent.
+   * The action id and idempotency key name the episode and answer, so a retry of the same choice replays it.
+   */
+  override: async ({ ask, action }) => {
+    try {
+      const read = await client.autoResolvedList()
+      const offered = read.value.items.find((each) => each.resolution_id === ask.resolution_id)?.action_parameters?.['work.override']
+      if (offered === undefined || offered.episode !== ask.episode) return refused('This can no longer be overridden.')
+      const key = `person-override:${offered.episode}:${action.answer.id}`
+      const response = await client.workOverride({
+        id: `action/${key}`,
+        idempotency_key: key,
+        fence: { snapshot_id: read.snapshot.id, subject_revisions: {} },
+        parameters: { target_id: offered.target_id, episode: offered.episode, answer: action.answer },
+      })
+      return response.value.status === 'rejected'
+        ? refused('Fractal did not take this answer.')
+        : { _tag: 'Sent' }
+    } catch (error) {
+      return refused(
+        error instanceof ClientError
+          ? `${plainError(error)}.`
+          : 'The answer could not be confirmed; check the ask before answering again. It was not sent again.',
       )
     }
   },

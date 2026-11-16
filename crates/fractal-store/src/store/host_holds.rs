@@ -162,6 +162,7 @@ impl Store {
         transaction.commit().map_err(internal)?;
         drop(writer);
         self.host_holds_changed();
+        self.observe_resource_holds(&hold.host, &hold.operations, None);
         Ok(hold)
     }
 
@@ -240,6 +241,8 @@ impl Store {
         transaction.commit().map_err(internal)?;
         drop(writer);
         self.host_holds_changed();
+        self.observe_resource_holds(&hold.host, &hold.operations, Some(std::time::Duration::from_millis(
+            hold.released_at_unix_ms.unwrap_or(hold.created_at_unix_ms).saturating_sub(hold.created_at_unix_ms))));
         Ok(hold)
     }
 }
@@ -310,6 +313,7 @@ mod tests {
         ];
         for store in stores {
             assert!(store.host_holds(None, false).unwrap().is_empty());
+            assert!(store.resource_memberships_for_host("host-a").unwrap().is_empty());
             let hold = store.place_host_hold("person/operator", &request()).unwrap();
             assert_eq!(store.host_holds(None, false).unwrap(), vec![hold]);
         }

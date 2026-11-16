@@ -1891,18 +1891,19 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
     assert_eq!(uploaded.blob, format!("blob/{hash}"));
     let message = crate::client::Client::unix(&owner_socket)
         .send_message(&crate::model::MessageSendRequest {
-            idempotency_key: "pasted-image".into(),
-            from: "person/avery".into(),
-            to: "agent/gateway-node.seat".into(),
-            content: "look at this".into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: vec![crate::model::AttachmentInput {
-                blob: uploaded.blob.clone(),
-                media_type: "image/png".into(),
-                name: Some("paste.png".into()),
-            }],
+        owner: None,
+        idempotency_key: "pasted-image".into(),
+        from: "person/avery".into(),
+        to: "agent/gateway-node.seat".into(),
+        content: "look at this".into(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: vec![crate::model::AttachmentInput {
+            blob: uploaded.blob.clone(),
+            media_type: "image/png".into(),
+            name: Some("paste.png".into()),
+        }],
         })
         .await
         .unwrap()
@@ -2079,14 +2080,15 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     let hash = hex::encode(Sha256::digest(body.as_bytes()));
     let message = crate::client::Client::unix(&owner_socket)
         .send_message(&crate::model::MessageSendRequest {
-            idempotency_key: "pasted-notes".into(),
-            from: "person/avery".into(),
-            to: "agent/gateway-node.seat".into(),
-            content: body.clone(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "pasted-notes".into(),
+        from: "person/avery".into(),
+        to: "agent/gateway-node.seat".into(),
+        content: body.clone(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .await
         .unwrap()
@@ -2143,14 +2145,15 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     let smaller = &body[..end];
     let sent = crate::client::Client::unix(&owner_socket)
         .send_message(&crate::model::MessageSendRequest {
-            idempotency_key: "pasted-notes-64".into(),
-            from: "person/avery".into(),
-            to: "agent/gateway-node.seat".into(),
-            content: smaller.to_owned(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "pasted-notes-64".into(),
+        from: "person/avery".into(),
+        to: "agent/gateway-node.seat".into(),
+        content: smaller.to_owned(),
+        title: None,
+        in_reply_to: None,
+        tags: Vec::new(),
+        attachments: Vec::new(),
         })
         .await
         .unwrap()

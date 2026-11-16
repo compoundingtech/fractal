@@ -194,6 +194,10 @@ fn batched_work_metadata_reads_new_owner_and_definition_on_each_call() {
     for step in mission.steps.values_mut() {
         step.fresh_context = true;
         step.timeout_ms = Some(12345);
+        step.retry.attempts = 4;
+        step.retry.schedule_ms = vec![120_000, 600_000, 1_800_000];
+        step.retry.window_ms = Some(7_200_000);
+        step.retry.on_error_tags = vec!["HostUnavailable".into(), "SlotLost".into()];
     }
     connection
         .execute(
@@ -212,6 +216,9 @@ fn batched_work_metadata_reads_new_owner_and_definition_on_each_call() {
             .iter()
             .all(|view| view.fresh_context && view.timeout_ms == Some(12345))
     );
+    assert!(changed.iter().all(|view| {
+        view.retry.as_ref() == Some(&mission.steps.values().next().unwrap().retry)
+    }));
     store
         .connection
         .write()

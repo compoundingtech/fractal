@@ -468,14 +468,15 @@ read -r _
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "mail".into(),
-                from: "person/avery".into(),
-                to: SEAT.into(),
-                content: "hello from the terminal owner".into(),
-                title: None,
-                in_reply_to: None,
-                tags: vec![],
-                attachments: vec![],
+            owner: None,
+            idempotency_key: "mail".into(),
+            from: "person/avery".into(),
+            to: SEAT.into(),
+            content: "hello from the terminal owner".into(),
+            title: None,
+            in_reply_to: None,
+            tags: vec![],
+            attachments: vec![],
             },
         )
         .await

@@ -1118,6 +1118,64 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     assert_eq!(resumed.person_answers[0].resolved_by.as_deref(), Some("deadline"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn ask_digest_stage_records_and_fires_local_nine_wakes_across_dst() {
+    use crate::store::fleet_admission_tests_shared_seats::{admit, key, node};
+    use futures_util::FutureExt as _;
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let ms = |at: &str| u128::try_from(chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis()).unwrap();
+    for (previous, boundary, hours) in [
+        ("2026-03-28T08:00:00Z", "2026-03-29T07:00:00Z", 23),
+        ("2026-10-24T07:00:00Z", "2026-10-25T08:00:00Z", 25),
+    ] {
+        let armed = ms(previous) + 1;
+        let deadline = ms(boundary);
+        assert_eq!(deadline - ms(previous), hours * 3_600_000);
+        smallclaims::store::set_thread_clock(Some(armed));
+        let identity = key();
+        let store = Arc::new(node("alder", Some(&identity), Some(&identity)));
+        admit(&store, "alder", &identity, "anchor", None);
+        store.project_replication_backlog().unwrap();
+        store.fleet_membership().unwrap();
+        let intent = parse_intent(&format!(
+            "version 2\nnotice-owner {{ member \"alder\"; member-key \"{}\"; always-on }}",
+            identity.public(),
+        ), "alder").unwrap();
+        let subject = crate::notice_owner::SUBJECT;
+        let expected = BTreeMap::from([(subject.to_owned(), Vec::new())]);
+        store.apply_as(&intent, &expected, "digest-owner", Some("person/example")).unwrap();
+        let reconciler = Reconciler::new(
+            store,
+            Arc::new(Runtime::default()),
+            "alder".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.set_ask_digest_policy(&crate::config::AsksConfig {
+            digest_timezone: "Europe/Berlin".into(),
+            ..crate::config::AsksConfig::default()
+        }).unwrap();
+        let (pass, due) = smallclaims::touched::record_due(|| reconciler.reconcile_ask_digests());
+        assert!(!pass.unwrap(), "no resolved asks means no digest");
+        assert_eq!(due, Some(deadline));
+        assert_eq!(reconciler.step_deadlines.lock().unwrap().get("ask-digest"), Some(&deadline));
+        let _ = reconciler.notify.notified().now_or_never();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(u64::try_from(deadline - armed - 1).unwrap())).await;
+        tokio::task::yield_now().await;
+        assert!(reconciler.notify.notified().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(reconciler.notify.notified().now_or_never().is_some(), "local 09:00 wakes the digest stage");
+        smallclaims::store::set_thread_clock(Some(deadline));
+        let (_, next) = smallclaims::touched::record_due(|| reconciler.reconcile_ask_digests().unwrap());
+        assert_eq!(next, Some(deadline + 24 * 3_600_000));
+    }
+}
+
 /// While the asked person holds their deadline clock no wake is armed for the ask; once it
 /// runs again the wake is armed for the stored deadline plus the time held.
 #[tokio::test(start_paused = true)]

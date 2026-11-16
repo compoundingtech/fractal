@@ -16,6 +16,8 @@ pub mod notice;
 pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
+pub mod invocation;
+pub mod effects;
 pub mod provenance;
 pub mod read_positions;
 pub mod source_map;
@@ -798,6 +800,10 @@ impl Registry {
             source_map::validate_claim(subject, fields)?;
         }
         harness_questions::validate(kind, fields)?;
+        if kind == invocation::KIND {
+            invocation::validate(subject, fields)?;
+        }
+        effects::validate(kind, subject, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -1300,6 +1306,12 @@ fn build_registry() -> Registry {
             "sekret",
             "sekret/HOST or sekret/HOST/OWNER/NAME",
             "A host's sekrets gateway, or one of its profiles: calls run with a credential the caller never reads.",
+            false,
+        ),
+        (
+            "effect",
+            "effect/OPERATION_ID",
+            "A durable native effect bound to one operation.",
             false,
         ),
         (
@@ -2045,6 +2057,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.person-override",
+            &["step-run"],
+            WritePolicy::AuthorizedParticipant,
+            Cardinality::Append,
+            Some("work"),
+            true,
+            &[],
+        ),
+        (
             "work.person-cancelled",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -2521,6 +2542,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "harness.invocation-artifact",
+            &["agent"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("harnesses"),
+            false,
+            &[],
+        ),
+        (
             "harness.session-file",
             &["agent"],
             WritePolicy::AuthorizedRequester,
@@ -2658,6 +2688,11 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ("client.js-error", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.native-crash", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.hang", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (invocation::KIND, &["agent"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_INTENDED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_IN_FLIGHT, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_CONFIRMED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_UNRESOLVED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (
             "harness.timeline",
             &["agent"],
@@ -3699,6 +3734,13 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("answer", object()),
             ("resolved_by", string()),
         ],
+        "work.person-override" => &[
+            ("answer", object()),
+            ("summary", string()),
+            ("episode", string()),
+            ("overrides", string()),
+            ("key", string()),
+        ],
         "work.person-reassigned" => &[
             ("previous_person", reference()),
             ("person", reference()),
@@ -3722,6 +3764,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("worker_reported", boolean()),
             ("claimant", reference()),
             ("claim_incarnation", string()),
+            ("invocation_id", string()),
             ("declared_model", string()),
             ("trace_id", string()),
             ("fallback", boolean()),
@@ -4291,8 +4334,19 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ),
             ("modified_at", string()),
         ],
+        "harness.invocation-artifact" => &[
+            ("invocation_id", required_string()),
+            ("kind", enumeration(&["input", "transcript"])),
+            ("status", enumeration(&["retained", "unavailable", "deleted"])),
+            ("artifact", object()),
+            ("sha256", string()),
+            ("deleted_at_unix_ms", integer()),
+            ("reason", string()),
+        ],
         "harness.diagnostic" => &[
             ("driver", string()),
+            ("producer_version", string()),
+            ("invocation_id", string()),
             ("severity", enumeration(&["warning", "error"])),
             ("status", string()),
             ("code", string()),
@@ -4340,6 +4394,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("pricing_provenance", array()),
             ("native_session_id", string()),
             ("execution_id", string()),
+            ("invocation_id", string()),
+            ("attempt", integer()),
             (
                 "semantics",
                 required_enum(&[
@@ -4465,6 +4521,38 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("unit", required_enum(&["hook"])),
             ("incarnation_id", required_string()),
             ("signals", required_object()),
+        ],
+        "harness.invocation" => &[
+            ("invocation_id", required_string()),
+            ("operation_id", required_string()),
+            ("agent", required_reference_to(&["agent"])),
+            ("phase", required_enum(&["admitted", "launch-inputs", "launch-accepted", "started",
+                "startup-failed", "revoked", "cancelled", "producer-closed", "ended", "observed"])),
+            ("event_key", any()), ("owner_run", any()), ("owner_step", any()),
+            ("owner_attempt", any()), ("parent_invocation_id", any()), ("incarnation", any()),
+            ("requested_model", any()), ("harness", any()), ("harness_version", any()),
+            ("launch_input_digest", any()), ("provider_binary_digest", any()),
+            ("prompt_digest", any()), ("transcript_ref", any()), ("trace_context", any()),
+            ("freshness", object()), ("fallback", any()), ("error", any()), ("evidence", any()),
+        ],
+        effects::KIND_INTENDED | effects::KIND_IN_FLIGHT | effects::KIND_CONFIRMED | effects::KIND_UNRESOLVED => &[
+            ("effect_id", required_reference_to(&["effect"])),
+            ("operation_id", required_string()),
+            ("provider", required_string()),
+            ("target", required_string()),
+            ("payload_digest", required_string()),
+            ("class", required_enum(&["native-coordinated", "provider-idempotent", "fail-closed"])),
+            ("bound_step_run", required_reference_to(&["step-run"])),
+            ("bound_attempt", required_integer()),
+            ("lease_owner", required_string()),
+            ("lease_incarnation", required_string()),
+            ("recovering_actor", string()),
+            ("resolution", enumeration(&["human"])),
+            ("outcome", enumeration(&["abandoned"])),
+            ("provider_ref", string()),
+            ("result_digest", string()),
+            ("error", string()),
+            ("evidence", array()),
         ],
         "harness.timeline" => &[
             (
@@ -5255,6 +5343,7 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
@@ -5269,6 +5358,15 @@ mod tests {
         current.claims.remove("program.step").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
+        current.claims.remove(invocation::KIND).unwrap();
+        current.claims.remove("harness.invocation-artifact").unwrap();
+        for kind in [effects::KIND_INTENDED, effects::KIND_IN_FLIGHT, effects::KIND_CONFIRMED, effects::KIND_UNRESOLVED] {
+            current.claims.remove(kind).unwrap();
+        }
+        current.subjects.remove("effect").unwrap();
+        for field in ["producer_version", "invocation_id"] {
+            current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
+        }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         for field in ["phase", "admission_publication"] {
@@ -5294,11 +5392,11 @@ mod tests {
         }
         for kind in ["work.claimed", "work.renewed", "work.progress", "work.submitted",
             "work.failed", "work.released", "work.extended"] {
-            for field in ["declared_model", "trace_id", "fallback"] {
+            for field in ["declared_model", "trace_id", "fallback", "invocation_id"] {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        for field in ["execution_id", "unpriced_responses"] {
+        for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
@@ -5500,6 +5598,7 @@ mod tests {
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",
+                "work.person-override",
                 "work.progress",
                 "work.released",
                 "work.renewed",

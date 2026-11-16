@@ -8411,6 +8411,18 @@ fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
         ).unwrap();
         connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     }
+    // Projection alone is not historical ownership evidence.
+    store.set_write_clock_at(activated as u128).unwrap();
+    {
+        let mut writer = store.connection.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        append_claim_tx(&tx, store.origin(), "step-run/example/build", "work.claimed",
+            Some(subject), &json!({"fields":{"attempt":1,"claimant":subject,
+                "claim_incarnation":"inc-one","claim_expires_at_unix_ms":activated+3_600_000},
+                "evidence":[]}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    store.set_write_clock_at(now_ms()).unwrap();
     let respond = |entry: &str, at: u64| {
         let mut claim = timeline_observation(subject, "inc-one", entry);
         claim

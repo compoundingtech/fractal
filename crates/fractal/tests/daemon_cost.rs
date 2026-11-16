@@ -509,6 +509,22 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "uploads image bytes, outside the graph",
     ),
     (
+        "GET /v1/agent-invocations/{*invocation}",
+        "returns all receipts for an invocation and folds the owning agent's artifact claims before filtering; cost can grow with unrelated artifact history and is not bounded by this fixture; no cost-independence claim is made",
+    ),
+    (
+        "GET /v1/client/invocation-artifacts/{id}",
+        "answers retained private bytes, which the JSON cost client cannot decode and the generated cost store never seeds; invocation_artifacts tests cover the content-addressed lookup and authorization",
+    ),
+    (
+        "DELETE /v1/client/invocation-artifacts/{id}",
+        "writes one tombstone per invocation/kind/hash reference; invocation_artifacts tests cover idempotent deletion and revocation authority across later same-hash captures",
+    ),
+    (
+        "POST /v1/invocation-input",
+        "requires a live kernel connector-generation witness descending from the daemon-recorded runtime process of the exact incarnation, absent from generated cost stores; agent_invocations tests cover capture, retry and conflict work",
+    ),
+    (
         "GET /v1/client/blobs/{id}",
         "image bytes, outside the graph",
     ),
@@ -577,6 +593,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "cancels a revision",
     ),
     ("POST /v1/work/cancel-ask", "cancels a person ask"),
+    (
+        "POST /v1/work/override",
+        "requires a deadline-resolved structured ask, absent from this cost fixture; native CLI round trip and person and episode fences are covered by client_v0_cli::cli_person_override_replaces_a_deadline_default_once",
+    ),
     (
         "POST /v1/work/mission/{*subject}",
         "publishes a step's mission",
@@ -697,6 +717,13 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get("GET /v1/effects/by-key", "/v1/effects/by-key?key={effect_key}"),
+    post("POST /v1/effects/{*subject}", "/v1/effects/{effect_subject}/resolve", |_, attempt| json!({
+        "actor": "person/bench-operator",
+        "outcome": "abandoned",
+        "evidence": ["message/cost-effect-evidence"],
+        "idempotency_key": format!("cost-effect-resolution-{attempt}"),
+    })),
     get("GET /v1/client/claims", "/v1/client/claims?limit=100"),
     get("GET /v1/client/claims/by-id/{id}", "/v1/client/claims/by-id/{service_claim}"),
     get("GET /v1/client/work-items/{*subject}", "/v1/client/work-items/{step}"),
@@ -713,6 +740,7 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/change", "/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001"),
     post("POST /v1/client/changes/sync", "/v1/client/changes/sync", |_, _| json!({"repository":"cost/garden"})),
     get("GET /v1/client/notes", "/v1/client/notes"),
+    get("GET /v1/client/auto-resolved", "/v1/client/auto-resolved"),
     put("PUT /v1/client/notes", "/v1/client/notes", |_, attempt| json!({
         "text":format!("Invented current person context {attempt}"),
     })),
@@ -1049,6 +1077,10 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/missions", "/v1/client/missions"),
     get("GET /v1/client/missions-tree", "/v1/client/missions-tree"),
+    get(
+        "GET /v1/client/mission-runs",
+        "/v1/client/mission-runs?mission_prefix=cost%2F&active=true&limit=10",
+    ),
     get(
         "GET /v1/client/missions/{*id}",
         "/v1/client/missions/{mission}",
@@ -3627,6 +3659,37 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            // Seed a fresh durable uncertainty outside the measured region. In particular,
+            // resolution must write a new receipt on every sample, never an idempotent replay.
+            if probe.route.contains("/v1/effects/") {
+                let key = format!("native-effect/[\"cost\",\"{}-{attempt}\"]", probe.route);
+                let operation = smallclaims::store::operation_id_for_key(&key);
+                let subject = format!("effect/{operation}");
+                let fields: BTreeMap<String, Value> = serde_json::from_value(json!({
+                    "effect_id": subject,
+                    "operation_id": operation,
+                    "provider": "native-message",
+                    "target": "agent/ada",
+                    "payload_digest": "cost-effect-payload",
+                    "class": "native-coordinated",
+                    "bound_step_run": fixture.items["step"],
+                    "bound_attempt": 1,
+                    "lease_owner": fixture.subjects.seats[0],
+                    "lease_incarnation": SEAT_RUNTIME,
+                    "error": "delivery-unknown",
+                    "evidence": [],
+                })).unwrap();
+                for kind in ["effect.intended", "effect.unresolved"] {
+                    store.append_claim(&ClaimInput {
+                        subject: subject.clone(), kind: kind.into(),
+                        actor: Some(fixture.subjects.seats[0].clone()),
+                        fields: fields.clone(), evidence: vec![],
+                        expected_subject: None, idempotency_key: None,
+                    }).unwrap();
+                }
+                fixture.items.insert("effect_key", urlencoding::encode(&key).into_owned());
+                fixture.items.insert("effect_subject", urlencoding::encode(&subject).into_owned());
+            }
             if probe.route.contains("/replication/") {
                 prepare_replication(&mut fixture, &store, &peer).await;
             }
@@ -3666,7 +3729,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") {
+                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
                     person.clone()
                 } else {
                     client.clone()
@@ -3690,6 +3753,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route.contains("/v1/effects/") {
+                                anyhow::ensure!(
+                                    value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
+                                    "the effect probe must read a populated uncertainty or record a real human resolution",
+                                );
+                            }
                             if probe.route == "POST /v1/fleet/transports" {
                                 anyhow::ensure!(
                                     value["published"] == true,

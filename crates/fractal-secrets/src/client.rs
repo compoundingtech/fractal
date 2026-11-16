@@ -618,6 +618,13 @@ impl Client {
         unreachable!("the bounded first-page retry loop always returns")
     }
 
+    /// Read the validated wire envelope, retaining snapshot metadata for JSON automation.
+    pub async fn get_envelope(&self, path: &str) -> Result<serde_json::Value> {
+        self.request_decoded::<(), serde_json::Value>(
+            "GET", path, None, decode_api_envelope,
+        ).await
+    }
+
     pub async fn post<I: Serialize, O: DeserializeOwned>(&self, path: &str, body: &I) -> Result<O> {
         self.request("POST", path, Some(body)).await
     }
@@ -695,6 +702,16 @@ impl Client {
         path: &str,
         body: Option<&I>,
     ) -> Result<O> {
+        self.request_decoded(method, path, body, decode_api_response).await
+    }
+
+    async fn request_decoded<I: Serialize, O>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&I>,
+        decode: fn(&[u8]) -> Result<O>,
+    ) -> Result<O> {
         if matches!(self.endpoint, Endpoint::Fabric(_)) {
             FabricEndpoint::validate_path(path)?;
         }
@@ -718,7 +735,7 @@ impl Client {
                     if let Some(retry) = &self.follow_retry {
                         retry.lock().expect("follow retry lock").unreachable_since = None;
                     }
-                    break decode_api_response(&response);
+                    break decode(&response);
                 }
                 Err(error) => error,
             };
@@ -1848,8 +1865,8 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     .into()
 }
 
-fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
-    let mut envelope: serde_json::Value =
+fn decode_api_envelope(bytes: &[u8]) -> Result<serde_json::Value> {
+    let envelope: serde_json::Value =
         serde_json::from_slice(bytes).context("decode the st API response envelope")?;
     let version = envelope
         .get("api_version")
@@ -1863,10 +1880,13 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
         "the st API returned unsupported version {version}"
     );
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
-    let value = envelope
-        .as_object_mut()
-        .and_then(|envelope| envelope.remove("value"))
-        .context("the st API response envelope has no value")?;
+    anyhow::ensure!(envelope.get("value").is_some(), "the st API response envelope has no value");
+    Ok(envelope)
+}
+
+fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
+    let mut envelope = decode_api_envelope(bytes)?;
+    let value = envelope["value"].take();
     serde_json::from_value(value).context("decode the st API response value")
 }
 

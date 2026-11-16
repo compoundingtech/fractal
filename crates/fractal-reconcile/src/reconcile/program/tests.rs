@@ -510,3 +510,66 @@ fn host_exit_reaps_before_releasing_only_its_termination_proofs() {
     engine.handle(&json!({"t": "cancelled", "step": step, "attempt": 1}), 2).unwrap();
     assert!(engine.fence_left_effects(&run).unwrap());
 }
+
+#[test]
+fn resource_protocol_preserves_native_identity_and_exact_cancellation() {
+    let payload = json!({
+        "name": "checks", "host": "executor", "coverage": "enforced",
+        "capacity": {"cores": 4, "memory": 8589934592_u64},
+        "admissionTimeout": "1800000ms"
+    });
+    for cancelled in [false, true] {
+        let message = json!({
+            "t": if cancelled { "resource-cancel" } else { "resource" },
+            "operation": "resource.lane.acquire", "payload": payload,
+        });
+        match wait("step-run/generation/check", 2, "resource.lane/checks", &message).unwrap() {
+            Wait::Resource { operation, payload: actual, cancelled: actual_cancelled } => {
+                assert_eq!(operation, "resource.lane.acquire");
+                assert_eq!(actual, payload);
+                assert_eq!(actual_cancelled, cancelled);
+            }
+            other => panic!("resource request changed kind: {other:?}"),
+        }
+    }
+    assert!(wait("step-run/generation/check", 2, "checks", &json!({
+        "t": "resource", "operation": "resource.lane.unknown", "payload": {}
+    })).is_err());
+    assert!(wait("step-run/generation/check", 2, "checks", &json!({
+        "t": "resource", "operation": "resource.lane.acquire", "payload": null
+    })).is_err());
+}
+
+#[test]
+fn a_replayed_grant_still_visits_native_authority_and_cancellation_wins_the_reply_race() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "resource-replay");
+    running_attempt(&engine, &run, 1, 7);
+    let step = &run.steps[0].subject;
+    let key = "resource.lane/checks";
+    entry(&engine, step, key, "completed", 1, json!({"membershipId":"stale"}));
+    let before = journal_claims(&engine, step);
+    let message = json!({
+        "t":"resource", "step":step, "attempt":1, "seq":10, "key":key,
+        "operation":"resource.lane.acquire",
+        "payload":{"name":"checks","host":"executor","coverage":"logical"}
+    });
+    engine.handle(&message, 7).unwrap();
+    let requests = engine.requests(&run.subject);
+    assert_eq!(requests.len(), 1, "a journaled grant must not satisfy native acquisition");
+    assert_eq!(journal_claims(&engine, step), before, "native requests do not journal capabilities");
+    let original = requests[0].clone();
+    let mut cancellation = message;
+    cancellation["t"] = Value::from("resource-cancel");
+    engine.handle(&cancellation, 7).unwrap();
+    engine.resolve_resource(&original, json!({"_tag":"Success","value":{"membershipId":"racing"}})).unwrap();
+    let requests = engine.requests(&run.subject);
+    assert_eq!(requests.len(), 1, "racing admission cannot discard the cancellation");
+    assert!(matches!(&requests[0].wait, Wait::Resource { cancelled: true, .. }));
+    engine.resolve_resource(&requests[0], json!({
+        "_tag":"Failure","error":{"_tag":"ResourceError","code":"cancelled","message":"withdrawn"}
+    })).unwrap();
+    assert!(engine.requests(&run.subject).is_empty());
+    assert_eq!(journal_claims(&engine, step), before, "neither acquisition nor withdrawal overwrites the journal");
+}

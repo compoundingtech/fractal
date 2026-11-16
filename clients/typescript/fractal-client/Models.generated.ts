@@ -52,6 +52,7 @@ export type ActionCommon = {
   | "session.import"
   | "work.ask"
   | "work.done"
+  | "work.override"
   | "work.cancel-ask"
   | "work.claim"
   | "work.renew"
@@ -1238,6 +1239,23 @@ export type AttentionWaiting = {
   step: StepRunId;
 };
 
+export type AutoResolvedAsk = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  request?: StructuredRequest;
+  requester_id: Id;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: Id;
+  title: string;
+};
+
+export type AutoResolvedAsks = {
+  complete: boolean;
+  items: Array<AutoResolvedAsk>;
+};
+
 export type AvailabilityDeadlineClock = ("run" | "hold-routine" | "hold-all" | string);
 
 export type AvailabilityDeadlineClockChange = {
@@ -1927,7 +1945,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -3184,6 +3202,31 @@ export type NoticeDelivery = ({
   surface: "tray" | "speech" | "push" | "log";
 });
 
+export type NoticeDigestActions = {
+  "work.override": NoticeDigestOverride;
+};
+
+export type NoticeDigestDefaultAnswer = {
+  id: string;
+  label: string;
+};
+
+export type NoticeDigestOverride = {
+  episode: string;
+  target_id: string;
+};
+
+export type NoticeDigestRow = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  requester_id: string;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: string;
+  title: string;
+};
+
 export type NoticeDismissParameters = {
   notice_id: NoticeId;
 };
@@ -3257,8 +3300,13 @@ export type NoticeSnoozeParameters = {
 
 export type NoticeSource = {
   agent?: NoticeAgent;
+  covered_through?: NoticeTimestamp;
   cwd?: string;
+  digest?: Array<NoticeDigestRow>;
+  digest_count?: string;
+  digest_document?: string;
   host: string;
+  owner_claim?: string;
   pty?: string;
   repo?: string;
 };
@@ -3547,6 +3595,16 @@ export type PersonId = string;
 export type PersonOptionNote = {
   id: string;
   text: string;
+};
+
+export type PersonOverrideParameters = {
+  answer: {
+  id: string;
+  text?: string;
+};
+  episode: string;
+  summary?: string;
+  target_id: Id;
 };
 
 export type PersonPairedSession = {
@@ -4189,6 +4247,7 @@ export type StepExecution = {
   fallback: boolean | null;
   id: string;
   incarnation_id: string | null;
+  invocation_id?: string;
   observed_models: Array<string>;
   started_at_unix_ms: number;
   status: string | null;
@@ -4633,7 +4692,10 @@ export type TimelineUsageBody = {
   api?: string;
   attribution: {
   agent_id: Id;
+  attempt?: number;
+  execution_id?: string;
   generation_id?: string | null;
+  invocation_id?: string;
   mission_run_id?: string | null;
   step_id?: string | null;
 };
@@ -5043,12 +5105,15 @@ export type UsageRow = {
   account?: string;
   account_ref?: string;
   agent: Id;
+  attempt?: number;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;
   cached_tokens: number;
   cost_microusd: number;
+  execution_id?: string;
   host?: string;
   input_tokens: number;
+  invocation_id?: string;
   mission_run?: Id;
   model?: string;
   native_session_id?: string;
@@ -5399,6 +5464,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.complete'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.done'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.fail'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.override'; parameters: PersonOverrideParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.progress'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.publish-mission'; parameters: {
   mission: {
