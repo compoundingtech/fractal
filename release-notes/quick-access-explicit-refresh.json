@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reconnect an interrupted Quick access follow on explicit Refresh without replaying edits",
+  "replay": {"status": "none", "detail": "No stored claims, membership winners or history are rewritten."},
+  "schema": {"status": "none", "detail": "The existing shared follow interface and server contracts are unchanged."},
+  "rules": {"status": "none", "detail": "Existing ownership, lifecycle and reader-readiness checks remain in force."},
+  "compatibility": {"status": "none", "detail": "Refresh keeps its Promise-returning interface. Reconnection rediscovers current capabilities and preserves known retirement."},
+  "downtime": {"status": "none", "detail": "No daemon restart is needed."},
+  "manual": {"status": "changed", "detail": "An explicit Refresh reopens an interrupted follow. There is no automatic reconnect or edit resend; unresolved edits must settle before replacement."},
+  "recovery": {"status": "changed", "detail": "Late events from a replaced session are ignored. Last-known rows remain while reconnecting; a failed reconnect stays explicitly unavailable."}
+}

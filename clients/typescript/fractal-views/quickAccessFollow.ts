@@ -40,8 +40,9 @@ type FollowOptions = {
   /** The owner must coordinate all arrangement readers before enabling v2 creation. */
   readonly v2ReadersReady?: boolean
 }
+interface Session extends QuickAccessFollow { needsReconnect(): boolean; wasObserved(): boolean }
 
-export const followQuickAccess = async ({ gateway, onState, signal, v2ReadersReady = false }: FollowOptions): Promise<QuickAccessFollow> => {
+const openSession = async ({ gateway, onState, signal, v2ReadersReady = false }: FollowOptions, previous: { observed: boolean; members: readonly OrderedMembership[] }): Promise<Session> => {
   const discovery = (await gateway.discover(signal === undefined ? {} : { signal })).value
   const selection = quickAccessSelection(discovery.session_actor)
   const person = selection.owner.slice('person/'.length), uuid = selection.subject.slice(selection.subject.lastIndexOf('/') + 1)
@@ -54,10 +55,10 @@ export const followQuickAccess = async ({ gateway, onState, signal, v2ReadersRea
   let dirty = false
   let ready = false
   let busy = false
-  let observed = false
+  let observed = previous.observed
   let retired = false
   let arrangement: Arrangement | undefined
-  let state: QuickAccessState = { phase: 'connecting', members: [] }
+  let state: QuickAccessState = { phase: 'connecting', members: previous.members }
   let stream: CollectionStream | undefined
   const abort = new AbortController()
   const close = () => { closed = true; abort.abort(); stream?.close(); signal?.removeEventListener('abort', close) }
@@ -141,6 +142,8 @@ export const followQuickAccess = async ({ gateway, onState, signal, v2ReadersRea
   return {
     close,
     refresh,
+    needsReconnect: () => interrupted,
+    wasObserved: () => observed,
     edit: async (identity, operations, createIdentity) => {
       if (closed || !ready || busy || !writable) throw new TypeError('Pins must be synced, writable and idle before editing')
       const parameters = { ...selection, operations }
@@ -164,6 +167,41 @@ export const followQuickAccess = async ({ gateway, onState, signal, v2ReadersRea
         if (edited.value.status !== 'completed') throw new TypeError('Pins edit is not completed')
         await read()
       } catch (error) { fail(error); throw error } finally { busy = false; if (ready) publish({ ...state, phase: 'synced' }) }
+    },
+  }
+}
+
+/** Refresh explicitly reopens an interrupted follow. It never replays a membership edit. */
+export const followQuickAccess = async (options: FollowOptions): Promise<QuickAccessFollow> => {
+  let closed = false, generation = 0, observed = false, editing = false
+  let current: Session | undefined, opening: Promise<void> | undefined, sessionAbort: AbortController | undefined
+  let latest: QuickAccessState = { phase: 'connecting', members: [] }
+  const close = () => { closed = true; generation++; sessionAbort?.abort(); current?.close(); current = undefined; options.signal?.removeEventListener('abort', close) }
+  if (options.signal?.aborted) throw new TypeError('Quick access follow aborted')
+  options.signal?.addEventListener('abort', close, { once: true })
+  const reopen = (): Promise<void> => {
+    if (closed) return Promise.resolve()
+    if (opening) return opening
+    const version = ++generation
+    observed ||= current?.wasObserved() ?? false
+    current?.close(); current = undefined; sessionAbort?.abort(); sessionAbort = new AbortController()
+    const publish = (state: QuickAccessState) => { if (!closed && version === generation) { latest = state; options.onState(state) } }
+    publish({ phase: 'connecting', members: latest.members, editable: false })
+    const task = openSession({ ...options, signal: sessionAbort.signal, onState: publish }, { observed, members: latest.members })
+      .then(next => { if (closed || version !== generation) next.close(); else current = next })
+      .catch(error => publish({ phase: 'unavailable', members: latest.members, editable: false, detail: error instanceof Error ? error.message : String(error) }))
+    opening = task
+    void task.then(() => { if (opening === task) opening = undefined })
+    return task
+  }
+  await reopen()
+  return {
+    close,
+    refresh: () => closed ? Promise.resolve() : opening ?? (current && (!current.needsReconnect() || editing) ? current.refresh() : reopen()),
+    edit: async (identity, operations, createIdentity) => {
+      if (closed || opening || editing || !current) throw new TypeError('Pins must be synced, writable and idle before editing')
+      editing = true
+      try { await current.edit(identity, operations, createIdentity) } finally { editing = false }
     },
   }
 }

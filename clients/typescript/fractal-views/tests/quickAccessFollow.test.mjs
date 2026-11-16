@@ -9,7 +9,7 @@ const snapshot = { id: 'snapshot/test/7/proof', host_id: 'host/test', store_inde
 const identity = { id: 'action/pin', idempotency_key: 'pins-edit-000001', fence: { snapshot_id: snapshot.id, subject_revisions: {} } };
 function setup({ absent = false, corrupt = false, actionStatus = 'completed' } = {}) {
   let exists = !absent, frame, ended;
-  const actions = [], states = [], subscriptions = [], reads = [];
+  const actions = [], states = [], subscriptions = [], reads = [], streams = [];
   const row = (member, key) => ({ id: member, container: subject, member, position: { bucket: null, key }, revision: 'claim/place' });
   const client = new FractalClient({ baseUrl: 'http://fixture.invalid', fetchImpl: async (input, init) => {
     const url = new URL(String(input)); reads.push(url.pathname); let value;
@@ -21,10 +21,10 @@ function setup({ absent = false, corrupt = false, actionStatus = 'completed' } =
     return Response.json({ api_version: 'st3.client.v0', request_id: 'request/test', snapshot, value });
   } });
   client.collectionStream = async options => {
-    frame = options.onFrame; ended = options.onEnd;
+    frame = options.onFrame; ended = options.onEnd; streams.push(options);
     return { subscribeArrangements: (...args) => subscriptions.push(args), subscribeOrderedMemberships: (...args) => subscriptions.push(args), close: () => {} };
   };
-  return { client, actions, states, subscriptions, reads, onState: state => states.push(state), retire: () => { exists = false; }, end: () => ended?.(), changed: () => frame?.({ kind: 'changes', id: 'pins-members' }) };
+  return { client, actions, states, subscriptions, reads, streams, onState: state => states.push(state), retire: () => { exists = false; }, end: () => ended?.(), changed: () => frame?.({ kind: 'changes', id: 'pins-members' }) };
 }
 
 test('native-compatible follow reads all pages and follows outside-window changes', async () => {
@@ -91,4 +91,64 @@ test('an accepted but incomplete action is not reported as a completed edit', as
   assert.equal(h.states.at(-1).editable, false);
   assert.deepEqual(h.states.at(-1).members.map(item => item.member), ['agent/example', 'mission/example']);
   follow.close();
+});
+
+
+test('explicit refresh after stream loss reconnects without replaying an edit', async () => {
+  const h = setup(), follow = await followQuickAccess({ gateway: h.client, onState: h.onState });
+  h.end();
+  assert.equal(h.states.at(-1).phase, 'unavailable');
+  assert.equal(h.streams.length, 1, 'a stream end does not automatically reconnect');
+  await assert.rejects(follow.edit(identity, [{ op: 'remove', member: 'agent/example' }]));
+  await follow.refresh();
+  assert.equal(h.streams.length, 2);
+  h.streams[1].onFrame({ kind: 'snapshot', id: 'pins-members' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.states.at(-1).phase, 'synced');
+  assert.equal(h.states.at(-1).editable, true);
+  assert.deepEqual(h.states.at(-1).members.map(item => item.member), ['agent/example', 'mission/example']);
+  assert.deepEqual(h.subscriptions.slice(-2).map(args => args[0]), ['pins-layout', 'pins-members']);
+  assert.equal(h.actions.length, 0, 'reconnecting never replays an edit');
+  h.streams[0].onEnd(new Error('late event from the old stream'));
+  assert.equal(h.states.at(-1).phase, 'synced', 'old stream cannot invalidate the replacement');
+  await follow.edit(identity, [{ op: 'remove', member: 'agent/example' }]);
+  assert.equal(h.actions.length, 1); follow.close();
+});
+
+test('a late interrupted HTTP read cannot overwrite a refreshed session', async () => {
+  const h = setup(), follow = await followQuickAccess({ gateway: h.client, onState: h.onState });
+  const original = h.client.arrangementsGet.bind(h.client), started = Promise.withResolvers(), release = Promise.withResolvers();
+  h.client.arrangementsGet = async (...args) => { started.resolve(); await release.promise; return original(...args); };
+  const oldRead = follow.refresh(); await started.promise;
+  h.end(); h.client.arrangementsGet = original;
+  await follow.refresh();
+  release.resolve(); await oldRead;
+  assert.equal(h.states.at(-1).phase, 'synced');
+  assert.equal(h.states.at(-1).editable, true);
+  assert.equal(h.streams.length, 2); follow.close();
+});
+
+test('reopening a broken follow does not forget that the Pins arrangement was removed', async () => {
+  const h = setup(), follow = await followQuickAccess({ gateway: h.client, onState: h.onState, v2ReadersReady: true });
+  h.end(); h.retire(); await follow.refresh();
+  assert.equal(h.states.at(-1).phase, 'unavailable');
+  assert.equal(h.states.at(-1).editable, false);
+  assert.match(h.states.at(-1).detail, /Restoring removed Pins/);
+  await assert.rejects(follow.edit(identity, [{ op: 'place', member: 'agent/example', bucket: null, key: 'a0' }], { ...identity, id: 'action/create', idempotency_key: 'create-after-loss' }));
+  assert.equal(h.actions.length, 0); follow.close();
+});
+
+
+test('refresh never replaces the session while an edit still has an unresolved outcome', async () => {
+  const h = setup(), follow = await followQuickAccess({ gateway: h.client, onState: h.onState });
+  const started = Promise.withResolvers(), release = Promise.withResolvers(), original = h.client.arrangementMembershipEdit.bind(h.client);
+  h.client.arrangementMembershipEdit = async (...args) => { started.resolve(); await release.promise; return original(...args); };
+  const editing = follow.edit(identity, [{ op: 'remove', member: 'agent/example' }]); await started.promise;
+  h.end(); await follow.refresh();
+  assert.equal(h.streams.length, 1);
+  await assert.rejects(follow.edit({ ...identity, id: 'action/second' }, [{ op: 'remove', member: 'mission/example' }]));
+  release.resolve(); await editing; await follow.refresh();
+  assert.equal(h.streams.length, 2);
+  assert.equal(h.states.at(-1).editable, true);
+  assert.equal(h.actions.length, 1); follow.close();
 });

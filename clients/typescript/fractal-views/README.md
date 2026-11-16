@@ -141,4 +141,4 @@ on the web UI, Effect schemas, or native platform APIs. The host owns immutable
 action IDs, idempotency keys, and fences. Creation requires a distinct identity
 and explicit `v2ReadersReady`; discovering server support does not establish
 that every arrangement reader has been upgraded. A retired arrangement is never
-silently replaced or migrated. Lost follows remain unavailable until the caller closes and reopens them; refresh only rereads a connected follow. No edit is replayed.
+silently replaced or migrated. An explicit refresh reopens an interrupted follow and rereads its memberships; it never replays an edit. A still-unresolved edit must settle before the session can be replaced.
