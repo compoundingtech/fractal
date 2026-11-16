@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "none",
-    "detail": "No new public writer or CLI mode is enabled by this reader expansion."
+    "detail": "The bundled TUI reads manual-return state, excludes it from active Now and triage without a wake time, and can bring it back through its existing control. No new public writer or CLI mode is enabled by this reader expansion."
   },
   "recovery": {
     "status": "changed",
