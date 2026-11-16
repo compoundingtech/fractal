@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Require matching completed iOS answer receipts and preserve ambiguous delivery identities through replay refusals.",
+  "summary": "Add dormant tested iOS delivery and request-draft models for complete recovery integration.",
   "replay": {
     "status": "none",
     "detail": "No graph replay or data migration is required."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Existing boolean-result callers retain their current interface. The new models do not expose new screens or controls in this change."
+    "detail": "Existing answer.ts and its active store consumers remain unchanged. The new private answerDelivery module is consumed only by dormant model types/tests until per-item locking and Check delivery controls land together."
   },
   "downtime": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "An ambiguous answer is not rebuilt with a fresh identity after a later stale-fence response. The retained check remains in memory only; this is not a durable outbox after process termination. A resolved transport promise with an accepted, missing, or unrelated receipt remains unconfirmed; only a completed receipt for the original action confirms delivery."
+    "detail": "The new model retains ambiguous delivery identity and requires a matching Completed receipt. Active runtime behavior is unchanged in this groundwork; its complete guarded consumer integration lands separately. Retained model checks are in memory only, not a process-durable outbox."
   }
 }

@@ -1,4 +1,4 @@
-import type { AnswerOutcome } from './answer';
+import type { AnswerOutcome } from './answerDelivery';
 export type AttentionDelivery = 'pending' | 'confirmed' | 'settled' | 'refused' | 'unconfirmed';
 /** One connection's in-memory delivery ownership. A lost reply never authorizes a new answer. */
 export class AttentionDeliveryTracker {

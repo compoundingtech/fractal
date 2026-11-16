@@ -13,7 +13,7 @@ function world(steps, waiting) {
       log.sent.push(request.id);
       const step = steps[Math.min(log.sent.length - 1, steps.length - 1)];
       if (step instanceof Error) throw step;
-      return step === 'ok' ? { value: { kind: 'action-result', status: 'completed', action_id: request.id } } : step;
+      return step;
     },
     async stillWaiting() { log.asked++; const value = typeof waiting === 'function' ? waiting(log) : waiting; if (value instanceof Error) throw value; return value; },
     async wait(ms) { log.waited.push(ms); },
@@ -96,26 +96,3 @@ function world(steps, waiting) {
   assert.equal(log.sent.length, 0);
 }
 console.log('answer ok');
-
-// Explicit unknown metadata overrides stale/rate-limited shorthand. Defensive unsafe metadata
-// is not a new protocol contract, but cannot justify inventing another action identity.
-for (const details of [{applied:'unknown'},{applied:'none',replay_unsafe:true}]) {
- const {ports,log}=world([refused('stale-fence',details)],true);
- const result=await submitAnswer(ports);assert.equal(result.how,'unconfirmed');assert.equal(log.built,1);
- const checked=await result.check();assert.equal(checked.how,'unconfirmed');assert.equal(log.built,1);
- assert(log.sent.every(id=>id==='action/1'));
-}
-
-// A resolved transport promise is not a matching Completed receipt. Explicit checks keep
-// the original identity even when a later replay is refused, then accept only its receipt.
-for (const receipt of [undefined, {}, {value:{kind:'action-result',status:'accepted',action_id:'action/1'}}, {value:{kind:'action-result',status:'completed',action_id:'action/other'}}]) {
-  const {ports,log}=world([receipt,refused('stale-fence',{applied:'none'}),'ok'],true);
-  const first=await submitAnswer(ports);
-  assert.equal(first.how,'unconfirmed');
-  assert.deepEqual(log.sent,['action/1'],'non-completed result is not polled automatically');
-  const second=await first.check();
-  assert.equal(second.how,'unconfirmed','later refusal cannot erase prior ambiguity');
-  assert.equal(log.built,1);
-  assert.deepEqual(await second.check(),{ok:true,how:'sent'});
-  assert.deepEqual(log.sent,['action/1','action/1','action/1']);
-}
