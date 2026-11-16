@@ -28,6 +28,34 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AutoResolvedAsk {
+    pub resolution_id: String,
+    pub title: String,
+    pub requester_id: String,
+    pub resolved_at: String,
+    pub target_id: String,
+    pub episode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<AskDefaultAnswer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<StructuredRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_parameters: Option<BTreeMap<String, PersonOverrideTarget>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonOverrideTarget {
+    pub target_id: String,
+    pub episode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AutoResolvedAsks {
+    pub items: Vec<AutoResolvedAsk>,
+    pub complete: bool,
+}
+
 /// Set or clear the session person's own note; `text: None` clears it and is sent as `null`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DirectiveNoteSet {
@@ -4002,6 +4030,8 @@ pub enum ActionType {
     WorkAsk,
     #[serde(rename = "work.done")]
     WorkDone,
+    #[serde(rename = "work.override")]
+    WorkOverride,
     #[serde(rename = "work.cancel-ask")]
     WorkCancelAsk,
     #[serde(rename = "work.claim")]
@@ -4121,6 +4151,20 @@ pub struct PersonStepParameters {
     pub target_id: String, pub summary: String, pub episode: String,
     #[serde(default)] pub evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub answer: Option<PersonAnswerInput>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PersonOverrideParameters {
+    pub target_id: String,
+    pub episode: String,
+    pub answer: PersonOverrideAnswer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PersonOverrideAnswer {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 /// A typed question with named answers: a `decision`, a `choice` or `feedback`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

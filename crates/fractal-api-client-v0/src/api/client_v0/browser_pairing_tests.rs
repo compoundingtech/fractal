@@ -309,26 +309,31 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     assert!(poll(&state,&owner,&started,&key).await.is_err());
     let another = start(&state,&owner,&key).await;
     let grant = owner.pairing_grant.as_deref().unwrap();
-    let mut paired = state.store.claims_for_subject_kind_at(grant,"custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
-    paired.body["fields"].as_object_mut().unwrap().remove("delegated_scopes");
-    let legacy = state.store.append_claim(&ClaimInput {
-        subject:paired.subject,kind:paired.kind,actor:paired.actor,
-        fields:serde_json::from_value(paired.body["fields"].clone()).unwrap(),
+    let paired = state.store.claims_for_subject_kind_at(grant,"custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
+    let mut legacy_fields = paired.body["fields"].clone();
+    legacy_fields.as_object_mut().unwrap().remove("delegated_scopes");
+    state.store.append_claim(&ClaimInput {
+        subject:paired.subject.clone(),kind:paired.kind.clone(),actor:paired.actor.clone(),
+        fields:serde_json::from_value(legacy_fields).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None,
     }).unwrap();
     assert!(answer(&state,&owner,&another,"approve").is_err());
-    let mut allowance = fractal_store::config::LegacyPairingAllowance {
-        completion_id:legacy.id.clone(),
-        record_hash:fractal_store::pairing::record_hash(&legacy.origin,legacy.actor.as_deref(),&legacy.body["fields"]).unwrap(),
-        until_unix_ms:(client_now_ms()+60_000) as u64,
-    };
-    state.store.configure_pairing_legacy_allowances(&[allowance.clone()]).unwrap();
+    // Restore operation provenance, not a wall-clock-limited migration allowance.
+    let admitted = state.store.append_client_operation_claim(&ClaimInput {
+        subject:paired.subject.clone(),kind:paired.kind,actor:paired.actor,
+        fields:serde_json::from_value(paired.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
     answer(&state,&owner,&another,"approve").unwrap();
     assert!(poll(&state,&owner,&another,&key).await.unwrap().0["bearer"].is_string());
-    let after_deadline = start(&state,&owner,&key).await;
-    allowance.until_unix_ms = 1;
-    state.store.configure_pairing_legacy_allowances(&[allowance]).unwrap();
-    assert!(answer(&state,&owner,&after_deadline,"approve").is_err());
+    let after_revocation = start(&state,&owner,&key).await;
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject:admitted.subject,kind:"custom.client.pairing-revoked".into(),
+        actor:Some(owner.authority_actor.clone()),
+        fields:BTreeMap::from([("completion_id".into(),json!(admitted.id))]),
+        evidence:vec![admitted.id],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(answer(&state,&owner,&after_revocation,"approve").is_err());
 }
 
 #[tokio::test]

@@ -62,6 +62,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case workComplete = "work.complete"
     case workDone = "work.done"
     case workFail = "work.fail"
+    case workOverride = "work.override"
     case workProgress = "work.progress"
     case workPublishMission = "work.publish-mission"
     case workRelease = "work.release"
@@ -73,6 +74,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case harnessQuestionsList = "harness-questions.list"
     case harnessQuestionsGet = "harness-questions.get"
     case notesList = "notes.list"
+    case autoResolvedList = "auto-resolved.list"
     case availabilityList = "availability.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
@@ -177,6 +179,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .harnessQuestionsList: "/v1/client/harness-questions",
     .harnessQuestionsGet: "/v1/client/harness-questions/{id}",
     .notesList: "/v1/client/notes",
+    .autoResolvedList: "/v1/client/auto-resolved",
     .availabilityList: "/v1/client/availability",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",

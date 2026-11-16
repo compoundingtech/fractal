@@ -27,6 +27,7 @@ pub mod transcript;
 mod test_executable;
 pub mod seat_admission;
 pub mod seat_admission_status;
+pub mod systemd;
 pub use seat_placement::UnlanedSeatPlacement;
 mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]

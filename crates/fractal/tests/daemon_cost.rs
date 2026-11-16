@@ -740,6 +740,7 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/change", "/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001"),
     post("POST /v1/client/changes/sync", "/v1/client/changes/sync", |_, _| json!({"repository":"cost/garden"})),
     get("GET /v1/client/notes", "/v1/client/notes"),
+    get("GET /v1/client/auto-resolved", "/v1/client/auto-resolved"),
     put("PUT /v1/client/notes", "/v1/client/notes", |_, attempt| json!({
         "text":format!("Invented current person context {attempt}"),
     })),
@@ -1076,6 +1077,10 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/missions", "/v1/client/missions"),
     get("GET /v1/client/missions-tree", "/v1/client/missions-tree"),
+    get(
+        "GET /v1/client/mission-runs",
+        "/v1/client/mission-runs?mission_prefix=cost%2F&active=true&limit=10",
+    ),
     get(
         "GET /v1/client/missions/{*id}",
         "/v1/client/missions/{mission}",
