@@ -161,7 +161,8 @@ fn step_word(step: &MissionStep, gated: bool) -> StepState {
     match step.state.as_str() {
         _ if gated => StepState::NeedsYou,
         "completed" => StepState::Done,
-        state if in_hand(state) => StepState::Working,
+        _ if super::working_agent(step) => StepState::Working,
+        state if in_hand(state) => StepState::Waiting,
         "ready" => StepState::Ready,
         "waiting" | "pending" | "blocked" => StepState::Waiting,
         "cancelled" => StepState::Cancelled,
@@ -281,13 +282,13 @@ pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fl
                         label: fleet.person_label(&gate.person),
                     })
                     .unwrap_or(Actor::Nobody)
-            } else if step.agentless {
-                Actor::St
             } else if let Some(person) = person {
                 Actor::Person {
                     person: person.to_owned(),
                     label: fleet.person_label(person),
                 }
+            } else if step.agentless {
+                Actor::St
             } else {
                 seat.as_ref().map(agent).unwrap_or(Actor::Nobody)
             };
@@ -361,7 +362,8 @@ pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fl
                 label: fleet.person_label(&gate.person),
             })
             .unwrap_or(Actor::Nobody),
-        Word::Working | Word::Watching => steps
+        Word::Watching => Actor::St,
+        Word::Working => steps
             .iter()
             .find(|(step, _)| step.word == StepState::Working)
             .map(|(step, _)| step.owner.clone())
