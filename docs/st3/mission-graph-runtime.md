@@ -262,6 +262,8 @@ Mission goal order is preserved. Each mission must have one, two, or three goals
 A mission can repeat constraints, baselines, and gates. Gate and baseline names must be unique within that mission. A mission has at most one `produces` block.
 
 A mission can repeat `input`. Each input name is unique and uses `kind="text"` or `kind="resource"`.
+An input name is nonempty, at most 160 bytes, and contains neither `/` nor whitespace.
+A full subject can be an input reference such as `${input.vrs-review}`; its name uses the same validation as the input declaration.
 
 The input set and kinds cannot change across revisions of an active run. Input values remain immutable across all run generations.
 
