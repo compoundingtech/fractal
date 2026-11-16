@@ -13586,9 +13586,9 @@ fn thread_mixed_timeline_preserves_the_selected_lifecycle_conflict() {
     }
     left.import_replication(right.origin(), &right.export_replication(0).unwrap()).unwrap();
     assert_eq!(history(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
-    assert_eq!(mixed_timeline(&left, owner, thread, None, None, 20).err().unwrap().code, "idempotency-conflict");
+    assert_eq!(mixed_timeline(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
     assert_eq!(
-        mixed_timeline(&left, "person/blair", thread, None, None, 20).err().unwrap().code,
+        mixed_timeline(&left, "person/blair", thread, None, 20).err().unwrap().code,
         "thread-unavailable",
     );
 }

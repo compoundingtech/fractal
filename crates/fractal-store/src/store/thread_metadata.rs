@@ -624,8 +624,6 @@ pub enum ThreadContext<'a> {
     Inbox { source: &'a str, episode: &'a str },
     Mission(&'a str),
     RecentlyClosed,
-    // COMPILE-ONLY CONTRACT STUB.
-    MarkedUnread,
 }
 
 /// Read one exact conversation, with cursor scope independent of agent incarnation.
@@ -670,9 +668,6 @@ pub fn list_context(
                 None,
             ),
             ThreadContext::RecentlyClosed => return recently_closed(&connection, &person, cursor, limit),
-            ThreadContext::MarkedUnread => return Err(FractalError::new(
-                "unread-store-not-linked", "compile-only stub: root unread store patch is not linked",
-            )),
         };
         let scope = if index == "claims_thread_conversation_index" {
             canonical_hash(&("thread.conversation.v1", &person, &key))
