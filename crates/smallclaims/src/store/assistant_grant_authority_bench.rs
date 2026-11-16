@@ -560,3 +560,290 @@ fn measure_backfill(config: Config) {
         config.target_bytes, raw_rows as f64 * scale, raw_authority_rows as f64 * scale,
         backfill_elapsed.as_secs_f64() * scale, peak_rss_kib as f64 * scale);
 }
+
+const SUBJECT_INDEXES: [&str; 11] = [
+    "assistant_grant_dirty_subject_index", "assistant_grant_dirty_unresolved",
+    "assistant_grant_auth_cursor_subject_index", "assistant_grant_auth_cursor_unresolved",
+    "assistant_grant_recompute_subject_index", "assistant_grant_recompute_unresolved",
+    "assistant_grant_proof_rechecks_subject_index", "assistant_grant_proof_rechecks_unresolved",
+    "assistant_grant_pending_signature_seek", "assistant_grant_pending_envelope_seek",
+    "assistant_grant_pending_retraction_seek",
+];
+
+fn subject_benchmark_history(connection: &Connection, count: usize) {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hdd2698c592c8 owner=smallclaims::store::assistant_grant_authority_bench TODO=chunk-or-reference-exact-wire-values */ "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?1)
+         INSERT INTO assistant_grant_pending
+         (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,
+          auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position)
+         SELECT printf('subject-bench/%08d',i),'bench-subject',?2,'bench-writer','owner',i,1,
+             '{}','bench-key',i,'bench-proof',0 FROM n",
+        params![count,assistant_grant_authority::POLICY],
+    ).unwrap();
+}
+
+#[test]
+#[ignore = "release-only subject-index installation budget; run alone with --nocapture"]
+fn assistant_grant_subject_install_all_eleven_indexes_under_one_second() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("subject-install.sqlite3");
+    let store = Store::open(&path,LOCAL,Arc::new(runtime::Plain)).unwrap();
+    store.persist_assistant_grant_membership_for_test().unwrap();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    // Remove every new index before loading so the timer includes actual builds
+    // over 10k rows in EACH queue and 100k retained pending rows.
+    for index in SUBJECT_INDEXES {
+        transaction.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h365ccc9565a7 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX {index}")).unwrap();
+    }
+    subject_benchmark_history(&transaction,100_000);
+    for queue in ["assistant_grant_dirty","assistant_grant_auth_cursor",
+        "assistant_grant_recompute","assistant_grant_proof_rechecks"] {
+        let (columns,values) = if queue == "assistant_grant_auth_cursor" {
+            ("claim_id,grant_subject,position,record_rowid,member_key,membership_start",
+             "claim_id,grant_subject,0,0,'',-1")
+        } else { ("claim_id,grant_subject","claim_id,grant_subject") };
+        transaction.execute(&format!(
+            /* sqlite-large-value: allow-for-now lv-h634505030b8f owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO {queue}({columns}) SELECT {values}
+             FROM assistant_grant_pending ORDER BY claim_id LIMIT 10000"),[],
+        ).unwrap();
+    }
+    transaction.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-ha879c0346fbf owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='1' WHERE key='assistant_grant_authority_schema_version';
+         DELETE FROM meta WHERE key='assistant_grant_subject_conversion_complete'
+             OR key GLOB 'assistant_grant_subject_conversion/*'
+             OR key GLOB 'assistant_grant_subject_conversion_upper/*';",
+    ).unwrap();
+    transaction.commit().unwrap();
+    let started = Instant::now();
+    let transaction = connection.transaction().unwrap();
+    assistant_grant_authority::install(&transaction,LOCAL).unwrap();
+    transaction.commit().unwrap();
+    let elapsed = started.elapsed();
+    let built: usize = SUBJECT_INDEXES.iter().map(|name| {
+        connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?1",
+            [name],|row| row.get::<_,usize>(0)).unwrap()
+    }).sum();
+    println!("authority_subject_install index_builds={built} rows_per_queue=10000 pending=100000 install_commit_ms={:.3}",
+        elapsed.as_secs_f64()*1000.0);
+    assert_eq!(built,11);
+    assert!(elapsed < Duration::from_secs(1), "all 11 index builds and install commit took {elapsed:?}");
+}
+
+#[test]
+#[ignore = "release-only subject readiness p95 budget; run alone with --nocapture"]
+fn assistant_grant_subject_readiness_one_hundred_and_one_thousand_tasks_p95_under_100ms() {
+    for tasks in [100,1_000] {
+        let store = Store::open_memory(LOCAL,Arc::new(runtime::Plain)).unwrap();
+        store.persist_assistant_grant_membership_for_test().unwrap();
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        subject_benchmark_history(&transaction,10_000);
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h1a809eac41d8 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows(writer,member_key,start,end)
+             VALUES('bench-writer','bench-key',1,10000)",[],
+        ).unwrap();
+        for index in 0..tasks {
+            let writer = if index == 0 { "bench-writer".to_owned() } else { format!("unrelated/{index}") };
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h6c00ea55a76b owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
+                 VALUES(?1,'bench-key',1,10000)",[&writer],
+            ).unwrap();
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hae18d09f1e2c owner=smallclaims::store::assistant_grant_authority_bench TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key)
+                 VALUES(?1,10001,'unrelated','bench-key')",[&writer],
+            ).unwrap();
+            for queue in ["assistant_grant_dirty","assistant_grant_recompute","assistant_grant_proof_rechecks"] {
+                transaction.execute(&format!(
+                    /* sqlite-large-value: allow-for-now lv-h7af9db6d9305 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO {queue}(claim_id,grant_subject) VALUES(?1,'unrelated-subject')"),
+                    [format!("unrelated/{index}")],
+                ).unwrap();
+            }
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hcc7c5da43bb1 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor
+                 (claim_id,grant_subject,position,record_rowid,member_key,membership_start)
+                 VALUES(?1,'unrelated-subject',0,0,'',-1)",[format!("unrelated/{index}")],
+            ).unwrap();
+        }
+        transaction.commit().unwrap();
+        let mut samples = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let started = Instant::now();
+            assistant_grant_authority::subject_ready(&connection,"bench-subject").unwrap();
+            samples.push(started.elapsed());
+        }
+        samples.sort_unstable();
+        let p95 = samples[189];
+        println!("authority_subject_readiness tasks_per_queue={tasks} covered_history=10000 samples=200 p95_ms={:.3}",
+            p95.as_secs_f64()*1000.0);
+        assert!(p95 < Duration::from_millis(100), "tasks={tasks} p95={p95:?}");
+    }
+}
+
+/// Synthetic stale derived state, not a claim about production orphan frequency.
+/// Run alone in release; setup is excluded, committed production maintenance and
+/// readiness probes are included. No live or restored user database is accepted.
+#[test]
+#[ignore = "release-only 20k orphan recovery measurement; run alone with --nocapture"]
+fn assistant_grant_subject_orphan_drain_twenty_thousand_reports_wall_units_and_fence_lift() {
+    const PER_QUEUE: usize = 10_000;
+    const ORPHANS: usize = PER_QUEUE*2;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("orphan-drain.sqlite3");
+    let store = Store::open(&path,LOCAL,Arc::new(runtime::Plain)).unwrap();
+    let body: Value = serde_json::from_str(&authority_body(1,0,false,1024)).unwrap();
+    let baseline = store.append_claim(&ClaimInput {
+        subject:"custom/client/assistant-v1-000000000000000000000001".into(),
+        kind:assistant_grant_authority::GRANTED.into(),
+        actor:Some("person/perf-operator".into()),
+        fields:serde_json::from_value(body["fields"].clone()).unwrap(),
+        evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    while !store.advance_assistant_grant_authority_backfill().unwrap() {}
+    store.persist_assistant_grant_membership_for_test().unwrap();
+    {
+        let mut connection = store.connection.write();
+        assistant_grant_authority::ready(&connection).unwrap();
+        assert!(assistant_grant_authority::contains(&connection,&baseline.id).unwrap());
+        let transaction = connection.transaction().unwrap();
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h1ee4d0c382d3 owner=smallclaims::store::assistant_grant_authority_bench TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE orphan_drain_fixture(id TEXT PRIMARY KEY, subject TEXT NOT NULL);
+             WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<19999)
+             INSERT INTO orphan_drain_fixture
+             SELECT printf('orphan-drain/%08d',i),printf('custom/orphan-drain/%08d',i) FROM n;"
+        ).unwrap();
+        // Clone real authenticated row shapes into stale derived caches only.
+        // No raw claim or pending source exists for any orphan identity.
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h74e466c6e133 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_authority
+             (claim_id,base_claim_id,grant_subject,kind,origin,actor,principal,profile,
+              expires_at,store_index,credential_hash,record)
+             SELECT fixture.id,fixture.id,fixture.subject,authority.kind,authority.origin,
+                authority.actor,authority.principal,authority.profile,authority.expires_at,
+                authority.store_index,authority.credential_hash,
+                json_set(authority.record,'$.id',fixture.id,'$.subject',fixture.subject)
+             FROM orphan_drain_fixture AS fixture
+             CROSS JOIN assistant_grant_authority AS authority
+             WHERE authority.claim_id=?1 AND authority.base_claim_id=?1",
+            [&baseline.id],
+        ).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hd9496a52b2c7 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_authority
+             (claim_id,base_claim_id,grant_subject,kind,origin,actor,principal,profile,
+              expires_at,store_index,credential_hash,record)
+             SELECT fixture.id||'/policy',fixture.id,fixture.subject,?2,authority.origin,
+                authority.actor,authority.principal,authority.profile,authority.expires_at,
+                authority.store_index,NULL,
+                json_set(authority.record,'$.id',fixture.id||'/policy',
+                    '$.subject',fixture.subject,'$.kind',?2)
+             FROM orphan_drain_fixture AS fixture
+             CROSS JOIN assistant_grant_authority AS authority
+             WHERE authority.claim_id=?1 AND authority.base_claim_id=?1",
+            params![baseline.id,assistant_grant_authority::POLICY],
+        ).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h4ed54c4bf460 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_effective
+             SELECT fixture.id,fixture.subject,effective.principal,effective.owner,
+                effective.profile,effective.expires_at,effective.revoked,
+                json_set(effective.grant_record,'$.id',fixture.id,'$.subject',fixture.subject)
+             FROM orphan_drain_fixture AS fixture
+             CROSS JOIN assistant_grant_effective AS effective WHERE effective.claim_id=?1",
+            [&baseline.id],
+        ).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-he7cbf7beaa3b owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_attachment_witnesses
+             SELECT effective.claim_id,effective.grant_subject,effective.principal,
+                effective.owner,effective.profile,effective.expires_at,
+                effective.revoked,effective.grant_record
+             FROM assistant_grant_effective AS effective
+             JOIN orphan_drain_fixture AS fixture ON fixture.id=effective.claim_id",[],
+        ).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h0938b353225a owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_attachments
+             (claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id)
+             SELECT fixture.id,kinds.kind,fixture.subject,?1,'person/perf-operator','','~'
+             FROM orphan_drain_fixture AS fixture CROSS JOIN
+                (SELECT ?2 AS kind UNION ALL SELECT ?3) AS kinds",
+            params![LOCAL,assistant_grant_authority::POLICY,assistant_grant_authority::REVOKED],
+        ).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h4d8eef21371e owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id,grant_subject)
+             SELECT id,NULL FROM orphan_drain_fixture ORDER BY id LIMIT ?1",
+            [PER_QUEUE],
+        ).unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-ha13af81b3cbe owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor
+             (claim_id,grant_subject,position,record_rowid,member_key,membership_start)
+             SELECT id,NULL,0,0,'',-1 FROM orphan_drain_fixture ORDER BY id LIMIT ?1 OFFSET ?1",
+            [PER_QUEUE],
+        ).unwrap();
+        assert_eq!(transaction.query_row(
+            "SELECT count(*) FROM claims WHERE id GLOB 'orphan-drain/*'",
+            [],|row| row.get::<_,usize>(0)).unwrap(),0);
+        assert_eq!(transaction.query_row(
+            "SELECT count(*) FROM assistant_grant_pending WHERE claim_id GLOB 'orphan-drain/*'",
+            [],|row| row.get::<_,usize>(0)).unwrap(),0);
+        for queue in ["assistant_grant_dirty","assistant_grant_auth_cursor"] {
+            assert_eq!(transaction.query_row(
+                /* sqlite-large-value: allow-for-now lv-h534377b2042f owner=smallclaims::store::assistant_grant_authority_bench TODO=trace-statement-and-value-representation */ &format!("SELECT count(*) FROM {queue} WHERE grant_subject IS NULL"),
+                [],|row| row.get::<_,usize>(0)).unwrap(),PER_QUEUE);
+        }
+        assert_eq!(transaction.query_row(
+            "SELECT count(*) FROM assistant_grant_authority WHERE base_claim_id GLOB 'orphan-drain/*'",
+            [],|row| row.get::<_,usize>(0)).unwrap(),ORPHANS*2);
+        assert_eq!(transaction.query_row(
+            "SELECT count(*) FROM assistant_grant_attachments WHERE claim_id GLOB 'orphan-drain/*'",
+            [],|row| row.get::<_,usize>(0)).unwrap(),ORPHANS*2);
+        assert_eq!(transaction.query_row(
+            "SELECT count(*) FROM assistant_grant_attachment_witnesses WHERE base_claim_id GLOB 'orphan-drain/*'",
+            [],|row| row.get::<_,usize>(0)).unwrap(),ORPHANS);
+        assert!(assistant_grant_authority::ready(&transaction).is_err());
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h1d87a8de73d0 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE orphan_drain_fixture").unwrap();
+        transaction.commit().unwrap();
+    }
+    assistant_grant_authority::take_maintenance_units();
+    let started = Instant::now();
+    let mut slices = 0_usize;
+    let mut maintenance_units = 0_usize;
+    let mut fence_lift = None;
+    loop {
+        let done = store.advance_assistant_grant_authority_backfill().unwrap();
+        slices += 1;
+        let units = assistant_grant_authority::take_maintenance_units();
+        assert!(units<=assistant_grant_authority::CLAIMS_PER_SLICE,
+            "production slice exceeded its 64-unit allowance: {units}");
+        maintenance_units += units;
+        let ready = assistant_grant_authority::ready(&store.readers.get()).is_ok();
+        if ready && fence_lift.is_none() {
+            fence_lift = Some(started.elapsed());
+        }
+        assert!(started.elapsed()<Duration::from_secs(60),
+            "STOP: synthetic orphan drain exceeded one minute: elapsed={:?}, units={maintenance_units}, slices={slices}, fence_lift={fence_lift:?}",
+            started.elapsed());
+        if done { break; }
+        assert!(slices<ORPHANS*32, "orphan drain made no bounded progress");
+    }
+    let wall = started.elapsed();
+    let fence_lift = fence_lift.expect("completed recovery never lifted the global NULL fence");
+    // Two indexed endpoint deletions plus handoff and completion per orphan.
+    // Other shared attachment/witness visits are also counted, never estimated
+    // by multiplying the slice count by its maximum allowance.
+    assert!(maintenance_units>=ORPHANS*4);
+    let connection = store.readers.get();
+    for (table,column) in [
+        ("assistant_grant_dirty","claim_id"),("assistant_grant_auth_cursor","claim_id"),
+        ("assistant_grant_recompute","claim_id"),("assistant_grant_proof_rechecks","claim_id"),
+        ("assistant_grant_authority","base_claim_id"),("assistant_grant_effective","claim_id"),
+        ("assistant_grant_attachments","claim_id"),
+        ("assistant_grant_attachment_witnesses","base_claim_id"),
+    ] {
+        assert_eq!(connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-h1cb20223aeaa owner=smallclaims::store::assistant_grant_authority_bench TODO=trace-statement-and-value-representation */ &format!("SELECT count(*) FROM {table} WHERE {column} GLOB 'orphan-drain/*'"),
+            [],|row| row.get::<_,usize>(0)).unwrap(),0,
+            "completed recovery left orphan state in {table}");
+    }
+    assert!(assistant_grant_authority::contains(&connection,&baseline.id).unwrap());
+    println!("authority_subject_orphan_drain true_orphans={PER_QUEUE} cursor_only_orphans={PER_QUEUE} initial_endpoint_pairs={} initial_effective={ORPHANS} initial_own_witnesses={ORPHANS} initial_own_attachments={} driver_units_per_slice=64 driver_budget_ms=100 committed_slices={slices} maintenance_units={maintenance_units} wall_ms={:.3} global_fence_lift_ms={:.3} fixture=disk-backed-synthetic-no-raw-or-pending-orphan-sources setup_excluded=true readiness_probes_included=true",
+        ORPHANS*2,ORPHANS*2,wall.as_secs_f64()*1000.0,fence_lift.as_secs_f64()*1000.0);
+}

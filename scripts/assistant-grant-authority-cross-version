@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Exercise real old/new Fractal executables against one converted authority store.
+
+Builds nothing. Supply the old executable from
+50b28bdca32c6f00b49253fc4f5d7864ccd4a17c, the new executable, and the new
+smallclaims --lib libtest executable containing the ignored fixture hook.
+The explicit fresh --root retains the database, daemon logs and build identities.
+"""
+import argparse
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import threading
+import tomllib
+
+from fractal_test_process import supervised_main
+
+
+HOOK = "store::assistant_grant_authority_tests::assistant_grant_authority_cross_version_fixture"
+OWNER = "person/owner"
+
+
+class UnixHttp(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("localhost", timeout=5)
+        self.path = str(path)
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.path)
+
+
+def request(path, method, route, payload=None):
+    connection = UnixHttp(path)
+    try:
+        headers = {"x-st3-person": OWNER}
+        body = None
+        if payload is not None:
+            headers["content-type"] = "application/json"
+            body = json.dumps(payload)
+        connection.request(method, route, body=body, headers=headers)
+        response = connection.getresponse()
+        body = response.read().decode()
+        if response.status != 200:
+            raise RuntimeError(f"{method} {route}: HTTP {response.status}: {body}")
+        return json.loads(body)
+    finally:
+        connection.close()
+
+
+def hook(binary, root, phase, env):
+    subprocess.run(
+        [str(binary), HOOK, "--exact", "--ignored", "--nocapture", "--test-threads=1"],
+        env=dict(env, AUTHORITY_CROSS_VERSION_ROOT=str(root),
+                 AUTHORITY_CROSS_VERSION_PHASE=phase), check=True, timeout=120,
+    )
+
+
+def daemon_round(binary, root, phase, env):
+    with (root / "state/fleet/fleet.toml").open("rb") as fleet_file:
+        fleet_id = tomllib.load(fleet_file)["fleet_id"]
+    socket_path = root / f"{phase}.sock"
+    with (root / f"{phase}-daemon.log").open("wb") as log:
+        ready = threading.Event()
+        ready_line = []
+
+        def drain_output():
+            for line in daemon.stdout:
+                log.write(line)
+                log.flush()
+                if b"local API listening at " in line:
+                    ready_line.append(line)
+                    ready.set()
+            ready.set()  # EOF wakes the owner to report startup failure.
+
+        daemon = subprocess.Popen(
+            [str(binary), "up", "--config", str(root / "daemon.toml"),
+             "--node", "authority-rollback", "--state-dir", str(root / "state"),
+             "--store-dir", str(root / "store"), "--pty-root", str(root / "pty"),
+             "--socket", str(socket_path), "--web-listen", "off",
+             "--fleet-id", fleet_id, "--replication-worker-pid", str(os.getpid())],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+        reader = threading.Thread(target=drain_output, daemon=True)
+        reader.start()
+        try:
+            if not ready.wait(timeout=60) or not ready_line:
+                raise RuntimeError(f"{phase} daemon did not announce readiness; see {log.name}")
+            request(socket_path, "GET", "/v1/health")
+            # A real old/new CLI request must append through its matching daemon.
+            subprocess.run(
+                [str(binary), "--endpoint", str(socket_path), "--daemon-wait", "0",
+                 "--json", "claim", f"custom/rollback/{phase}-write",
+                 "custom.rollback.observed", "--actor", OWNER, "--field", f"phase={phase}"],
+                env=env, check=True, timeout=30,
+            )
+            if phase == "old":
+                # Generic claims intentionally cannot impersonate native grants.
+                # Use the old binary's actual trusted-local owner revocation route
+                # to execute an authority-triggering append, not SQL injection.
+                reply = request(socket_path, "POST",
+                    "/v1/client/assistant/grants/0123456789abcdef01234567/revoke")
+                (root / "old-revoke-response.json").write_text(json.dumps(reply, indent=2) + "\n")
+                # Foreground up enrolls this process generation as its worker.
+                # The request below comes from that exact Unix peer PID, through
+                # production worker authorization; no person-header bypass.
+                # A non-summary export synchronously seals the old native append
+                # before shutdown, rather than hoping for a background interval.
+                sealed = request(socket_path, "POST", "/v1/internal/replication/export", {
+                    "fleet_id": fleet_id, "inventory": {}, "summary_only": False,
+                })
+                (root / "old-sealed-export.json").write_text(json.dumps(sealed, indent=2) + "\n")
+        finally:
+            if daemon.poll() is None:
+                os.killpg(daemon.pid, signal.SIGTERM)
+                try:
+                    daemon.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    os.killpg(daemon.pid, signal.SIGKILL)
+                    daemon.wait(timeout=10)
+            reader.join(timeout=10)
+            if reader.is_alive():
+                raise RuntimeError(f"{phase} daemon retained its output pipe after exit")
+            # The shared test guardian also owns/reaps detached descendants.
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--old-binary", type=Path, required=True)
+    parser.add_argument("--new-binary", type=Path, required=True)
+    parser.add_argument("--test-binary", type=Path, required=True,
+                        help="already-built new smallclaims --lib libtest executable")
+    parser.add_argument("--root", type=Path, required=True,
+                        help="fresh, short absolute fixture directory; retained as evidence")
+    args = parser.parse_args()
+    binaries = [path.resolve(strict=True) for path in
+                [args.old_binary, args.new_binary, args.test_binary]]
+    for binary in binaries:
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            parser.error(f"not an executable file: {binary}")
+    if binaries[0] == binaries[1]:
+        parser.error("old and new binary paths must differ")
+    root = args.root.absolute()
+    if len(os.fsencode(root / "old.sock")) >= 104:
+        parser.error("--root must be short enough for Unix-domain socket paths")
+    root.mkdir(parents=True, exist_ok=False)
+    for directory in ["home", "state", "store", "pty", "config", "data", "runtime"]:
+        (root / directory).mkdir(mode=0o700)
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("ST_", "ST3_", "FRACTAL_", "AUTHORITY_"))}
+    # Preserve process-tree supervision while excluding live agent credentials,
+    # daemon endpoints, fleet identity, and inherited harness actor bindings.
+    for key in ["FRACTAL_TEST_SUPERVISOR", "FRACTAL_TEST_EVIDENCE_MANIFEST"]:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    env.update(HOME=str(root / "home"), XDG_CONFIG_HOME=str(root / "config"),
+               XDG_STATE_HOME=str(root / "state"), XDG_DATA_HOME=str(root / "data"),
+               XDG_RUNTIME_DIR=str(root / "runtime"), NO_COLOR="1")
+    (root / "daemon.toml").write_text(
+        f'person = "{OWNER}"\naccess_mode = "bypass"\n')
+    identities = []
+    for binary in binaries:
+        with binary.open("rb") as executable:
+            digest = hashlib.file_digest(executable, "sha256").hexdigest()
+        identities.append({"path": str(binary), "sha256": digest})
+    for binary, identity in zip(binaries[:2], identities):
+        identity["version"] = subprocess.check_output(
+            [str(binary), "--version"], env=env, text=True, timeout=10).strip()
+    (root / "executables.json").write_text(json.dumps(identities, indent=2) + "\n")
+    hook(binaries[2], root, "setup", env)
+    daemon_round(binaries[0], root, "old", env)
+    hook(binaries[2], root, "assert-old", env)
+    daemon_round(binaries[1], root, "new", env)
+    hook(binaries[2], root, "assert-new", env)
+    print(json.dumps({"authority_cross_version": "passed", "schema": 2,
+                      "root": str(root), "executables": identities}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(supervised_main(main))
