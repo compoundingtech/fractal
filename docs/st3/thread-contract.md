@@ -58,6 +58,10 @@ creation claim ID, not a snapshot ID. Labels, `about` links and arbitrary
 `custom.attention.*` kinds confer no authority. Reassignment removes retained discussion
 rights. Enrollment, browser/device admission, message scope, rollout and responsible-agent
 checks still apply; a retained source never grants an otherwise refused write.
+Retained-source starts prefer the original source agent through the existing responsibility
+selection chain. If that agent cannot participate under the existing admission check,
+they use the configured `inbox_fallback_agent`; no new recipient admission is introduced.
+Current-source selection is unchanged. Existing threads retain their frozen audience.
 
 Authored human steps are not covered: their retained `step-run.state` opening does not
 carry the recipient at opening. Harness prompts, seat login, planning, revision proposals

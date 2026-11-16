@@ -252,7 +252,7 @@ pub fn append_reply(
                     };
                     discussion_source::qualify(connection, person, &key, now_ms())?
                         .ok_or_else(unavailable)?.into_resolved()
-                        .require_agent(store, connection, agent)?;
+                        .require_retained_agent(store, connection, agent)?;
                 }
                 Err(error) => return Err(error),
             }

@@ -567,4 +567,46 @@ pub(crate) mod retained_discussion {
         assert!(thread_metadata::unread_inbox_positions(&state.store, "person/other", &keys).unwrap().is_empty());
         assert_not_in_attention(&state);
     }
+
+    #[tokio::test]
+    async fn retained_discussion_prefers_participating_original_agent_over_configured_fallback() {
+        let (_root, state, origin) = fixture(true);
+        state.store.configure_inbox_fallback_agent(Some("agent/garden/fallback")).unwrap();
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let mut wrong = request(&state, &origin, "thread/retained-wrong-fallback", "retained-wrong-fallback");
+        wrong.parameters["agent_id"] = json!("agent/garden/fallback");
+        assert_eq!(start(&state, &owner, wrong).await.unwrap_err().status, StatusCode::NOT_FOUND);
+        let actual = start(&state, &owner,
+            request(&state, &origin, "thread/retained-original", "retained-original")).await.unwrap();
+        assert_eq!(actual["affected_ids"][0], "thread/retained-original");
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/retained-original").unwrap().agent_id, AGENT);
+    }
+
+    #[tokio::test]
+    async fn retained_discussion_uses_configured_fallback_when_original_cannot_participate() {
+        let (_root, state, _) = fixture(true);
+        state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
+        let source = "custom/garden/review/v1/unavailable-original";
+        let opening = state.store.append_claim(&ClaimInput {
+            subject:source.into(), kind:"custom.garden.review.v1.requested".into(),
+            actor:Some("agent/garden/undeclared".into()),
+            fields:serde_json::from_value(json!({
+                "title":"Retained original", "detail":"Explain", "recipient":PERSON,
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("unavailable-original-open".into()),
+        }).unwrap();
+        state.store.append_claim(&ClaimInput {
+            subject:source.into(), kind:"custom.garden.review.v1.answered".into(), actor:Some(PERSON.into()),
+            fields:serde_json::from_value(json!({
+                "request":opening.id, "selection":"keep", "text":"Proceed.",
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("unavailable-original-answer".into()),
+        }).unwrap();
+        let origin = InboxOrigin { source_id:source.into(), episode:opening.id };
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let actual = start(&state, &owner, request(&state, &origin,
+            "thread/retained-fallback", "retained-fallback")).await.unwrap();
+        assert_eq!(actual["affected_ids"][0], "thread/retained-fallback");
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/retained-fallback").unwrap().agent_id, AGENT);
+    }
 }

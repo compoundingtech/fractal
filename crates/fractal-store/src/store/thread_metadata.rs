@@ -1319,7 +1319,7 @@ pub fn start_from_inbox_as(
             let mut creation_body = creation_body.clone();
             creation_body["fields"]["person"] = json!(identities::resolve_reference_conn(tx, person)?);
             creation_body["fields"]["agent"] = json!(identities::resolve_reference_conn(tx, agent)?);
-            let (selected, retained) = match inbox_source::resolve(store, tx, person, origin, now_ms()) {
+            let (mut selected, retained) = match inbox_source::resolve(store, tx, person, origin, now_ms()) {
                 Ok(selected) => (selected, false),
                 Err(error) if error.code == "thread-unavailable" => {
                     let key = request_history::SourceEpisode {
@@ -1331,7 +1331,11 @@ pub fn start_from_inbox_as(
                 }
                 Err(error) => return Err(error),
             };
-            selected.require_agent(store, tx, agent)?;
+            if retained {
+                selected.require_retained_agent(store, tx, agent)?;
+            } else {
+                selected.require_agent(store, tx, agent)?;
+            }
             if retained
                 && let Some(existing) = newest_owned_origin(tx, person, source, episode)?
             {

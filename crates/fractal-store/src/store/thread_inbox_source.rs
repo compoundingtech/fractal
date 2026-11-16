@@ -15,7 +15,7 @@ pub(in crate::store) struct ResolvedSource {
 
 /// Reuse the same source reducers as the Inbox without taking a pooled reader,
 /// trusting a client-rendered row, or refolding another person's Inbox.
-pub(super) fn resolve(
+pub(in crate::store) fn resolve(
     store: &Store,
     connection: &Connection,
     person: &str,
@@ -174,6 +174,33 @@ impl ResolvedSource {
             return Err(unavailable());
         }
         Ok(selected)
+    }
+
+    /// Retained sources preserve their original participant when the existing
+    /// admission permits it. Only an unavailable original may use configured policy.
+    pub(in crate::store) fn require_retained_agent(
+        &mut self, store: &Store, connection: &Connection, selected: &str,
+    ) -> Result<String, FractalError> {
+        let original = match store.inbox_responsible_agent_at(connection, &self.item) {
+            Ok(original) => original,
+            Err(error) if error.downcast_ref::<FractalError>()
+                .is_some_and(|error| error.code == "lifecycle-unavailable") => None,
+            Err(error) => return Err(internal(error)),
+        };
+        if let Some(original) = original {
+            match self.require_agent(store, connection, &original) {
+                Ok(_) => return self.require_agent(store, connection, selected),
+                Err(error) if matches!(error.code.as_str(), "thread-unavailable" | "lifecycle-unavailable") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let fallback = inbox::configured_agent_at(connection).map_err(internal)?
+            .ok_or_else(|| FractalError::new(
+                "thread-responsibility-unassigned",
+                "this retained source has no participating original or configured fallback agent",
+            ))?;
+        self.item.conversation = Some(fallback);
+        self.require_agent(store, connection, selected)
     }
 }
 
