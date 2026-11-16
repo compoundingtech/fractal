@@ -362,6 +362,7 @@ fn request_history_concurrent_cross_thread_attachments_have_one_canonical_member
     let forward = Store::open_memory("dogwood").unwrap();
     let reverse = Store::open_memory("elm").unwrap();
     for replica in [&left, &right, &forward, &reverse] {
+        replica.configure_thread_write_rollout([]);
         let exchange = baseline.export_replication_exchange_answering(
             TEST_FLEET, &replica.replication_inventory().unwrap(), &[],
         ).unwrap();
