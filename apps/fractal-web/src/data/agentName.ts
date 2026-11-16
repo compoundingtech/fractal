@@ -18,16 +18,14 @@ export const isFractalMachinery = (id: string): boolean => id.startsWith('daemon
 
 /**
  * An agent's visible name: Fractal for Fractal's own machinery, whatever the roster calls it; else the name Fractal
- * serves, as declared; else An agent. The daemon labels a seat that declares no name by its id without `agent/`, so a
- * label equal to the full id, or to that path (it has a `/`), is no name. A single word is kept as a name even when it
- * matches the id's last segment ('builder' for agent/builder): it may be declared, and an ordinary name is never erased.
- * The served name carries no provenance, so a seat that declares exactly a fallback path reads as unnamed too.
+ * serves, as declared; else An agent. Readable supplied single names win, even when they match the id's slug.
+ * A full id or its matching multi-segment path is an address, not a name. A seat that declares exactly such a path
+ * reads as unnamed too: the served name cannot distinguish that path from the daemon's fallback.
  */
 export const agentDisplayName = ({ id, name }: { readonly id: string; readonly name?: string | undefined }): string => {
   if (isFractalMachinery(id)) return FRACTAL_NAME
   const label = name?.trim() ?? ''
-  const fallbackPath = label.includes('/') && `agent/${label}` === id
-  return label === '' || label === id || fallbackPath ? UNNAMED_AGENT : label
+  return label === '' || label === id || (label.includes('/') && `agent/${label}` === id) ? UNNAMED_AGENT : label
 }
 
 /** A shown agent name inside a sentence ("To an agent"): only the unnamed form changes case. */

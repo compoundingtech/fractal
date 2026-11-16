@@ -12,8 +12,11 @@ describe('agent display names', () => {
     expect(agentDisplayName({ id, name: 'Manager' })).toBe('Manager')
     expect(agentDisplayName({ id, name: 'Atlas/Manager' })).toBe('Atlas/Manager')
     expect(agentDisplayName({ id: opaque, name: 'd415892e' })).toBe('d415892e')
-    // A single word is a name even when it is the id's last segment: it may be declared, so it is never erased.
+  })
+
+  it('preserves a supplied single name even when it matches the id slug', () => {
     expect(agentDisplayName({ id: 'agent/builder', name: 'builder' })).toBe('builder')
+    expect(agentDisplayName({ id: 'agent/builder' })).toBe('An agent')
   })
 
   it('reads an agent with no name as An agent, never as any part of its id', () => {
@@ -27,7 +30,6 @@ describe('agent display names', () => {
     for (const name of [id, 'example/atlas', ' example/atlas ']) expect(agentDisplayName({ id, name })).toBe('An agent')
     for (const name of [opaque, 'example/d415892ea7a1dab11e6ba7ed22a8eb13']) expect(agentDisplayName({ id: opaque, name })).toBe('An agent')
     expect(agentDisplayName({ id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests' })).toBe('An agent')
-    expect(agentDisplayName({ id: 'agent/builder', name: 'agent/builder' })).toBe('An agent')
   })
 
   it('lowercases only the unnamed form inside a sentence', () => {
