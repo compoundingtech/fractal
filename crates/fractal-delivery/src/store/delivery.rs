@@ -4,6 +4,36 @@ use crate::message_desired_recipient_match;
 use crate::message_sent_recipient_match;
 use super::*;
 pub use fractal_store::store::delivery::*;
+use smallclaims::store::canonical::{CANONICAL_ORDER, CANONICAL_ORDER_DESC};
+
+// The frontier retains finished winners as an anti-resurrection fence. Neither candidate
+// selection nor completion probes visit historical relevant-change requests.
+// Unary + removes the claim ID's TEXT affinity so the closer's JSON-expression index
+// seeks both subject and request, rather than scanning every receipt for the subscription.
+pub(super) fn prepare_pending_subscription_requests(
+    connection: &Connection,
+) -> rusqlite::Result<rusqlite::Statement<'_>> {
+    connection.prepare(format!(
+    "SELECT claims.id,claims.store_index,claims.batch_id,claims.subject,
+           claims.kind,claims.origin,claims.actor,claims.body,
+           claims.predecessors,claims.accepted_at_unix_ms
+    FROM (WITH candidates(id) AS MATERIALIZED (
+        SELECT id FROM claims INDEXED BY claims_subscription_legacy_requests
+        WHERE subject=?1 AND kind='subscription.mission-requested'
+          AND json_extract(body,'$.fields.admission') IS NOT 'relevant-changes'
+        UNION ALL
+        SELECT claim_id FROM local_subscription_request_frontier WHERE subject=?1
+    ) SELECT id FROM candidates) AS candidates
+    CROSS JOIN claims ON claims.id=candidates.id
+    WHERE NOT EXISTS (
+        SELECT 1 FROM claims finished INDEXED BY claims_subscription_request_closer
+        WHERE finished.subject=?1
+          AND json_extract(finished.body,'$.fields.request')=+claims.id
+          AND finished.kind IN ('subscription.mission-started','subscription.mission-failed',
+                                'subscription.mission-request-cancelled')
+    )
+    ORDER BY {CANONICAL_ORDER}").as_str())
+}
 
 fn subscription_request_view(
     request: &ClaimRecord,
@@ -110,8 +140,14 @@ fn mailbox_owner_key(
 }
 
 pub trait DeliveryStore {
+    /// Start with the delivery's immutable policy snapshot. Durable queue callers
+    /// also pass the original request claim ID so the writer fences supersession;
+    /// direct callers without a durable request pass `None`.
+    #[allow(clippy::too_many_arguments)] // Preserve the delivery snapshot and its original queue identity.
     fn create_subscription_mission_run(&self, request: &MissionRunRequest,
             parent: Option<&MissionRunView>, subscription: &str, resource: &str, discovery: &str,
+            request_fields: Option<&Value>,
+            request_id: Option<&str>,
         ) -> Result<MissionRunView, FractalError>;
     fn next_subscription_mission_retry_deadline(&self) -> Result<Option<u128>>;
     fn populate_work_wake_for_reconcile(
@@ -293,15 +329,19 @@ pub trait DeliveryStore {
 
 impl DeliveryStore for Store {
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the delivery admission contract above.
     fn create_subscription_mission_run(&self, request: &MissionRunRequest,
             parent: Option<&MissionRunView>, subscription: &str, resource: &str, discovery: &str,
+            request_fields: Option<&Value>,
+            request_id: Option<&str>,
         ) -> Result<MissionRunView, FractalError> {
         let child = parent.map(|parent| ChildMissionContext {
             root_revision: parent.root_revision.clone(),
             root_run_id: parent.root_mission_run.trim_start_matches("mission-run/").into(),
             parent_step_run: normalize_step_run(subscription), default_selector: None, started_by: None,
         });
-        self.create_mission_run_inner(request, child, None, Some((resource, discovery)))
+        self.create_mission_run_inner(request, child, None,
+            Some((resource, discovery, request_fields, request_id.map(|id| (subscription, id)))))
     }
 
     fn next_subscription_mission_retry_deadline(&self) -> Result<Option<u128>> {
@@ -805,10 +845,21 @@ impl DeliveryStore for Store {
         ] {
             decisions.extend(self.claims_for(subscription, Some(kind))?);
         }
+        let pending = self.pending_subscription_mission_requests(subscription)?
+            .into_iter().map(|claim| claim.id).collect::<BTreeSet<_>>();
         Ok(self
             .claims_for(subscription, Some("subscription.mission-requested"))?
             .into_iter()
-            .map(|request| subscription_request_view(&request, &decisions))
+            .map(|request| {
+                let mut view = subscription_request_view(&request, &decisions);
+                if request.body.pointer("/fields/admission").and_then(Value::as_str) == Some("relevant-changes")
+                    && matches!(view.status.as_str(), "pending" | "held")
+                    && !pending.contains(&request.id)
+                {
+                    view.status = "cancelled".into();
+                }
+                view
+            })
             .collect())
     }
 
@@ -890,31 +941,10 @@ impl DeliveryStore for Store {
     fn pending_subscription_mission_requests(&self, subject: &str) -> Result<Vec<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        // Every pass asks this for every subscription. The finished requests are listed once, not
-        // scanned for each request: a correlated NOT EXISTS read every finished claim once per
-        // request, 0.4 s a pass for a subscription with hundreds of runs.
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfa785c4cf4bd owner=fractal_delivery::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT request.id, request.store_index, request.batch_id, request.subject,
-                    request.kind, request.origin, request.actor, request.body,
-                    request.predecessors, request.accepted_at_unix_ms
-             FROM claims AS request
-             WHERE request.subject=?1 AND request.kind='subscription.mission-requested'
-               AND request.id NOT IN (
-                 SELECT json_extract(finished.body, '$.fields.request') FROM claims AS finished
-                 WHERE finished.subject=?1
-                   AND finished.kind IN (
-                     'subscription.mission-started',
-                     'subscription.mission-failed',
-                     'subscription.mission-request-cancelled'
-                   )
-                   AND json_extract(finished.body, '$.fields.request') IS NOT NULL
-               )
-             ORDER BY CANONICAL_ASC(request)",
-        ))?;
-        statement
+        let mut statement = prepare_pending_subscription_requests(&connection)?;
+        Ok(statement
             .query_map([subject], claim_from_row)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     fn subscription_mission_deferral(

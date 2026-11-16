@@ -586,6 +586,11 @@ fn listed_item(issue: &Value, fields: &BTreeSet<String>, watermark: Option<&str>
     let state = issue.get("state").and_then(Value::as_str).unwrap_or("open");
     facts.insert("state".into(), Value::String(state.into()));
     if pull {
+        // Hash the body already returned by the issue listing; keep raw text out of facts.
+        facts.insert(
+            "body_digest".into(),
+            json!(body_digest(issue.get("body").and_then(Value::as_str).unwrap_or_default())),
+        );
         insert(&mut facts, "draft", issue.get("draft"));
         if state != "open"
             && let Some(merged_at) = issue.pointer("/pull_request/merged_at")
@@ -709,7 +714,7 @@ const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after:
     pullRequests(states: OPEN, first: $first, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number title url isDraft headRefOid headRefName baseRefName createdAt
+        id number title url isDraft headRefOid headRefName baseRefName baseRefOid createdAt
         author { login }
         timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) { nodes {
           __typename
@@ -1125,6 +1130,7 @@ fn open_pull_request(
     insert(&mut facts, "head", node.get("headRefOid"));
     insert(&mut facts, "branch", node.get("headRefName"));
     insert(&mut facts, "base_branch", node.get("baseRefName"));
+    insert(&mut facts, "base_sha", node.get("baseRefOid"));
     facts.insert("state".into(), Value::String("open".into()));
     facts.insert(
         "draft".into(),
@@ -4146,6 +4152,107 @@ mod tests {
             cursor.comments_since.as_deref(),
             Some("2026-09-10T05:00:00Z")
         );
+    }
+
+    #[tokio::test]
+    async fn relevant_pull_request_changes_reach_observations_without_raw_bodies() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let listed_pull = |at: &str, body: &str| {
+            issue(2, at, json!({
+                "pull_request": {"merged_at": null}, "draft": false,
+                "html_url": "https://github.com/acme/garden/pull/2",
+                "body": body, "comments": 1,
+            }))
+        };
+        let comment = |at: &str, body: &str| {
+            json!({
+                "id": 91, "issue_url": "https://api.github.com/repos/acme/garden/issues/2",
+                "html_url": "https://github.com/acme/garden/pull/2#issuecomment-91",
+                "user": {"login": "fern"}, "body": body,
+                "created_at": "2026-09-10T00:00:00Z", "updated_at": at,
+            })
+        };
+        github.route(
+            "/repos/acme/garden/issues?state=open&per_page=100",
+            json!([listed_pull("2026-09-10T00:00:00Z", "original PR body")]),
+        );
+        github.route(
+            "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-08T23:59:59Z&per_page=100",
+            json!([comment("2026-09-10T00:00:00Z", "original comment")]),
+        );
+        let mut pull = open_pull(2, "unchanged-head", "PENDING");
+        pull["baseRefName"] = json!("main");
+        pull["baseRefOid"] = json!("original-base");
+        github.open_pull_requests(json!([pull.clone()]));
+        let token = GithubAuth::test("orchid-token");
+        let fields = ["pull_requests", "comments"];
+        let initial_cursor = serde_json::to_string(&RepositoryCursor {
+            comments_since: Some("2026-09-09T00:00:00Z".into()),
+            ..RepositoryCursor::default()
+        })
+        .unwrap();
+        let first = observe_at(
+            request(&fields, Some(&initial_cursor), None),
+            &base,
+            Some(&token),
+        )
+        .await
+        .unwrap();
+        let before = item(&first.facts, "pull_requests", 2);
+        assert_eq!(before["body_digest"], body_digest("original PR body"));
+        assert_eq!(before["last_comment"]["body_digest"], body_digest("original comment"));
+        assert_eq!(before["base_branch"], "main");
+        assert_eq!(before["base_sha"], "original-base");
+        assert_eq!(before["checks_state"], "pending");
+        assert_eq!(before["required_checks"]["state"], "pending");
+        assert_eq!(before["review_decision"], "review_required");
+        assert_eq!(before["reviews"][0]["state"], "commented");
+
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        let since = inclusive_since(cursor.items_since.as_deref().unwrap());
+        github.route(
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"),
+            json!([listed_pull("2026-09-10T01:00:00Z", "edited PR body")]),
+        );
+        let since = inclusive_since(cursor.comments_since.as_deref().unwrap());
+        github.route(
+            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={since}&per_page=100"),
+            json!([comment("2026-09-10T01:00:00Z", "edited comment")]),
+        );
+        pull["baseRefName"] = json!("release");
+        pull["baseRefOid"] = json!("updated-base");
+        pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] = json!("SUCCESS");
+        pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0]["state"] =
+            json!("SUCCESS");
+        pull["reviewDecision"] = json!("APPROVED");
+        pull["latestReviews"]["nodes"][0]["state"] = json!("APPROVED");
+        github.open_pull_requests(json!([pull]));
+        age_pull_request_check(&base, PULL_REQUEST_CHECK_INTERVAL);
+        let edited = observe_at(
+            request(&fields, first.cursor.as_deref(), None),
+            &base,
+            Some(&token),
+        )
+        .await
+        .unwrap();
+        let after = item(&edited.facts, "pull_requests", 2);
+        assert_eq!(after["body_digest"], body_digest("edited PR body"));
+        assert_ne!(before["body_digest"], after["body_digest"]);
+        assert_eq!(after["last_comment"]["body_digest"], body_digest("edited comment"));
+        assert_ne!(before["last_comment"]["body_digest"], after["last_comment"]["body_digest"]);
+        assert_eq!(after["base_branch"], "release");
+        assert_eq!(after["base_sha"], "updated-base");
+        assert_eq!(after["head"], before["head"]);
+        assert_eq!(after["checks_state"], "success");
+        assert_eq!(after["required_checks"]["state"], "pass");
+        assert_ne!(before["checks"], after["checks"]);
+        assert_eq!(after["review_decision"], "approved");
+        assert_eq!(after["reviews"][0]["state"], "approved");
+        for facts in [before, after] {
+            assert!(facts.get("body").is_none());
+            assert!(facts["last_comment"].get("body").is_none());
+        }
     }
 
     #[tokio::test]

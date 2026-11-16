@@ -328,6 +328,26 @@ fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
         || prior_head.is_some_and(|prior_head| Some(prior_head) != head)
 }
 
+/// Facts that can change the responsibility of an opt-in PR evaluation. Observation
+/// timestamps and attribution to a local agent are deliberately not admission events.
+fn pull_request_change_facts(item: &Value) -> [(&'static str, Option<&Value>); 15] {
+    [
+        "state", "draft", "merged", "head_sha", "base_branch", "base_sha",
+        "checks_state", "checks", "required_checks", "review_decision", "reviews",
+        "comments", "last_comment", "recent_comments", "body_digest",
+    ]
+    .map(|field| (field, item.get(field)))
+}
+
+fn pull_request_has_relevant_change(prior: Option<&Value>, item: &Value) -> bool {
+    prior.is_none_or(|prior| {
+        pull_request_change_facts(prior) != pull_request_change_facts(item)
+            // Resolving pending attribution must reconsider the current snapshot even
+            // when no technical fact changed in the meantime.
+            || prior.get("author") != item.get("author")
+    })
+}
+
 /// The repository collections whose items become their own resources, with each item's subject
 /// segment and resource kind.
 const REPOSITORY_COLLECTIONS: [(&str, &str, &str); 2] = [
