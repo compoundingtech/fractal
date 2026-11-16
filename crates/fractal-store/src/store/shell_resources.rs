@@ -47,7 +47,8 @@ pub struct Execution {
 }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
+    // Transitional debt: command/result bodies and indexed text keys have no byte-size proof.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9574bb92e055 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
     Ok(())
 }
 
@@ -58,7 +59,8 @@ impl Store {
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, timed_out: false, head_start: None, clean_start: None, result: None };
-        self.connection.write().execute("INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",
+        // One row per command does not bound its serialized argv/environment/result bytes.
+        self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
         self.resource_admission_elapsed(&format!("shell-wait:{}", execution.command.id), now, now);
         Ok(execution)
@@ -90,7 +92,8 @@ impl Store {
         next.revision = previous.revision;
         if next == previous { return Ok(false); }
         next.revision += 1;
-        transaction.execute("UPDATE shell_resources_v1 SET state=?2,body=?3 WHERE id=?1",
+        // Primary-key selection bounds rows, not replacement body bytes or retained rows.
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0b67351b90df owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET state=?2,body=?3 WHERE id=?1",
             rusqlite::params![next.command.id,next.state,serde_json::to_string(&next)?])?;
         transaction.commit()?;
         if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") {
@@ -100,7 +103,8 @@ impl Store {
     }
 
     pub fn cancel_shell_resource(&self, id: &str) -> Result<()> {
-        self.connection.write().execute("UPDATE shell_resources_v1 SET body=json_set(body,'$.cancel',json('true')) WHERE id=?1", [id])?;
+        // A scalar cancel flag still rewrites one potentially unbounded JSON body.
+        self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hf463932112ca owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET body=json_set(body,'$.cancel',json('true')) WHERE id=?1", [id])?;
         Ok(())
     }
 

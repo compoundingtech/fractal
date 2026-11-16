@@ -53,6 +53,8 @@ CPU limits. macOS refuses `resources exec` before launch with `unsupported-platf
 has no whole-tree retirement proof; `ls`, `show`, `hold` and `release` remain available.
 A nested resource exec validates and inherits its parent's membership through an environment
 marker instead of reserving a second footprint; custody lasts until every execution root retires.
+Disk accounting uses declared reservations, not measured disk peaks; memory peaks come from cgroup
+`memory.peak` on enforced hosts and are absent on logical-only hosts.
 
 `fractal resources ls` lists host holders and waiters; `fractal resources show` exposes membership
 details and blocking reasons. `fractal resources hold` and `fractal resources release` operate on
