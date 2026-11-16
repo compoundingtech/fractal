@@ -25,6 +25,7 @@ mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
+pub mod continuity;
 pub mod mission_run_query;
 pub mod step_executions;
 mod mission_supersession;
@@ -21190,7 +21191,7 @@ fn reviewers_for_changed_path<'a>(
         .expect("the mission metadata is always present")
 }
 
-fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
+pub fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
     let mut flat = Vec::new();
     flatten_steps(mission, None, &[], &mut flat);
     flat.into_iter()
@@ -21438,7 +21439,7 @@ pub fn carried_step_lease(
     )
 }
 
-fn flattened_dependencies(mission: &MissionSpec) -> BTreeMap<String, BTreeSet<String>> {
+pub fn flattened_dependencies(mission: &MissionSpec) -> BTreeMap<String, BTreeSet<String>> {
     fn collect(
         mission: &MissionSpec,
         prefix: &str,
