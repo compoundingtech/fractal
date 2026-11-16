@@ -57,9 +57,10 @@ pub fn outside_lane_memory() -> Option<HostMemoryObservation> {
 pub fn arc_credit_bytes() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let arcstats = optional_stat(std::path::Path::new("/proc/spl/kstat/zfs/arcstats"))?;
-    let without_arc = outside_memory(&meminfo, None, None)?;
-    let with_arc = outside_memory(&meminfo, arcstats.as_deref(), None)?;
-    Some(without_arc.saturating_sub(with_arc))
+    let pressure = std::fs::read_to_string("/proc/pressure/memory").ok();
+    let without_arc = outside_memory(&meminfo, None, None, pressure.as_deref())?;
+    let with_arc = outside_memory(&meminfo, arcstats.as_deref(), None, pressure.as_deref())?;
+    Some(without_arc.outside_bytes.saturating_sub(with_arc.outside_bytes))
 }
 
 fn optional_stat(path: &std::path::Path) -> Option<Option<String>> {

@@ -11,7 +11,7 @@ pub struct ParentContext {
     pub request: LaneRequest,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Command {
     pub id: String,
@@ -23,7 +23,7 @@ pub struct Command {
     pub parent: Option<Grant>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {
     pub command: Command,
@@ -88,7 +88,7 @@ impl Store {
         let mut next = execution.clone();
         next.cancel |= previous.cancel;
         next.revision = previous.revision;
-        if serde_json::to_string(&next)? == body { return Ok(false); }
+        if next == previous { return Ok(false); }
         next.revision += 1;
         transaction.execute("UPDATE shell_resources_v1 SET state=?2,body=?3 WHERE id=?1",
             rusqlite::params![next.command.id,next.state,serde_json::to_string(&next)?])?;
@@ -153,7 +153,7 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PayloadResult {
     pub head_start: Option<String>,
