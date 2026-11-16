@@ -276,7 +276,7 @@ pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, Fract
     Ok(views)
 }
 
-fn known_members(
+pub(super) fn known_members(
     connection: &Connection,
     set: &str,
     at: Option<u64>,

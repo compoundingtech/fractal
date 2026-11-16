@@ -426,6 +426,14 @@ rather than adding typed-only inputs to the frozen generic corpora. The test cre
 and renames a thread on different members, closes it, exchanges the real operation
 claims, restarts both members, and checks owner visibility and receipt recovery.
 Ask-link admission and replication have dedicated thread store coverage. Keep main's
-selected v32 corpus and measured `NEVER_TRIMS` unchanged; optional thread message fields do
+selected v33 corpus and measured `NEVER_TRIMS` unchanged; optional thread message fields do
 not justify rewriting frozen snapshots or importing the older thread-only v17
 snapshot. Generated current-registry snapshots remain verification artifacts.
+
+`claims-v33.json` registers the optional `resolution: "human"` and
+`outcome: "abandoned"` fields on existing native effect receipt kinds. No kind is
+added. Versions 1 through 32 remain byte-identical. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v33.json`;
+do not hand-edit it. The simulation and audit reports select v33. Ordinary effect
+draws retain their explicit immutable binding and confirmation-evidence mapping;
+human resolution is exercised by focused effect API and reconciliation tests.

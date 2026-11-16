@@ -349,6 +349,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
+        } else if id == "auto-resolved.list" {
+            writeln!(out, "    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {{ self.get(\"/v1/client/auto-resolved\").await }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
         } else if id == "clients.list" {
@@ -621,6 +623,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
+        } else if id == "auto-resolved.list" {
+            writeln!(out, "    public func autoResolvedList() async throws -> Envelope<AutoResolvedAsks> {{ try await get(\"v1/client/auto-resolved\") }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
         } else if id == "clients.list" {
@@ -1884,6 +1888,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
+        } else if id == "auto-resolved.list" {
+            writeln!(out, "    async autoResolvedList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AutoResolvedAsks>> {{ return this.get('/v1/client/auto-resolved', undefined, requestOptions); }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {

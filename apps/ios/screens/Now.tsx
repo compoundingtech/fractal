@@ -17,19 +17,28 @@ import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } fro
 import { AvailabilitySection } from './Availability';
 import { ThreadViewport } from '../threadViewport';
 import { InboxThread, PendingInboxThreads, ThreadGroup } from './Threads';
+import { AutoResolvedSection, useAutoResolvedRows, useOverride } from './AutoResolved';
+import { closedOverride, OVERRIDE_TITLE } from '../autoResolved';
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
 // Now: what needs the person, as the Fractal terminal UI's Home lists it.
 export function NowScreen() {
-  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions, readAvailability } = useStore();
+  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions, readAvailability, readAutoResolved } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
   const threadViewport = useMemo(() => ({ get current() { return list.current?.getScrollResponder() ?? null; } }), []);
   useDebugScroll(list as never);
-  const refresh = useRefresh([], readAvailability);
-  const agentOf = (row: HomeRow) => row.item.conversation_id?.startsWith('agent/') ? row.item.conversation_id : undefined;
+  const readExtra = useCallback(() => Promise.all([readAvailability(), readAutoResolved()]).then(() => {}), [readAvailability, readAutoResolved]);
+  const refresh = useRefresh([], readExtra);
+  // Auto-resolved asks are a read, not a collection: read again each time Now comes into view.
+  useFocusEffect(useCallback(() => { void readAutoResolved(); }, [readAutoResolved]));
+  const override = useOverride();
+  const autoRows = useAutoResolvedRows();
+  // The item's own agent conversation first, else the agent that asked or published it.
+  const agentOf = (row: HomeRow) => (row.item.conversation_id?.startsWith('agent/') ? row.item.conversation_id : undefined)
+    ?? [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
   const rows = useMemo(() => homeRows(data.attention, caps?.session_actor), [data.attention, caps?.session_actor]);
   const requesterOf = (row: HomeRow) => {
     const id = row.item.requester_id ?? row.item.source_id;
@@ -83,6 +92,8 @@ export function NowScreen() {
         ...(row.item.mission_id ? [{ id: 'mission', title: 'Open the mission', symbol: 'point.3.connected.trianglepath.dotted', run: () => navigation.navigate('Mission', { id: row.item.mission_id! }) }] : []),
         ...(row.item.actions.includes('work.done') && !row.item.update && !busy && status === 'online' ? [{ id: 'done', title: 'Complete step', symbol: 'checkmark.circle', run: () => Alert.prompt('Complete step', row.title, summary => { if (summary.trim()) void actions.done(row.item, summary); }) }] : []),
         ...(dismiss(row) && !busy && status === 'online' ? [{ id: 'dismiss', title: row.item.closedElsewhere ? 'Clear from Now' : row.item.update ? 'Mark read' : 'Dismiss', symbol: 'xmark.circle', run: dismiss(row)! }] : []),
+        // A closed ask Fractal resolved by its deadline may still take the person's own answer.
+        ...(closedOverride(row.item, autoRows) && !busy && status === 'online' ? [{ id: 'override', title: OVERRIDE_TITLE, symbol: 'arrow.uturn.backward.circle', run: () => override(closedOverride(row.item, autoRows)!) }] : []),
       ]}>
         <GroupedRow
           title={row.title}
@@ -95,6 +106,7 @@ export function NowScreen() {
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
         <PendingInboxThreads onOpen={(id, title) => navigation.navigate('Thread', { id, title })} />
+        <AutoResolvedSection rows={autoRows} />
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
         <ThreadViewport viewport={threadViewport}>
           <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
@@ -107,7 +119,7 @@ export function NowScreen() {
 
 // One attention item: what it asks, who raised it, and what can be done here.
 export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) {
-  const { data, busy, status, actions, hasSynced, loadErrors } = useStore();
+  const { data, busy, status, actions, hasSynced, loadErrors, overridePending } = useStore();
   useMissionsOnFocus();
   // Pulling also reloads the item's threads, which show no manual refresh while followed.
   const refresh = useRefresh();
@@ -127,6 +139,8 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       if (frame !== undefined) cancelAnimationFrame(frame);
     };
   }, []));
+  const autoRows = useAutoResolvedRows();
+  const override = useOverride();
   const found = data.attention.find(candidate => candidate.id === route.params.id);
   // Nothing leaves Now by itself: an update is read when the person says so, never by opening it.
   const kept = useRef(found);
@@ -144,8 +158,10 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     origin={item.source_id && item.episode ? { sourceId: item.source_id, episode: item.episode } : undefined}
     agentId={agentId} initialTitle={item.title} onOpen={(id, title) => navigation.navigate('Thread', { id, title })} /></ThreadViewport>;
   const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
-  // Closed elsewhere, so nothing here can be answered; it stays until the person clears it.
+  // Closed elsewhere, so nothing here can be answered; it stays until the person clears it. One Fractal
+  // resolved by its deadline may still take the person's own answer instead of the default.
   if (item.closedElsewhere && !item.update) {
+    const overridable = closedOverride(item, autoRows);
     return <Screen>
       <Banners />
       <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
@@ -154,6 +170,10 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
         {threadEntry}
+        {overridable ? <>
+          <T dim>Fractal resolved it by its deadline{overridable.ask.default_answer ? ` with the default “${overridable.ask.default_answer.label}”` : ''}.</T>
+          <Button label={OVERRIDE_TITLE} disabled={busy || status !== 'online' || overridePending.has(overridable.ask.episode)} onPress={() => override(overridable)} />
+        </> : null}
         <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
       </ScrollView>

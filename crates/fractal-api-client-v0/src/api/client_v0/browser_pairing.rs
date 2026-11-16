@@ -32,16 +32,18 @@ pub struct Redeem { request_key: String }
 fn field<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
     claim.body["fields"][name].as_str()
 }
-fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
+pub(super) fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
     if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return Err(validation("invalid browser request id"));
     }
-    state.store.newest_admitted_client_operation(
-        &format!("custom/client/pairing-{id}"), "custom.client.pairing-begun",
-    ).map_err(ApiError::internal)?
-        .filter(|claim| claim.body["fields"]["browser_request"] == true
-            && claim.origin == state.store.origin())
-        .ok_or_else(|| ApiError::not_found("browser request does not exist"))
+    let begun = state.store.claims_for_subject_kind_at(&format!("custom/client/pairing-{id}"), "custom.client.pairing-begun", None, true, 1)
+        .map_err(ApiError::internal)?.claims.into_iter()
+        .find(|c| c.body["fields"]["browser_request"] == true && c.origin == state.store.origin())
+        .ok_or_else(|| ApiError::not_found("browser request does not exist"))?;
+    if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
+        return Err(forbidden("browser request requires a pairing operation record"));
+    }
+    Ok(begun)
 }
 fn owner(state: &AppState, session: &ClientSession) -> Result<(), ApiError> {
     if state.owning_person.as_deref() != Some(session.authority_actor.as_str())
@@ -107,6 +109,15 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
             let Some(begun) = state.store.newest_admitted_client_operation(
                 &subject, "custom.client.pairing-begun",
             ).map_err(ApiError::internal)? else { continue };
+            // Raw rows discover candidates; only the admitted request defines quota membership.
+            if begun.origin != state.store.origin()
+                || begun.body["fields"]["browser_request"] != true
+                || begun.body["fields"]["tailnet_login"].as_str() != Some(body.tailnet_login.as_str())
+                || begun.body["fields"]["expires_at_unix_ms"].as_u64()
+                    .is_none_or(|expires| u128::from(expires) <= now)
+            {
+                continue;
+            }
             if state.store.newest_admitted_pairing_completion(&subject, now)
                 .map_err(ApiError::internal)?.is_none() && approval(&state, &begun)? == "pending"
             {
@@ -234,17 +245,14 @@ pub async fn redeem(State(state): State<AppState>, Extension(session): Extension
 pub async fn revoke_current(State(state): State<AppState>, Extension(session): Extension<ClientSession>) -> Result<Json<Value>, ApiError> {
     owner(&state, &session)?;
     let grant = session.pairing_grant.as_deref().ok_or_else(|| forbidden("a paired browser device is required"))?;
-    let paired = state.store.newest_admitted_pairing_completion(grant, client_now_ms())
-        .map_err(ApiError::internal)?
-        .filter(|claim| field(claim, "session_actor") == Some(session.actor.as_str())
-            && session.pairing_completion.as_deref() == Some(claim.id.as_str()))
+    let paired = state.store.claims_for_subject_kind_at(grant, "custom.client.pairing-completed", None, true, 1).map_err(ApiError::internal)?.claims.into_iter()
+        .next().filter(|c| field(c, "session_actor") == Some(session.actor.as_str()))
         .ok_or_else(|| forbidden("a paired browser device is required"))?;
-    let id = grant.strip_prefix("custom/client/pairing-")
-        .ok_or_else(|| forbidden("a paired browser device is required"))?;
-    let begun = request(&state, id)?;
-    if paired.origin != state.store.origin()
-        || !paired.body["evidence"].as_array().is_some_and(|evidence| evidence.contains(&json!(begun.id)))
-    {
+    let begun = state.store.claims_for_subject_kind_at(&paired.subject, "custom.client.pairing-begun", None, true, 1).map_err(ApiError::internal)?.claims.into_iter().next()
+        .ok_or_else(|| forbidden("browser request does not exist"))?;
+    if paired.origin != state.store.origin() || begun.body["fields"]["browser_request"] != true
+        || !state.store.client_operation_is_trusted(&paired).map_err(ApiError::internal)?
+        || !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
         return Err(forbidden("only this browser's issuer can revoke it"));
     }
     state.store.append_client_operation_claim(&ClaimInput { subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(), actor: Some(session.authority_actor),

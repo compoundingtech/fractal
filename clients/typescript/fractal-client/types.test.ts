@@ -44,6 +44,13 @@ void cancellationClient.publicationDefinition('mission/example', cancellationOpt
 void cancellationClient.conversationContentChunk('session/example', 'reference', 0, cancellationOptions);
 void cancellationClient.availabilityList(undefined, cancellationOptions);
 void cancellationClient.availabilityList('person/ada', cancellationOptions);
+void cancellationClient.autoResolvedList(cancellationOptions);
+void cancellationClient.workOverride({
+    id: 'action/person-override:episode:accept',
+    idempotency_key: 'person-override:episode:accept',
+    fence: { snapshot_id: 'snapshot/example', subject_revisions: {} },
+    parameters: { target_id: 'step-run/example', episode: 'episode', answer: { id: 'accept' } },
+}, cancellationOptions);
 void cancellationClient.availabilitySet({ status: { value: null } }, cancellationOptions);
 void cancellationClient.presenceReport({ state: 'active', last_input_at: '2026-11-12T09:57:30Z', observed_at: '2026-11-12T09:58:00Z' }, cancellationOptions);
 // @ts-expect-error a client reports raw device state, never derived presence

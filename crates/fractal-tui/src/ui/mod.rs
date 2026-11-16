@@ -344,6 +344,16 @@ pub enum Effect {
         id: String,
         text: Option<String>,
     },
+    /// Replace the default an ask resolved with by the person's own named answer
+    /// (`work.override`), fenced on the ask's episode; `text` is the changes a request-changes
+    /// answer carries, `label` the answer's words, for notices.
+    Override {
+        target_id: String,
+        episode: String,
+        answer: String,
+        text: Option<String>,
+        label: String,
+    },
 }
 
 /// How long l puts an item off for.
@@ -432,6 +442,24 @@ const LEAVE_TAP: Duration = Duration::from_millis(400);
 const DRAFTS_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
 const DRAFTS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// "Use my answer instead" open on a row of Now.
+#[derive(Clone, Debug)]
+struct OverrideChoice {
+    row: String,
+    /// The alternative marked.
+    marked: usize,
+    /// Writing the changes the marked answer needs (it requests changes): Enter sends them with
+    /// it, Esc goes back to the answers. The words are a draft, `override:{episode}:{answer}`.
+    writing: bool,
+    /// Why the last Enter sent nothing; stays until the next attempt.
+    error: Option<String>,
+}
+
+/// Where the words for overriding `ask` with `answer` are kept while they are written.
+fn override_draft_key(ask: &view::AutoResolved, answer: &view::OverrideAnswer) -> String {
+    format!("override:{}:{}", ask.episode, answer.id)
+}
+
 pub struct Ui {
     world: World,
     /// Negotiated by the terminal guard, never inferred from an ambiguous Escape byte.
@@ -492,6 +520,12 @@ pub struct Ui {
     /// Attention items st no longer lists that nobody here acted on. Nothing leaves Home by
     /// itself (Nathan, 2026-10-07): they stay, marked, until `x` clears them.
     closed: HashSet<String>,
+    /// "Use my answer instead" open on a row of Now (an auto-resolved ask, or a closed row of the
+    /// same episode). Digits mark, Enter sends, Esc closes.
+    overriding: Option<OverrideChoice>,
+    /// The episodes whose override is on its way to st: until st answers, `o` offers no second
+    /// one and their rows say "sending…".
+    pub(super) override_pending: HashSet<String>,
     /// Subject membership and current badge observations, indexed when the world changes.
     tab_statuses: glass::TabStatuses,
     /// Conversations scrolled up to their oldest entry since the last frame: each asks st for
@@ -929,6 +963,8 @@ impl Ui {
             acted: HashSet::new(),
             pending_answers: HashMap::new(),
             closed: HashSet::new(),
+            overriding: None,
+            override_pending: HashSet::new(),
             older_wanted: RefCell::default(),
             conversation_first: None,
             terminal_fallback: true,
@@ -1844,7 +1880,7 @@ impl Ui {
     fn listing_for(&self, tab: usize, width: usize) -> Listing {
         match tab {
             0 => {
-                let mut list = screens::home_list(&self.world, &self.closed);
+                let mut list = screens::home_list(&self.world, &self.closed, &self.override_pending);
                 self.threads.mark_inbox_unread(&mut list);
                 self.threads.recently_closed(&mut list);
                 list
@@ -2563,6 +2599,21 @@ impl Ui {
             }).unwrap_or_default(),
             // In Inbox the draft's key is the alert's id: no listing is built for it per frame.
             form: self.form_state(key),
+            overriding: screens::auto_resolved_for(&self.world, &self.closed, key).map(|ask| {
+                let choice = self.overriding.as_ref().filter(|choice| choice.row == key);
+                let words = choice.filter(|choice| choice.writing).and_then(|choice| {
+                    let draft = override_draft_key(ask, ask.alternatives.get(choice.marked)?);
+                    let text = self.conversation_state.drafts.get(&draft).map_or("", String::as_str);
+                    Some((text, self.cursor.at(&draft, text)))
+                });
+                screens::Overriding {
+                    ask,
+                    chooser: choice.map(|choice| choice.marked),
+                    words,
+                    error: choice.and_then(|choice| choice.error.as_deref()),
+                    sending: self.override_pending.contains(&ask.episode),
+                }
+            }),
         }
     }
 
@@ -3843,6 +3894,7 @@ impl Ui {
                 "not started by Fractal, so Fractal cannot see inside it",
             ),
             ("✉", theme::SAPPHIRE, "a Fractal message"),
+            ("↻", theme::SAPPHIRE, "an ask that resolved by itself: its default applied"),
         ] {
             marks.lines(text::wrap(
                 &[text::run(meaning, theme::soft())],
@@ -3966,6 +4018,10 @@ impl Ui {
                 ("n", "Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
                 ("x", "Inbox: dismiss a request, update or message"),
+                (
+                    "o",
+                    "Inbox: on an ask that resolved by itself, use my answer instead; digits choose, Enter sends, Esc cancels",
+                ),
                 (
                     "b p",
                     "Usage: group by agent, mission, step...; change the period",
@@ -4223,6 +4279,165 @@ impl Ui {
         true
     }
 
+    /// The auto-resolved ask behind the row selected on Now, while st takes the person's own
+    /// answer to it, it has another one to give, and none is already on its way.
+    fn overridable(&self, row: &str) -> Option<&view::AutoResolved> {
+        screens::auto_resolved_for(&self.world, &self.closed, row)
+            .filter(|ask| ask.overridable() && !self.override_pending.contains(&ask.episode))
+    }
+
+    /// "Use my answer instead" while its chooser is open on the selected row of Now: a digit or
+    /// ↑↓ marks an answer, Enter sends the marked one, Esc closes it. Other keys go on as usual.
+    /// While the changes a request-changes answer needs are being written, every key is theirs.
+    fn override_key(&mut self, key: KeyEvent) -> bool {
+        let Some(choice) = self.overriding.clone() else {
+            return false;
+        };
+        let shown = self.tab() == 0 && !self.editing && self.selected_id().as_deref() == Some(choice.row.as_str());
+        let Some((count, draft)) = self.overridable(&choice.row).filter(|_| shown).map(|ask| {
+            (ask.alternatives.len(), ask.alternatives.get(choice.marked).map(|answer| override_draft_key(ask, answer)))
+        }) else {
+            self.overriding = None;
+            return false;
+        };
+        if choice.writing
+            && let Some(draft) = draft
+        {
+            let control = key.modifiers.contains(KeyModifiers::CONTROL);
+            let newline = (key.code == KeyCode::Enter && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT))
+                || (key.code == KeyCode::Char('j') && control);
+            match key.code {
+                _ if newline => {
+                    let text = self.conversation_state.drafts.entry(draft.clone()).or_default();
+                    edit::insert(text, &self.cursor, &draft, "\n");
+                }
+                KeyCode::Esc => self.overriding = Some(OverrideChoice { writing: false, error: None, ..choice }),
+                KeyCode::Char('c') if control => {
+                    self.overriding = Some(OverrideChoice { writing: false, error: None, ..choice });
+                }
+                KeyCode::Enter => self.send_override(),
+                _ => {
+                    let text = self.conversation_state.drafts.entry(draft.clone()).or_default();
+                    edit::edit(text, &self.cursor, &draft, key);
+                }
+            }
+            return true;
+        }
+        match key.code {
+            KeyCode::Char(digit @ '1'..='9') if key.modifiers == KeyModifiers::NONE => {
+                self.mark_override(digit);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.overriding = Some(OverrideChoice { marked: choice.marked.saturating_sub(1), error: None, ..choice });
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let marked = (choice.marked + 1).min(count - 1);
+                self.overriding = Some(OverrideChoice { marked, error: None, ..choice });
+            }
+            KeyCode::Enter => self.send_override(),
+            KeyCode::Esc => self.overriding = None,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Mark the alternative numbered `digit` in the open chooser, when it has one.
+    fn mark_override(&mut self, digit: char) {
+        let Some(choice) = self.overriding.clone() else {
+            return;
+        };
+        let count = self.overridable(&choice.row).map_or(0, |ask| ask.alternatives.len());
+        if let Some(index) = digit.to_digit(10).and_then(|number| (number as usize).checked_sub(1))
+            && index < count
+        {
+            self.overriding = Some(OverrideChoice { row: choice.row, marked: index, writing: false, error: None });
+        }
+    }
+
+    /// Send the marked alternative as the person's own answer (`work.override`). One that
+    /// requests changes first opens the box for them, and goes only with words in it.
+    fn send_override(&mut self) {
+        let Some(choice) = self.overriding.clone() else {
+            return;
+        };
+        let Some((target_id, episode, answer, label, draft)) = self.overridable(&choice.row).and_then(|ask| {
+            let answer = ask.alternatives.get(choice.marked)?;
+            let draft = answer.words.then(|| override_draft_key(ask, answer));
+            Some((ask.target_id.clone(), ask.episode.clone(), answer.id.clone(), answer.label.clone(), draft))
+        }) else {
+            self.overriding = None;
+            return;
+        };
+        let text = match draft {
+            Some(_) if !choice.writing => {
+                self.overriding = Some(OverrideChoice { writing: true, error: None, ..choice });
+                return;
+            }
+            Some(draft) => {
+                let text = self.conversation_state.drafts.get(&draft).map_or("", |text| text.trim());
+                if text.is_empty() {
+                    let error = format!("“{label}” needs your words: say what should change, then Enter sends both.");
+                    self.overriding = Some(OverrideChoice { error: Some(error), ..choice });
+                    return;
+                }
+                Some(text.to_owned())
+            }
+            None => None,
+        };
+        self.overriding = None;
+        if self.live {
+            self.override_pending.insert(episode.clone());
+            self.flash(format!("Answering “{label}” instead of the default…"));
+            self.effects.push(Effect::Override { target_id, episode, answer, text, label });
+        } else {
+            self.flash(format!("Answered “{label}” instead · demo: nothing was sent"));
+        }
+    }
+
+    /// st answered the override of `episode`. Either way its row offers `o` again: refused, the
+    /// notice says why and the words written stay; accepted, they are done with.
+    pub(super) fn finish_override(&mut self, episode: &str, accepted: bool) {
+        self.override_pending.remove(episode);
+        if accepted {
+            let prefix = format!("override:{episode}:");
+            self.conversation_state.drafts.retain(|key, _| !key.starts_with(&prefix));
+        }
+    }
+
+    /// `o` on Now, on an auto-resolved ask or a closed row of the same episode: open the chooser,
+    /// or say why it offers none. Returns whether the key was the override's.
+    fn override_action(&mut self, key: char) -> bool {
+        if self.tab() != 0 {
+            return false;
+        }
+        let Some(row) = self.selected_id() else {
+            return false;
+        };
+        let Some(ask) = screens::auto_resolved_for(&self.world, &self.closed, &row) else {
+            return false;
+        };
+        let (sending, overridable, open) = (self.override_pending.contains(&ask.episode), ask.overridable(), ask.open);
+        let choosing = self.overriding.as_ref().is_some_and(|choice| choice.row == row);
+        match key {
+            'o' if sending => self.flash("Your answer is on its way: sending…"),
+            'o' if overridable => {
+                self.threads.leave_input(&self.main_pane());
+                self.editing = false;
+                self.find = None;
+                self.answering = None;
+                self.confirm = None;
+                self.overriding = Some(OverrideChoice { row, marked: 0, writing: false, error: None });
+            }
+            'o' if !open => self.flash("This ask no longer takes your own answer: its seven days are over, or no default applied"),
+            'o' => self.flash("This ask names no other answer to give instead"),
+            // A click on an answer in the open chooser marks it.
+            '1'..='9' if choosing => self.mark_override(key),
+            // A closed row keeps its own keys (x clears it); an auto-resolved row has no others.
+            _ => return row.starts_with(screens::AUTO_RESOLVED),
+        }
+        true
+    }
+
     /// Find `query` in an agent's conversation, as `/` does, jumping to the first match.
     pub(crate) fn find_in(&mut self, agent: &str, query: &str) {
         self.find = Some(Find {
@@ -4236,6 +4451,7 @@ impl Ui {
 
     fn select(&mut self, index: usize) {
         self.answering = None;
+        self.overriding = None;
         let count = self.ids().len();
         if count == 0 {
             return;
@@ -4473,20 +4689,6 @@ impl Ui {
         if self.observe_recent_key(key) {
             return;
         }
-        if self.threads.available() && key.kind != KeyEventKind::Release && !self.palette_open() && !self.help
-            && !self.terminal_focused() && !self.leader && self.popover.is_none() && self.context.is_none()
-            && !self.editing && self.find.is_none() && self.new_mission.is_none() && self.voice.is_none()
-        {
-            let pane = self.main_pane();
-            if !self.threads.editing_in(&pane) && let Some(tap) = self.threads.shortcut(&pane, key) {
-                self.click(Hit::Thread(pane.key(), tap));
-                return;
-            }
-            if self.threads.key(&pane, key, &self.cursor, &mut self.conversation_state.drafts) {
-                self.flash_thread_refusal();
-                return;
-            }
-        }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
             if ctrl_t && key.kind != KeyEventKind::Press {
@@ -4633,6 +4835,10 @@ impl Ui {
         if self.context_key(key) {
             return;
         }
+        // "Use my answer instead" on an auto-resolved ask: digits mark, Enter sends, Esc closes.
+        if self.override_key(key) {
+            return;
+        }
         if let Some(action) = self.confirm {
             // Confirmation owns the keys even when a sidebar or terminal is behind the menu.
             // Ctrl+C retains its existing second-press confirmation of an interrupt.
@@ -4659,6 +4865,20 @@ impl Ui {
                 && (self.inbox_in_view() || self.conversation_here().is_some())
             {
                 self.toggle_form_keys();
+                return;
+            }
+        }
+        if self.threads.available() && key.kind != KeyEventKind::Release && !self.palette_open() && !self.help
+            && !self.terminal_focused() && !self.leader && self.popover.is_none() && self.context.is_none()
+            && !self.editing && self.find.is_none() && self.new_mission.is_none() && self.voice.is_none()
+        {
+            let pane = self.main_pane();
+            if !self.threads.editing_in(&pane) && let Some(tap) = self.threads.shortcut(&pane, key) {
+                self.click(Hit::Thread(pane.key(), tap));
+                return;
+            }
+            if self.threads.key(&pane, key, &self.cursor, &mut self.conversation_state.drafts) {
+                self.flash_thread_refusal();
                 return;
             }
         }
@@ -5251,6 +5471,9 @@ impl Ui {
     }
 
     fn action_key(&mut self, key: char) {
+        if self.override_action(key) {
+            return;
+        }
         if self.tab() == 2 {
             match key {
                 'k' => {
@@ -6657,6 +6880,7 @@ impl Ui {
                     self.editing = false;
                     self.find = None;
                     self.answering = None;
+                    self.overriding = None;
                     self.confirm = None;
                 }
                 // One focus per conversation: a selected thread heading takes it from a tool.
@@ -6752,6 +6976,7 @@ impl Ui {
                     self.action_key(key);
                 }
             }
+            Hit::Enter if self.overriding.is_some() => self.send_override(),
             Hit::Enter if self.new_mission.is_some() => self.create_launch(),
             Hit::Enter => {
                 // A visible Send belongs to this draft even after Esc or refusal restored it.
@@ -7681,6 +7906,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7971,6 +8197,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -8023,6 +8250,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -8336,6 +8564,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -8415,6 +8644,7 @@ mod tests {
                 deadline: None,
                 requested_at: None,
                 snoozed_until: None,
+                episode: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -8556,6 +8786,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8662,6 +8893,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8757,6 +8989,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8841,6 +9074,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8899,6 +9133,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -9156,6 +9391,7 @@ mod tests {
                     deadline: None,
                     requested_at: None,
                     snoozed_until: None,
+                    episode: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
@@ -10037,7 +10273,7 @@ mod tests {
                 Some(world.at - chrono::TimeDelta::minutes(1));
         }
         ui.set_world(world);
-        assert!(screens::home_list(&ui.world, &ui.closed).ids.contains(&"attention/1".to_owned()));
+        assert!(screens::home_list(&ui.world, &ui.closed, &ui.override_pending).ids.contains(&"attention/1".to_owned()));
     }
 
     #[test]
@@ -10289,5 +10525,419 @@ mod tests {
         assert_eq!(ui.world.devices.items().len(), 2, "not before confirming");
         press(&mut ui, KeyCode::Char('y'));
         assert_eq!(ui.world.devices.items().len(), 1);
+    }
+
+    /// An ask that resolved by itself to its default: `open` when st still takes another answer.
+    fn auto_resolved(key: char, open: bool) -> view::AutoResolved {
+        view::AutoResolved {
+            id: format!("{}{}", screens::AUTO_RESOLVED, key.to_string().repeat(64)),
+            title: if open { "Ship the release on Friday?" } else { "Keep the old banner?" }.into(),
+            asker: "Example Builder".into(),
+            default: Some(if open { "Hold" } else { "Keep" }.into()),
+            resolved: if open { "3h" } else { "8d" }.into(),
+            target_id: "work/example/release/ask".into(),
+            episode: format!("claim/example-{key}"),
+            open,
+            alternatives: vec![
+                view::OverrideAnswer { id: "ship".into(), label: "Ship it".into(), words: false },
+                view::OverrideAnswer { id: "split".into(), label: "Ship half".into(), words: false },
+                view::OverrideAnswer { id: "changes".into(), label: "Ask for changes".into(), words: true },
+            ],
+        }
+    }
+
+    fn with_auto_resolved(world: &mut World, items: Vec<view::AutoResolved>) {
+        world.auto_resolved = Load::Ready(view::AutoResolvedList { items, complete: true });
+    }
+
+    fn select_row(ui: &mut Ui, id: &str) {
+        let ids = ui.listing(60).ids.clone();
+        let index = ids.iter().position(|row| row == id);
+        ui.select(index.unwrap_or_else(|| panic!("{id} is not listed: {ids:?}")));
+    }
+
+    fn override_with_embedded_thread() -> (Ui, String) {
+        let demo = demo::load().unwrap();
+        let item = "attention/scenario-fleet-mid-refactor-worker-typecheck";
+        let ask = auto_resolved('a', true);
+        let mut world = demo.world;
+        let Load::Ready(items) = &mut world.attention else { panic!("demo attention") };
+        items.iter_mut().find(|row| row.id == item).unwrap().episode = Some(ask.episode.clone());
+        let mut ui = Ui::new(world.clone());
+        ui.live = true;
+        ui.threads = demo.threads;
+        ui.threads.set_access(fractal_feed::ThreadAccess {
+            start: true, reply: true, rename: true, close: true, reopen: true, mark_read: true,
+        });
+        ui.open_home();
+        select_row(&mut ui, item);
+        if let Load::Ready(items) = &mut world.attention {
+            items.retain(|row| row.id != item);
+        }
+        with_auto_resolved(&mut world, vec![ask]);
+        ui.set_world(world);
+        select_row(&mut ui, item);
+        let pane = ui.main_pane();
+        let id = ui.threads.rows(&pane, &ui.conversation_state.drafts)[0].clone();
+        ui.conversation_state.drafts.insert(format!("thread-reply:{id}"), "Saved thread draft".into());
+        ui.click(Hit::Thread(pane.key(), thread::Tap::Compose(id.clone())));
+        assert!(ui.threads.editing_in(&pane));
+        ui.effects.clear();
+        (ui, id)
+    }
+
+    #[test]
+    fn override_thread_focus_click_sends_only_the_chosen_override() {
+        let (mut ui, id) = override_with_embedded_thread();
+        ui.click(Hit::Key('o'));
+        assert!(!ui.threads.editing_in(&ui.main_pane()));
+        assert!(ui.overriding.is_some());
+        press(&mut ui, KeyCode::Char('2'));
+        press(&mut ui, KeyCode::Enter);
+        assert!(matches!(ui.effects.as_slice(),
+            [Effect::Override { answer, text: None, .. }] if answer == "split"));
+        assert!(ui.threads.writes().is_empty(), "the override never sends a thread reply");
+        assert_eq!(ui.conversation_state.drafts[&format!("thread-reply:{id}")], "Saved thread draft");
+    }
+
+    #[test]
+    fn override_thread_focus_words_and_thread_taps_transfer_exclusive_ownership() {
+        for reply in [false, true] {
+            let (mut ui, id) = override_with_embedded_thread();
+            ui.click(Hit::Key('o'));
+            press(&mut ui, KeyCode::Char('3'));
+            press(&mut ui, KeyCode::Enter);
+            for character in "tnz".chars() {
+                press(&mut ui, KeyCode::Char(character));
+            }
+            let words = "override:claim/example-a:changes";
+            assert_eq!(ui.conversation_state.drafts[words], "tnz");
+            assert!(ui.overriding.as_ref().is_some_and(|choice| choice.writing));
+            assert!(!ui.threads.editing_in(&ui.main_pane()));
+            assert!(ui.threads.writes().is_empty(), "t/n/z are words, not thread actions");
+            let tap = if reply {
+                thread::Tap::Reply { thread: id.clone(), message: "message/focus-test".into() }
+            } else {
+                thread::Tap::Compose(id.clone())
+            };
+            ui.click(Hit::Thread(ui.main_pane().key(), tap));
+            assert!(ui.overriding.is_none(), "thread Compose/Reply closes the chooser");
+            assert!(ui.threads.editing_in(&ui.main_pane()));
+            assert_eq!(ui.conversation_state.drafts[words], "tnz", "override words remain saved");
+            press(&mut ui, KeyCode::Esc);
+            assert!(!ui.threads.editing_in(&ui.main_pane()));
+            assert_eq!(ui.conversation_state.drafts[&format!("thread-reply:{id}")], "Saved thread draft");
+            assert!(ui.effects.is_empty());
+            assert!(ui.threads.writes().is_empty());
+        }
+    }
+
+    #[test]
+    fn override_thread_focus_escape_preserves_both_unsent_drafts() {
+        let (mut ui, id) = override_with_embedded_thread();
+        ui.click(Hit::Key('o'));
+        press(&mut ui, KeyCode::Char('3'));
+        press(&mut ui, KeyCode::Enter);
+        for character in "Keep these words".chars() {
+            press(&mut ui, KeyCode::Char(character));
+        }
+        press(&mut ui, KeyCode::Esc);
+        assert!(ui.overriding.as_ref().is_some_and(|choice| !choice.writing));
+        press(&mut ui, KeyCode::Esc);
+        assert!(ui.overriding.is_none());
+        assert_eq!(ui.conversation_state.drafts["override:claim/example-a:changes"], "Keep these words");
+        ui.click(Hit::Thread(ui.main_pane().key(), thread::Tap::Compose(id.clone())));
+        press(&mut ui, KeyCode::Esc);
+        assert_eq!(ui.conversation_state.drafts[&format!("thread-reply:{id}")], "Saved thread draft");
+        assert!(ui.effects.is_empty());
+        assert!(ui.threads.writes().is_empty());
+    }
+
+    /// The whole screen, wide enough that the override's copy fits on one line.
+    fn screen_text(ui: &Ui) -> String {
+        frame(ui, 240, 60).join("\n")
+    }
+
+    #[test]
+    fn auto_resolved_asks_are_listed_under_their_own_heading_on_now() {
+        let mut world = demo::test_world();
+        with_auto_resolved(&mut world, vec![auto_resolved('a', true), auto_resolved('b', false)]);
+        let mut ui = Ui::new(world);
+        ui.open_home();
+        let ids = ui.listing(60).ids.clone();
+        let first = ids.iter().position(|id| id.starts_with(screens::AUTO_RESOLVED)).unwrap();
+        assert_eq!(ids[first..].len(), 2, "below every alert: {ids:?}");
+        select_row(&mut ui, &ids[first]);
+        let shown = screen_text(&ui);
+        assert!(shown.contains("Auto-resolved"), "{shown}");
+        assert!(shown.contains("↻ resolved Ship the release on Frid"), "{shown}");
+        assert!(shown.contains("Example Builder asked · “Hold” appl"), "{shown}");
+        // The selected one opens in the detail card.
+        assert!(shown.contains("↻ resolved by itself · Example Builder asked · 3h ago"), "{shown}");
+    }
+
+    #[test]
+    fn o_on_an_auto_resolved_ask_sends_the_chosen_answer_instead_of_the_default() {
+        let mut world = demo::test_world();
+        let ask = auto_resolved('a', true);
+        with_auto_resolved(&mut world, vec![ask.clone()]);
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.open_home();
+        select_row(&mut ui, &ask.id);
+        let copy = screens::override_copy("Example Builder");
+        let shown = screen_text(&ui);
+        assert!(shown.contains("Use my answer instead"), "{shown}");
+        assert!(!shown.contains(&copy), "the copy shows once choosing: {shown}");
+
+        press(&mut ui, KeyCode::Char('o'));
+        let shown = screen_text(&ui);
+        assert!(shown.contains(&copy), "{shown}");
+        assert!(shown.contains("Ship it") && shown.contains("Ship half"), "{shown}");
+        assert!(ui.effects.is_empty(), "nothing sent before Enter");
+
+        // Esc closes the chooser and sends nothing.
+        press(&mut ui, KeyCode::Esc);
+        assert!(!screen_text(&ui).contains(&copy));
+        assert!(ui.effects.is_empty());
+
+        press(&mut ui, KeyCode::Char('o'));
+        press(&mut ui, KeyCode::Char('2'));
+        press(&mut ui, KeyCode::Enter);
+        let [Effect::Override { target_id, episode, answer, text: None, label }] = ui.effects.as_slice() else {
+            panic!("{:?}", ui.effects);
+        };
+        assert_eq!(
+            (target_id.as_str(), episode.as_str(), answer.as_str(), label.as_str()),
+            ("work/example/release/ask", "claim/example-a", "split", "Ship half")
+        );
+        assert!(ui.overriding.is_none(), "the chooser closes once sent");
+    }
+
+    #[test]
+    fn an_override_request_names_the_episode_and_answer() {
+        let (action, idempotency, parameters) =
+            crate::override_request("work/example/release/ask", "claim/example-a", "split", None);
+        assert_eq!(action, "action/person-override:claim/example-a:split");
+        assert_eq!(idempotency, "person-override:claim/example-a:split");
+        assert_eq!(
+            serde_json::to_value(&parameters).unwrap(),
+            serde_json::json!({
+                "target_id": "work/example/release/ask",
+                "episode": "claim/example-a",
+                "answer": { "id": "split" },
+            })
+        );
+        let (_, _, parameters) = crate::override_request(
+            "work/example/release/ask",
+            "claim/example-a",
+            "changes",
+            Some("Move it to Monday"),
+        );
+        assert_eq!(
+            serde_json::to_value(&parameters).unwrap()["answer"],
+            serde_json::json!({ "id": "changes", "text": "Move it to Monday" })
+        );
+    }
+
+    #[test]
+    fn an_override_on_its_way_offers_no_second_one_until_st_answers() {
+        let mut world = demo::test_world();
+        let ask = auto_resolved('a', true);
+        with_auto_resolved(&mut world, vec![ask.clone()]);
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.open_home();
+        select_row(&mut ui, &ask.id);
+        press(&mut ui, KeyCode::Char('o'));
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.effects.len(), 1, "{:?}", ui.effects);
+        let shown = screen_text(&ui);
+        assert!(shown.contains("sending your answer…"), "the row says so: {shown}");
+        assert!(shown.contains("Sending your answer…"), "and its card: {shown}");
+        assert!(!shown.contains("Use my answer instead"), "{shown}");
+        // `o` again opens nothing, so nothing more can be sent while st has not answered.
+        press(&mut ui, KeyCode::Char('o'));
+        assert!(ui.overriding.is_none());
+        assert_eq!(ui.effects.len(), 1, "{:?}", ui.effects);
+        // Refused, the row offers `o` again.
+        ui.finish_override(&ask.episode, false);
+        assert!(!screen_text(&ui).contains("sending your answer…"));
+        press(&mut ui, KeyCode::Char('o'));
+        assert!(ui.overriding.is_some(), "{}", screen_text(&ui));
+        press(&mut ui, KeyCode::Enter);
+        assert_eq!(ui.effects.len(), 2, "{:?}", ui.effects);
+        assert!(ui.override_pending.contains(&ask.episode));
+        ui.finish_override(&ask.episode, true);
+        assert!(ui.override_pending.is_empty());
+    }
+
+    #[test]
+    fn an_answer_that_requests_changes_goes_only_with_the_changes_in_words() {
+        let mut world = demo::test_world();
+        let ask = auto_resolved('a', true);
+        with_auto_resolved(&mut world, vec![ask.clone()]);
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.open_home();
+        select_row(&mut ui, &ask.id);
+        press(&mut ui, KeyCode::Char('o'));
+        press(&mut ui, KeyCode::Char('3'));
+        assert!(screen_text(&ui).contains("Write what should change"));
+        // Enter opens the box for the changes; nothing is sent yet.
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.overriding.as_ref().is_some_and(|choice| choice.writing));
+        assert!(screen_text(&ui).contains("WHAT SHOULD CHANGE · EXAMPLE BUILDER READS THIS"), "{}", screen_text(&ui));
+        // Empty words are refused, on the card.
+        press(&mut ui, KeyCode::Char(' '));
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        assert!(screen_text(&ui).contains("“Ask for changes” needs your words"), "{}", screen_text(&ui));
+        // Esc goes back to the answers and keeps the words; a second Esc closes the chooser.
+        for character in "Move it to Monday ".chars() {
+            press(&mut ui, KeyCode::Char(character));
+        }
+        press(&mut ui, KeyCode::Esc);
+        assert!(ui.overriding.as_ref().is_some_and(|choice| !choice.writing));
+        press(&mut ui, KeyCode::Esc);
+        assert!(ui.overriding.is_none());
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        // Back again, the words are still there, and Enter sends them trimmed with the answer.
+        press(&mut ui, KeyCode::Char('o'));
+        press(&mut ui, KeyCode::Char('3'));
+        press(&mut ui, KeyCode::Enter);
+        assert!(screen_text(&ui).contains("Move it to Monday"));
+        press(&mut ui, KeyCode::Enter);
+        let [Effect::Override { answer, text, .. }] = ui.effects.as_slice() else {
+            panic!("{:?}", ui.effects);
+        };
+        assert_eq!((answer.as_str(), text.as_deref()), ("changes", Some("Move it to Monday")));
+        // Taken, the words are done with.
+        ui.finish_override(&ask.episode, true);
+        assert!(!ui.conversation_state.drafts.keys().any(|key| key.starts_with("override:")));
+    }
+
+    #[test]
+    fn a_read_that_stopped_short_says_so_even_with_none_listed() {
+        let mut world = demo::test_world();
+        world.auto_resolved = Load::Ready(view::AutoResolvedList { items: Vec::new(), complete: false });
+        let mut ui = Ui::new(world);
+        ui.open_home();
+        let shown = screen_text(&ui);
+        assert!(shown.contains("Auto-resolved"), "{shown}");
+        assert!(shown.contains("Only the newest are listed"), "{shown}");
+    }
+
+
+    #[test]
+    fn o_is_refused_where_st_takes_no_other_answer() {
+        let mut world = demo::test_world();
+        let expired = auto_resolved('b', false);
+        let mut alone = auto_resolved('c', true);
+        alone.alternatives.clear();
+        with_auto_resolved(&mut world, vec![expired.clone(), alone.clone()]);
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.open_home();
+        for ask in [&expired, &alone] {
+            select_row(&mut ui, &ask.id);
+            assert!(!screen_text(&ui).contains("Use my answer instead"));
+            press(&mut ui, KeyCode::Char('o'));
+            press(&mut ui, KeyCode::Enter);
+            assert!(ui.overriding.is_none());
+            assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        }
+        select_row(&mut ui, &expired.id);
+        assert!(screen_text(&ui).contains("The seven days to give your own answer are over."));
+    }
+
+    #[test]
+    fn a_closed_alert_whose_ask_resolved_by_itself_offers_the_override() {
+        let mut world = demo::test_world();
+        let ask = auto_resolved('a', true);
+        if let Load::Ready(items) = &mut world.attention {
+            items[0].episode = Some(ask.episode.clone());
+        }
+        let mut ui = Ui::new(world.clone());
+        ui.live = true;
+        ui.open_home();
+        let closed = ui.listing(60).ids[0].clone();
+        ui.select(0);
+        let mut next = world;
+        if let Load::Ready(items) = &mut next.attention {
+            items.retain(|item| item.id != closed);
+        }
+        with_auto_resolved(&mut next, vec![ask]);
+        ui.set_world(next);
+        select_row(&mut ui, &closed);
+        let shown = screen_text(&ui);
+        assert!(shown.contains(&format!("o {}", screens::OVERRIDE_LABEL)), "{shown}");
+        assert!(shown.contains("resolved by itself"), "{shown}");
+        press(&mut ui, KeyCode::Char('o'));
+        press(&mut ui, KeyCode::Enter);
+        let [Effect::Override { episode, answer, .. }] = ui.effects.as_slice() else {
+            panic!("{:?}", ui.effects);
+        };
+        assert_eq!((episode.as_str(), answer.as_str()), ("claim/example-a", "ship"));
+    }
+
+    // Regenerate after intended rendering changes with:
+    // FRACTAL_TUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui auto_resolved_golden
+    #[test]
+    fn auto_resolved_golden() {
+        let mut world = demo::test_world();
+        let (open, expired) = (auto_resolved('a', true), auto_resolved('b', false));
+        if let Load::Ready(items) = &mut world.attention {
+            items[0].episode = Some("claim/example-c".into());
+        }
+        let mut ui = Ui::new(world.clone());
+        ui.open_home();
+        let closed = ui.listing(60).ids[0].clone();
+        ui.select(0);
+        let mut next = world;
+        if let Load::Ready(items) = &mut next.attention {
+            items.retain(|item| item.id != closed);
+        }
+        let mut behind = auto_resolved('c', true);
+        behind.title = "Approve the atlas store cut-over".into();
+        with_auto_resolved(&mut next, vec![open.clone(), expired.clone(), behind]);
+        ui.set_world(next);
+        let mut actual = String::new();
+        let mut capture = |ui: &Ui, state: &str| {
+            actual.push_str(&format!("== {state}\n"));
+            for line in frame(ui, 140, 36) {
+                actual.push_str(line.trim_end());
+                actual.push('\n');
+            }
+        };
+        select_row(&mut ui, &open.id);
+        capture(&ui, "auto-resolved, overridable");
+        press(&mut ui, KeyCode::Char('o'));
+        capture(&ui, "auto-resolved, choosing");
+        press(&mut ui, KeyCode::Char('3'));
+        capture(&ui, "auto-resolved, choosing an answer that needs words");
+        press(&mut ui, KeyCode::Enter);
+        press(&mut ui, KeyCode::Enter);
+        capture(&ui, "auto-resolved, words missing");
+        for character in "Move it to Monday".chars() {
+            press(&mut ui, KeyCode::Char(character));
+        }
+        capture(&ui, "auto-resolved, writing what should change");
+        ui.live = true;
+        press(&mut ui, KeyCode::Enter);
+        capture(&ui, "auto-resolved, sending");
+        select_row(&mut ui, &expired.id);
+        capture(&ui, "auto-resolved, seven days over");
+        select_row(&mut ui, &closed);
+        capture(&ui, "recently closed, resolved by itself");
+        if std::env::var_os("FRACTAL_TUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                test_env!("CARGO_MANIFEST_DIR", "/tests/fixtures/auto-resolved.golden"),
+                &actual,
+            )
+            .unwrap();
+            return;
+        }
+        assert_eq!(actual, include_str!("../../tests/fixtures/auto-resolved.golden"));
     }
 }

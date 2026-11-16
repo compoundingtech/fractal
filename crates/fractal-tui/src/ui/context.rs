@@ -236,6 +236,7 @@ impl Ui {
             noted_answers: Vec::new(),
             answer_error: None,
             form: Default::default(),
+            overriding: None,
         };
         let doc = screens::home_detail(&self.world, Some(subject), 120, &drafts);
         let mut items = vec![(
@@ -660,6 +661,7 @@ mod tests {
                     noted_answers: Vec::new(),
                     answer_error: None,
                     form: Default::default(),
+                    overriding: None,
                 },
             );
             for target in doc.targets {

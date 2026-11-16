@@ -9,6 +9,11 @@
   ],
   "typed_actions": [
     {
+      "action": "work.override",
+      "tests": ["crates/fractal/tests/client_v0_contract.rs::auto_resolved_read_and_override_round_trip"],
+      "behavior": "Person-scoped deadline resolutions and exact-episode overrides; same action replay is idempotent, other people are forbidden and closed windows refused."
+    },
+    {
       "action": "harness.answer",
       "tests": [
         "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::accepted_receipts_survive_reopen_without_an_adapter_or_duplicate_writes",
@@ -524,6 +529,23 @@
     }
   ],
   "cli": [
+    {
+      "command": "st effects status",
+      "description": "Read durable native-effect state by its full idempotency key without sending",
+      "tests": [
+        "crates/fractal-api-core/src/api/effects_tests.rs::effect_by_key_reports_effective_state_and_conventional_not_found"
+      ],
+      "verification": "Real daemon keyed effect reads, including resolved outcomes and not-found"
+    },
+    {
+      "command": "st effects resolve",
+      "description": "Explicitly confirm or abandon an unresolved effect with authenticated person authority and evidence",
+      "tests": [
+        "crates/fractal/src/effects_cli.rs::resolution_requires_explicit_outcome_and_confirmation_evidence",
+        "crates/fractal-api-core/src/api/effects_tests.rs::effect_routes_authenticate_person_authority_and_return_standard_receipts"
+      ],
+      "verification": "CLI outcome and evidence parsing; real daemon person authorization and durable resolution"
+    },
     {
       "command": "st harness-questions list",
       "description": "Read one explicit page of metadata-only native harness questions",
@@ -1943,6 +1965,15 @@
       "verification": "native command dispatcher over a private Unix socket; repeated invocations create distinct linked runs"
     },
     {
+      "command": "st missions runs",
+      "description": "Read bounded run and step summaries for a mission ID prefix, optionally limited to active runs",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::missions_runs_query_requires_prefix_and_bounds_limit",
+        "crates/fractal/src/main_tests.rs::missions_runs_query_fixture_renders_summaries_and_truncation"
+      ],
+      "verification": "CLI parsing and encoded read-only query path; fixture-based human summary, empty result, and truncation rendering"
+    },
+    {
       "command": "st missions show",
       "description": "Explain one mission run, its goals, state, work, and usage",
       "tests": [
@@ -3314,6 +3345,20 @@
         "crates/fractal/tests/action_coverage.rs::attention_controls_survive_stale_fences_and_restarts"
       ],
       "verification": "l reducer emits attention.snooze (3h, or null on a row already put off) and hides nothing itself; rows follow st's snoozed_until against the adapt clock; real daemon transport and restart"
+    },
+    {
+      "effect": "Override",
+      "tests": [
+        "crates/fractal-tui/src/ui/mod.rs::o_on_an_auto_resolved_ask_sends_the_chosen_answer_instead_of_the_default",
+        "crates/fractal-tui/src/ui/mod.rs::an_override_on_its_way_offers_no_second_one_until_st_answers",
+        "crates/fractal-tui/src/ui/mod.rs::an_answer_that_requests_changes_goes_only_with_the_changes_in_words",
+        "crates/fractal-tui/src/ui/mod.rs::o_is_refused_where_st_takes_no_other_answer",
+        "crates/fractal-tui/src/ui/mod.rs::a_closed_alert_whose_ask_resolved_by_itself_offers_the_override",
+        "crates/fractal-tui/src/ui/mod.rs::an_override_request_names_the_episode_and_answer",
+        "crates/fractal-tui/src/ui/live.rs::an_override_reaches_st_and_the_ask_leaves_the_auto_resolved_list",
+        "crates/fractal/tests/client_v0_contract.rs::auto_resolved_read_and_override_round_trip"
+      ],
+      "verification": "o reducer emits work.override with the episode, the chosen non-default answer and, for request changes, the words; one per episode until st answers; no action once the window closed; real daemon transport refuses another person and drops the ask from auto-resolved.list"
     },
     {
       "effect": "Dismiss",

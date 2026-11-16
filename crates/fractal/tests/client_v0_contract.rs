@@ -547,6 +547,100 @@ fn mission_step_actor_references_conform_without_accepting_other_id_families() {
 }
 
 #[tokio::test]
+async fn auto_resolved_read_and_override_round_trip() {
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    state.store.set_ask_deadlines(true);
+    let asked_at = fractal_daemon::api::client_now_ms().saturating_sub(120_000);
+    let clock = Clock;
+    smallclaims::store::set_thread_clock(Some(asked_at));
+    state.store.graph.set_write_clock_at(asked_at).unwrap();
+    let intent = fractal_daemon::graph::parse_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }", state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "override-contract-agent").unwrap();
+    let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        priority: None, deadline_ms: Some(60_000), default_answer: Some("hold".into()), legacy_request: None,
+        person: "person/avery".into(), title: "Ship?".into(), reason: "Release choice".into(),
+        actor: format!("agent/{}.asker", state.store.origin()), step: None, new_run: Some("override-contract".into()),
+        incarnation: None, idempotency_key: "override-contract-ask".into(),
+        request: Some(serde_json::json!({"version": 1, "type": "choice", "question": "Ship?",
+            "why_person": "Release choice", "answers": [{"id":"hold","label":"Hold","consequence":"The release waits."}, {"id":"ship","label":"Ship","consequence":"The release ships."}]})),
+    }).unwrap();
+    state.store.reconcile_person_asks_at(asked_at).unwrap();
+    smallclaims::store::set_thread_clock(Some(asked_at + 60_001));
+    state.store.graph.set_write_clock_at(asked_at + 60_001).unwrap();
+    assert!(state.store.reconcile_person_asks_at(asked_at + 60_001).unwrap().changed);
+    drop(clock);
+    state.store.graph.set_write_clock_at(fractal_daemon::api::client_now_ms()).unwrap();
+    let app = fractal_daemon::api::router(state.clone());
+    let (status, rows) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/avery").await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    assert_conforms(&contract_validator("AutoResolvedAsks"), "auto-resolved", &rows["value"]);
+    let decoded: fractal_client::AutoResolvedAsks = serde_json::from_value(rows["value"].clone()).unwrap();
+    assert_eq!(decoded.items.len(), 1);
+    assert_eq!(decoded.items[0].default_answer.as_ref().unwrap().id, "hold");
+    let row = &rows["value"]["items"][0];
+    let (_, other) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/blair").await;
+    assert_eq!(other["value"]["items"], serde_json::json!([]));
+    let (status, _) = client_json_person(app.clone(), "/v1/client/auto-resolved", "agent/example").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let action = serde_json::json!({"api_version":"st3.client.v0", "id":format!("action/person-override:{}:ship", row["episode"].as_str().unwrap()),
+        "type":"work.override", "idempotency_key":format!("person-override:{}:ship", row["episode"].as_str().unwrap()),
+        "fence":{"snapshot_id":rows["snapshot"]["id"],"subject_revisions":{}},
+        "parameters":{"target_id":ask.subject,"episode":row["episode"],"answer":{"id":"ship"}}});
+    assert_conforms(&contract_validator("ActionRequest"), "override action", &action);
+    let (status, wrong) = client_post_json_person(app.clone(), "/v1/client/actions", "person/blair", action.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{wrong}");
+    let (status, accepted) = client_post_json_person(app.clone(), "/v1/client/actions", "person/avery", action.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["value"]["status"], "completed", "{accepted}");
+    let (status, replay) = client_post_json_person(app.clone(), "/v1/client/actions", "person/avery", action.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["value"], accepted["value"]);
+    let (_, after) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/avery").await;
+    assert_eq!(after["value"]["items"], serde_json::json!([]));
+    let old = asked_at - 8 * 24 * 60 * 60_000;
+    let closed_root = tempfile::tempdir().unwrap();
+    let state = test_state(closed_root.path());
+    state.store.set_ask_deadlines(true);
+    let clock = Clock;
+    smallclaims::store::set_thread_clock(Some(old));
+    state.store.graph.set_write_clock_at(old).unwrap();
+    state.store.apply_internal(&intent, "closed-override-contract-agent").unwrap();
+    let app = fractal_daemon::api::router(state.clone());
+    let closed = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        priority: None, deadline_ms: Some(60_000), default_answer: Some("hold".into()), legacy_request: None,
+        person: "person/avery".into(), title: "Old choice".into(), reason: "Release choice".into(),
+        actor: format!("agent/{}.asker", state.store.origin()), step: None, new_run: Some("closed-override-contract".into()),
+        incarnation: None, idempotency_key: "closed-override-contract-ask".into(),
+        request: Some(serde_json::json!({"version": 1, "type": "choice", "question": "Ship?",
+            "why_person": "Release choice", "answers": [{"id":"hold","label":"Hold","consequence":"The release waits."}, {"id":"ship","label":"Ship","consequence":"The release ships."}]})),
+    }).unwrap();
+    let episode = state.store.claims_for_subject_kind_at(&closed.subject, "work.person-asked", None, true, 1).unwrap().claims[0].id.clone();
+    state.store.reconcile_person_asks_at(old).unwrap();
+    smallclaims::store::set_thread_clock(Some(old + 60_001));
+    state.store.graph.set_write_clock_at(old + 60_001).unwrap();
+    assert!(state.store.reconcile_person_asks_at(old + 60_001).unwrap().changed);
+    drop(clock);
+    state.store.graph.set_write_clock_at(fractal_daemon::api::client_now_ms()).unwrap();
+    let (_, current) = client_json_person(app.clone(), "/v1/client/auto-resolved", "person/avery").await;
+    assert_eq!(current["value"]["items"], serde_json::json!([]));
+    let closed_action = serde_json::json!({"api_version":"st3.client.v0","id":"action/closed-override",
+        "type":"work.override","idempotency_key":"closed-override-contract",
+        "fence":{"snapshot_id":current["snapshot"]["id"],"subject_revisions":{}},
+        "parameters":{"target_id":closed.subject,"episode":episode,"answer":{"id":"ship"}}});
+    let (status, refused) = client_post_json_person(app, "/v1/client/actions", "person/avery", closed_action).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["code"], "stale-fence", "{refused}");
+    assert_eq!(refused["retryable"], false, "{refused}");
+}
+
+#[tokio::test]
 async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());

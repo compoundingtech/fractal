@@ -55,6 +55,7 @@ export type ActionCommon = {
   | "session.import"
   | "work.ask"
   | "work.done"
+  | "work.override"
   | "work.cancel-ask"
   | "work.claim"
   | "work.renew"
@@ -1243,6 +1244,23 @@ export type AttentionWaiting = {
   step: StepRunId;
 };
 
+export type AutoResolvedAsk = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  request?: StructuredRequest;
+  requester_id: Id;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: Id;
+  title: string;
+};
+
+export type AutoResolvedAsks = {
+  complete: boolean;
+  items: Array<AutoResolvedAsk>;
+};
+
 export type AvailabilityDeadlineClock = ("run" | "hold-routine" | "hold-all" | string);
 
 export type AvailabilityDeadlineClockChange = {
@@ -1990,7 +2008,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -3640,6 +3658,16 @@ export type PersonId = string;
 export type PersonOptionNote = {
   id: string;
   text: string;
+};
+
+export type PersonOverrideParameters = {
+  answer: {
+  id: string;
+  text?: string;
+};
+  episode: string;
+  summary?: string;
+  target_id: Id;
 };
 
 export type PersonPairedSession = {
@@ -5625,6 +5653,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.complete'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.done'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.fail'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.override'; parameters: PersonOverrideParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.progress'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.publish-mission'; parameters: {
   mission: {

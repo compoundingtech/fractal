@@ -48,6 +48,9 @@ pub struct Extras {
     pub slo_stale: Option<String>,
     /// Where the exported observation history is read, from the same `slo.list` read.
     pub slo_otel_url: Option<String>,
+    /// The person's asks that resolved by themselves (`auto-resolved.list`): read when Now opens,
+    /// when the attention window changes and after an override is accepted, never on a timer.
+    pub auto_resolved: Load<fractal_client::AutoResolvedAsks>,
 }
 
 impl Extras {
@@ -301,6 +304,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, at: chrono:
             _ => None,
         },
         slo: extras.slo.clone(),
+        auto_resolved: auto_resolved_at(model, &extras.auto_resolved, now),
         slo_history: extras.slo_history.clone(),
         slo_stale: extras.slo_stale.clone(),
         slo_otel_url: extras.slo_otel_url.clone(),
@@ -637,6 +641,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                 age: age(&item.requested_at, now),
                 requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
                 snoozed_until: item.snoozed_until.as_deref().and_then(|until| chrono::DateTime::parse_from_rfc3339(until).ok()),
+                episode: (!item.episode.is_empty()).then(|| item.episode.clone()),
                 deadline: item.deadline_at.as_deref().map(|deadline| {
                     ask_deadline(
                         deadline,
@@ -650,6 +655,50 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
             })
         })
         .collect()
+}
+
+/// st's auto-resolved asks as Now shows them: the asker by name where Fractal knows the agent,
+/// and the answers the person may give instead of the default that applied. The override is
+/// offered only while st lists `work.override` for the row.
+fn auto_resolved_at(model: &Model, read: &Load<fractal_client::AutoResolvedAsks>, now: &str) -> Load<AutoResolvedList> {
+    let asks = match read {
+        Load::Loading => return Load::Loading,
+        Load::Failed(why) => return Load::Failed(why.clone()),
+        Load::Ready(asks) => asks,
+    };
+    let items = asks
+        .items
+        .iter()
+        .map(|ask| {
+            let default = ask.default_answer.as_ref();
+            AutoResolved {
+                id: format!("auto-resolved/{}", ask.resolution_id),
+                title: clean_message_text(&ask.title),
+                asker: model
+                    .agents()
+                    .find(|agent| agent.header.id == ask.requester_id)
+                    .map(crate::agent_label)
+                    .unwrap_or_else(|| ask.requester_id.clone()),
+                default: default.map(|answer| answer.label.clone()),
+                resolved: age(&ask.resolved_at, now),
+                target_id: ask.target_id.clone(),
+                episode: ask.episode.clone(),
+                open: ask.action_parameters.as_ref().is_some_and(|actions| actions.contains_key("work.override")),
+                alternatives: ask
+                    .request
+                    .iter()
+                    .flat_map(|request| &request.answers)
+                    .filter(|answer| default.is_none_or(|default| default.id != answer.id))
+                    .map(|answer| OverrideAnswer {
+                        id: answer.id.clone(),
+                        label: answer.label.clone(),
+                        words: answer.outcome.as_deref() == Some("request_changes"),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    Load::Ready(AutoResolvedList { items, complete: asks.complete })
 }
 
 /// The launch card's preview as st serves it (`presentation.launch`): the newest variant's

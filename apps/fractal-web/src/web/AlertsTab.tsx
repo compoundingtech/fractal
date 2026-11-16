@@ -7,11 +7,14 @@ import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
+import type { AutoResolvedRead } from '../conversation/alerts/alert-action-port.ts'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
+import { useAutoResolved, type Override } from '../conversation/alerts/useAutoResolved.ts'
 import { useAttentionDecode, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
 import { LivePendingInboxStarts, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
+import { AutoResolvedSection } from './AutoResolvedAsks.tsx'
 import { DecodeNotice } from './LiveRoster.tsx'
 
 // The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
@@ -21,8 +24,9 @@ import { DecodeNotice } from './LiveRoster.tsx'
 const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a question', '◆': 'needs you', '!': 'fault' }
 
 /**
- * The Alerts tab over the active source: its attention feed, without answers on their way, and its clock. Thread
- * starts whose Inbox item has left the list, and recently closed threads, stay reachable below it.
+ * The Alerts tab over the active source: its attention feed, without answers on their way, its clock and its
+ * auto-resolved asks. Thread starts whose Inbox item has left the list, and recently closed threads, stay reachable
+ * below it.
  */
 export const AlertsTab = ({ onOpen, selected, onSelect }: {
   readonly onOpen: (ref: string) => void
@@ -31,6 +35,7 @@ export const AlertsTab = ({ onOpen, selected, onSelect }: {
 }): React.ReactNode => {
   const feed = useVisibleAttention()
   const now = useNow()
+  const { read, onOverride } = useAutoResolved()
   const currentItems = feed._tag === 'Observed' ? alertsTabRows(feed.value, now).map(row => row.item) : []
   return (
     <AlertsList
@@ -41,6 +46,8 @@ export const AlertsTab = ({ onOpen, selected, onSelect }: {
       footer={<><LivePendingInboxStarts items={currentItems} onOpenThread={onOpen} /><LiveRecentlyClosedThreads onOpenThread={onOpen} /></>}
       {...(selected === undefined ? {} : { selected })}
       {...(onSelect === undefined ? {} : { onSelect })}
+      {...(read === undefined ? {} : { autoResolved: read })}
+      {...(onOverride === undefined ? {} : { onOverride })}
     />
   )
 }
@@ -49,7 +56,7 @@ export const AlertsTab = ({ onOpen, selected, onSelect }: {
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row stays reachable.
  */
-export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, footer }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, autoResolved, onOverride, footer }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly decode?: RosterDecode
   readonly now: number
@@ -59,6 +66,10 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
   readonly selected?: string
   /** Opens an alert's details in the main area. */
   readonly onSelect?: (id: string) => void
+  /** Asks a default answered at their deadline, below the open alerts; absent until read. */
+  readonly autoResolved?: AutoResolvedRead
+  /** Replaces a default with the person's own answer; absent without control access. */
+  readonly onOverride?: Override
   /** Shown after the rows: thread recovery and recently closed threads. */
   readonly footer?: React.ReactNode
 }): React.ReactNode => {
@@ -139,6 +150,7 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
                 ))}
               </ul>
             )}
+            <AutoResolvedSection read={autoResolved} now={now} {...(onOverride === undefined ? {} : { onOverride })} />
           </>
         )}
       {footer}
