@@ -18,9 +18,12 @@ pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
 #[derive(Clone)]
 pub struct LocalWebStatus(pub DoctorCheck);
 
-/// Each step outside the store checks waits at most this long, so the report answers inside
-/// the client's 120 s request limit even when every step is slow.
+/// Default bound for steps outside the store checks, keeping the report within the client's
+/// 120 s request limit even when every step is slow.
 const DOCTOR_STEP: Duration = Duration::from_secs(10);
+/// Allow both the login-shell snapshot and `gh auth token` ten seconds, plus scheduling margin,
+/// so their typed diagnostic is not masked by the doctor's outer deadline.
+const DOCTOR_AUTH_STEP: Duration = Duration::from_secs(21);
 
 pub async fn doctor(
     State(state): State<AppState>,
@@ -48,7 +51,7 @@ pub async fn doctor(
         fractal_runtime::priority_report(&observations)
     });
     // Resolve the current credential source without changing observer token-cache/backoff state.
-    let token = tokio::time::timeout(DOCTOR_STEP, crate::github_http::diagnose_github_auth()).await;
+    let token = tokio::time::timeout(DOCTOR_AUTH_STEP, crate::github_http::diagnose_github_auth()).await;
     // Doctor reads what is sealed: claims in batches not sealed yet count as unsealed. Sealing
     // or judging here would take the writer to answer a read-only question.
     let mut report = crate::api::read_deadline::spawn_blocking(move || doctor_report(&state))
@@ -89,7 +92,7 @@ pub async fn doctor(
     });
     report.checks.push(match token {
         Ok(token) => github_auth_check(token),
-        Err(_) => doctor_timeout("github-observer-auth", DOCTOR_STEP),
+        Err(_) => doctor_timeout("github-observer-auth", DOCTOR_AUTH_STEP),
     });
     // Request samples are live operational telemetry. Keep them on /v1/doctor,
     // outside the store-index-fenced operation projection built by doctor_report.
