@@ -364,7 +364,7 @@ pub(super) fn creation_claim(
     })
 }
 
-fn owned_creation(
+pub(super) fn owned_creation(
     connection: &Connection,
     subject: &str,
     person: &str,
@@ -537,6 +537,7 @@ pub struct Summary {
     pub state: &'static str,
     pub message_count: u64,
     pub unread: bool,
+    pub unread_reminder: Option<fractal_schema::threads::ThreadUnreadReminder>,
 }
 
 /// Read metadata for the authenticated owner. All fields come from one graph snapshot.
@@ -610,6 +611,7 @@ fn summary_conn(
         state,
         message_count,
         unread,
+        unread_reminder: super::thread_reading::reminder_conn(connection, person, subject)?,
     })
 }
 

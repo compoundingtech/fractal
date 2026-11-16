@@ -805,6 +805,7 @@ impl Registry {
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
+        threads::validate_reminder_fields(kind, fields)?;
         attention_controls::validate_fields(kind, fields)?;
         availability::validate_fields(kind, fields)?;
         if kind == "mission.provenance" {
@@ -2853,6 +2854,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "thread.unread-marked",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &[],
+        ),
+        (
+            "thread.unread-cleared",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &[],
+        ),
+        (
             "thread.ask-linked",
             &["thread"],
             WritePolicy::SystemOnly,
@@ -4734,6 +4753,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("previous_title", required_string()),
             ("title_revision", required_string()),
         ],
+        "thread.unread-marked" => &[
+            ("person", required_reference_to(&["person"])),
+            ("anchor_message", required_reference_to(&["message"])),
+            ("observed_marks", FieldSpec { required: true, ..array() }),
+        ],
+        "thread.unread-cleared" => &[
+            ("person", required_reference_to(&["person"])),
+            ("observed_marks", FieldSpec { required: true, ..array() }),
+        ],
         "thread.ask-linked" => &[
             ("thread_id", required_reference_to(&["thread"])),
             ("ask", required_reference_to(&["step-run"])),
@@ -5425,7 +5453,8 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.subjects.remove("thread").unwrap();
-        for kind in ["thread.created", "thread.title-set", "thread.state-set", "thread.ask-linked"] {
+        for kind in ["thread.created", "thread.title-set", "thread.state-set", "thread.ask-linked",
+            threads::UNREAD_MARKED, threads::UNREAD_CLEARED] {
             current.claims.remove(kind).unwrap();
         }
         for field in threads::MESSAGE_RELATION_FIELDS {
