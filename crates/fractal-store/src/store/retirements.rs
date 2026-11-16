@@ -303,8 +303,8 @@ mod tests {
                     scan(&path, calls);
                 } else if path.extension().is_some_and(|extension| extension == "rs") {
                     let source = std::fs::read_to_string(&path).unwrap();
-                    // The primitive is private. Only the common wrapper and the commit-context
-                    // writer may call it; a newly introduced direct producer fails this guard.
+                    // The primitive is private. Only the common wrapper, commit-context
+                    // writer, scheduled writer and its retirement fixture may call it.
                     for _ in source.match_indices("append_admitted_claim_tx(") {
                         calls.push(path.file_name().unwrap().to_str().unwrap().into());
                     }
@@ -314,11 +314,12 @@ mod tests {
         let root = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR")).join("src");
         let mut calls = Vec::new();
         scan(&root, &mut calls);
-        // One occurrence in this guard itself, and three in store.rs (definition + two seams).
+        // Count every approved occurrence, including this guard and the retirement fixture.
         calls.sort();
         assert_eq!(
             calls,
-            vec!["retirements.rs", "store.rs", "store.rs", "store.rs"]
+            vec!["retirements.rs", "scheduled_messages.rs", "scheduled_messages_tests.rs",
+                "store.rs", "store.rs", "store.rs"]
         );
     }
 }

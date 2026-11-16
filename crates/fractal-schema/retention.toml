@@ -128,6 +128,9 @@
 "loop.round-dispatch" = { class = "durable" }
 "loop.round-result" = { class = "durable" }
 "loop.state" = { class = "transition", window = "7d" }
+"message-schedule.cancelled" = { class = "durable" }
+"message-schedule.delivered" = { class = "durable" }
+"message-schedule.requested" = { class = "durable" }
 "message.closed" = { class = "durable" }
 "message.delivered" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
 "message.expired" = { class = "durable" }

@@ -146,8 +146,7 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     while !socket.exists() {
         tokio::task::yield_now().await;
     }
-    let request = MessageSendRequest {
-    owner: None,
+    let request = MessageSendRequest { at: None, owner: None,
     idempotency_key: "message-retry-accepted-001".into(),
     from: "person/ada".into(),
     to: "agent/example/worker".into(),
@@ -155,8 +154,7 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     title: Some("A greeting".into()),
     in_reply_to: None,
     tags: vec!["example".into()],
-    attachments: Vec::new(),
-    };
+    attachments: Vec::new(), };
     let mut client = fast_client(Endpoint::Unix(socket));
     client.deadlines.request = Duration::from_millis(200);
     let receipt = client.send_message(&request).await.unwrap();
@@ -223,8 +221,7 @@ async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
         tokio::task::yield_now().await;
     }
     let error = fast_client(Endpoint::Unix(socket))
-        .send_message(&MessageSendRequest {
-        owner: None,
+        .send_message(&MessageSendRequest { at: None, owner: None,
         idempotency_key: "retry-this-key".into(),
         from: "person/ada".into(),
         to: "agent/example/worker".into(),
@@ -232,8 +229,7 @@ async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
         title: None,
         in_reply_to: None,
         tags: vec![],
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .await
         .unwrap_err()
         .to_string();

@@ -54,7 +54,8 @@ pub use staged::plan_staged;
 /// readers of a seat's last turn ask for.
 /// Version 26 includes winner-preserving legacy placement migration and its authority marker
 /// in the existing arrangement/membership witnesses; it adds no claim-drop rule.
-pub const RULES_VERSION: u32 = 26;
+/// Version 27 keeps timed message request evidence and recipient/owner declaration fences.
+pub const RULES_VERSION: u32 = 27;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -101,7 +102,8 @@ reader-usage=rollup-per-slot-else-cumulative-per-incarnation-else-response-delta
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,request-discovery,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot-but-harness-questions
 carriers=every-rule-but-loop.state-and-harness-questions-keeps-the-newest-carrier-of-each-field
-review=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references";
+review=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references
+message-schedule=retain-request,recipient-declaration,owner-claim,message-evidence";
 
 /// A canonical description of every rule: one line per rule of the retention policy
 /// (`crates/fractal-schema/retention.toml`), then the engine's terms. The rules digest hashes it with
@@ -817,7 +819,8 @@ pub fn status_source(claim: &ClaimRecord) -> bool {
 
 /// The claim IDs a claim cites as evidence, pins as a mission run's input, names as a mission
 /// request's discovery, or references as a review record (binding, withdrawal, verdict, attempt
-/// relation, predecessors). Those claims are read by their IDs, so they stay.
+/// relation, predecessors), or binds as timed message evidence and declaration fences.
+/// Those claims are read by their IDs, so they stay.
 pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let body = &claim.body;
     let evidence = body
@@ -847,7 +850,8 @@ pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let lineage = (claim.kind == fractal_schema::slo_breaches::KIND)
         .then(|| body.pointer("/fields/record/previous_recovery").and_then(Value::as_str))
         .flatten().into_iter();
-    evidence.chain(inputs).chain(discovery).chain(review).chain(predecessors).chain(lineage)
+    let scheduled_messages = fractal_schema::scheduled_messages::claim_references(&claim.kind, body);
+    evidence.chain(inputs).chain(discovery).chain(review).chain(predecessors).chain(lineage).chain(scheduled_messages)
 }
 
 /// Whether claims of `kind` are never dropped, because their validation reads them: a kind that

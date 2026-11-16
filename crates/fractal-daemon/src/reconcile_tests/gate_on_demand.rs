@@ -262,8 +262,7 @@ let response = crate::api::router(state)
             .uri("/v1/messages")
             .header("content-type", "application/json")
             .body(axum::body::Body::from(
-                serde_json::to_vec(&crate::model::MessageSendRequest {
-                owner: None,
+                serde_json::to_vec(&crate::model::MessageSendRequest { at: None, owner: None,
                 idempotency_key: "garden-handoff".into(),
                 from: format!("agent/{}/builder", fixture.round.id),
                 to: gate.clone(),
@@ -271,8 +270,7 @@ let response = crate::api::router(state)
                 title: None,
                 in_reply_to: None,
                 tags: Vec::new(),
-                attachments: Vec::new(),
-                })
+                attachments: Vec::new(), })
                 .unwrap(),
             ))
             .unwrap(),

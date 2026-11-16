@@ -19,6 +19,7 @@ const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
   work: 'work',
   attention: 'attention',
   message: 'messages',
+  'scheduled-message': 'scheduledMessages',
   launch: 'launches',
   'launch-variant': 'launch_variants',
   'launch-decision': 'launchDecisions',

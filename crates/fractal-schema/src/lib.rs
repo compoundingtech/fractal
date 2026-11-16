@@ -23,6 +23,7 @@ pub mod read_positions;
 pub mod source_map;
 pub mod private_notes;
 pub mod retention;
+pub mod scheduled_messages;
 pub mod slo_breaches;
 pub mod review;
 pub mod task_grants;
@@ -804,6 +805,7 @@ impl Registry {
             invocation::validate(subject, fields)?;
         }
         effects::validate(kind, subject, fields)?;
+        scheduled_messages::validate(kind, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -1228,6 +1230,12 @@ fn build_registry() -> Registry {
             "objective",
             "objective/NAME",
             "A declared objective: an interval over claims, its targets, window and breach response.",
+            false,
+        ),
+        (
+            "message-schedule",
+            "message-schedule/ID",
+            "An immutable timed native message request and its permanent cancellation or delivery receipts.",
             false,
         ),
         (
@@ -2754,6 +2762,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append,
             None,
             false,
+            &[],
+        ),
+        (
+            "message-schedule.requested",
+            &["message-schedule"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Once,
+            None,
+            true,
+            &[],
+        ),
+        (
+            "message-schedule.cancelled",
+            &["message-schedule"],
+            WritePolicy::AuthorizedParticipant,
+            Cardinality::Once,
+            None,
+            true,
+            &[],
+        ),
+        (
+            "message-schedule.delivered",
+            &["message-schedule"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
             &[],
         ),
         (
@@ -4628,6 +4663,25 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("rows", required_integer()),
             ("columns", required_integer()),
         ],
+        "message-schedule.requested" => &[
+            ("from", required_reference()),
+            ("to", required_reference()),
+            ("at_unix_ms", required_integer()),
+            ("key", required_string()),
+            ("message", required_object()),
+            ("evidence", required_array()),
+            ("recipient_declaration", required_string()),
+        ],
+        "message-schedule.cancelled" => &[
+            ("reason", required_string()),
+            ("request", required_string()),
+            ("owner_claim", string()),
+        ],
+        "message-schedule.delivered" => &[
+            ("request", required_string()),
+            ("message", required_reference_to(&["message"])),
+            ("owner_claim", required_string()),
+        ],
         "message.sent" => &[
             ("from", reference()),
             ("to", reference()),
@@ -4898,6 +4952,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     ) {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());
+    }
+    if scheduled_messages::KINDS.contains(&kind) {
+        for field in fields.values_mut() {
+            field.immutable = true;
+        }
     }
     fields
 }

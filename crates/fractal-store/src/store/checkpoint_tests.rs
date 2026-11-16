@@ -2550,7 +2550,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 26);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 27);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2590,7 +2590,35 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                 "carriers=every-rule-but-loop.state-keeps",
                 "carriers=every-rule-but-loop.state-and-harness-questions-keeps",
             ) + "\nreview=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references"
+                + "\nmessage-schedule=retain-request,recipient-declaration,owner-claim,message-evidence"
     );
+}
+
+#[test]
+fn timed_message_receipts_retain_fences_and_original_evidence() {
+    for (kind, names) in [
+        (fractal_schema::scheduled_messages::REQUESTED, &["recipient_declaration", "evidence"][..]),
+        (fractal_schema::scheduled_messages::CANCELLED, &["request", "owner_claim"][..]),
+        (fractal_schema::scheduled_messages::DELIVERED, &["request", "owner_claim"][..]),
+    ] {
+        let mut sealed = Sealed::default();
+        let mut refs = serde_json::Map::new();
+        let mut dependencies = Vec::new();
+        for name in names {
+            let subject = format!("agent/timed-message/{name}");
+            sealed.add("ada", 0, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            let referenced = sealed.add("ada", 1, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            sealed.add("ada", 2, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            refs.insert((*name).into(), if *name == "evidence" { json!([referenced]) } else { json!(referenced) });
+            dependencies.push(referenced);
+        }
+        sealed.add("scheduler", 3, draft(kind, "message-schedule/test", Value::Object(refs)));
+        let fixture = sealed.build();
+        let dropped = plan_drops(&fixture).claims.into_iter().map(|claim| claim.id).collect::<BTreeSet<_>>();
+        for dependency in dependencies {
+            assert!(!dropped.contains(&dependency), "{kind} must retain {dependency}");
+        }
+    }
 }
 
 #[test]

@@ -259,6 +259,13 @@ fn validate_digest_writer(
 ) -> Result<()> {
     let id = fields.get("source").and_then(|source| source.get("owner_claim")).and_then(Value::as_str)
         .ok_or_else(|| unavailable("only the bound notice owner's daemon writes daemon notices: missing owner claim"))?;
+    validate_owner_receipt(connection, actor, id, position)
+}
+
+/// Historical singleton delivery ownership, shared by digest and timed-mail receipts.
+pub(super) fn validate_owner_receipt(
+    connection: &Connection, actor: &str, id: &str, position: Option<Position<'_>>,
+) -> Result<()> {
     let declaration = claim_by_id_tx(connection, id)?
         .filter(|claim| claim.subject == notice_owner::SUBJECT && claim.kind == "intent.desired")
         .ok_or_else(|| unavailable("owner declaration is unavailable"))?;

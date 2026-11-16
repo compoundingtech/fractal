@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v33.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v34.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1179,8 +1179,23 @@ impl World {
             let mut fields = Map::new();
             for (name, field) in &spec.fields {
                 if field.required || self.rng.chance(40) {
-                    fields.insert(name.clone(), self.value_of(field, index));
+                    let value = if spec.kind == "mission-run.created" && name == "mission_spec" {
+                        // The schema's object has a native MissionSpec projection contract.
+                        // A newer corpus changes the random draw order and can expose it.
+                        generated_run_mission_spec()
+                    } else {
+                        self.value_of(field, index)
+                    };
+                    fields.insert(name.clone(), value);
                 }
+            }
+            if spec.kind == "mission-run.created" && fields.contains_key("ad_hoc_title") {
+                // Minimal spontaneous runs require these together, even though each
+                // is optional in the schema shared with ordinary mission runs.
+                fields.entry("mission_spec").or_insert_with(generated_run_mission_spec);
+                fields.entry("current_generation").or_insert_with(|| {
+                    json!(format!("run-generation/{}", subject.trim_start_matches("mission-run/")))
+                });
             }
             let actor = if spec.kind == "message.expired" {
                 Some("daemon/runtime".to_owned())
@@ -1264,6 +1279,7 @@ impl World {
             "host" => format!("host/{}", self.other_name(index)),
             "loop-run" => format!("loop-run/gen-0/loop-{small}"),
             "message" => format!("message/{}", self.fresh("message")),
+            "message-schedule" => format!("message-schedule/{}", self.fresh("message-schedule")),
             "mission" => format!("mission/convergence-{small}"),
             "mission-run" => format!("mission-run/convergence-{small}"),
             "observer" => format!("observer/run-0/watch-{small}"),
@@ -1870,6 +1886,15 @@ fn admit(store: &Store) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn generated_run_mission_spec() -> Value {
+    let intent = fractal_daemon::graph::parse_intent(
+        "version 2\nmission \"convergence\" state=\"ready\" {\n goal \"Converge.\"\n step \"work\" { goal \"Converge.\" }\n}\n",
+        "convergence",
+    ).expect("generated run mission declaration");
+    serde_json::to_value(&intent.missions["convergence"])
+        .expect("serialize generated run mission")
+}
+
 /// Publication claims carry a canonical MissionSpec at the top level, not the generic
 /// `fields` wrapper. Exercise the owning publication API rather than admitting an invalid
 /// mission body that only fails later when another node projects it.
@@ -1976,6 +2001,30 @@ fn generated_run_lineage_links_are_admitted_and_replicate() {
         assert!(claims(&world.oracle).contains_key(&claim.id));
         assert!(world.failures.is_empty(), "{}", world.report());
     }
+}
+
+#[test]
+fn generated_run_mission_specs_project_and_replicate() {
+    let mut world = World::new(1, Sabotage::None);
+    let mut generated = None;
+    // Exercise the optional field through the corpus generator rather than supplying
+    // a hand-written replacement that leaves the random input path malformed.
+    for _ in 0..32 {
+        let input = world.claim_of(&corpus()["mission-run.created"], 0).unwrap();
+        if input.fields.contains_key("ad_hoc_title") {
+            generated = Some(input);
+            break;
+        }
+    }
+    let mut input = generated.expect("the fixed seed generates a run mission spec");
+    input.actor = None;
+    let mission: fractal_daemon::model::MissionSpec =
+        serde_json::from_value(input.fields["mission_spec"].clone()).unwrap();
+    assert_eq!(mission.subject, "mission/convergence");
+    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+    world.tap(0);
+    assert!(claims(&world.oracle).contains_key(&claim.id));
+    assert!(world.failures.is_empty(), "{}", world.report());
 }
 
 #[test]
@@ -2104,7 +2153,7 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v32 adds durable native effect receipts to v31's explicit person overrides.
+/// Corpus v34 adds durable timed seat-message requests and terminal receipts.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
 const NEVER_TRIMS: &[u64] = &[179];
@@ -2117,7 +2166,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v33 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v34 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2126,7 +2175,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v33 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v34 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2134,7 +2183,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v33 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v34 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2347,7 +2396,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v33.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v34.json"
         }))
         .unwrap(),
     )
