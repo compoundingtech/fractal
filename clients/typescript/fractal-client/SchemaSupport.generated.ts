@@ -140,6 +140,10 @@ export const epochRange = /*#__PURE__*/ Schema.makeIsBetween({ order: DateTime.O
 })
 /** Nullable fields treat missing and `null` alike; `None` encodes as `null`. */
 export const NULL_NONE = { onNoneEncoding: null } as const
+import type { MarkdownBlock, MarkdownInline } from "./markdown-text.ts"
+/** Markdown stays the wire string at runtime: only the static type changes, so this adds no decode work. */
+export const markdownBlockSchema = (schema: Schema.Top): Schema.Codec<MarkdownBlock, string> => schema as unknown as Schema.Codec<MarkdownBlock, string>
+export const markdownInlineSchema = (schema: Schema.Top): Schema.Codec<MarkdownInline, string> => schema as unknown as Schema.Codec<MarkdownInline, string>
 
 
 export const LOSSLESS_DATE_TIME = new RegExp(DATE_TIME.source + "(?![\\s\\S])", "u")
