@@ -60,6 +60,27 @@ Inline thread read and timeline errors offer an in-place Retry button; a success
 Thread action failures, validation issues, changed read errors and quote selection are explicitly announced to VoiceOver; revoked read access moves focus to the error. Expandable thread rows and the Threads header expose expanded/collapsed values and hints. Embedded composers name their thread in the message and Send labels; Retry names the failed thread or thread list. Standalone composers keep their existing Message thread and Send labels. Thread action hints identify the affected title without changing the visible button text.
 Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
 
+Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
+measured message text in the focused, foreground view. Collapsed rows and background
+tabs never count. A clipped edge or an author label is not text visibility. Natural
+read history remains forward-only and separate from the private unread reminder.
+
+`unreadVisit.ts` owns visit capture and observed-remove intent logic. A reminder
+created or first observed during a visit is sticky until a later visit; automatic
+clear then includes only captured mark IDs whose own anchor was deliberately viewed.
+Manual clear and a new mark supersede all observed IDs, preserving unseen concurrent
+marks. IDs enter only through `Summary.unread_reminder`, never action receipts,
+timestamps or locally generated identifiers. Unavailable anchors keep their reminder;
+pending seek metadata shows no body and cannot activate a badge.
+
+`unreadActions.ts` is the typed client-API seam. The current client has natural
+`thread.read`, but no generated reminder edits/around seek. Mark unread is disabled
+until that seam is bound, even with `control.messages`; read-only clients have no
+mark controls. The reminder indicator uses only the authoritative summary, never
+natural unread or guessed seek state. The new lifecycle and domain tests run with
+`node --experimental-transform-types --import ./testHooks.mjs --test unreadVisit.test.mjs unreadVisitNative.test.mjs`.
+
+
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
 | Piece | Native component | Package |

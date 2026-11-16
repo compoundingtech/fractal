@@ -18,3 +18,11 @@ test('nested clipping and keyboard bounds exclude offscreen and unmeasured messa
   assert.deepEqual(visibleThreadMessages(viewport, rows, 1), ['visible-part']);
   assert.equal(intersectThreadBounds(box(0, 20), box(20, 20)), undefined);
 });
+
+test('a sliver of content is not meaningful visibility, while a fully visible short body is', () => {
+  assert.deepEqual(visibleThreadMessages(box(100, 100), [
+    { id: 'one-pixel', bounds: box(199, 100) },
+    { id: 'short-body', bounds: box(110, 18) },
+    { id: 'line', bounds: box(176, 100) },
+  ], 50), ['short-body', 'line']);
+});

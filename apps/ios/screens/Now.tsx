@@ -16,7 +16,7 @@ import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
 import { AvailabilitySection } from './Availability';
-import { ThreadViewport } from '../threadViewport';
+import { threadViewportChanged, ThreadViewport } from '../threadViewport';
 import { InboxThread, PendingInboxThreads, ThreadGroup } from './Threads';
 import { AutoResolvedSection, useAutoResolvedRows, useOverride } from './AutoResolved';
 import { closedOverride, OVERRIDE_TITLE } from '../autoResolved';
@@ -83,6 +83,7 @@ export function NowScreen() {
     <SectionList
       ref={list}
       contentInsetAdjustmentBehavior="automatic"
+      onScroll={() => threadViewportChanged(threadViewport)} scrollEventThrottle={100}
       sections={sections}
       keyExtractor={row => row.item.id}
       stickySectionHeadersEnabled={false}
@@ -165,7 +166,8 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     const overridable = closedOverride(item, autoRows);
     return <Screen>
       <Banners />
-      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}
+        onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
         <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={markdownSource(item.detail)} color={theme.subtext0} /> : null}
@@ -184,7 +186,8 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     const from = publisher ? agentName(publisher) : item.requester_id?.replace(/^agent\//, '') ?? 'An agent';
     return <Screen>
       <Banners />
-      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}
+        onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
         <T><T bold color={theme[row.color]}>{row.glyph} update</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         <T><T dim>from  </T><T bold color={theme.person}>{from}</T></T>
@@ -209,7 +212,8 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       <Banners />
       {/* Automatic insets keep the end of a long request clear of the floating tab bar. */}
       <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
-  <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+        <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}
+          onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
           <T><T bold color={theme[row.color]}>{row.glyph} request</T><T dim>  {item.priority} · waited {row.age}</T></T>
           <T bold selectable>{row.title}</T>
           <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
@@ -229,7 +233,8 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   }
   return <Screen>
     <Banners />
-    <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+    <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}
+      onScroll={() => threadViewportChanged(requestScroll)} scrollEventThrottle={100}>
       <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {attentionKindLabel(item.attention_kind)} · {item.priority} · waited {row.age}</T></T>
       <T bold selectable>{row.title}</T>
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'

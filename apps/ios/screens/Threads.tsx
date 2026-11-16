@@ -17,7 +17,9 @@ import { threadReadErrorText as errorText, threadEditScope, threadDraftKey, thre
 import type { ThreadEditResult } from '../threadEdits';
 import { threadClock, threadExactTime, threadRelativeTime } from '../threadClock';
 import { visibleThreadMessages } from '../threadVisibility';
-import { measureThreadBounds, measureThreadViewport, ThreadViewport, useThreadViewports } from '../threadViewport';
+import { measureThreadBounds, measureThreadViewport, threadViewportChanged, ThreadViewport, useThreadViewports } from '../threadViewport';
+import { reminderFromSummary } from '../unreadVisit';
+import { useUnreadVisit } from '../unreadVisitNative';
 import { theme } from '../theme';
 import { Button, Field, Markdown, SystemScreen, SystemText, T, useSystemColors, useTextAppearance } from '../ui';
 
@@ -228,8 +230,8 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       <T dim>{show ? 'Hide' : 'Show'}</T>
     </Pressable>
     {show ? <ScrollView ref={attachScroll} innerViewRef={scrollContent as React.RefObject<View>} keyboardShouldPersistTaps="handled" scrollEventThrottle={16}
-      onLayout={event => { viewportHeight.current = event.nativeEvent.layout.height; }}
-      onScroll={event => { offset.current = event.nativeEvent.contentOffset.y; }}
+      onLayout={event => { viewportHeight.current = event.nativeEvent.layout.height; threadViewportChanged(scroll); }}
+      onScroll={event => { offset.current = event.nativeEvent.contentOffset.y; threadViewportChanged(scroll); }}
       style={{ maxHeight: Math.round(height * (hosted ? 0.75 : 0.5)), flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
       <ThreadViewport viewport={scroll}>
       {threads.map(thread => {
@@ -258,7 +260,7 @@ function ContextThreadHeader({ thread, open, toggle }: { thread: ThreadSummary; 
   const { threadEdits } = useStore();
   const displayed = threadEdits?.project(thread) ?? thread;
   return <ThreadRow title={displayed.title} label={`${displayed.title}, ${threadSummaryLine(displayed, ', ')}`}
-    unread={displayed.unread} trailing={displayed.state === 'closed' ? 'Closed' : undefined} expanded={open} toggle={toggle} />;
+    unread={displayed.unread} reminder={!!reminderFromSummary(displayed)} trailing={displayed.state === 'closed' ? 'Closed' : undefined} expanded={open} toggle={toggle} />;
 }
 
 function ExpandedContextThread({ client, initial, refresh, onSummary, toggle, onOpen, revealComposer }: {
@@ -300,8 +302,9 @@ function ThreadDetail({ client, id }: { client: ThreadClient; id: string }) {
     return () => { shown.remove(); hidden.remove(); };
   }, []);
   const frame: ThreadFrame = (content, dock) => <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
-    <ScrollView ref={viewport} style={{ flex: 1 }} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive"
-      refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8 }}>{content}</ScrollView>
+    <ScrollView ref={viewport} style={{ flex: 1 }} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" refreshControl={refresh}
+      onScroll={() => threadViewportChanged(viewport)} scrollEventThrottle={100} onLayout={() => threadViewportChanged(viewport)}
+      contentContainerStyle={{ padding: 12, gap: 8 }}>{content}</ScrollView>
     {dock ? <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: keyboard ? 8 : Math.max(insets.bottom, 8), borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator, backgroundColor: colors.background }}>
       {dock}
     </View> : null}
@@ -323,7 +326,7 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, s
   if (thread || start) {
     const pending = start?.accepted ? 'Loading history…' : 'draft';
     const summary = standalone ? <T dim>{displayed ? threadSummaryLine(displayed, ' · ', displayed.state !== 'closed') : pending}</T>
-      : <ThreadRow bold title={title!} label={`${title}, ${displayed ? threadSummaryLine(displayed, ', ') : pending}`} unread={displayed?.unread}
+      : <ThreadRow bold title={title!} label={`${title}, ${displayed ? threadSummaryLine(displayed, ', ') : pending}`} unread={displayed?.unread} reminder={!!reminderFromSummary(displayed)}
         trailing={displayed ? displayed.state === 'closed' ? 'Closed' : undefined : pending} expanded={expanded} toggle={() => setExpanded(value => !value)} />;
     // A framed (docked) thread puts its summary line at the top of the scrolling history.
     if (frame) return <ThreadBody client={client} thread={thread} start={start} onOpen={onOpen} frame={(content, dock) => frame(<>{summary}{content}</>, dock)} />;
@@ -345,12 +348,13 @@ function threadSummaryLine(thread: ThreadSummary, separator = ' · ', includeSta
     count === undefined ? undefined : `${count} message${count === 1 ? '' : 's'}`,
     includeState ? thread.state : undefined,
     thread.unread ? 'unread' : undefined,
+    reminderFromSummary(thread) ? 'marked unread reminder' : undefined,
   ].filter(Boolean).join(separator);
 }
 
 /** One thread row: an unread dot, the title, and Closed. Counts and state stay in the spoken label. */
-function ThreadRow({ title, label, unread, trailing, expanded, toggle, bold }: {
-  title: string; label: string; unread?: boolean; trailing?: string; expanded: boolean; toggle: () => void; bold?: boolean;
+function ThreadRow({ title, label, unread, reminder, trailing, expanded, toggle, bold }: {
+  title: string; label: string; unread?: boolean; reminder?: boolean; trailing?: string; expanded: boolean; toggle: () => void; bold?: boolean;
 }) {
   const appearance = useTextAppearance();
   const titleLines = useTitleLines();
@@ -359,6 +363,7 @@ function ThreadRow({ title, label, unread, trailing, expanded, toggle, bold }: {
     style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
     <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: unread ? appearance.color(theme.accent) : 'transparent' }} />
     <T bold={bold} color={theme.accent} numberOfLines={titleLines} style={{ flex: 1 }}>{title}</T>
+    {reminder ? <T dim>Marked unread</T> : null}
     {trailing ? <T dim numberOfLines={1}>{trailing}</T> : null}
   </Pressable>;
 }
@@ -526,7 +531,7 @@ function ThreadEditFlash({ message }: { message: string }) {
 function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
   client: ThreadClient; thread?: ThreadSummary; start?: ThreadStartDraft; onOpen?: () => void; revealComposer?: (row: View) => void; frame?: ThreadFrame;
 }) {
-  const { actions, threadActions, status, threadRefresh, threadDeliveries, threadEdits, actor, data, feed } = useStore();
+  const { actions, threadActions, status, threadRefresh, threadDeliveries, threadEdits, actor, data, feed, caps, unreadAPI } = useStore();
   const displayed = thread && (threadEdits?.project(thread) ?? thread);
   const flash = thread && threadEdits?.flash(thread.id);
   const id = thread?.id ?? start?.target;
@@ -573,21 +578,29 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
     try { const result = await send(); setEditResult(retained && result.how === 'unconfirmed' ? undefined : result); }
     finally { setEditing(false); }
   };
-  const canMarkRead = thread?.unread === true && !!actor && threadActions.has('thread.read');
+  const canMarkRead = !!thread?.unread && !!actor && threadActions.has('thread.read');
+  const canEditReminder = !!actor && (caps?.capabilities.some(capability => capability.id === 'control.messages' && capability.state === 'granted') ?? false);
+  const reminder = reminderFromSummary(thread);
   const readCandidates = canMarkRead ? page.items.filter((event): event is ThreadMessage =>
-    event.kind === 'message' && !ownMessage(event.actor_id)) : [];
-  const markVisibleRead = () => void runEdit(async () => {
-    if (!thread) return { how: 'failed', error: 'This thread has not been sent yet.' };
-    const top = Math.max(headerHeight, insets.top);
-    const [viewport, rows] = await Promise.all([
-      measureThreadViewport(viewports, { x: insets.left, y: top, width: width - insets.left - insets.right, height: height - top - Math.max(tabBarHeight, insets.bottom) }),
-      Promise.all(readCandidates.map(async ({ id }) => ({ id, bounds: await measureThreadBounds(messageViews.current.get(id)) }))),
-    ]);
-    if (!navigation.isFocused() || !viewport) return { how: 'failed', error: 'The visible replies could not be verified.' };
-    const ids = visibleThreadMessages(viewport, rows, THREAD_WINDOW_SIZE);
-    if (!ids.length) return { how: 'failed', error: 'Scroll a reply into view to mark it read.' };
-    return actions.markThreadRead(thread, ids);
+    event.kind === 'message' && !!event.content.trim() && !ownMessage(event.actor_id)) : [];
+  const visit = useUnreadVisit({
+    scope: client, threadId: id, actor, summary: thread, api: unreadAPI,
+    canRead: canMarkRead && status === 'online', canEdit: canEditReminder && status === 'online',
+    feedback: setEditResult,
+    read: ids => thread ? actions.markThreadRead(thread, ids) : Promise.resolve({ how: 'failed', error: 'This thread has not been sent yet.' }),
+    measure: async () => {
+      const top = Math.max(headerHeight, insets.top);
+      const candidates = page.items.filter((event): event is ThreadMessage => event.kind === 'message' && !!event.content.trim());
+      const [viewport, rows] = await Promise.all([
+        measureThreadViewport(viewports, { x: insets.left, y: top, width: width - insets.left - insets.right, height: height - top - Math.max(tabBarHeight, insets.bottom) }),
+        Promise.all(candidates.map(async ({ id }) => ({ id, bounds: await measureThreadBounds(messageViews.current.get(id)) }))),
+      ]);
+      const messageIds = viewport ? visibleThreadMessages(viewport, rows, THREAD_WINDOW_SIZE) : [];
+      return { messageIds, readMessageIds: messageIds.filter(id => readCandidates.some(message => message.id === id)) };
+    },
   });
+  const markVisibleRead = () => void runEdit(() => visit.measure('read'));
+  const markUnread = () => void runEdit(() => visit.measure('unread'));
   const rename = () => {
     const title = renameTitle?.trim();
     if (!thread || !title || title === displayed?.title || !editable) return;
@@ -611,11 +624,6 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
       const reply = canReply ? () => chooseQuote(event) : undefined;
       const readHere = canMarkRead && !ownMessage(event.actor_id) && editable;
       const row = <Pressable key={event.id} testID={`thread-message:${event.id}`} onLongPress={reply} accessible accessibilityLabel={`${name}, ${exactTime}. ${quoteLabel}${event.content}`}
-        collapsable={canMarkRead ? false : undefined}
-        ref={canMarkRead ? view => {
-          if (view) messageViews.current.set(event.id, view);
-          else messageViews.current.delete(event.id);
-        } : undefined}
         accessibilityActions={[
           ...(reply ? [{ name: 'reply', label: 'Reply to this message' }] : []),
           ...(readHere ? [{ name: 'markRead', label: 'Mark visible replies read' }] : []),
@@ -626,7 +634,10 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
         }}>
         <T bold>{name}<Text accessibilityElementsHidden importantForAccessibility="no"> · {age}</Text></T>
         {event.thread_quote_id ? <T dim numberOfLines={1}>{quoted ? `Reply to ${actorLabel(quoted.actor_id)} · ${quoted.content}` : 'Reply to an earlier message'}</T> : null}
-        <Markdown text={event.content} selectable={!reply} />
+        <View collapsable={false} onLayout={visit.refresh} ref={view => {
+          if (view) messageViews.current.set(event.id, view);
+          else messageViews.current.delete(event.id);
+        }}><Markdown text={event.content} selectable={!reply} /></View>
       </Pressable>;
       return <ContextMenu key={event.id} title={exactTime} actions={readHere ? [
         ...(reply ? [{ id: 'reply', title: 'Reply to this message', run: reply }] : []),
@@ -634,7 +645,12 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
       ] : []}>{row}</ContextMenu>;
   });
   const history = page.issue ? <><ThreadReadIssue message={page.issue} /><Button label="Retry" accessibilityLabel={`Retry loading ${displayed?.title ?? start?.title ?? 'thread'}`} onPress={page.reload} disabled={page.loading} /></> : !start && !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null;
-  const markRead = readCandidates.length ? <Button label="Mark visible replies read" disabled={!editable} onPress={markVisibleRead} /> : null;
+  const markRead = <View style={{ gap: 6 }}>
+    {readCandidates.length || reminder && canEditReminder ? <Button label="Mark read" disabled={!editable || !!reminder && unreadAPI.state !== 'ready'} onPress={markVisibleRead} /> : null}
+    {thread && canEditReminder ? <Button label="Mark unread" disabled={!editable || unreadAPI.state !== 'ready'} onPress={markUnread} /> : null}
+    {thread && canEditReminder && unreadAPI.state === 'pending-api' ? <T dim>Unread reminders require the upcoming client API.</T> : null}
+    {reminder ? <T color={theme.accent}>Marked unread · return message kept</T> : null}
+  </View>;
   const closedHint = closed ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
     <View accessible accessibilityRole="text" accessibilityLabel={canReply ? 'Closed, replying keeps it closed' : 'Closed'} style={{ flex: 1 }}>
       <T dim>{canReply ? 'Closed · replying keeps it closed' : 'Closed'}</T>

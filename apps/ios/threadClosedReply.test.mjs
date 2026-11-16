@@ -5,6 +5,8 @@ import ts from 'typescript';
 import { ThreadEdits } from './threadEdits.ts';
 import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 import { threadClock, threadExactTime, threadRelativeTime } from './threadClock.ts';
+import { reminderFromSummary } from './unreadVisit.ts';
+import { nativeVisitPorts } from './unreadVisitTestPorts.mjs';
 
 const React = { createElement: (type, props, ...children) => ({ type, props, children: children.flat() }) };
 const find = (node, type) => findBy(node, candidate => candidate.type === type);
@@ -23,6 +25,7 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   const exports = {};
   // Components rendered as children stay inspectable without mounting a second hook scope.
   dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', threadClock, threadExactTime, threadRelativeTime,
+    reminderFromSummary, useUnreadVisit: nativeVisitPorts().useUnreadVisit,
     useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(), ...dependencies };
   new Function('exports', 'React', ...Object.keys(dependencies), outputText)(exports, React, ...Object.values(dependencies));
   return exports.component;
@@ -133,7 +136,7 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
     useStore: () => ({}), threadSummaryLine: summaryLine, ThreadRow: 'ThreadRow',
   })({ thread, open: false, toggle() {} });
   assert.deepEqual({ ...header.props, toggle: undefined }, {
-    title: 'Review', label: 'Review, 2 messages, closed, unread', unread: true, trailing: 'Closed', expanded: false, toggle: undefined,
+    title: 'Review', label: 'Review, 2 messages, closed, unread', unread: true, reminder: false, trailing: 'Closed', expanded: false, toggle: undefined,
   });
   const row = threadRow(header.props);
   assert.equal(row.props.accessibilityRole, 'button');
@@ -142,14 +145,15 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   assert.deepEqual(row.props.accessibilityValue, { text: 'Collapsed' });
   assert.equal(row.props.accessibilityHint, 'Shows Review');
   assert.equal(row.props.style.minHeight, 44);
-  const [dot, title, trailing] = row.children;
+  const [dot, title, reminder, trailing] = row.children;
+  assert.equal(reminder, null, 'natural unread alone does not display a reminder');
   assert.deepEqual([dot.props.style.width, dot.props.style.backgroundColor], [8, 'accent']);
   assert.deepEqual(title.children, ['Review'], 'no disclosure glyph, count, state words or age');
   assert.equal(title.props.style.flex, 1);
   assert.deepEqual(trailing.children, ['Closed']);
   const openRow = threadRow({ title: 'Review', label: 'Review, 1 message, open', expanded: true, toggle() {} });
   assert.equal(openRow.children[0].props.style.backgroundColor, 'transparent', 'read rows keep the 8pt spacer');
-  assert.equal(openRow.children[2], null, 'open rows show no trailing state');
+  assert.equal(openRow.children[3], null, 'open rows show no trailing state');
   assert.deepEqual(openRow.props.accessibilityValue, { text: 'Expanded' });
   assert.equal(openRow.props.accessibilityHint, 'Hides Review');
 
@@ -937,4 +941,37 @@ test('expanded summary Retry names the thread without changing the visible Retry
   const tree = expanded({ client: {}, initial: { id: 'thread/one', title: 'Review' }, refresh: 0 });
   assert.equal(button(tree, 'Retry').props.accessibilityLabel, 'Retry loading Review');
   assert.equal(find(tree, 'ThreadReadIssue').props.message, 'Updates paused');
+});
+
+test('unread visit buttons preserve the read-only boundary and pending API seam', () => {
+  for (const granted of [false, true]) for (const ready of [false, true]) {
+    const store = {
+      actor: 'person/one', data: { agents: [] }, status: 'online', actions: {},
+      threadActions: new Set(granted ? ['thread.read'] : []),
+      caps: { capabilities: granted ? [{ id: 'control.messages', state: 'granted' }] : [] },
+      unreadAPI: { state: ready ? 'ready' : 'pending-api' },
+    };
+    const body = compile('ThreadBody', 'type Quote', {
+      ...hooks(), useCallback: fn => fn, useRef: current => ({ current }),
+      useStore: () => store, threadEditScope: id => `edit/${id}`,
+      useThreadPage: () => ({ items: [{ id: 'message/reply', kind: 'message', content: 'Meaningful reply', actor_id: 'agent/one', accepted_at_unix_ms: 0 }] }),
+      useWindowDimensions: () => ({ width: 400, height: 800 }), useSafeAreaInsets: () => ({}),
+      useHeaderHeight: () => 0, useContext: () => 0, BottomTabBarHeightContext: {},
+      useNavigation: () => ({}), useThreadViewports: () => [], theme: {},
+      View: 'View', T: 'T', Button: 'Button', Pressable: 'Pressable', Markdown: 'Markdown', ContextMenu: 'ContextMenu',
+      ThreadActionFeedback: 'ThreadActionFeedback', ThreadComposer: 'ThreadComposer',
+    });
+    const tree = body({ client: {}, thread: { id: 'thread/one', title: 'Review', unread: true, state: 'open' } });
+    assert.equal(!!button(tree, 'Mark unread'), granted);
+    assert.equal(!!button(tree, 'Mark read'), granted);
+    if (granted) assert.equal(button(tree, 'Mark unread').props.disabled, !ready);
+  }
+});
+
+test('reminder presentation is separate from natural unread and never inferred from a pending seek', () => {
+  const line = compile('threadSummaryLine', '/** One thread row', {});
+  const reminder = { marks: [{ mark_id: 'opaque/summary-only', anchor_message_id: 'message/one' }], anchor_message_id: 'message/one' };
+  assert.equal(line({ unread: false, unread_reminder: reminder }, ', ', false), 'marked unread reminder');
+  assert.equal(line({ unread: true, unread_reminder: null }, ', ', false), 'unread');
+  assert.equal(line({ unread: false, anchor: { message_id: 'message/pending', state: 'pending' } }, ', ', false), '');
 });
