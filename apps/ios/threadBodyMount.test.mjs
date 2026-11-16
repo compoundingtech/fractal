@@ -89,7 +89,10 @@ const threadViewport = load('./threadViewport.tsx', {
 });
 const { useUnreadVisit } = load('./unreadVisitNative.ts', {
   react: React,
-  'react-native': { AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) } },
+  'react-native': {
+    AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
+    Keyboard: { addListener: () => ({ remove() {} }) },
+  },
   '@react-navigation/native': {
     useNavigation: () => navigation, useRoute: () => route,
     useFocusEffect: callback => React.useEffect(() => callback(), [callback]),
@@ -97,6 +100,7 @@ const { useUnreadVisit } = load('./unreadVisitNative.ts', {
   './unreadActions': { applyVisitEffect, UnreadVisitController },
   './unreadVisit': { unreadVisit },
   './threadViewport': { watchThreadViewports: threadViewport.watchThreadViewports, useThreadViewports: () => viewports },
+  './ownedPresentation': { ownedPresentations: { isOccluded: () => false, watch: () => () => {} } },
 }, {
   requestAnimationFrame: callback => { frames.set(++frameId, callback); return frameId; },
   cancelAnimationFrame: id => { frames.delete(id); },
@@ -151,6 +155,7 @@ function deliveryStore(thread) {
     actions: { markThreadRead: async (_summary, messageIds) => { store.reads.push([...messageIds]); return { how: 'sent' }; } },
   };
   const capsRef = { current: { capabilities: [{ id: 'threads-v1', version: 3, state: 'granted' }, ...['thread.clear-unread', 'thread.mark-unread'].map(id => ({ id, state: 'granted' }))] } };
+  const statusRef = { current: 'online' };
   const dependencies = {
     threadClient: member, threadActions: store.threadActions, status: 'online', proof: undefined,
     selected: { route: { kind: 'tailscale' } }, fabricMember: undefined, url: 'https://gateway.example', carrier: { snapshot: null },
@@ -159,7 +164,7 @@ function deliveryStore(thread) {
     actionReceiptCheck, sendBoundAction, resendBoundAction, setThreadRefresh: () => {}, ClientError,
     threadActionErrorText: error => error instanceof Error ? error.message : String(error),
     deliveriesByClient, setThreadDeliveryRevision: () => { store.threadDeliveries = new Map(ledger()); changed(); },
-    unreadPorts, client: member, capsRef, capsClient: { current: member }, unreadSupported, actions: store.actions,
+    unreadPorts, client: member, capsRef, capsClient: { current: member }, statusRef, unreadSupported, actions: store.actions,
     // Only the lost-reply repeat waits; it need not take a real second here.
     setTimeout: callback => setImmediate(callback),
   };
@@ -167,6 +172,8 @@ function deliveryStore(thread) {
   store.unreadClient = bindUnreadClient(member, unreadPorts.current);
   return { store, member, ledger, track: trackThreadDelivery, onChange: next => { changed = next; },
     setVersion(version) { capsRef.current.capabilities.find(capability => capability.id === 'threads-v1').version = version; store.unreadEnabled = unreadSupported(capsRef.current); changed(); },
+    setGrant(kind, state) { capsRef.current.capabilities.find(capability => capability.id === `thread.${kind}`).state = state; changed(); },
+    setOnline(online) { statusRef.current = online ? 'online' : 'offline'; store.status = statusRef.current; changed(); },
   };
 }
 
@@ -258,6 +265,9 @@ const sameRequest = (retried, original) => {
   assert.equal(retried.request.idempotency_key, original.request.idempotency_key, 'the original idempotency key');
   assert.deepEqual(retried.request.parameters, original.request.parameters, 'the original observed marks');
   assert.notDeepEqual(retried.request.fence, original.request.fence, 'only the fence is read again');
+  const { fence: _oldFence, ...oldIdentity } = original.request;
+  const { fence: _newFence, ...retriedIdentity } = retried.request;
+  assert.deepEqual(retriedIdentity, oldIdentity, 'all signed fields and original operation identity remain unchanged');
 };
 
 test('an unconfirmed Mark read clear is recovered after remount before a held metadata edit, with its original request', async () => {
@@ -345,5 +355,31 @@ test('bound unread retries never send after negotiated threads-v1 falls back to 
     assert.equal(retried.how, 'unconfirmed', 'a downgrade cannot resolve the earlier unknown outcome');
     assert.deepEqual([...harness.ledger().keys()], [`unread/${thread.id}`], 'retain the bound request until it can be confirmed');
     assert.deepEqual(harness.member.sends, before, 'no original or refreshed unread write is sent to v2');
+  }
+});
+
+test('specific unread action revocation or offline status blocks a retained retry without losing its identity', async () => {
+  for (const kind of ['mark', 'clear']) for (const blockedBy of ['grant', 'offline']) {
+    const thread = unconfirmedThread(), harness = deliveryStore(thread);
+    const edit = kind === 'mark'
+      ? { kind, anchor_message: 'message/reply', observed_marks: ['mark/one'] }
+      : { kind, observed_marks: ['mark/one'] };
+    const original = await harness.store.unreadClient.forThread(thread).actions.edit(edit);
+    assert.equal(original.how, 'unconfirmed');
+    const before = structuredClone(harness.member.sends);
+    if (blockedBy === 'grant') harness.setGrant(`${kind === 'mark' ? 'mark' : 'clear'}-unread`, 'denied');
+    else harness.setOnline(false);
+    harness.member.outcome = 'confirmed';
+    const blocked = await original.retry();
+    assert.equal(blocked.how, 'unconfirmed', `${kind}: ${blockedBy} cannot settle an unknown outcome`);
+    assert.deepEqual(harness.member.sends, before, `${kind}: no request while ${blockedBy} is unavailable`);
+    assert.deepEqual([...harness.ledger().keys()], [`unread/${thread.id}`]);
+    harness.setGrant(`${kind === 'mark' ? 'mark' : 'clear'}-unread`, 'granted');
+    harness.setOnline(true);
+    const restored = await blocked.retry();
+    assert.equal(restored.how, 'sent');
+    assert.equal(harness.member.sends.length, before.length + 1);
+    sameRequest(harness.member.sends.at(-1), before[0]);
+    assert.equal(harness.ledger().size, 0, 'only a legitimate receipt releases the original slot');
   }
 });

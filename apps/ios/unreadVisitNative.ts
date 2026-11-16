@@ -1,9 +1,10 @@
 import { useCallback, useMemo, useRef } from 'react';
-import { AppState } from 'react-native';
+import { AppState, Keyboard } from 'react-native';
 import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import { applyVisitEffect, UnreadVisitController, type UnreadActionResult, type UnreadAPI } from './unreadActions';
 import { unreadVisit, type UnreadSummary, type VisitEffect } from './unreadVisit';
 import { watchThreadViewports, useThreadViewports } from './threadViewport';
+import { ownedPresentations } from './ownedPresentation';
 
 export type VisitTimer = { cancel(): void };
 export type VisitClock = {
@@ -80,7 +81,7 @@ export function useUnreadVisit(options: UnreadVisitPlacement & {
     controller.observe(latest.current.summary ?? { unread: false, unread_reminder: null });
     controller.send({ kind: 'capabilities', ...currentGrants() });
     controller.send({ kind: 'foreground', value: AppState.currentState === 'active' });
-    controller.send({ kind: 'visibility', value: navigation.isFocused() });
+    controller.send({ kind: 'visibility', value: navigation.isFocused() && !ownedPresentations.isOccluded() });
   };
   const perform = async (effects: readonly VisitEffect[], capturedLease: object): Promise<UnreadActionResult> => {
     const release = (unsent: readonly VisitEffect[]) => {
@@ -91,7 +92,7 @@ export function useUnreadVisit(options: UnreadVisitPlacement & {
     let result: UnreadActionResult = { how: 'sent' };
     for (const [index, effect] of effects.entries()) {
       // Re-check the live grant, app and visit after every asynchronous boundary.
-      if (lease.current !== capturedLease || !navigation.isFocused() || AppState.currentState !== 'active') {
+      if (lease.current !== capturedLease || !navigation.isFocused() || AppState.currentState !== 'active' || ownedPresentations.isOccluded()) {
         release(effects.slice(index));
         return { how: 'failed', error: 'Open this thread in the foreground first.' };
       }
@@ -115,10 +116,10 @@ export function useUnreadVisit(options: UnreadVisitPlacement & {
   };
   const measure = async (intent?: 'read' | 'unread', expected?: readonly string[]): Promise<UnreadActionResult> => {
     const capturedLease = lease.current;
-    if (!capturedLease || !navigation.isFocused() || AppState.currentState !== 'active')
+    if (!capturedLease || !navigation.isFocused() || AppState.currentState !== 'active' || ownedPresentations.isOccluded())
       return { how: 'failed', error: 'Open this thread in the foreground first.' };
     const visible = await latest.current.measure();
-    if (lease.current !== capturedLease || !navigation.isFocused() || AppState.currentState !== 'active')
+    if (lease.current !== capturedLease || !navigation.isFocused() || AppState.currentState !== 'active' || ownedPresentations.isOccluded())
       return { how: 'failed', error: 'The visible messages changed before they could be verified.' };
     if (!intent && (!expected || visible.messageIds.length !== expected.length
       || visible.messageIds.some((id, index) => id !== expected[index])))
@@ -165,8 +166,8 @@ export function useUnreadVisit(options: UnreadVisitPlacement & {
     controller.send({ kind: 'start', foreground: AppState.currentState === 'active', visible: true });
     const changed = () => {
       invalidate();
-      controller.send({ kind: 'visibility', value: navigation.isFocused() });
-      if (!navigation.isFocused() || AppState.currentState !== 'active') return;
+      controller.send({ kind: 'visibility', value: navigation.isFocused() && !ownedPresentations.isOccluded() });
+      if (!navigation.isFocused() || AppState.currentState !== 'active' || ownedPresentations.isOccluded()) return;
       const captured = token;
       frame = requestAnimationFrame(() => {
         frame = undefined;
@@ -190,12 +191,24 @@ export function useUnreadVisit(options: UnreadVisitPlacement & {
       controller.send({ kind: 'foreground', value: state === 'active' });
       changed();
     });
+    const unwatchPresentations = ownedPresentations.watch(changed);
+    // Keyboard geometry can change without a scroll or host layout callback.
+    // Both ends of the transition invalidate pending native measurements.
+    const keyboard = [
+      Keyboard.addListener('keyboardWillShow', changed),
+      Keyboard.addListener('keyboardDidShow', changed),
+      Keyboard.addListener('keyboardWillHide', changed),
+      Keyboard.addListener('keyboardDidHide', changed),
+      Keyboard.addListener('keyboardWillChangeFrame', changed),
+      Keyboard.addListener('keyboardDidChangeFrame', changed),
+    ];
     changed();
     return () => {
       invalidate();
       lease.current = undefined;
       refresh.current = () => {};
-      unwatch(); app.remove();
+      unwatch(); app.remove(); unwatchPresentations();
+      for (const subscription of keyboard) subscription.remove();
       // Focus-effect cleanup also occurs on rerender/remount. Only a navigation
       // exit ends the visit; detaching geometry merely suspends its evidence.
       controller.send({ kind: 'visibility', value: false });

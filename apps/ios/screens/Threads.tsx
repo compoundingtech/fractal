@@ -20,7 +20,7 @@ import { visibleThreadMessages, type ThreadBounds } from '../threadVisibility';
 import { measureThreadBounds, measureThreadViewport, threadViewportChanged, ThreadViewport, useThreadViewports } from '../threadViewport';
 import { anchorPresentation, reminderFromSummary } from '../unreadVisit';
 import { useUnreadVisit, useUnreadVisitEntry } from '../unreadVisitNative';
-import { pendingUnreadAPI } from '../unreadActions';
+import { pendingUnreadAPI, type UnreadAPI } from '../unreadActions';
 import type { UnreadList, UnreadReadError, UnreadSeek } from '../unreadClient';
 import { theme } from '../theme';
 import { Button, Field, Markdown, SystemScreen, SystemText, T, useSystemColors, useTextAppearance, type MarkdownLine } from '../ui';
@@ -351,7 +351,8 @@ function ExpandedContextThread({ client, initial, refresh, placement, seekRemind
 
 /** A marked thread opens around its private return message, read-only: the seek never
  * marks anything read or cleared. Only a current anchor has a body; unavailable and
- * pending anchors show their notice alone, with no history and no new unread signal.
+ * pending anchors show their notice alone, with no history and no new unread signal,
+ * beside an explicit Clear reminder that needs no body.
  */
 function ReminderThreadBody({ client, thread, placement, onOpen, revealComposer }: {
   client: ThreadClient; thread: ThreadSummary; placement: string; onOpen: () => void; revealComposer?: (row: View) => void;
@@ -385,6 +386,7 @@ function ReminderThreadBody({ client, thread, placement, onOpen, revealComposer 
     case 'unavailable':
     case 'pending': return <View style={{ gap: 6, paddingBottom: 8 }}>
       <T dim>{anchorPresentation(result.anchor).notice}</T>
+      <ClearReminder thread={thread} />
       <Button label="Open thread" hint={`Opens ${thread.title}`} onPress={onOpen} />
     </View>;
     case 'error': return <View style={{ gap: 6, paddingBottom: 8 }}>
@@ -591,15 +593,15 @@ function useThreadSummary(client: ThreadClient, id: string | undefined, refresh:
 }
 
 /** Only whole rendered lines are evidence, never paragraph spacing, rules or margins.
- * A body offers its bounds only while at least two of its lines and its last line are
- * fully inside the viewport; otherwise it fails closed with no bounds at all.
+ * A body offers its bounds only while its last line and two of its lines are fully inside
+ * the viewport; a one-line body needs its only line. Otherwise it fails closed with no bounds.
  */
 function renderedLineEvidence(viewport: ThreadBounds | undefined, bounds: ThreadBounds | undefined, lines: readonly MarkdownLine[] | undefined): { bounds?: ThreadBounds; lineHeight?: number } {
   if (!viewport || !bounds || !lines?.length) return {};
   const inside = (line: MarkdownLine) => bounds.y + line.y >= viewport.y && bounds.y + line.y + line.height <= viewport.y + viewport.height;
   const visible = lines.filter(inside).length;
   const lineHeight = Math.max(...lines.map(line => line.height));
-  return visible >= 2 && inside(lines[lines.length - 1]) ? { bounds, lineHeight } : { lineHeight };
+  return visible >= Math.min(lines.length, 2) && inside(lines[lines.length - 1]) ? { bounds, lineHeight } : { lineHeight };
 }
 
 function threadTextIssue(content: string): string | undefined {
@@ -700,31 +702,15 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
     setQuote(message);
     setQuoteFocus(previous => previous + 1);
   };
-  const [editing, setEditing] = useState(false);
-  const [editResult, setEditResult] = useState<ThreadEditResult>();
+  const { editable, feedback: editFeedback, busy: editBusy, run: runEdit, retry: retryEdit, setResult: setEditResult } = useThreadEditing(thread);
   const [renameTitle, setRenameTitle] = useState<string>();
-  const editDelivery = thread ? threadDeliveries?.get(threadEditScope(thread.id)) : undefined;
-  // The store retains a bound unread mark or clear under `unread/<thread>`, as it retains metadata
-  // edits under threadEditScope, so a remount recovers either original request. Explicit
-  // precedence: the unread delivery's retry is offered first; the metadata edit's retry follows
-  // once that is confirmed. Any retained delivery blocks new edits until it is resolved.
-  const unreadDelivery = thread ? threadDeliveries?.get(`unread/${thread.id}`) : undefined;
-  const heldDeliveries = [unreadDelivery, editDelivery].filter(delivery => delivery !== undefined);
-  const recovered = heldDeliveries.find(delivery => delivery.retry)?.retry;
-  const editFeedback = recovered ? { how: 'unconfirmed' as const, retry: recovered } : editResult;
-  const editable = status === 'online' && !editing && !heldDeliveries.length && editFeedback?.how !== 'unconfirmed';
-  const runEdit = async (send: () => Promise<ThreadEditResult>, retained = false) => {
-    setEditing(true);
-    setEditResult(undefined);
-    try { const result = await send(); setEditResult(retained && result.how === 'unconfirmed' ? undefined : result); }
-    finally { setEditing(false); }
-  };
   const canMarkRead = !!thread?.unread && !!actor && threadActions.has('thread.read');
   // Live grants from the current capability set, re-checked again when an edit is sent.
   const unreadAPI = thread ? unreadClient.forThread(thread) : pendingUnreadAPI;
   const canClearReminder = unreadAPI.state === 'ready' && !!actor && threadActions.has('thread.clear-unread');
   const canMarkUnread = canClearReminder && threadActions.has('thread.mark-unread');
   const reminder = unreadAPI.state === 'ready' ? reminderFromSummary(thread) : undefined;
+  const clearReminder = canClearReminder ? reminderClear(unreadAPI, thread) : undefined;
   const readCandidates = canMarkRead ? page.items.filter((event): event is ThreadMessage =>
     event.kind === 'message' && !!event.content.trim() && !ownMessage(event.actor_id)) : [];
   // Rendered body lines, as laid out; a body without them is never visible evidence.
@@ -815,6 +801,7 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
   const newer = around?.previous_cursor && onOpen ? <T dim>Newer messages follow. Open the thread for the latest.</T> : null;
   const markRead = <View style={{ gap: 6 }}>
     {readCandidates.length || reminder && canClearReminder ? <Button label="Mark read" disabled={!editable} onPress={markVisibleRead} /> : null}
+    {clearReminder ? <Button label="Clear reminder" hint="Removes the marked unread reminder without reading replies" disabled={!editable} onPress={() => void runEdit(clearReminder)} /> : null}
     {thread && canMarkUnread ? <Button label="Mark unread" disabled={!editable} onPress={markUnread} /> : null}
     {reminder ? <T color={theme.accent}>Marked unread · return message kept</T> : null}
   </View>;
@@ -837,9 +824,7 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
       <Button label="Cancel rename" onPress={() => setRenameTitle(undefined)} />
     </View>
   </View> : null;
-  const editStatus = <ThreadActionFeedback result={editFeedback} busy={editing || heldDeliveries.some(delivery => !delivery.retry) || status !== 'online'} onRetry={() => {
-    if (editFeedback?.how === 'unconfirmed') void runEdit(editFeedback.retry, !!recovered);
-  }} />;
+  const editStatus = <ThreadActionFeedback result={editFeedback} busy={editBusy} onRetry={retryEdit} />;
   const threadButtons = thread ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
     {threadActions.has('thread.rename') ? <Button label="Rename" hint={`Renames ${displayed!.title}`} onPress={() => setRenameTitle(displayed!.title)} disabled={!editable} /> : null}
     {!closed && threadActions.has('thread.close') ? <Button label="Close thread" hint={`Closes ${displayed!.title}`} disabled={!editable} onPress={changeState} /> : null}
@@ -854,6 +839,62 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
   return <View style={{ gap: 6, paddingBottom: 8 }}>
     {earlier}{rows}{newer}{history}{markRead}{closedHint}{composer}{unavailable}{flashLine}{renameField}{editStatus}{threadButtons}
   </View>;
+}
+
+/** Clear reminder for a return message with no body here: a pending or unavailable anchor.
+ * Read-only connections get no control, but a retained clear still offers its retry.
+ */
+function ClearReminder({ thread }: { thread: ThreadSummary }) {
+  const { actor, threadActions, unreadClient } = useStore();
+  const { editable, feedback, busy, run, retry } = useThreadEditing(thread);
+  const api = unreadClient.forThread(thread);
+  const clear = api.state === 'ready' && !!actor && threadActions.has('thread.clear-unread') ? reminderClear(api, thread) : undefined;
+  if (!clear && !feedback) return null;
+  return <View style={{ gap: 6 }}>
+    {clear ? <Button label="Clear reminder" hint="Removes the marked unread reminder without reading replies" disabled={!editable} onPress={() => void run(clear)} /> : null}
+    <ThreadActionFeedback result={feedback} busy={busy} onRetry={retry} />
+  </View>;
+}
+
+/** An explicit clear names exactly the mark IDs the current summary shows, never IDs from a
+ * receipt, a seek or the visit's entry capture, and sends them through the store's bound
+ * delivery, which re-checks the live grant. It never seeks, measures, waits out a dwell or
+ * acknowledges messages, so it works whether the return message is current, scrolled away,
+ * pending or unavailable. The next summary, not the receipt, removes the reminder.
+ */
+function reminderClear(api: UnreadAPI, thread: ThreadSummary | undefined): (() => Promise<ThreadEditResult>) | undefined {
+  const actions = api.state === 'ready' ? api.actions : undefined;
+  const reminder = actions && reminderFromSummary(thread);
+  if (!actions || !reminder) return undefined;
+  const observed_marks = reminder.marks.map(mark => mark.mark_id);
+  return () => actions.edit({ kind: 'clear', observed_marks });
+}
+
+/** One thread's edit state, shared by its body and by a reminder notice without one. The store
+ * retains a bound unread mark or clear under `unread/<thread>`, as it retains metadata edits
+ * under threadEditScope, so a remount recovers either original request. Explicit precedence:
+ * the unread delivery's retry is offered first; the metadata edit's retry follows once that is
+ * confirmed. Any retained delivery blocks new edits until it is resolved.
+ */
+function useThreadEditing(thread: ThreadSummary | undefined) {
+  const { status, threadDeliveries } = useStore();
+  const [editing, setEditing] = useState(false);
+  const [result, setResult] = useState<ThreadEditResult>();
+  const editDelivery = thread ? threadDeliveries?.get(threadEditScope(thread.id)) : undefined;
+  const unreadDelivery = thread ? threadDeliveries?.get(`unread/${thread.id}`) : undefined;
+  const held = [unreadDelivery, editDelivery].filter(delivery => delivery !== undefined);
+  const recovered = held.find(delivery => delivery.retry)?.retry;
+  const feedback = recovered ? { how: 'unconfirmed' as const, retry: recovered } : result;
+  const editable = status === 'online' && !editing && !held.length && feedback?.how !== 'unconfirmed';
+  const run = async (send: () => Promise<ThreadEditResult>, retained = false) => {
+    setEditing(true);
+    setResult(undefined);
+    try { const next = await send(); setResult(retained && next.how === 'unconfirmed' ? undefined : next); }
+    finally { setEditing(false); }
+  };
+  const busy = editing || held.some(delivery => !delivery.retry) || status !== 'online';
+  const retry = () => { if (feedback?.how === 'unconfirmed') void run(feedback.retry, !!recovered); };
+  return { editable, feedback, busy, run, retry, setResult };
 }
 
 type Quote = { id: string; from: string; text: string };

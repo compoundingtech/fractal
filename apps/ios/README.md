@@ -62,8 +62,12 @@ Timeline relative ages are visual-only: message and lifecycle accessibility labe
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.
-The body must have full width, its trailing end visible, and at least two lines.
-Visibility, focus, AppState and layout changes reset the timer. Collapsed rows,
+The body must have full width, its trailing end visible, and visible height of at
+least min(actual body height, two rendered lines): a fully visible one-line body
+qualifies, but a clipped one-line body or one line of a longer body does not.
+Visibility, focus, AppState, occlusion and layout changes reset the timer. Owned
+action sheets/modals/menus suspend the lease until dismissal and a fresh full dwell;
+keyboard show/hide also invalidates measured geometry. Collapsed rows,
 background tabs, clipped edges and author labels never count. A mission screen's
 outer scroll view reports its scroll and layout too, so its clipping participates.
 Rerenders such as the shared second tick keep a message's laid-out lines; only new
@@ -77,6 +81,9 @@ Manual clear and a new mark supersede all observed IDs, preserving unseen concur
 marks. IDs enter only through `Summary.unread_reminder`, never action receipts,
 timestamps or locally generated identifiers. Unavailable anchors keep their reminder;
 pending seek metadata shows no body and cannot activate a badge.
+Explicit Clear reminder is independent of seek, geometry and dwell: it clears only
+known IDs captured from the current authoritative summary, including when its
+anchor is pending, unavailable or offscreen. It never acknowledges natural messages.
 
 `unreadActions.ts` is the typed action boundary; `unreadClient.ts` binds canonical
 generated `threadMarkUnread`, `threadClearUnread`, `threadTimeline({around})`, and
@@ -90,7 +97,10 @@ metadata cannot create a badge.
 The new reminder list, around reads and mark/clear writes require a granted
 `threads-v1 >= 3`. Version 2 keeps the existing thread and natural-read experience
 but hides reminder UI and sends none of the new queries or actions. An already-open
-menu or retained retry also re-checks the negotiated version before sending; an
+menu or retained retry also re-checks the negotiated version, exact mark/clear grant
+and current online status before sending. Revocation or going offline preserves
+the original unknown-outcome ledger, request identity and signed fields; restoration
+allows that same request to resolve through legitimate receipt verification. An
 explicit unsupported read reports Upgrade required locally, never a fetch failure.
 Generic `thread-unavailable` seek refusal maps to unavailable, not Pending. Only an
 explicit Pending response can show that state; neither exposes an unrelated body.
@@ -106,9 +116,10 @@ count, and the section header adds no count of its own (visually or for VoiceOve
 Opening a marked row seeks its return anchor. The section sits on Now above Recently
 closed threads and is read on focus and refresh, not followed. A current anchor opens
 the shared thread body on that page (older history continues from it; Open thread
-shows the latest); unavailable and pending anchors show only their notice. Visible
-evidence counts whole rendered Markdown lines (two, including the last), never
-paragraph spacing. Loading wrappers (detail, Inbox start, expanded rows) start the
+shows the latest); unavailable and pending anchors show their notice and, with the
+current write grant, an explicit Clear reminder. Visible evidence counts whole
+rendered Markdown lines (up to two, including the last), never paragraph spacing.
+Loading wrappers (detail, Inbox start, expanded rows) start the
 visit entry with the same placement key before the body mounts, so a reminder that
 loads after entry is never captured. Focused node coverage lives beside the visit
 reducer, native lifecycle, client adapter, list UI and paging helper; a mounted shared

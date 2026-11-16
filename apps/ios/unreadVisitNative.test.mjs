@@ -142,3 +142,152 @@ test('a failed natural read releases the unsent clear for the next stable view',
   ports.scroll(); await stable(ports);
   assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/captured'] }]);
 });
+
+test('an action sheet opening at 300ms suspends reads and captured clears until a fresh 500ms', async () => {
+  const { ports } = mount();
+  const edits = editable(ports);
+  ports.options.summary.unread_reminder = reminder('opaque/captured');
+  ports.focus(); await ports.flush(); await ports.advance(300);
+  ports.showSheet(); await ports.flush(); await ports.advance(1000);
+  assert.deepEqual(ports.reads, []);
+  assert.deepEqual(edits, []);
+  ports.dismissSheet(); await ports.flush(); await ports.advance(499);
+  assert.deepEqual(ports.reads, []);
+  assert.deepEqual(edits, []);
+  await ports.advance(1);
+  assert.deepEqual(ports.reads, [['message/visible']]);
+  assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/captured'] }]);
+});
+
+test('opening and dismissing a sheet fences queued initial and expiry native measurements', async () => {
+  for (const phase of ['initial', 'expiry']) {
+    const { ports } = mount();
+    const pending = Promise.withResolvers();
+    if (phase === 'initial') ports.options.measure = () => pending.promise;
+    ports.focus(); await ports.flush();
+    if (phase === 'expiry') {
+      ports.options.measure = () => pending.promise;
+      await ports.advance(500);
+    }
+    ports.showSheet(); ports.dismissSheet();
+    ports.options.measure = async () => ({ messageIds: ['message/fresh'], readMessageIds: ['message/fresh'] });
+    pending.resolve({ messageIds: ['message/stale'], readMessageIds: ['message/stale'] });
+    await ports.advance(500);
+    assert.deepEqual(ports.reads, [], phase);
+    await ports.flush(); await ports.advance(499);
+    assert.deepEqual(ports.reads, [], phase);
+    await ports.advance(1);
+    assert.deepEqual(ports.reads, [['message/fresh']], phase);
+  }
+});
+
+test('nested presentation owners release independently and idempotently', async () => {
+  const { ports } = mount();
+  ports.focus(); await ports.flush(); await ports.advance(300);
+  const release = ports.ownedPresentations.acquire();
+  ports.showSheet();
+  release(); release();
+  await stable(ports);
+  assert.deepEqual(ports.reads, []);
+  ports.dismissSheet(); await ports.flush(); await ports.advance(499);
+  assert.deepEqual(ports.reads, []);
+  await ports.advance(1);
+  assert.equal(ports.reads.length, 1);
+});
+
+test('a sheet callback opening another sheet never uncovers the body between them', async () => {
+  const { ports } = mount();
+  ports.focus(); await ports.flush();
+  ports.showSheet(() => ports.showSheet());
+  ports.dismissSheet();
+  assert.equal(ports.ownedPresentations.isOccluded(), true);
+  await stable(ports); assert.deepEqual(ports.reads, []);
+  ports.dismissSheet(); await stable(ports);
+  assert.equal(ports.reads.length, 1);
+});
+
+test('owned Modal holds occlusion until native dismissal and releases on unmount', async () => {
+  const { ports } = mount();
+  ports.focus(); await ports.flush();
+  let dismissed = 0;
+  const modal = ports.modal({ visible: true, onDismiss: () => dismissed++ });
+  modal.componentDidMount();
+  modal.props = { ...modal.props, visible: false };
+  modal.componentDidUpdate();
+  await stable(ports); assert.deepEqual(ports.reads, []);
+  modal.render().props.onDismiss();
+  assert.equal(dismissed, 1);
+  await stable(ports); assert.equal(ports.reads.length, 1);
+  modal.componentWillUnmount();
+  assert.equal(ports.ownedPresentations.isOccluded(), false);
+  const removed = ports.modal({ visible: true });
+  removed.componentDidMount(); removed.componentWillUnmount();
+  assert.equal(ports.ownedPresentations.isOccluded(), false);
+});
+
+test('keyboard show, hide and frame events without scrolling invalidate the entire dwell lease', async () => {
+  for (const event of ['keyboardWillShow', 'keyboardDidShow', 'keyboardWillHide', 'keyboardDidHide', 'keyboardWillChangeFrame', 'keyboardDidChangeFrame']) {
+    const { ports } = mount();
+    ports.focus(); await ports.flush(); await ports.advance(300);
+    ports.keyboard(event); await ports.flush(); await ports.advance(499);
+    assert.deepEqual(ports.reads, [], event);
+    await ports.advance(1); assert.equal(ports.reads.length, 1, event);
+  }
+});
+
+test('keyboard transitions invalidate late queued measurements even without scrolling', async () => {
+  const { ports } = mount();
+  const pending = Promise.withResolvers();
+  ports.options.measure = () => pending.promise;
+  ports.focus(); await ports.flush();
+  ports.keyboard('keyboardWillShow'); ports.keyboard('keyboardDidShow');
+  ports.options.measure = async () => ({ messageIds: ['message/fresh'], readMessageIds: ['message/fresh'] });
+  pending.resolve({ messageIds: ['message/stale'], readMessageIds: ['message/stale'] });
+  await ports.advance(500); assert.deepEqual(ports.reads, []);
+  await stable(ports); assert.deepEqual(ports.reads, [['message/fresh']]);
+});
+
+test('sheet to prompt to alert keeps ownership through nested native callbacks', async () => {
+  const { ports } = mount();
+  const words = [];
+  ports.focus(); await ports.flush(); await ports.advance(300);
+  ports.showSheet(() => ports.prompt(text => { words.push(text); ports.alert(); }));
+  ports.dismissSheet();
+  await stable(ports); assert.deepEqual(ports.reads, []);
+  ports.dismissAlert(1, 'Keep this');
+  assert.deepEqual(words, ['Keep this']);
+  await stable(ports); assert.deepEqual(ports.reads, []);
+  ports.dismissAlert(); await ports.flush(); await ports.advance(499);
+  assert.deepEqual(ports.reads, []);
+  await ports.advance(1); assert.equal(ports.reads.length, 1);
+});
+
+test('native prompt cancellation and alert dismissal release their own leases', async () => {
+  const { ports } = mount();
+  ports.focus(); await ports.flush();
+  ports.prompt(() => assert.fail('Cancel must not submit'));
+  ports.dismissAlert(0);
+  assert.equal(ports.ownedPresentations.isOccluded(), false);
+  let dismissed = 0;
+  ports.alert(undefined, { cancelable: true, onDismiss: () => dismissed++ });
+  await stable(ports); assert.deepEqual(ports.reads, []);
+  ports.cancelAlert();
+  assert.equal(dismissed, 1);
+  await stable(ports); assert.equal(ports.reads.length, 1);
+});
+
+test('occlusion while natural read is in flight releases an unsent automatic clear', async () => {
+  const { ports } = mount();
+  const edits = editable(ports);
+  const read = Promise.withResolvers();
+  ports.options.summary.unread_reminder = reminder('opaque/captured');
+  ports.options.read = () => read.promise;
+  ports.focus(); await stable(ports);
+  ports.showSheet();
+  read.resolve({ how: 'sent' });
+  await ports.advance(500);
+  assert.deepEqual(edits, []);
+  ports.options.read = async () => ({ how: 'sent' });
+  ports.dismissSheet(); await stable(ports);
+  assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/captured'] }]);
+});

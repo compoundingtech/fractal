@@ -1,7 +1,8 @@
 import { createContext, useContext, useCallback, useRef, type ReactNode, type Ref } from 'react';
 import { quality } from './qualityNative';
 import * as Clipboard from 'expo-clipboard';
-import { ActionSheetIOS, Linking, Pressable, StyleSheet, Text, TextInput, View, useColorScheme, type LayoutChangeEvent, type StyleProp, type TextInputProps, type TextLayoutEventData, type NativeSyntheticEvent, type TextStyle, type ViewStyle } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, TextInput, View, useColorScheme, type LayoutChangeEvent, type StyleProp, type TextInputProps, type TextLayoutEventData, type NativeSyntheticEvent, type TextStyle, type ViewStyle } from 'react-native';
+import { showOwnedActionSheet } from './ownedPresentationNative';
 import { fonts, inLight, lightTheme, systemColors, theme, type Theme } from './theme';
 import type { Run } from './markdown';
 import { markdown } from './markdown';
@@ -153,7 +154,7 @@ function runStyle(run: Run, base: TextStyle, palette: Theme): StyleProp<TextStyl
 }
 // A path in a message names a file on the writer's machine: say so, and offer to copy it.
 function showPath(path: string) {
-  ActionSheetIOS.showActionSheetWithOptions(
+  showOwnedActionSheet(
     { title: 'A file on the writer’s machine', message: path, options: ['Copy path', 'Cancel'], cancelButtonIndex: 1 },
     index => { if (index === 0) void Clipboard.setStringAsync(path); },
   );

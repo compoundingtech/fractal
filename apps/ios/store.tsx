@@ -190,10 +190,13 @@ function useAppStore(proof?: FabricProfile) {
   const foreground = useRef(new ForegroundGate(proof && !proof.ready ? 'background' : AppState.currentState));
   const [feed, setFeed] = useState<Feed | null>(null), [connectionIssue, setConnectionIssue] = useState('');
   const [cachedHostId, setCachedHostId] = useState('');
-  const [caps, setCaps] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [caps, setCapsState] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
-  capsRef.current = caps;
+  const setCaps = useCallback((next: Capabilities | null) => {
+    capsRef.current = next;
+    setCapsState(next);
+  }, []);
   const [availability, setAvailability] = useState<{ person: PersonAvailability | null; note: DirectiveNote | null; issue: string }>(NO_AVAILABILITY);
   const [autoResolved, setAutoResolved] = useState(NO_AUTO_RESOLVED);
   // Episodes with an override in flight: the ref refuses a second send at once, the state redraws the rows.
@@ -205,7 +208,14 @@ function useAppStore(proof?: FabricProfile) {
   const presence = useRef<PresenceReporter | null>(null);
   useEffect(() => foreground.current.subscribe(active => { if (active) lastInput.current = Date.now(); }), []);
   const noteInput = useCallback(() => { lastInput.current = Date.now(); presence.current?.input(); }, []);
-  const [status, setStatus] = useState<Status>('setup');
+  const [status, setStatusState] = useState<Status>('setup');
+  const statusRef = useRef(status);
+  const setStatus = useCallback((next: Status | ((previous: Status) => Status)) => {
+    const value = typeof next === 'function' ? next(statusRef.current) : next;
+    // Native connection callbacks can race a retained retry before React renders.
+    statusRef.current = value;
+    setStatusState(value);
+  }, []);
   const [hasSynced, setHasSynced] = useState(false);
   // The page `sync` notice (this host lacks records a peer holds): the socket's frames carry none, so a
   // small page read supplies it while online. Unread is `undefined`, and level with its peers is `null`.
@@ -1071,6 +1081,10 @@ function useAppStore(proof?: FabricProfile) {
       }
       if ((kind === 'mark-unread' || kind === 'clear-unread') && (capsClient.current !== threadClient || !unreadSupported(capsRef.current))) {
         throw new Error('Upgrade the connected Fractal to use unread reminders.');
+      }
+      if ((kind === 'mark-unread' || kind === 'clear-unread') && (statusRef.current !== 'online'
+        || !capsRef.current?.capabilities.some(capability => capability.id === `thread.${kind}` && capability.state === 'granted'))) {
+        throw new Error('The original unread change is waiting for an online connection with its action permission.');
       }
     };
     const id = actionId();

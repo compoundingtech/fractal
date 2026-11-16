@@ -43,7 +43,7 @@ function render(item, enabled = true, start = true) {
   const hookDeps = {
     useStore, useMemo: f => f(), autoResolvedRows, agentName, needsWords, OVERRIDE_TITLE, overrideAnswer, overrideCopy,
     Alert: { alert: unexpectedNativeCall('Alert.alert'), prompt: unexpectedNativeCall('Alert.prompt') },
-    ActionSheetIOS: { showActionSheetWithOptions: unexpectedNativeCall('ActionSheetIOS.showActionSheetWithOptions') },
+    showOwnedActionSheet: unexpectedNativeCall('showOwnedActionSheet'),
   };
   const InboxThread = component('./screens/Threads.tsx', 'InboxThread', 'InboxThreadStart', {
     useStore: () => ({ threadClient: enabled ? {} : null, threadActions: new Set(start ? ['thread.start'] : []) }),

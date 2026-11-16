@@ -1,6 +1,7 @@
 import { markdownSource, optionalSource } from '../../../clients/typescript/fractal-client/markdown-text';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { Alert, Keyboard, KeyboardAvoidingView, Linking, Pressable, ScrollView, SectionList, TextInput, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Linking, Pressable, ScrollView, SectionList, TextInput, View } from 'react-native';
+import { OwnedAlert as Alert } from '../ownedPresentationNative';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';

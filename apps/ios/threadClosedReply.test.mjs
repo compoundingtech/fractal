@@ -1048,16 +1048,167 @@ test('visible evidence counts whole rendered body lines, never paragraph spacing
   const { visibleThreadMessages } = await import('./threadVisibility.ts');
   const viewport = { x: 0, y: 0, width: 400, height: 100 };
   const bounds = (y, height) => ({ x: 0, y, width: 400, height });
-  // One line plus a trailing spacer: a 2-line-tall box, but only one line.
-  assert.deepEqual(evidence(viewport, bounds(40, 40), [{ y: 0, height: 20 }]), { lineHeight: 20 });
+  // A one-line body whose only line is whole offers its bounds; the shared rule then needs the whole body.
+  const oneLine = evidence(viewport, bounds(40, 20), [{ y: 0, height: 20 }]);
+  assert.deepEqual(oneLine, { bounds: bounds(40, 20), lineHeight: 20 });
+  // A clipped one-line body fails closed, at either edge.
+  assert.deepEqual(evidence(viewport, bounds(90, 20), [{ y: 0, height: 20 }]), { lineHeight: 20 });
+  assert.deepEqual(evidence(viewport, bounds(-10, 20), [{ y: 0, height: 20 }]), { lineHeight: 20 });
+  // One visible line of a two-line body is not evidence, even with its trailing line whole.
+  assert.deepEqual(evidence(viewport, bounds(-20, 40), [{ y: 0, height: 20 }, { y: 20, height: 20 }]), { lineHeight: 20 });
   // Two lines separated by a spacer, the second cut off: the trailing line is not visible.
   assert.deepEqual(evidence(viewport, bounds(50, 60), [{ y: 0, height: 20 }, { y: 40, height: 20 }]), { lineHeight: 20 });
   // Two whole lines, last included: bounds are offered to the shared geometry rule.
   const shown = evidence(viewport, bounds(20, 60), [{ y: 0, height: 20 }, { y: 40, height: 20 }]);
   assert.deepEqual(shown, { bounds: bounds(20, 60), lineHeight: 20 });
-  assert.deepEqual(visibleThreadMessages(viewport, [{ id: 'two', ...shown }, { id: 'one', ...evidence(viewport, bounds(40, 40), [{ y: 0, height: 20 }]) }], 20), ['two']);
+  assert.deepEqual(visibleThreadMessages(viewport, [
+    { id: 'two', ...shown }, { id: 'one', ...oneLine },
+    { id: 'clipped-one', ...evidence(viewport, bounds(90, 20), [{ y: 0, height: 20 }]) },
+    { id: 'one-of-two', ...evidence(viewport, bounds(-20, 40), [{ y: 0, height: 20 }, { y: 20, height: 20 }]) },
+  ], 20), ['two', 'one']);
   assert.deepEqual(evidence(viewport, bounds(0, 40), undefined), {}, 'no laid-out lines fails closed');
   assert.deepEqual(evidence(undefined, bounds(0, 40), [{ y: 0, height: 20 }, { y: 20, height: 20 }]), {});
+});
+
+test('a fully visible one-line reply is read, clears its viewed reminder and can be the Mark unread return anchor; a clipped one is not', async () => {
+  const { visibleThreadMessages } = await import('./threadVisibility.ts');
+  const message = { id: 'message/one-line', kind: 'message', content: 'Short reply', actor_id: 'agent/one', accepted_at_unix_ms: 0 };
+  const visit = async ({ bounds, unread, unread_reminder }) => {
+    const ports = nativeVisitPorts();
+    const reads = [], edits = [];
+    const store = {
+      actor: 'person/one', data: { agents: [] }, status: 'online',
+      threadActions: new Set(['thread.read', 'thread.clear-unread', 'thread.mark-unread']),
+      actions: { markThreadRead: async (_thread, ids) => { reads.push([...ids]); return { how: 'sent' }; } },
+      unreadClient: { forThread: () => ({ state: 'ready', actions: {
+        edit: async edit => { edits.push(edit); return { how: 'sent' }; }, seek: () => assert.fail('the body never seeks'),
+      } }) },
+    };
+    const body = compile('ThreadBody', 'type Quote', {
+      ...bodyDependencies(store), useUnreadVisit: options => ports.useUnreadVisit({ ...options, clock: ports.options.clock }), useThreadPage: () => ({ items: [message] }),
+      measureThreadViewport: async () => ({ x: 0, y: 0, width: 400, height: 100 }),
+      measureThreadBounds: async view => view ? bounds : undefined, visibleThreadMessages, THREAD_WINDOW_SIZE: 20,
+    });
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread, unread_reminder };
+    const tree = body({ client: {}, thread, placement: 'thread:thread/one' });
+    findBy(tree, node => node.type === 'View' && node.props?.collapsable === false).props.ref({});
+    find(tree, 'Markdown').props.onLines([{ y: 0, height: 20 }]);
+    ports.focus(); await ports.flush(); await ports.advance(500);
+    return { tree, reads, edits };
+  };
+  const whole = { x: 0, y: 40, width: 400, height: 20 };
+  const clipped = { ...whole, y: 90 };
+  let result = await visit({ bounds: whole, unread: true, unread_reminder: reminderOn('message/one-line') });
+  assert.deepEqual(result.reads, [['message/one-line']], 'a whole one-line reply is natural read after the dwell');
+  assert.deepEqual(result.edits, [{ kind: 'clear', observed_marks: ['opaque/summary-only'] }], 'its viewed captured reminder clears');
+  result = await visit({ bounds: clipped, unread: true, unread_reminder: reminderOn('message/one-line') });
+  assert.deepEqual([result.reads, result.edits], [[], []], 'a clipped one-line reply is no evidence');
+
+  for (const [bounds, expected] of [[whole, [{ kind: 'mark', anchor_message: 'message/one-line', observed_marks: [] }]], [clipped, []]]) {
+    result = await visit({ bounds, unread: false, unread_reminder: null });
+    button(result.tree, 'Mark unread').props.onPress();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(result.edits, expected, 'only a whole one-line reply can be the return anchor');
+    assert.deepEqual(result.reads, []);
+  }
+});
+
+const twoMarks = anchor => ({ marks: [
+  { mark_id: 'opaque/first', anchor_message_id: anchor }, { mark_id: 'opaque/second', anchor_message_id: 'message/later' },
+], anchor_message_id: anchor });
+
+test('Clear reminder in a body sends the observed summary marks for a current or scrolled-away anchor without reading, measuring or seeking', async () => {
+  const page = { items: [{ id: 'message/reply', kind: 'message', content: 'Meaningful reply', actor_id: 'agent/one', accepted_at_unix_ms: 0 }], next_cursor: null };
+  for (const anchor of ['message/reply', 'message/offscreen']) for (const granted of [true, false]) {
+    const edits = [];
+    const store = {
+      actor: 'person/one', data: { agents: [] }, status: 'online',
+      threadActions: new Set(granted ? ['thread.read', 'thread.clear-unread'] : ['thread.read']),
+      actions: { markThreadRead: () => assert.fail('an explicit clear never acknowledges messages') },
+      unreadClient: { forThread: () => ({ state: 'ready', actions: {
+        edit: async edit => { edits.push(edit); return { how: 'sent' }; }, seek: () => assert.fail('an explicit clear never seeks'),
+      } }) },
+    };
+    const never = () => assert.fail('an explicit clear needs no geometry or dwell');
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: true, unread_reminder: twoMarks(anchor) };
+    const tree = compile('ThreadBody', 'type Quote', { ...bodyDependencies(store), measureThreadViewport: never, measureThreadBounds: never })({
+      client: {}, thread, placement: 'thread:thread/one',
+      around: anchor === 'message/reply' ? { ...page, anchor: { message_id: anchor, state: 'current' } } : undefined,
+    });
+    const clear = button(tree, 'Clear reminder');
+    assert.ok(button(tree, 'Mark read'), 'natural Mark read stays a separate control');
+    if (!granted) { assert.equal(clear, undefined, `read-only connections get no clear control (${anchor})`); continue; }
+    assert.equal(clear.props.disabled, false);
+    clear.props.onPress();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/first', 'opaque/second'] }], `every observed summary mark (${anchor})`);
+  }
+});
+
+test('pending and unavailable return messages offer Clear reminder for exactly the observed summary marks, keeping retained retries first', async () => {
+  for (const anchorState of ['pending', 'unavailable']) for (const granted of [true, false]) {
+    const edits = [], seeks = [];
+    const store = {
+      unreadEnabled: true, actor: 'person/one', status: 'online', threadDeliveries: new Map(),
+      threadActions: new Set(granted ? ['thread.clear-unread'] : []),
+      unreadClient: { forThread: () => ({ state: 'ready', actions: {
+        read: () => assert.fail('an explicit clear never acknowledges messages'),
+        seek: async id => { seeks.push(id); return { state: anchorState, anchor: { message_id: id, state: anchorState } }; },
+        edit: async edit => { edits.push(edit); return { how: 'sent' }; },
+      } }) },
+    };
+    const clearReminder = compile('ClearReminder', 'type Quote', {
+      ...hooks(), useStore: () => store, threadEditScope: id => `edit/${id}`,
+      View: 'View', Button: 'Button', ThreadActionFeedback: 'ThreadActionFeedback',
+    });
+    const state = hooks(), effects = [];
+    const body = compile('ReminderThreadBody', 'export function ThreadScreen', {
+      ...state, useRef: current => ({ current }), useStore: () => store, useEffect: effect => effects.push(effect),
+      unreadReadIssue: String, ClearReminder: clearReminder, ThreadBody: 'ThreadBody', View: 'View', T: 'T', Button: 'Button',
+    });
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: twoMarks('message/anchor') };
+    const props = { client: {}, thread, placement: 'context:marked:thread/one', onOpen() {} };
+    state.reset(); body(props);
+    for (const effect of effects.splice(0)) effect();
+    await new Promise(resolve => setImmediate(resolve));
+    state.reset();
+    const tree = body(props);
+    assert.deepEqual(texts(find(tree, 'T')), [anchorPresentation({ message_id: 'message/anchor', state: anchorState }).notice]);
+    const control = findBy(tree, node => node.type === clearReminder);
+    assert.equal(control.props.thread, thread, 'the control reads the current authoritative summary');
+    const rendered = clearReminder(control.props);
+    if (!granted) { assert.equal(rendered, null, `read-only: no control beside a ${anchorState} notice`); continue; }
+    const clear = button(rendered, 'Clear reminder');
+    assert.equal(clear.props.disabled, false);
+    clear.props.onPress();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/first', 'opaque/second'] }], `${anchorState}: only the observed summary marks`);
+    assert.deepEqual(seeks, ['message/anchor'], 'clearing never seeks again or falls back to newer history');
+  }
+
+  // A retained unconfirmed unread change offers its own original retry first and blocks a new clear,
+  // with or without the clear grant; the metadata edit's retry waits behind it.
+  for (const granted of [true, false]) {
+    const retries = [];
+    const store = {
+      actor: 'person/one', status: 'online', threadActions: new Set(granted ? ['thread.clear-unread'] : []),
+      threadDeliveries: new Map([
+        ['unread/thread/one', { retry: async () => { retries.push('unread'); return { how: 'sent' }; } }],
+        ['edit/thread/one', { retry: async () => { retries.push('edit'); return { how: 'sent' }; } }],
+      ]),
+      unreadClient: { forThread: () => ({ state: 'ready', actions: { edit: () => assert.fail('no new clear while a delivery is held') } }) },
+    };
+    const rendered = compile('ClearReminder', 'type Quote', {
+      ...hooks(), useStore: () => store, threadEditScope: id => `edit/${id}`,
+      View: 'View', Button: 'Button', ThreadActionFeedback: 'ThreadActionFeedback',
+    })({ thread: { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: twoMarks('message/anchor') } });
+    assert.equal(button(rendered, 'Clear reminder')?.props.disabled ?? true, true);
+    const feedback = find(rendered, 'ThreadActionFeedback');
+    assert.equal(feedback.props.result.how, 'unconfirmed');
+    feedback.props.onRetry();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(retries, ['unread']);
+  }
 });
 
 test('the marked unread list reads through the bounded unread client; typed errors keep rows and are never empty', async () => {
@@ -1170,7 +1321,7 @@ test('a marked row opens around its reminder anchor; only a current anchor shows
         committed[at] = deps;
         effects.push(effect);
       },
-      unreadReadIssue, ThreadBody: 'ThreadBody', View: 'View', T: 'T', Button: 'Button',
+      unreadReadIssue, ThreadBody: 'ThreadBody', ClearReminder: 'ClearReminder', View: 'View', T: 'T', Button: 'Button',
     });
     let thread = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder };
     const render = async () => {
@@ -1254,6 +1405,7 @@ test('threads-v1 v2 hides reminder UI and never requests the new list, seek or a
   const tree = compile('ThreadBody', 'type Quote', bodyDependencies(store))({ client, thread, placement: 'thread:thread/one' });
   assert.equal(button(tree, 'Mark unread'), undefined);
   assert.ok(button(tree, 'Mark read'), 'legacy natural read remains available');
+  assert.equal(button(tree, 'Clear reminder'), undefined, 'v2 offers no reminder clear');
   assert.ok(!texts(tree).some(text => /Marked unread|Couldn't load/.test(text)));
   const effects = [];
   const reminderBody = compile('ReminderThreadBody', 'export function ThreadScreen', {
