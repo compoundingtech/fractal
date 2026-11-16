@@ -938,3 +938,24 @@ an incremental causal projection. Preserve complete frontier ancestry, repaired
 intermediates, canonical concurrent ties, effective field selection, missing-parent
 refusal and snapshot CAS under replication, restart and reclamation. This review
 changes no schema declarations, logical limits, claim formats or authority rules.
+
+### Thread unread reminder routing headers
+
+`fractal_store::store::thread_reading` owns `lv-h47f366444514` and
+`lv-he08523974536`. The first selects signed reminder operation IDs, owner/actor,
+anchor IDs and observed operation references for one indexed thread subject. The
+second point-selects only signed message routing headers (actor/from/to/thread
+and batch), never returning message content. It requires current eligible routing
+for a new mark, while retained reminders may use admitted historical routing
+solely to prove owner/thread scope after the anchor becomes unavailable. Both retain existing claim JSON and TEXT
+identity representations and use the existing subject/kind and operation indexes;
+no new persisted columns or keys are added. Header work is independent of message
+body history, but reminder history and reference bytes remain variable inline
+values. The owning store maintainer retains the
+`trace-statement-and-value-representation` follow-up: a future prepared/reference
+representation must preserve exact observed operation identity, owner/thread
+validation, pending dependency resolution, and canonical anchor selection.
+
+The existing `flow-h1f241b496964` admission flow now also validates the named
+reminder person against its signed actor before append; its producer, dependency
+and inline body/predecessor representation are unchanged.

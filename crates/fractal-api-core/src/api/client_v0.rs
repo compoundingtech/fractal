@@ -67,6 +67,7 @@ pub struct ThreadCollectionContext {
     pub origin_episode: Option<String>,
     pub mission_id: Option<String>,
     pub recently_closed: Option<bool>,
+    pub marked_unread: Option<bool>,
 }
 
 // A client holds one socket for all its current collection views. A subscription
@@ -4717,7 +4718,7 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
-    if matches!(action, "thread.read" | "thread.rename" | "thread.close" | "thread.reopen" | "thread.start" | "thread.reply") {
+    if matches!(action, "thread.read" | "thread.mark-unread" | "thread.clear-unread" | "thread.rename" | "thread.close" | "thread.reopen" | "thread.start" | "thread.reply") {
         return Some("control.messages");
     }
     if action == "thread.link-ask" {

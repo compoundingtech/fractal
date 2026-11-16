@@ -270,6 +270,8 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `thread.created` | `thread` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `first_message:subject-reference(message)`, `mission:subject-reference(mission)`, `origin_ask:subject-reference(step-run)`, `origin_ask_episode:string`, `origin_episode:string`, `origin_source:subject-reference`, `person!:subject-reference(person)`, `title!:string` | `thread` |
 | `thread.state-set` | `thread` | `system-only` | `append` | `durable` | `state!:string` |  |
 | `thread.title-set` | `thread` | `system-only` | `append` | `durable` | `previous_title!:string`, `title!:string`, `title_revision!:string` |  |
+| `thread.unread-cleared` | `thread` | `system-only` | `append` | `durable` | `observed_marks!:array`, `person!:subject-reference(person)` |  |
+| `thread.unread-marked` | `thread` | `system-only` | `append` | `durable` | `anchor_message!:subject-reference(message)`, `observed_marks!:array`, `person!:subject-reference(person)` |  |
 | `transport.observed` | `host` | `system-only` | `append` | `durable` | `last_success_at:integer`, `protocol:string`, `reason:string`, `remote_heads:object`, `status!:string` |  |
 | `usage.limits.observed` | `agent` | `same-subject-actor` | `append` | `durable` | `credit_readings!:array`, `readings!:array` |  |
 | `vcs.item.state` | `resource` | `system-only` | `append` | `durable` | `checks_state:string`, `draft:boolean`, `head_sha:string`, `item_kind!:string`, `merge_queue:object`, `merged:boolean`, `observer!:subject-reference(observer)`, `required_checks:object`, `review_decision:string`, `state!:string`, `version!:integer` |  |
