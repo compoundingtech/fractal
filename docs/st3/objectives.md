@@ -199,6 +199,8 @@ milliseconds), `bucket_seconds` (positive integer seconds), and one selection mo
   does not count a claim twice. The first present timestamp field in `at`,
   `occurred_at_unix_ms`, `occurred_at` determines the claim's event time. A present but
   unreadable timestamp excludes that claim, even if a lower-priority field is readable.
+  Generic-read visibility applies before timestamps, counts or groups: reserved notice subjects
+  and reserved notice kinds contribute nothing, including when explicitly named in a selector.
 - `objective=NAME` selects the exact declared count or interval name, not a percentile or
   label row. It cannot be combined with `kind`, `subject_prefix` or `group_by`.
 

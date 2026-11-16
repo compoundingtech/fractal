@@ -81,3 +81,38 @@ fn generic_series_rejects_missing_selection_and_mixed_objective_selectors() {
         assert_eq!(claim_series(&store, Some(THROUGHPUT), &kinds, prefix, group, 0, 1, 1).unwrap_err().code, "invalid-series");
     }
 }
+
+#[test]
+fn explicit_series_hides_reserved_subjects_and_kinds_before_aggregation() {
+    let store = Store::open_memory("node").unwrap();
+    let reserved_kind = "custom.attention.notice-created";
+    let reserved_subject = "custom/attention/source/series-hidden";
+    for (subject, kind, marker) in [
+        (reserved_subject, READY, "hidden-subject-value"),
+        ("custom/acme/change/reserved-kind", reserved_kind, "hidden-kind-value"),
+    ] {
+        // Already-admitted history uses the same low-level fixture boundary as generic reads.
+        let hidden = store.connection.batched(|tx| crate::store::append_claim_tx(
+            tx, store.origin(), subject, kind, None,
+            &json!({"fields":{"at":1000,"private_marker":marker}}), &[], None,
+        )).unwrap().unwrap();
+        assert!(!crate::api::records::generic_claim_visible(&hidden));
+    }
+    claim(&store, "visible", READY, json!({"at":1000}));
+    let kinds = [READY.into(), reserved_kind.into()];
+    let candidates = store.series_claims(&kinds, None, 1000, 2000).unwrap();
+    assert_eq!(candidates.len(), 3, "the serving boundary, not missing index data, hides the two private claims");
+    let result = claim_series(&store, None, &kinds, None, Some("private_marker"), 1000, 2000, 1).unwrap();
+    assert_eq!(result, json!({"from":1000,"to":2000,"bucket_seconds":1,"group_by":"private_marker","buckets":[
+        {"start":1000,"end":2000,"count":1,"groups":[{"value":null,"count":1}]}
+    ]}));
+    for (kinds, prefix) in [
+        (vec![reserved_kind.into()], None),
+        (vec![READY.into()], Some(reserved_subject)),
+    ] {
+        let grouped = claim_series(&store, None, &kinds, prefix, Some("private_marker"), 1000, 2000, 1).unwrap();
+        assert_eq!(grouped["buckets"], json!([{"start":1000,"end":2000,"count":0,"groups":[]}]));
+        let ungrouped = claim_series(&store, None, &kinds, prefix, None, 1000, 2000, 1).unwrap();
+        assert_eq!(ungrouped["buckets"], json!([{"start":1000,"end":2000,"count":0}]));
+    }
+}

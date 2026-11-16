@@ -148,7 +148,7 @@ pub fn claim_series(
     let claims = store.series_claims(kinds, subject_prefix, from, to).map_err(internal)?;
     let mut counts = vec![0u64; bucket_count];
     let mut groups = group_by.map(|_| vec![BTreeMap::<String, (Value, u64)>::new(); bucket_count]);
-    for claim in claims {
+    for claim in claims.into_iter().filter(crate::api::records::generic_claim_visible) {
         let fields = claim.body.get("fields").and_then(Value::as_object);
         let at = ["at", "occurred_at_unix_ms", "occurred_at"].into_iter()
             .find_map(|field| fields.and_then(|fields| fields.get(field)))
