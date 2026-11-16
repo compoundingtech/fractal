@@ -13807,7 +13807,7 @@ mission "differential" state="ready" {
             "content": "Review the example report", "at": "2030-01-02T03:04:05Z",
         })).unwrap();
         match accept_message_response_authorized(state, request, None, None, None, None, None).unwrap() {
-            crate::model::MessageSendResponse::Scheduled { scheduled } => scheduled,
+            crate::model::MessageSendResponse::Scheduled { scheduled } => *scheduled,
             crate::model::MessageSendResponse::Sent(_) => panic!("timed request inserted mail"),
         }
     }

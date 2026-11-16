@@ -16408,7 +16408,7 @@ async fn send_message(
         let scheduled = client.schedule_message(&request).await.with_context(|| {
             format!("timed message request key {}; retain this key and identical parameters when recovering an unanswered request", request.idempotency_key)
         })?;
-        return Ok(Some(fractal_daemon::model::MessageSendResponse::Scheduled { scheduled }));
+        return Ok(Some(fractal_daemon::model::MessageSendResponse::Scheduled { scheduled: Box::new(scheduled) }));
     }
     request.idempotency_key = match args.idempotency_key {
         Some(key) => key,
@@ -16424,7 +16424,7 @@ async fn send_message(
                 match client.sent_message(&previous).await {
                     Ok(Some(receipt)) => {
                         warn_unconfirmed_silent(&request, &receipt);
-                        return Ok(Some(fractal_daemon::model::MessageSendResponse::Sent(receipt)));
+                        return Ok(Some(fractal_daemon::model::MessageSendResponse::Sent(Box::new(receipt))));
                     }
                     Ok(None) => {}
                     // A daemon from before the lookup has no such route. Its sends still repeat
@@ -16441,7 +16441,7 @@ async fn send_message(
     match client.send_message(&request).await {
         Ok(receipt) => {
             warn_unconfirmed_silent(&request, &receipt);
-            Ok(Some(fractal_daemon::model::MessageSendResponse::Sent(receipt)))
+            Ok(Some(fractal_daemon::model::MessageSendResponse::Sent(Box::new(receipt))))
         }
         Err(error) => Err(message_send_error(error, &request.idempotency_key)),
     }

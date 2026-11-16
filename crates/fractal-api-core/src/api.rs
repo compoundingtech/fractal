@@ -11883,7 +11883,7 @@ fn accept_message_receipt_authorized(
     }
     match accept_message_response_authorized(state, request, session_id, device_signature,
         upload_owner, assistant_authorization, effect_caller)? {
-        crate::model::MessageSendResponse::Sent(receipt) => Ok(receipt),
+        crate::model::MessageSendResponse::Sent(receipt) => Ok(*receipt),
         crate::model::MessageSendResponse::Scheduled { .. } => unreachable!("immediate request"),
     }
 }
@@ -12236,7 +12236,7 @@ pub fn accept_message_response_authorized(
             staged.commit().map_err(ApiError::internal)?;
         }
         signal_changed(state);
-        return Ok(crate::model::MessageSendResponse::Scheduled { scheduled });
+        return Ok(crate::model::MessageSendResponse::Scheduled { scheduled: Box::new(scheduled) });
     }
     // A repeated key returns the first claim and says it appended nothing.
     let sent = if let Some(record) = recovered {
@@ -12327,7 +12327,7 @@ pub fn accept_message_response_authorized(
     } else {
         "wake"
     };
-    Ok(crate::model::MessageSendResponse::Sent(MessageSendReceipt {
+    Ok(crate::model::MessageSendResponse::Sent(Box::new(MessageSendReceipt {
         requested_recipient,
         recipient,
         recipient_identity,
@@ -12358,7 +12358,7 @@ pub fn accept_message_response_authorized(
         idempotency_key: request.idempotency_key,
         already_sent: !appended,
         sent_at: Some(client_timestamp(record.accepted_at_unix_ms)),
-    }))
+    })))
 }
 
 fn receipt_recipient(store: &Store, requested: &str) -> Result<(String, String), ApiError> {

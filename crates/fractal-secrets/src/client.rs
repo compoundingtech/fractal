@@ -703,7 +703,7 @@ impl Client {
         anyhow::ensure!(request.at.is_some(), "a scheduled message needs an absolute delivery time");
         anyhow::ensure!(!request.idempotency_key.trim().is_empty(), "a scheduled message needs a nonempty key");
         match self.post("/v1/messages", request).await? {
-            MessageSendResponse::Scheduled { scheduled } => Ok(scheduled),
+            MessageSendResponse::Scheduled { scheduled } => Ok(*scheduled),
             MessageSendResponse::Sent(_) => anyhow::bail!("daemon returned an immediate receipt for a timed delivery"),
         }
     }

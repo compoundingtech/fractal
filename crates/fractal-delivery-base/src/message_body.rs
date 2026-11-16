@@ -348,6 +348,7 @@ impl Bodies {
     /// - A body older than `retention` is expired: its text is removed and a marker left, so
     ///   the message reads as its preview with a typed "expired" state.
     /// - A marker whose message no longer exists is removed.
+    ///
     /// Retention is chosen per file; `None` keeps a named body regardless of its age.
     pub fn reconcile(
         &self,

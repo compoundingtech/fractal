@@ -2890,8 +2890,8 @@ pub struct ScheduledMessageView {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum MessageSendResponse {
-    Scheduled { scheduled: ScheduledMessageView },
-    Sent(MessageSendReceipt),
+    Scheduled { scheduled: Box<ScheduledMessageView> },
+    Sent(Box<MessageSendReceipt>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
