@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as Atom from 'effect/reactivity/Atom'
 import { useAtomValue } from '@effect/atom-react'
+import { meaningfulBodyRegion, overlap, type ReadableRect } from './meaningfulGeometry.ts'
 
 export interface ForegroundSnapshot {
   readonly foreground: boolean
@@ -8,63 +9,86 @@ export interface ForegroundSnapshot {
 }
 const hidden: ForegroundSnapshot = { foreground: false, visibleMessageIds: [] }
 
-/** Browser events and observers drive this atom; no timers or polling. */
+// Adopted source: doc/threads-delivery/adopted-ux-20261116/unread-implementation,
+// “Deterministic visibility default for implementation/review”: stable 500 ms,
+// one cancellable placement timer, followed by a fresh body measurement.
+const dwellMs = 500
+
 export const foregroundVisibility = (container: HTMLElement | null, active: boolean): Atom.Atom<ForegroundSnapshot> => Atom.make(get => {
-  if (!active || container === null || typeof IntersectionObserver === 'undefined') return hidden
-  const intersecting = new Set<Element>()
-  const tracked = new Set<Element>()
+  if (!active || container === null) return hidden
   let current: ForegroundSnapshot = hidden
-  const rows = () => [...container.querySelectorAll<HTMLElement>('[data-thread-message]')]
+  let timer: number | undefined
+  const tracked = new Set<Element>()
   const foreground = () => document.visibilityState === 'visible' && document.hasFocus()
-    && container.isConnected && container.closest('[hidden], [inert], [aria-hidden="true"]') === null
+    && container.isConnected && shown(container)
     && ![...document.querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"]')].some(dialog =>
-      !dialog.contains(container) && dialog.closest('[hidden], [aria-hidden="true"]') === null
-      && getComputedStyle(dialog).display !== 'none' && getComputedStyle(dialog).visibility !== 'hidden')
-  const publish = () => {
-    if (!foreground()) { if (current.foreground) { current = hidden; get.setSelf(current) }; return }
-    const bounds = viewportBounds(container)
-    const visibleMessageIds = rows().flatMap(row => {
-      if (!intersecting.has(row)) return []
-      const content = row.querySelector<HTMLElement>('[data-thread-message-content]') ?? row
-      if (content.textContent?.trim() === '') return []
-      const rect = content.getBoundingClientRect()
-      const left = Math.max(rect.left, bounds.left), right = Math.min(rect.right, bounds.right)
-      const top = Math.max(rect.top, bounds.top), bottom = Math.min(rect.bottom, bounds.bottom)
-      if (right <= left || bottom <= top) return []
-      // Intersections do not account for covering content. Check the actually exposed point too.
-      const exposed = document.elementFromPoint?.((left + right) / 2, (top + bottom) / 2)
-      if (exposed != null && !content.contains(exposed)) return []
-      const id = row.getAttribute('data-thread-message')
-      return id === null ? [] : [id]
-    })
-    const ids = [...new Set(visibleMessageIds)].slice(-50)
-    if (current.foreground && current.visibleMessageIds.length === ids.length && current.visibleMessageIds.every((id, index) => id === ids[index])) return
-    current = { foreground: true, visibleMessageIds: ids }
+      !dialog.contains(container) && shown(dialog))
+  const publish = (next: ForegroundSnapshot) => {
+    if (current.foreground === next.foreground && current.visibleMessageIds.length === next.visibleMessageIds.length
+      && current.visibleMessageIds.every((id, index) => id === next.visibleMessageIds[index])) return
+    current = next
     get.setSelf(current)
   }
-  const observer = new IntersectionObserver(entries => {
-    for (const entry of entries) {
-      if (tracked.has(entry.target) && entry.isIntersecting && entry.intersectionRatio > 0) intersecting.add(entry.target)
-      else intersecting.delete(entry.target)
+  const measure = () => {
+    const candidates: { id: string; body: HTMLElement; geometry: string }[] = []
+    if (!foreground()) return candidates
+    for (const row of container.querySelectorAll<HTMLElement>('[data-thread-message]')) {
+      const body = row.querySelector<HTMLElement>('[data-thread-message-content]')
+      const id = row.getAttribute('data-thread-message')
+      if (body === null || id === null || !body.isConnected || !body.textContent?.trim() || !shown(body)) continue
+      const rect = body.getBoundingClientRect()
+      const style = getComputedStyle(body)
+      const lineHeight = Number.parseFloat(style.lineHeight)
+      const clips = viewportClips(body, container)
+      const region = meaningfulBodyRegion(rect, Number.isFinite(lineHeight) ? lineHeight : renderedLineHeight(body), clips)
+      if (region === undefined || !exposed(body, region)) continue
+      candidates.push({ id, body, geometry: [rect.left, rect.right, rect.top, rect.bottom, region.top,
+        ...clips.flatMap(clip => [clip.left, clip.right, clip.top, clip.bottom])].join(',') })
     }
-    publish()
-  }, { threshold: 0.001 })
+    return candidates
+  }
+  const cancel = () => { window.clearTimeout(timer); timer = undefined }
+  const restart = () => {
+    cancel()
+    publish(foreground() ? { foreground: true, visibleMessageIds: [] } : hidden)
+    const before = measure()
+    if (before.length === 0) return
+    timer = window.setTimeout(() => {
+      timer = undefined
+      const after = measure()
+      if (before.length !== after.length || before.some((candidate, index) => {
+        const next = after[index]
+        return next === undefined || candidate.id !== next.id || candidate.body !== next.body || candidate.geometry !== next.geometry
+      })) { restart(); return }
+      publish(foreground() ? { foreground: true, visibleMessageIds: [...new Set(after.map(candidate => candidate.id))].slice(-50) } : hidden)
+    }, dwellMs)
+  }
+  const intersections = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(restart, { threshold: [0, 1] })
+  const resize = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(restart)
   const sync = () => {
-    const current = new Set(rows())
-    for (const row of tracked) if (!current.has(row)) { observer.unobserve(row); tracked.delete(row); intersecting.delete(row) }
-    for (const row of current) if (!tracked.has(row)) { tracked.add(row); observer.observe(row) }
-    publish()
+    const elements = new Set<Element>([container, ...container.querySelectorAll('[data-thread-message], [data-thread-message-content]')])
+    for (let ancestor = container.parentElement; ancestor !== null; ancestor = ancestor.parentElement) elements.add(ancestor)
+    const panel = container.closest('[data-thread-panel]')
+    for (const element of panel?.querySelectorAll('[data-thread-read-heading], [data-thread-composer], [data-testid="conversation-composer-dock"], textarea, form') ?? []) elements.add(element)
+    for (const element of tracked) if (!elements.has(element)) { resize?.unobserve(element); intersections?.unobserve(element); tracked.delete(element) }
+    for (const element of elements) if (!tracked.has(element)) { tracked.add(element); resize?.observe(element); intersections?.observe(element) }
+    restart()
   }
   const mutations = new MutationObserver(sync)
-  mutations.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'style', 'class', 'data-thread-message'] })
-  for (const type of ['focus', 'blur', 'resize']) window.addEventListener(type, publish)
-  document.addEventListener('visibilitychange', publish)
-  document.addEventListener('scroll', publish, true)
+  mutations.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true,
+    attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'style', 'class', 'data-thread-message', 'data-thread-message-content'] })
+  for (const type of ['focus', 'blur', 'resize']) window.addEventListener(type, restart)
+  document.addEventListener('visibilitychange', restart)
+  document.addEventListener('scroll', restart, true)
+  window.visualViewport?.addEventListener('resize', restart)
+  window.visualViewport?.addEventListener('scroll', restart)
   get.addFinalizer(() => {
-    observer.disconnect(); mutations.disconnect()
-    for (const type of ['focus', 'blur', 'resize']) window.removeEventListener(type, publish)
-    document.removeEventListener('visibilitychange', publish)
-    document.removeEventListener('scroll', publish, true)
+    cancel(); intersections?.disconnect(); resize?.disconnect(); mutations.disconnect()
+    for (const type of ['focus', 'blur', 'resize']) window.removeEventListener(type, restart)
+    document.removeEventListener('visibilitychange', restart)
+    document.removeEventListener('scroll', restart, true)
+    window.visualViewport?.removeEventListener('resize', restart)
+    window.visualViewport?.removeEventListener('scroll', restart)
   })
   sync()
   return current
@@ -78,23 +102,66 @@ export const useForegroundVisibility = (active: boolean): ForegroundSnapshot & {
   return { ...useAtomValue(visibility), timeline }
 }
 
-const viewportBounds = (container: HTMLElement) => {
-  const bounds = { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth }
-  const clips = (overflow: string) => overflow !== '' && overflow !== 'visible'
-  for (let element = container.parentElement; element !== null; element = element.parentElement) {
-    const style = getComputedStyle(element)
-    if (!clips(style.overflowX) && !clips(style.overflowY)) continue
-    const rect = element.getBoundingClientRect()
-    if (clips(style.overflowX)) {
-      bounds.left = Math.max(bounds.left, rect.left + element.clientLeft)
-      bounds.right = Math.min(bounds.right, rect.left + element.clientLeft + element.clientWidth)
-    }
-    if (clips(style.overflowY)) {
-      bounds.top = Math.max(bounds.top, rect.top + element.clientTop)
-      bounds.bottom = Math.min(bounds.bottom, rect.top + element.clientTop + element.clientHeight)
-    }
+const shown = (element: Element): boolean => {
+  for (let ancestor: Element | null = element; ancestor !== null; ancestor = ancestor.parentElement) {
+    if (ancestor.matches('[hidden], [inert], [aria-hidden="true"]')) return false
+    const style = getComputedStyle(ancestor)
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0' || style.contentVisibility === 'hidden') return false
+  }
+  return true
+}
+
+const renderedLineHeight = (body: HTMLElement): number => {
+  // With `normal`, line box origins are more accurate than font glyph bounds.
+  const range = document.createRange()
+  range.selectNodeContents(body)
+  const lines = typeof range.getClientRects === 'function' ? [...range.getClientRects()] : []
+  const tops = [...new Set(lines.map(line => line.top))].sort((a, b) => a - b)
+  const first = tops[0], second = tops[1]
+  return first !== undefined && second !== undefined ? second - first : body.getBoundingClientRect().height
+}
+
+const viewportClips = (body: HTMLElement, container: HTMLElement): ReadableRect[] => {
+  const viewport = window.visualViewport
+  const clips: ReadableRect[] = [{ left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }]
+  if (viewport) clips.push({ left: viewport.offsetLeft, top: viewport.offsetTop, right: viewport.offsetLeft + viewport.width, bottom: viewport.offsetTop + viewport.height })
+  const clipsAxis = (overflow: string) => overflow !== '' && overflow !== 'visible'
+  for (let element = body.parentElement; element !== null; element = element.parentElement) {
+    const style = getComputedStyle(element), rect = element.getBoundingClientRect()
+    clips.push({ left: clipsAxis(style.overflowX || style.overflow) ? rect.left + element.clientLeft : -Infinity,
+      right: clipsAxis(style.overflowX || style.overflow) ? rect.left + element.clientLeft + element.clientWidth : Infinity,
+      top: clipsAxis(style.overflowY || style.overflow) ? rect.top + element.clientTop : -Infinity,
+      bottom: clipsAxis(style.overflowY || style.overflow) ? rect.top + element.clientTop + element.clientHeight : Infinity })
   }
   const heading = container.closest('[data-thread-panel]')?.querySelector('[data-thread-read-heading]')
-  if (heading) bounds.top = Math.max(bounds.top, heading.getBoundingClientRect().bottom)
-  return bounds
+  if (heading) clips.push({ left: -Infinity, right: Infinity, top: heading.getBoundingClientRect().bottom, bottom: Infinity })
+  return clips
+}
+
+/** Probe the entire required region's boundary and every overlapping element's
+ * intersection, not only the body midpoint (which misses partial composer covers).
+ * Hit testing resolves paint order, so underlying siblings are not occluders.
+ */
+const exposed = (body: HTMLElement, region: ReadableRect): boolean => {
+  if (typeof document.elementFromPoint !== 'function') return false
+  // Composer docks can opt out of pointer hit testing while still covering text.
+  for (const composer of document.querySelectorAll('[data-thread-composer], [data-testid="conversation-composer-dock"], [data-thread-panel] textarea')) {
+    if (shown(composer) && overlap(region, composer.getBoundingClientRect()) !== undefined) return false
+  }
+  const clearAt = (x: number, y: number) => {
+    const hit = document.elementFromPoint(x, y)
+    return hit !== null && body.contains(hit)
+  }
+  const inset = Math.min(0.5, (region.right - region.left) / 4, (region.bottom - region.top) / 4)
+  for (const x of [region.left + inset, (region.left + region.right) / 2, region.right - inset]) {
+    for (const y of [region.top + inset, (region.top + region.bottom) / 2, region.bottom - inset]) if (!clearAt(x, y)) return false
+  }
+  for (const element of document.querySelectorAll('*')) {
+    if (element.contains(body) || body.contains(element)) continue
+    for (const rect of element.getClientRects()) {
+      const intersection = overlap(region, rect)
+      if (intersection !== undefined && !clearAt((intersection.left + intersection.right) / 2, (intersection.top + intersection.bottom) / 2)) return false
+    }
+  }
+  return true
 }

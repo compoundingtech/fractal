@@ -1,13 +1,17 @@
-import { actionReceiptCheck, ClientError, type ActionResult, type EnvelopeOf } from '@fractal/client'
+import { actionReceiptCheck as sharedActionReceiptCheck, ClientError, type ActionReceiptExpectation, type ActionResult, type EnvelopeOf } from '@fractal/client'
 
-/** Unread actions acknowledge exactly the thread, without a metadata claim or a message-read receipt. */
-export const unreadReceiptCheck = ({ actionId, targetId }: { readonly actionId: string; readonly targetId: string }) => {
-  // Reuse envelope/action/status/unknown-outcome handling; the allowed affected set is checked more strictly below.
-  const check = actionReceiptCheck({ kind: 'read', actionId, readMessageIds: [targetId] })
+/** Web-local compatibility seam; replace this import with the shared helper once it accepts unread receipts. */
+export const actionReceiptCheck = (expected: ActionReceiptExpectation | {
+  readonly kind: 'unread'; readonly actionId: string; readonly targetId: string
+}, stage: 'terminal' | 'transport' = 'terminal') => {
+  if (expected.kind !== 'unread') return sharedActionReceiptCheck(expected, stage)
+  const { actionId, targetId } = expected
+  // Shared validation owns the envelope/action/status/unknown-outcome behavior; unread requires the exact thread.
+  const check = sharedActionReceiptCheck({ kind: 'read', actionId, readMessageIds: [targetId] }, stage)
   return <TResponse extends EnvelopeOf<ActionResult>>(send: () => Promise<TResponse>): Promise<TResponse> => check(async () => {
     const response = await send()
     const value = response.value
-    if (value.status !== 'rejected' && (value.affected_ids.length !== 1 || value.affected_ids[0] !== targetId)) {
+    if (value.status !== 'rejected' && (value.status !== 'completed' || value.affected_ids.length !== 1 || value.affected_ids[0] !== targetId)) {
       throw new ClientError({
         api_version: response.api_version, error_version: 'st3.client.error.v0', request_id: actionId,
         code: 'internal', message: 'Fractal has not confirmed this unread reminder change.',

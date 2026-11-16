@@ -330,6 +330,15 @@ function ThreadById({ source, threadId, active = true, embedded = false, focusCo
 }) {
   const { read, upgradeRequired, unknown, failure } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
+  const entryRead = useAtomValue(source.unreadActions?.reminder(threadId) ?? noReminder)
+  const entryReminder = entryRead._tag === 'Known' ? entryRead.reminder : undefined
+  // Capture at the route's entry cut, even while access/detail are still unknown.
+  const visit = React.useRef<UnreadVisit>(active ? enterUnreadVisit(entryReminder) : awayVisit)
+  const entry = React.useRef({ threadId, active })
+  if (entry.current.threadId !== threadId || entry.current.active !== active) {
+    entry.current = { threadId, active }
+    visit.current = active ? enterUnreadVisit(entryReminder) : awayVisit
+  }
   // The thread reports its own detail and each message page going stale; embedded, its section carries the marker.
   const [threadReadsStale, reportStale] = useStaleThreadReads()
   const paused = useUpdatesPaused(threadReadsStale)
@@ -343,7 +352,7 @@ function ThreadById({ source, threadId, active = true, embedded = false, focusCo
   // Reading again cannot bring back a thread Fractal says does not exist.
   if (detail._tag === 'Unavailable' && detail.code === 'not-found') return status(<SystemNotice kind="empty" scope="inline" title="Fractal has no thread at this link." />)
   if (detail._tag !== 'Observed') return status(<ReadStatus feed={detail} subject="thread" onRetry={source.reload} />)
-  const thread = <LiveThread key={threadId} source={source} thread={detail.value.summary} active={active} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
+  const thread = <LiveThread key={threadId} source={source} thread={detail.value.summary} visitRef={visit} active={active} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
   if (embedded) return thread
   return <StaleThreadReads.Provider value={reportStale}>
     {/* A thread in its own tab carries the marker above its heading; Retry only when one of its reads went stale. */}
@@ -359,9 +368,10 @@ const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
 const noPendingStarts = Atom.make<readonly RetainedThreadStart[]>([])
 const noReminder = Atom.make<UnreadReminderRead>({ _tag: 'Unavailable', detail: 'Unread reminders are not available on this connection.' })
 
-function LiveThread({ source, thread, active = true, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
+function LiveThread({ source, thread, visitRef, active = true, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly thread: ThreadSummary
+  readonly visitRef?: React.RefObject<UnreadVisit>
   readonly active?: boolean
   readonly embedded?: boolean
   readonly inList?: boolean
@@ -387,20 +397,21 @@ function LiveThread({ source, thread, active = true, embedded = true, inList = f
   const pendingChange = useAtomValue(source.pendingChange?.(thread.id) ?? noPendingChange)
   const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
   const viewport = useThreadViewport(expanded && (markRead !== undefined || source.unreadActions?.canMark === true))
-  const foreground = useForegroundVisibility(active && expanded && !embedded)
+  const foreground = useForegroundVisibility(active && expanded)
   const timeline = React.useCallback((node: HTMLDivElement | null) => {
     viewport.timeline(node)
     foreground.timeline(node)
   }, [viewport.timeline, foreground.timeline])
   const reminderRead = useAtomValue(source.unreadActions?.reminder(thread.id) ?? noReminder)
   const reminder = reminderRead._tag === 'Known' ? reminderRead.reminder : undefined
-  const visit = React.useRef<UnreadVisit>(awayVisit)
+  const localVisit = React.useRef<UnreadVisit>(awayVisit)
+  const visit = visitRef ?? localVisit
   const naturallyRead = React.useRef(new Set<string>())
   const [readFailure, setReadFailure] = React.useState<ThreadRefusal>()
   React.useLayoutEffect(() => {
-    if (!active || !expanded || embedded) { visit.current = awayVisit; naturallyRead.current.clear(); return }
-    // The entry read may still be loading. Capture before the first content view, never after an unknown-intent view.
-    if (visit.current._tag === 'Away' && (reminderRead._tag === 'Known' || foreground.visibleMessageIds.length > 0)) visit.current = enterUnreadVisit(reminder)
+    if (!active || !expanded) { visit.current = awayVisit; naturallyRead.current.clear(); return }
+    // Unknown at entry captures nothing and remains sticky when a reminder arrives later.
+    if (visit.current._tag === 'Away') visit.current = enterUnreadVisit(reminder)
     if (!foreground.foreground || observation === undefined) return
     if (source.unreadActions?.canMark && reminderRead._tag === 'Known') {
       const plan = planUnreadView(visit.current, { foreground: true, visibleMessageIds: foreground.visibleMessageIds, currentReminder: reminder })
@@ -415,7 +426,7 @@ function LiveThread({ source, thread, active = true, embedded = true, inList = f
     for (const id of seen) naturallyRead.current.add(id)
     void markRead(observation, anchor, seen).then(failure => { if (failure !== undefined) setReadFailure(failure) })
       .catch(() => setReadFailure({ detail: 'The read change could not be confirmed. Refresh to check its current state.' }))
-  }, [active, expanded, embedded, foreground, observation, markRead, reminderRead, reminder, source, thread.id])
+  }, [active, expanded, foreground, observation, markRead, reminderRead, reminder, source, thread.id, visit])
   return <ThreadPanel thread={summary} pendingChange={pendingChange}
     unreadControls={source.unreadActions === undefined ? undefined : <UnreadReminderControls threadId={thread.id}
       port={source.unreadActions} visibleReplies={viewport.capture} timeline={viewport.container}
@@ -591,6 +602,16 @@ function ThreadTimeline({ source, threadId, cursor, direction, agentId, agentNam
   const now = useNow()
   const [showOlder, setShowOlder] = React.useState(false)
   const [showNewer, setShowNewer] = React.useState(false)
+  const rows = React.useRef<HTMLOListElement>(null)
+  const revealedAnchor = React.useRef<string | undefined>(undefined)
+  React.useLayoutEffect(() => {
+    const anchor = feed._tag === 'Observed' && feed.value.anchor?.state === 'current' ? feed.value.anchor.message_id : undefined
+    if (anchor === undefined || anchor === revealedAnchor.current) return
+    const row = [...(rows.current?.querySelectorAll<HTMLElement>('[data-thread-anchor]') ?? [])].find(row => row.dataset.threadAnchor === anchor)
+    if (row === undefined) return
+    row.scrollIntoView?.({ block: 'center', behavior: 'auto' })
+    revealedAnchor.current = anchor
+  }, [feed])
   if (feed._tag !== 'Observed') return <ReadStatus feed={feed} subject="messages" onRetry={source.reload} />
   const next = direction === 'newer' ? undefined : Option.getOrUndefined(feed.value.next_cursor)
   const previous = direction === 'older' ? undefined : feed.value.previous_cursor
@@ -598,7 +619,7 @@ function ThreadTimeline({ source, threadId, cursor, direction, agentId, agentNam
     {next === undefined ? null : showOlder
       ? <ThreadTimeline source={source} threadId={threadId} cursor={next} direction="older" agentId={agentId} agentName={agentName} onQuote={onQuote} />
       : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
-    <ol {...stylex.props(styles.timeline)}>
+    <ol ref={rows} {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
         // Another person reads by their handle; only agents and Fractal's machinery go through the agent formatter.
         const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You'

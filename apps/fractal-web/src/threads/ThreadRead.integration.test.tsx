@@ -80,20 +80,31 @@ it.each(['manual', 'foreground', 'inactive-pane'] as const)('marks only current 
   document.body.append(host)
   const root = createRoot(host)
   const mark = () => [...host.querySelectorAll('button')].find(row => row.getAttribute('aria-label') === 'Mark visible replies read')
+  const messageViewport = (size: number) => observations.find(observer => observer.rows.size === size && [...observer.rows].every(row => row.hasAttribute('data-thread-message')))
   try {
     await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveThreadPane threadId={id} active={mode !== 'inactive-pane'} /></DataSourceProvider>))
-    await vi.waitFor(() => expect(observations.at(-1)?.rows.size).toBe(1))
+    await vi.waitFor(() => expect(messageViewport(1)).toBeDefined())
     const older = [...host.querySelectorAll('button')].find(row => row.textContent === 'Load earlier messages')
     expect(older).toBeDefined()
     await act(async () => older?.click())
-    await vi.waitFor(() => expect(observations.at(-1)?.rows.size).toBe(3))
-    const viewport = observations.at(-1)!
+    await vi.waitFor(() => expect(messageViewport(3)).toBeDefined())
+    const viewport = messageViewport(3)!
     const row = (id: string) => [...viewport.rows].find(element => element.getAttribute('data-thread-message') === id)!
     for (const element of viewport.rows) {
-      vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 120, 100, 40))
-      const content = element.querySelector('[data-thread-message-content]')
-      if (content !== null) vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 120, 100, 40))
+      const rect = new DOMRect(8, element.getAttribute('data-thread-message') === 'message/newest-offscreen' ? 2000 : 120, 100, 40)
+      vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(rect)
+      const content = element.querySelector<HTMLElement>('[data-thread-message-content]')
+      if (content !== null) {
+        content.style.lineHeight = '20px'
+        vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(rect)
+      }
     }
+    Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: (x: number, y: number) =>
+      [...host.querySelectorAll('[data-thread-message-content]')].find(body => {
+        const rect = body.getBoundingClientRect()
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+      }) ?? document.body })
+    if (mode !== 'manual') vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     expect(mark()?.disabled).toBe(true)
     expect(writes).toEqual([])
     await act(async () => { for (const observer of observations) observer.changed([
@@ -108,6 +119,8 @@ it.each(['manual', 'foreground', 'inactive-pane'] as const)('marks only current 
     } else {
       expect(writes).toEqual([])
       await act(async () => {
+        const scrolledBody = row('message/scrolled-away').querySelector('[data-thread-message-content]')!
+        vi.spyOn(scrolledBody, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, -100, 100, 40))
         for (const observer of observations) observer.changed([entry(row('message/scrolled-away'), false)])
         focused = true
         window.dispatchEvent(new Event('focus'))
@@ -117,6 +130,9 @@ it.each(['manual', 'foreground', 'inactive-pane'] as const)('marks only current 
         await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveThreadPane threadId={id} active /></DataSourceProvider>))
         await act(async () => observations.at(-1)?.changed([entry(row('message/visible'), true)]))
       }
+      await act(async () => { await vi.advanceTimersByTimeAsync(499) })
+      expect(writes).toEqual([])
+      await act(async () => { await vi.advanceTimersByTimeAsync(1) })
     }
     expect(writes).toHaveLength(1)
     expect(writes[0]).toMatchObject({
@@ -127,6 +143,8 @@ it.each(['manual', 'foreground', 'inactive-pane'] as const)('marks only current 
     await act(async () => root.unmount())
     registry.dispose()
     host.remove()
+    Reflect.deleteProperty(document, 'elementFromPoint')
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
   }

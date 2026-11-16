@@ -5963,6 +5963,9 @@ jobs:
               "apps/fractal-web/src/terminal/TerminalViewport.tsx",
               # ThreadWorkspace and LiveAgentWorkspace stories bundle the production thread pane, including lazy chunks.
               "apps/fractal-web/src/threads/LiveThreads.tsx",
+              "apps/fractal-web/src/threads/MarkedUnreadThreads.tsx",
+              "apps/fractal-web/src/threads/markedUnreadPages.ts",
+              "apps/fractal-web/src/threads/meaningfulGeometry.ts",
               "apps/fractal-web/src/threads/ThreadEditor.tsx",
               "apps/fractal-web/src/threads/ThreadPanel.tsx",
               "apps/fractal-web/src/threads/ThreadRefusalAlert.tsx",

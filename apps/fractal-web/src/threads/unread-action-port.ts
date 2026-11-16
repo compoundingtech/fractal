@@ -6,16 +6,9 @@ import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import type { Feed } from '../data/source.ts'
 import type { ThreadObservation } from './threadSource.ts'
 
-/** Opaque stable signed operation IDs come only from the authoritative reminder read. */
-export type ThreadUnreadMark = {
-  readonly mark_id: string
-  readonly anchor_message_id: string
-}
-
-export type ThreadUnreadReminder = {
-  readonly marks: readonly ThreadUnreadMark[]
-  readonly anchor_message_id: string
-}
+/** Canonical generated shapes; mark IDs remain opaque stable signed operation IDs. */
+export type ThreadUnreadMark = Native.ThreadUnreadMark
+export type ThreadUnreadReminder = Native.ThreadUnreadReminder
 
 /** An unavailable read is not evidence that a thread has no reminder. */
 export type UnreadReminderRead =
@@ -84,7 +77,7 @@ export const gatewayUnreadActions = ({ client, registry, access, detail, send, o
     if (!grant.read || observed._tag !== 'Observed' || observed.freshness !== 'live') {
       return unavailable('Reconnect and load this thread before using unread reminders.')
     }
-    return { _tag: 'Known', reminder: Option.getOrUndefined(observed.value.summary.unread_reminder ?? Option.none()) }
+    return { _tag: 'Known', reminder: Option.getOrUndefined(observed.value.summary.unread_reminder) }
   }))
   const edit = (threadId: string, intent: UnreadEdit): Promise<UnreadActionResult> => {
     if (!canEdit(registry.get(access))) return Promise.resolve(unavailable('This connection cannot change unread reminders.'))

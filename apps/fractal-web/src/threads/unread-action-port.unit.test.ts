@@ -1,11 +1,13 @@
 import { FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema/read'
 import type { ThreadTimelinePage } from '@fractal/client/schema/read'
-import { Option } from 'effect'
+import { Option, Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { Feed } from '../data/source.ts'
+import fixture from '../data/subjectReadPort.gateway.fixtures.json'
 import type { ThreadObservation } from './threadSource.ts'
 import { gatewayUnreadActions, type GatewayUnreadActionsOptions, type UnreadActionResult } from './unread-action-port.ts'
 
@@ -18,19 +20,20 @@ afterEach(() => {
 
 const threadId = 'thread/example'
 const anchor = 'message/anchor'
-const mark = { mark_id: 'signed-operation/mark', anchor_message_id: anchor }
+const mark = Native.decodeUnknownSync(Native.ThreadUnreadMark)({ mark_id: 'signed-operation/mark', anchor_message_id: anchor })
 const observation: ThreadObservation = {
-  summary: {
+  summary: Native.decodeUnknownSync(Native.ThreadSummary)({
     id: threadId, agent_id: 'agent/example', title: 'Example', title_revision: 'revision/title',
     revision: 'revision/thread', state: 'open', unread: false,
-    unread_reminder: Option.some({ marks: [mark], anchor_message_id: anchor }),
-  },
-  snapshotId: 'snapshot/thread',
+    unread_reminder: { marks: [mark], anchor_message_id: anchor },
+  }),
+  snapshotId: fixture.capabilities.snapshot.id,
 }
-const message = { kind: 'message', id: anchor, actor_id: 'person/example', accepted_at_unix_ms: 1, content: 'Real body', thread_quote_id: null }
-const page = (state = 'current', items: readonly unknown[] = state === 'current' ? [message] : []) => ({
-  items, next_cursor: null, anchor: { message_id: anchor, state },
-})
+const message = { kind: 'message', id: anchor, actor_id: 'person/example', accepted_at_unix_ms: 1, content: 'Real body', thread_quote_id: null } satisfies Native.ThreadTimelineEventEncoded
+const page = (state: Native.ThreadTimelineAnchor['state'] = 'current', items: readonly Native.ThreadTimelineEventEncoded[] = state === 'current' ? [message] : []) =>
+  Schema.encodeSync(Native.ThreadTimelinePage)(Native.decodeUnknownSync(Native.ThreadTimelinePage)({
+    items, next_cursor: null, anchor: { message_id: anchor, state },
+  }))
 
 const harness = ({
   response = page(),
@@ -48,7 +51,7 @@ const harness = ({
     fetchImpl: async input => {
       requests.push(new URL(String(input)))
       const value = await response
-      return value instanceof Response ? value : Response.json({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/around' }, value })
+      return value instanceof Response ? value : Response.json({ ...fixture.capabilities, value })
     },
   })
   const port = gatewayUnreadActions({
@@ -91,7 +94,7 @@ describe('gateway unread reminders', () => {
     registry.set(access, { read: true, actor: 'person/example', actions: new Set(['thread.mark-unread']) })
     expect(port.canMark).toBe(false)
     await expect(port.mark({ threadId, anchor_message_id: anchor, observed_marks: [] })).resolves.toMatchObject({ _tag: 'Unavailable' })
-    registry.set(access, { read: false, actor: 'person/example', actions: new Set() })
+    registry.set(access, { read: false, actor: 'person/example', actions: new Set<string>() })
     expect(registry.get(reminder)._tag).toBe('Unavailable')
     await expect(port.clear({ threadId, observed_marks: [mark.mark_id] })).resolves.toMatchObject({ _tag: 'Unavailable' })
     expect(sent).toEqual([])
@@ -127,7 +130,7 @@ describe('gateway unread reminders', () => {
     expect(hydrated[0]?.page.items[0]).toMatchObject({ kind: 'message', id: anchor, content: 'Real body' })
   })
 
-  it.each(['pending', 'unavailable'])('never hydrates a %s anchor or activates a reminder from it', async state => {
+  it.each(['pending', 'unavailable'] as const)('never hydrates a %s anchor or activates a reminder from it', async state => {
     const { port, hydrated, registry } = harness({ response: page(state) })
     await expect(port.seek({ threadId, anchor_message_id: anchor })).resolves.toMatchObject({ _tag: state === 'pending' ? 'Pending' : 'Unavailable' })
     expect(hydrated).toEqual([])
@@ -157,7 +160,7 @@ describe('gateway unread reminders', () => {
     const response = Promise.withResolvers<unknown>()
     const { port, registry, access, hydrated } = harness({ response: response.promise })
     const seeking = port.seek({ threadId, anchor_message_id: anchor })
-    registry.set(access, { read: false, actor: 'person/example', actions: new Set() })
+    registry.set(access, { read: false, actor: 'person/example', actions: new Set<string>() })
     response.resolve(page())
     await expect(seeking).resolves.toMatchObject({ _tag: 'Unavailable' })
     expect(hydrated).toEqual([])
