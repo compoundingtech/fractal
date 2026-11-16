@@ -41,6 +41,7 @@ pub async fn send(client: &Client, request: &Send) -> Result<String, ClientError
                 kind: fractal_client::MessageKind::Wake,
                 attachments: vec![],
                 signature: None,
+                at: None,
             },
         )
         .await?;
