@@ -12,6 +12,13 @@ extension EnvironmentValues {
   }
 }
 
+extension View {
+  /// Pins gallery scenes without changing the person's saved period.
+  public func inboxActivityPeriod(_ period: InboxActivity.Period?) -> some View {
+    environment(\.inboxActivityPeriod, period)
+  }
+}
+
 struct InboxActivityLabel: View {
   let model: AttentionModel
   let count: Int
@@ -54,6 +61,7 @@ struct InboxActivityHistogram: View {
           Picker("Activity period", selection: Binding(get: { period }, set: { picked = $0 })) {
             ForEach(InboxActivity.Period.allCases, id: \.self) { Text($0.label).tag($0) }
           }
+          .labelsHidden()
           .pickerStyle(.segmented).frame(width: 112)
         }
         if let activity = model.inboxActivity[period]?.value {

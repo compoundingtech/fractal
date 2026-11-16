@@ -71,6 +71,7 @@ private struct PreviousCapture: Decodable {
   static let shared = CaptureStage()
 
   var model = AttentionModel(adapter: nil)
+  var inboxActivityPeriod: InboxActivity.Period?
   /// Bumped per job so per-row state (hover, disclosure) starts fresh.
   var generation = 0
 }
@@ -84,6 +85,7 @@ struct CaptureApp: App {
       TrayPanel(model: stage.model, build: GalleryBuild.identity)
         // Whole pages in view: captures are for review, not for the scroll limit.
         .environment(\.panelScrollHeight, .infinity)
+        .inboxActivityPeriod(stage.inboxActivityPeriod)
         .id(stage.generation)
     } label: {
       TrayMenuBarLabel(model: stage.model)
@@ -165,6 +167,7 @@ struct CaptureFailure: Error, CustomStringConvertible {
     for job in jobs {
       NSApp.appearance = NSAppearance(named: job.appearance.value)
       stage.model = await job.scenario.prepare(.now)
+      stage.inboxActivityPeriod = job.scenario.inboxActivityPeriod
       stage.generation += 1
       try await Task.sleep(for: .milliseconds(400))
       guard let itemFrame = item.button?.window?.frame, let screen = Screen(containing: itemFrame) else {

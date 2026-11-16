@@ -155,8 +155,7 @@ for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
         model: model, build: GalleryBuild.identity, appearance: appearance.value,
         scrollHeight: scenario.id.hasPrefix("glance-") || scenario.id.hasPrefix("inbox-activity-")
           ? PanelSnapshot.compactScrollHeight : .infinity,
-        inboxActivityPeriod: scenario.id.hasPrefix("inbox-activity-")
-          ? (scenario.id.hasSuffix("-hours") ? .hours : .days) : nil),
+        inboxActivityPeriod: scenario.inboxActivityPeriod),
       let bitmap = NSBitmapImageRep(data: png)
     else { fail("could not render \(scenario.id) \(appearance.name)", code: 1) }
     let file = "\(scenario.id)-\(appearance.name).png"
