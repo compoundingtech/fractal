@@ -9,7 +9,7 @@ fn publish(store: &Store, source: &str, key: &str) {
 }
 
 fn setup(store: &Store) {
-    publish(store, "version 2\nagent \"worker\" { workspace \".\"; command \"true\"; restart always; }\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/worker\"; } }", "setup");
+    publish(store, "version 2\nagent \"worker\" { workspace \".\"; command \"true\"; restart always; }\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/controller.worker\"; } }", "setup");
 }
 
 fn ask(store: &Store, key: &str) -> (StepRunView, StepRunView) {
@@ -27,12 +27,12 @@ fn ask_with_inputs(store: &Store, key: &str, head: &str, context: &str) -> (Step
     }
     store.set_step_state(&step.subject, "ready", None).unwrap();
     store.work_action(&step.subject, "claim", &WorkRequest {
-        wait_ms: None, actor: Some("agent/worker".into()), incarnation: Some(key.into()),
+        wait_ms: None, actor: Some("agent/controller.worker".into()), incarnation: Some(key.into()),
         summary: None, reason: None, evidence: Vec::new(), idempotency_key: format!("claim-{key}"),
     }).unwrap();
     let ask = store.ask_person(&PersonAskRequest {
         legacy_request: None, person: "person/test".into(), title: "Approve".into(), reason: "Proceed?".into(),
-        actor: "agent/worker".into(), step: Some(step.subject.clone()), new_run: None, incarnation: Some(key.into()),
+        actor: "agent/controller.worker".into(), step: Some(step.subject.clone()), new_run: None, incarnation: Some(key.into()),
         request: None, deadline_ms: None, default_answer: None, priority: None, idempotency_key: format!("ask-{key}"),
     }).unwrap();
     (step.clone(), ask)
@@ -94,7 +94,7 @@ fn changed_authority_refuses_answer_reuse() {
     setup(&store);
     let (_, first) = ask(&store, "first");
     answer(&store, &first);
-    publish(&store, "version 2\nmission \"answer\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/worker\"; } }", "authority-change");
+    publish(&store, "version 2\nmission \"answer\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/controller.worker\"; } }", "authority-change");
     assert_ne!(ask(&store, "changed").1.subject, first.subject);
 }
 
@@ -118,7 +118,7 @@ fn independent_asks_keep_key_identity_without_native_cross_key_carry() {
     setup(&store);
     let mut input = PersonAskRequest {
         legacy_request: None, person: "person/test".into(), title: "Approve".into(), reason: "Proceed?".into(),
-        actor: "agent/worker".into(), step: None, new_run: None, incarnation: None,
+        actor: "agent/controller.worker".into(), step: None, new_run: None, incarnation: None,
         request: None, deadline_ms: None, default_answer: None, priority: None, idempotency_key: "independent-first".into(),
     };
     let first = store.ask_person(&input).unwrap();
@@ -142,17 +142,17 @@ fn spontaneous_work_asks_do_not_gain_native_binding_or_cross_key_carry() {
     let store = Store::open_memory("controller").unwrap();
     setup(&store);
     let origin = store.start_work(&crate::model::WorkStartRequest {
-        actor: "agent/worker".into(), title: "Independent work".into(), idempotency_key: "work".into(),
+        actor: "agent/controller.worker".into(), title: "Independent work".into(), idempotency_key: "work".into(),
     }).unwrap();
     let mut original = None;
     for key in ["first", "second"] {
         store.work_action(&origin.subject, "claim", &WorkRequest {
-            wait_ms: None, actor: Some("agent/worker".into()), incarnation: Some(key.into()),
+            wait_ms: None, actor: Some("agent/controller.worker".into()), incarnation: Some(key.into()),
             summary: None, reason: None, evidence: Vec::new(), idempotency_key: format!("claim-{key}"),
         }).unwrap();
         let input = PersonAskRequest {
             legacy_request: None, person: "person/test".into(), title: "Approve".into(), reason: "Proceed?".into(),
-            actor: "agent/worker".into(), step: Some(origin.subject.clone()), new_run: None, incarnation: Some(key.into()),
+            actor: "agent/controller.worker".into(), step: Some(origin.subject.clone()), new_run: None, incarnation: Some(key.into()),
             request: None, deadline_ms: None, default_answer: None, priority: None, idempotency_key: key.into(),
         };
         let ask = store.ask_person(&input).unwrap();
@@ -204,7 +204,7 @@ fn answered_ask_same_input_retry_and_prose_revision_reuse_one_original_answer_ac
         actor: "person/test".into(), same_revision: true, reason: Some("Retry unchanged work".into()), idempotency_key: "same-input".into(),
     }).unwrap();
     assert_single_original_answer(&store, &original_ask, &same.steps[0]);
-    publish(&store, "version 2\nmission \"answer\" state=\"ready\" { goal \"Clarify the mission introduction.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/worker\"; } }", "prose");
+    publish(&store, "version 2\nmission \"answer\" state=\"ready\" { goal \"Clarify the mission introduction.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/controller.worker\"; } }", "prose");
     let prose = store.retry_mission_run(&origin.run, &crate::model::MissionRunRetryRequest {
         actor: "person/test".into(), same_revision: false, reason: Some("Prose-only revision".into()), idempotency_key: "prose".into(),
     }).unwrap();
@@ -220,7 +220,7 @@ fn answered_ask_same_input_retry_and_prose_revision_reuse_one_original_answer_ac
 fn changed_transitive_effect_contract_refuses_answer_reuse() {
     let store = Store::open_memory("controller").unwrap();
     setup(&store);
-    let source = "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"prepare\" { goal \"Original effect.\"; } step \"work\" { assigned-to \"agent/worker\"; depends-on { step \"prepare\" completed; } } }";
+    let source = "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"prepare\" { goal \"Original effect.\"; }; step \"work\" { assigned-to \"agent/controller.worker\"; depends-on { step \"prepare\" completed; }; } }";
     publish(&store, source, "dependency");
     let (_, first) = ask(&store, "first");
     answer(&store, &first);
@@ -310,7 +310,7 @@ fn legacy_run_human_gate_requires_confirmation_and_reuses_original_approval_by_r
     let path = directory.path().join("claims.sqlite3");
     let store = Store::open(&path, "controller").unwrap();
     setup(&store);
-    let definition = "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; gate \"approval\" type=\"human\" { reviewer \"person/test\"; question \"Approve this effect?\"; } step \"work\" { assigned-to \"agent/worker\"; } }";
+    let definition = "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; gate \"approval\" type=\"human\" { reviewer \"person/test\"; question \"Approve this effect?\"; }; step \"work\" { assigned-to \"agent/controller.worker\"; } }";
     publish(&store, definition, "root-gate");
     let source = gate_run(&store, "root-source");
     let mut fields = gate_fields(&source.steps[0]);
