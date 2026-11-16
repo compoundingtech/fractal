@@ -103,6 +103,50 @@ impl Store {
     pub fn shell_resource_queue_wait_ms(&self, execution: &Execution, now: u64) -> u64 {
         self.resource_admission_elapsed(&format!("shell-wait:{}", execution.command.id), execution.queued_at, now).0
     }
+
+    /// Resolve native invocation evidence, never the caller's environment labels.
+    pub fn shell_resource_agent_owner(&self, agent: &str) -> Result<resource_membership::Owner> {
+        let harness = self.current_harness(agent)?.context("calling agent has no current harness")?;
+        anyhow::ensure!(!matches!(harness.state.as_str(), "ended" | "indeterminate"), "calling agent harness is not live");
+        let receipts = self.agent_invocation_receipts(agent)?;
+        let receipt = receipts.iter().rev().find(|receipt| receipt.incarnation.as_deref() == Some(harness.incarnation_id.as_str()))
+            .context("calling agent has no native invocation receipt for its current incarnation")?;
+        let owner = match (&receipt.owner_run, &receipt.owner_step, receipt.owner_attempt) {
+            (Some(run), Some(step), Some(attempt)) => resource_membership::Owner {
+                run: run.clone(), step: step.clone(), attempt, invocation: Some(receipt.invocation_id.clone()),
+            },
+            (None, None, None) => resource_membership::Owner {
+                run: receipt.invocation_id.clone(), step: receipt.invocation_id.clone(), attempt: 1,
+                invocation: Some(receipt.invocation_id.clone()),
+            },
+            _ => anyhow::bail!("calling invocation has incomplete native step ownership"),
+        };
+        self.shell_resource_owner_live(&owner)?;
+        Ok(owner)
+    }
+
+    /// Recheck the real invocation/attempt before admission and physical payload release.
+    pub fn shell_resource_owner_live(&self, owner: &resource_membership::Owner) -> Result<()> {
+        if let Some(invocation) = owner.invocation.as_deref().filter(|id| id.starts_with("invocation/")) {
+            let receipts = self.invocation_receipts(invocation)?;
+            use fractal_schema::invocation::InvocationPhase;
+            anyhow::ensure!(!receipts.iter().any(|receipt| matches!(receipt.phase,
+                InvocationPhase::StartupFailed | InvocationPhase::Revoked | InvocationPhase::Cancelled
+                    | InvocationPhase::ProducerClosed | InvocationPhase::Ended)), "shell owner invocation ended");
+            let receipt = receipts.iter().rev().find(|receipt| receipt.incarnation.is_some())
+                .context("shell owner has no native invocation evidence")?;
+            let harness = self.current_harness(&receipt.agent)?.context("shell owner harness disappeared")?;
+            anyhow::ensure!(receipt.incarnation.as_deref() == Some(harness.incarnation_id.as_str())
+                && !matches!(harness.state.as_str(), "ended" | "indeterminate"), "shell owner invocation is no longer live");
+        }
+        if owner.run.starts_with("mission-run/") || owner.invocation.as_deref()
+            .is_some_and(|invocation| invocation.starts_with("invocation/") && owner.step != invocation) {
+            let step = self.step_run(&owner.step)?.context("shell owner step disappeared")?;
+            anyhow::ensure!(step.run == owner.run && step.attempt == owner.attempt
+                && super::run_credentials::LIVE_STEP_STATES.contains(&step.status.as_str()), "shell owner attempt is no longer live");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -164,5 +208,42 @@ mod tests {
         store.update_shell_resource(&execution).unwrap();
         assert!(store.shell_resource("one").unwrap().cancel);
         assert_eq!(store.shell_resource("one").unwrap().revision, 1);
+    }
+
+    #[test]
+    fn agent_owner_is_native_invocation_custody_not_mutable_launch_environment() {
+        use crate::store::invocation_receipts::{append_receipt_tx, native_receipt};
+        use fractal_schema::invocation::InvocationPhase;
+        let store = Store::open_memory("host-a").unwrap();
+        let agent = "agent/host-a/worker";
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"worker","incarnation_id":"exact"})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":"exact"})),
+        ] {
+            store.append_claim(&ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+                fields:serde_json::from_value(fields).unwrap(), evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
+        }
+        let receipt = native_receipt("owner-operation", agent,
+            &json!({"subject":{"kind":"agent"},"launch_member":{"driver":"omp","environment":{}}}),
+            InvocationPhase::Started, Some(&json!({"verification":"operation-incarnation","incarnation":"exact"}))).unwrap().unwrap();
+        store.connection.batched(|transaction| append_receipt_tx(transaction, store.origin(), &receipt)).unwrap().unwrap();
+        let owner = store.shell_resource_agent_owner(agent).unwrap();
+        assert_eq!(owner.run,"invocation/owner-operation");
+        assert_eq!(owner.invocation.as_deref(),Some("invocation/owner-operation"));
+        let mut launch = command("native");
+        launch.lane.owner = owner.clone();
+        launch.environment.insert("ST_MISSION_RUN".into(),"mission-run/spoofed".into());
+        let mut execution = store.submit_shell_resource(launch,10).unwrap();
+        execution.command.environment.clear();
+        store.update_shell_resource(&execution).unwrap();
+        assert_eq!(store.shell_resource("native").unwrap().command.lane.owner,owner);
+        let mut ended = receipt.clone(); ended.phase = InvocationPhase::Ended;
+        store.connection.batched(|transaction| append_receipt_tx(transaction, store.origin(), &ended)).unwrap().unwrap();
+        assert!(store.shell_resource_owner_live(&owner).is_err(), "native invocation end fences even a stale ready harness view");
+        store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.observed".into(), actor:None,
+            fields:serde_json::from_value(json!({"state":"ended","driver":"omp","incarnation_id":"exact"})).unwrap(),
+            evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
+        assert!(store.shell_resource_owner_live(&owner).is_err());
+        assert!(store.shell_resource_agent_owner("agent/missing").is_err());
     }
 }

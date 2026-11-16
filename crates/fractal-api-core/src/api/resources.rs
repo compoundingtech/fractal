@@ -12,7 +12,7 @@ pub(super) struct ListQuery {
 #[derive(Deserialize)]
 pub(super) struct WaitQuery { after: u64 }
 
-pub(super) async fn submit(State(state): State<AppState>, Json(mut command): Json<Command>) -> Result<Json<Execution>, ApiError> {
+pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Json(mut command): Json<Command>) -> Result<Json<Execution>, ApiError> {
     (|| -> anyhow::Result<()> {
         anyhow::ensure!(command.lane.host.is_empty() || command.lane.host == state.node, "shell execution must use the connected host");
         let id = format!("shell:{}", command.id);
@@ -28,6 +28,23 @@ pub(super) async fn submit(State(state): State<AppState>, Json(mut command): Jso
         validate_parent(&command, &record.request, &record.state).map_err(ApiError::internal)?;
         // The same durable membership owns every nested root. Never submit a second charge.
         command.lane = record.request;
+    } else {
+        command.lane.owner = if let Some(Extension(BoundRun(binding))) = run {
+            crate::store::resource_membership::Owner { run: binding.run, step: binding.step_run, attempt: binding.attempt,
+                invocation: Some(format!("shell:{}", command.id)) }
+        } else if let Some(BoundActor::Agent(agent)) = bound {
+            state.store.shell_resource_agent_owner(&agent).map_err(|error|
+                ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?
+        } else if matches!(bound, Some(BoundActor::Run(_))) {
+            return Err(ApiError::bad(FractalError::new("resource-exec-owner", "run caller has no verified attempt binding")));
+        } else {
+            crate::store::resource_membership::Owner {
+                run: state.owning_person.clone().unwrap_or_else(|| format!("local:{}", state.node)),
+                step: format!("shell:{}", command.id), attempt: 1, invocation: Some(format!("shell:{}", command.id)),
+            }
+        };
+        state.store.shell_resource_owner_live(&command.lane.owner).map_err(|error|
+            ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?;
     }
     let execution = state.store.submit_shell_resource(command, u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(ApiError::internal)?;
     state.notify.notify_one();
@@ -133,12 +150,12 @@ mod tests {
         lane.owner = Owner { run:owner.clone(), step:owner.clone(), attempt:1, invocation:Some(owner) };
         let command = Command { id, lane, argv:vec!["true".into()], cwd:"/work".into(), environment:BTreeMap::new(),
             timeout_ms:None, parent:Some(grant.clone()) };
-        let Json(child) = submit(State(state.clone()), Json(command.clone())).await.unwrap();
+        let Json(child) = submit(State(state.clone()), None, None, Json(command.clone())).await.unwrap();
         assert_eq!(child.command.lane, parent);
         assert_eq!(state.store.resource_memberships_for_host(&state.node).unwrap().len(), 1);
         assert_eq!(state.store.held_resource_membership_bytes(&state.node, "").unwrap(), 24 << 30);
         state.store.cancel_resource_membership(&grant, &parent.owner, 11).unwrap();
-        assert!(submit(State(state), Json(command)).await.is_err());
+        assert!(submit(State(state), None, None, Json(command)).await.is_err());
     }
 
     #[tokio::test]
@@ -185,5 +202,26 @@ mod tests {
         assert_eq!(result.exit_code,Some(37));
         assert!(result.command.environment.is_empty());
         assert_eq!(state.store.shell_resource("waiter").unwrap().command.environment.len(),1);
+    }
+
+    #[tokio::test]
+    async fn submission_persists_authenticated_owner_and_never_promotes_environment_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = super::super::tests::state(directory.path());
+        state.owning_person = Some("person/operator".into());
+        let id = uuid::Uuid::now_v7().to_string();
+        let transport = format!("shell:{id}");
+        let mut lane = request(); lane.id.clone_from(&transport); lane.host.clone_from(&state.node);
+        lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport.clone()) };
+        let command = Command { id:id.clone(), lane, argv:vec!["true".into()], cwd:"/work".into(),
+            environment:BTreeMap::from([("ST_MISSION_RUN".into(),"mission-run/spoofed".into())]), timeout_ms:None, parent:None };
+        assert!(submit(State(state.clone()),Some(BoundActor::Agent("agent/missing".into())),None,Json(command.clone())).await.is_err());
+        let Json(execution) = submit(State(state.clone()),None,None,Json(command)).await.unwrap();
+        assert_eq!(execution.command.lane.owner.run,"person/operator");
+        assert_eq!(execution.command.lane.owner.step,transport);
+        let mut persisted = state.store.shell_resource(&id).unwrap();
+        persisted.command.environment.clear();
+        state.store.update_shell_resource(&persisted).unwrap();
+        assert_eq!(state.store.shell_resource(&id).unwrap().command.lane.owner.run,"person/operator");
     }
 }

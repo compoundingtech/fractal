@@ -70,6 +70,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         let request = execution.command.lane.clone();
+        self.store.shell_resource_owner_live(&request.owner)?;
         let grant: Grant = if let Some(parent) = &execution.command.parent {
             let record = self.store.resource_membership_for_grant(parent)?;
             anyhow::ensure!(record.request == request && matches!(record.state.as_str(), "admitted" | "launched"), "nested parent membership is no longer live");
@@ -119,6 +120,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             resource_lanes::set_request(&mut member, &request)?;
             self.runtime.start_resource_guarded(&self.store, &member, &|| {
                 anyhow::ensure!(!self.store.shell_resource(&execution.command.id)?.cancel, "shell request cancelled before payload release");
+                self.store.shell_resource_owner_live(&request.owner)?;
                 Ok(())
             })?;
             self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != request.id);

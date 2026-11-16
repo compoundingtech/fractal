@@ -5,7 +5,7 @@ use fractal_daemon::store::shell_resources::{self, Execution, PayloadResult};
 
 #[derive(Subcommand)]
 pub(super) enum ResourcesCommand {
-    /// Wait for host admission, execute argv, and retain one durable execution receipt.
+    /// Wait for host admission, execute argv, and await confirmed retirement.
     Exec(ExecArgs),
     /// List shell executions and their host custody.
     Ls {
@@ -55,8 +55,12 @@ pub(super) struct ExecArgs {
     #[arg(long, value_enum)] io: Option<CliIo>,
     #[arg(long, value_parser = parse_stalled_after)] admission_timeout: Option<u64>,
     #[arg(long, value_parser = parse_stalled_after)] timeout: Option<u64>,
-    #[arg(long, value_enum, default_value = "logical")] coverage: CliCoverage,
+    #[arg(long, value_enum, default_value = default_coverage())] coverage: CliCoverage,
     #[arg(last = true, required = true)] argv: Vec<String>,
+}
+
+fn default_coverage() -> &'static str {
+    if cfg!(target_os = "linux") { "enforced" } else { "logical" }
 }
 
 pub(super) async fn run(client: &Client, person: Option<&str>, command: ResourcesCommand, json_output: bool) -> Result<()> {
@@ -195,6 +199,7 @@ mod tests {
         let Command::Resources { command: ResourcesCommand::Exec(args) } = cli.command else { panic!("wrong command") };
         assert_eq!(args.argv, ["sh","-c","exit 37"]);
         assert_eq!(args.timeout, Some(300_000));
+        assert_eq!(matches!(args.coverage, CliCoverage::Enforced), cfg!(target_os = "linux"));
         assert!(Cli::try_parse_from(["fractal","resources","exec","--lane","x","--cores","1","--memory","1G","--disk","1G","--","true"]).is_err());
     }
     #[test]
