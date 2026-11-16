@@ -689,3 +689,58 @@ TODO is to bound or reference bodies and account for their cleanup without
 weakening fencing or releasing uncertain execution custody. Neither queue order,
 capacity counts nor the host-local authority proves value sizes.
 
+### Indexed mission run summaries
+
+The `fractal_store::store` maintainer owns revised schema site
+`lv-h709be0a6fbc5`, replacing `lv-h2c1da3f5b1d1`. Its new
+`mission_runs_open_mission_prefix_index` retains existing mission ID, creation-time
+and run ID TEXT keys, restricted to nonterminal runs. The explicit `mission_id>=''`
+domain predicate scopes planner eligibility to prefix readers rather than changing
+the index selected by unrelated open-run queues. Schema installation builds this
+index synchronously, not online; its duration on a large store is unmeasured.
+The existing `chunk-or-reference-variable-columns` task must preserve prefix seeks,
+descending creation-time/run-ID ordering and both partial-index predicates when
+those keys move to a bounded or referenced representation.
+
+The `fractal_store::store::mission_run_query` maintainer owns
+`lv-hbc959d871d00`, `lv-h890a38462624`, `lv-hf58566f1b601` and
+`lv-hd7513b5c921e`. The run reader binds literal mission-prefix bounds and a row
+limit, selecting existing run/mission/generation IDs, revision, status, phase and
+timestamps. Its bounded current-generation step reader hydrates step rows for
+the shared effective-state rules. The ownership reader binds one run ID and
+selects run, generation and root-run status/phase by their indexed identities.
+The canonical host reader binds the exact run subject and selects the creation
+claim's origin, excluding repaired replica records.
+These narrow projections avoid hydrating claim bodies or folding run history;
+run and step row limits are not encoded byte-size or statement-cost proofs.
+Values remain inline to reuse existing projections and canonical claim identity.
+The module retains `trace-statement-and-value-representation`: trace the macro
+and canonical SQL expansions and preserve prefix ordering, current-generation
+identity and canonical origin selection through a reference/chunk conversion.
+
+The `fractal::main_tests` maintainer owns `lv-hd8a0024f2dd3` and
+`lv-h0dd9e5195a5e`, respectively the run-summary JSON and rendered-text fixture
+includes. These test-only values are parsed or compared in memory, not written
+to SQLite. Exact inline fixtures preserve renderer and truncation assertions.
+Their `trace-statement-and-value-representation` task is to review the producer
+and any future persistence consumer before changing that representation; the
+conservative include inventory is not a permanent exemption or a byte-size bound.
+
+### Native effect resolution
+
+`fractal_store::store::effects` owns `lv-h4d33c1e58bfd`, the step/effect reverse
+index. Its step and effect subject TEXT keys remain inline like the existing
+claim-subject indexes; their representation still needs chunk/reference review.
+`lv-hb9a49c3cca1c` walks one effect's predecessor graph to distinguish a person's
+covered unresolved episodes from concurrent observations. `lv-h01c4365780a3`
+selects that effect's monotonic phase through canonical ordering. Both reads
+reuse existing claim identity/body/predecessor representation, not a size proof:
+the owner must trace those values to bounded physical references without
+weakening causal resolution or immutable receipt selection.
+
+`fractal_store::store` owns `lv-he1edfe7bd7b2`, which reopens the existing current
+generation on a causally backed late effect conflict. Run identity and timestamp
+TEXT stay inline with the surrounding run-state projection. Representation and
+reclamation review must preserve the evidence-backed hold and terminal-tree
+invariants; no growing receipt body is synthesized by this update.
+

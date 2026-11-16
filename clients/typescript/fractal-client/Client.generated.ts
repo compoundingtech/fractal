@@ -7,6 +7,7 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
+    AutoResolvedAsks,
     AvailabilitySet, AvailabilityHistory, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
@@ -719,6 +720,7 @@ export class FractalClient {
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
+    async autoResolvedList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AutoResolvedAsks>> { return this.get('/v1/client/auto-resolved', undefined, requestOptions); }
     async availabilityList(person?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailabilities>> { return this.get('/v1/client/availability' + query({ person }), undefined, requestOptions); }
     async availabilityHistory(options: { from: string; to: string; bucket_seconds: number; person?: string }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AvailabilityHistory>> { return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
@@ -875,6 +877,7 @@ export class FractalClient {
     async workComplete(input: Omit<ActionOf<'work.complete'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.complete' } as ActionOf<'work.complete'>, requestOptions); }
     async workDone(input: Omit<ActionOf<'work.done'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.done' } as ActionOf<'work.done'>, requestOptions); }
     async workFail(input: Omit<ActionOf<'work.fail'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.fail' } as ActionOf<'work.fail'>, requestOptions); }
+    async workOverride(input: Omit<ActionOf<'work.override'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.override' } as ActionOf<'work.override'>, requestOptions); }
     async workProgress(input: Omit<ActionOf<'work.progress'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.progress' } as ActionOf<'work.progress'>, requestOptions); }
     async workPublishMission(input: Omit<ActionOf<'work.publish-mission'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.publish-mission' } as ActionOf<'work.publish-mission'>, requestOptions); }
     async workRelease(input: Omit<ActionOf<'work.release'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.release' } as ActionOf<'work.release'>, requestOptions); }

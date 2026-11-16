@@ -22,6 +22,25 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+public struct AutoResolvedAsk: Codable, Sendable {
+    public let resolutionID, title, requesterID, resolvedAt, targetID, episode: String
+    public let defaultAnswer: AskDefaultAnswer?
+    public let request: StructuredRequest?
+    public let actionParameters: [String: PersonOverrideTarget]?
+    enum CodingKeys: String, CodingKey {
+        case resolutionID = "resolution_id", title, requesterID = "requester_id", resolvedAt = "resolved_at", targetID = "target_id", episode
+        case defaultAnswer = "default_answer", request, actionParameters = "action_parameters"
+    }
+}
+public struct PersonOverrideTarget: Codable, Sendable {
+    public let targetID, episode: String
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", episode }
+}
+public struct AutoResolvedAsks: Codable, Sendable {
+    public let items: [AutoResolvedAsk]
+    public let complete: Bool
+}
+
 /// Set or clear the session person's own note. A nil `text` clears it and is sent as `null`.
 public struct DirectiveNoteSet: Codable, Sendable, Equatable {
     public var text: String?
@@ -1558,6 +1577,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func workComplete(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workComplete, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workDone(id: String, idempotencyKey: String, fence: Fence, parameters: PersonStepParameters) throws -> Self { try .init(id: id, type: .workDone, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workFail(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workFail, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func workOverride(id: String, idempotencyKey: String, fence: Fence, parameters: PersonOverrideParameters) throws -> Self { try .init(id: id, type: .workOverride, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workProgress(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workProgress, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workPublishMission(id: String, idempotencyKey: String, fence: Fence, parameters: WorkPublishMissionParameters) throws -> Self { try .init(id: id, type: .workPublishMission, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func workRelease(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .workRelease, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1568,6 +1588,20 @@ public struct ActionRequest: Codable, Sendable {
 
 public struct PersonAskParameters: Codable, Sendable { public var personID, title, reason: String; public var stepID, newRun: String?; public var request: StructuredRequest?; public var deadlineMS: UInt64?; public var defaultAnswer: String?; public init(personID: String, title: String, reason: String, stepID: String? = nil, newRun: String? = nil, request: StructuredRequest? = nil, deadlineMS: UInt64? = nil, defaultAnswer: String? = nil) { self.personID = personID; self.title = title; self.reason = reason; self.stepID = stepID; self.newRun = newRun; self.request = request; self.deadlineMS = deadlineMS; self.defaultAnswer = defaultAnswer }; enum CodingKeys: String, CodingKey { case personID = "person_id", title, reason, stepID = "step_id", newRun = "new_run", request, deadlineMS = "deadline_ms", defaultAnswer = "default_answer" } }
 public struct PersonStepParameters: Codable, Sendable { public var targetID, summary, episode: String; public var evidence: [String]; public var answer: PersonAnswerInput?; public init(targetID: String, summary: String, episode: String, evidence: [String] = [], answer: PersonAnswerInput? = nil) { self.targetID = targetID; self.summary = summary; self.episode = episode; self.evidence = evidence; self.answer = answer }; enum CodingKeys: String, CodingKey { case targetID = "target_id", summary, episode, evidence, answer } }
+public struct PersonOverrideParameters: Codable, Sendable {
+    public var targetID, episode: String
+    public var answer: PersonOverrideAnswer
+    public var summary: String?
+    public init(targetID: String, episode: String, answer: PersonOverrideAnswer, summary: String? = nil) {
+        self.targetID = targetID; self.episode = episode; self.answer = answer; self.summary = summary
+    }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", episode, answer, summary }
+}
+public struct PersonOverrideAnswer: Codable, Sendable {
+    public var id: String
+    public var text: String?
+    public init(id: String, text: String? = nil) { self.id = id; self.text = text }
+}
 public struct StructuredRequest: Codable, Sendable { public var version: Int; public var type, question, whyPerson: String; public var summary: String?; public var reasons: [String]?; public var recommendation: RequestRecommendation?; public var subjects: [RequestSubject]?; public var answers: [RequestAnswerOption]?; public var custom: Bool?; public var attachments: [Attachment]?; enum CodingKeys: String, CodingKey { case version, type, question, whyPerson = "why_person", summary, reasons, recommendation, subjects, answers, custom, attachments } }
 public struct PersonUpdate: Codable, Sendable { public var version: Int; public var type, about: String; public var summary: String?; public var speech: String?; public var subjects: [RequestSubject]? }
 public struct RequestRecommendation: Codable, Sendable { public var answer, reason: String }

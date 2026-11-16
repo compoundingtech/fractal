@@ -27,6 +27,7 @@
     { "file": "directive-notes.json", "definition": "Envelope" },
     { "file": "person-availability.json", "definition": "Envelope" },
     { "file": "availability-history.json", "definition": "Envelope" },
+    { "file": "auto-resolved.json", "definition": "Envelope" },
     { "file": "availability-set.json", "definition": "AvailabilitySet" },
     { "file": "availability-set-result.json", "definition": "Envelope" },
     { "file": "presence-report.json", "definition": "PresenceReport" },

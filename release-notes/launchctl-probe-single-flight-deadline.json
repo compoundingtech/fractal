@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound launchctl subprocesses, skip overlapping probes and report stalled launchd with capped backoff instead of accumulating hung children.",
+  "replay": {"status": "none", "detail": "No claim format or replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Every launchctl invocation has a three-second deadline with kill and wait cleanup. Each process admits one invocation at a time; overlapping calls skip. After timeouts, requests back off for 5, 10, 20, 40 and at most 60 seconds. Daemon health adds an optional service_manager object with launchd-unresponsive reason, since and next-retry Unix milliseconds, and consecutive timeout count. A completed RPC clears the failure."},
+  "downtime": {"status": "changed", "detail": "Restart the daemon to activate the bounded runner; no state migration is required."},
+  "manual": {"status": "none", "detail": "No new configuration. Linux fake-command tests cover the runner and deterministic gate; a real macOS launchd stall is not exercised."},
+  "recovery": {"status": "none", "detail": "A responsive launchd clears the recorded failure on the next admitted RPC; this does not repair the launchd stall itself."}
+}

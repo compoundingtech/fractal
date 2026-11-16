@@ -309,6 +309,19 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(clear, ["text": NSNull()] as NSDictionary)
     }
 
+    func testAutoResolvedFixtureAndOverrideParameters() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixture = root.appendingPathComponent("docs/st3/client-v0/fixtures/auto-resolved.json")
+        let rows = try JSONDecoder().decode(Envelope<AutoResolvedAsks>.self, from: Data(contentsOf: fixture))
+        XCTAssertTrue(rows.value.complete)
+        XCTAssertEqual(rows.value.items[0].defaultAnswer?.id, "hold")
+        XCTAssertEqual(rows.value.items[0].actionParameters?["work.override"]?.episode, "claim/example")
+        let input = PersonOverrideParameters(targetID: "step-run/example", episode: "claim/example", answer: PersonOverrideAnswer(id: "ship"))
+        let wire = try JSONSerialization.jsonObject(with: JSONEncoder().encode(input)) as? NSDictionary
+        XCTAssertEqual(wire, ["target_id": "step-run/example", "episode": "claim/example", "answer": ["id": "ship"]] as NSDictionary)
+    }
+
     func testAvailabilityFixturesDecodeBothViewsAndEncodeAStatusClearAsNull() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

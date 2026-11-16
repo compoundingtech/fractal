@@ -462,6 +462,28 @@
       "type": "object", "additionalProperties": false, "required": ["notes"],
       "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/DirectiveNote"}}}
     },
+    "AutoResolvedAsk": {
+      "type": "object", "additionalProperties": false,
+      "required": ["resolution_id", "title", "requester_id", "resolved_at", "target_id", "episode"],
+      "properties": {
+        "resolution_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "title": {"type": "string"},
+        "requester_id": {"$ref": "#/$defs/Id"},
+        "resolved_at": {"$ref": "#/$defs/NoticeTimestamp"},
+        "target_id": {"$ref": "#/$defs/Id"},
+        "episode": {"type": "string"},
+        "default_answer": {"$ref": "#/$defs/NoticeDigestDefaultAnswer"},
+        "request": {"$ref": "#/$defs/StructuredRequest"},
+        "action_parameters": {"$ref": "#/$defs/NoticeDigestActions"}
+      }
+    },
+    "AutoResolvedAsks": {
+      "type": "object", "additionalProperties": false, "required": ["items", "complete"],
+      "properties": {
+        "items": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/AutoResolvedAsk"}},
+        "complete": {"type": "boolean"}
+      }
+    },
     "DirectiveNoteSet": {
       "description": "Set or clear the session person's own directive note. `text` is required; null clears the note. The person always comes from the session.",
       "type": "object", "additionalProperties": false, "required": ["text"],
@@ -1168,6 +1190,7 @@
         "value": {
           "oneOf": [
             { "$ref": "#/$defs/DirectiveNotes" },
+            { "$ref": "#/$defs/AutoResolvedAsks" },
             { "$ref": "#/$defs/PersonAvailabilities" },
             { "$ref": "#/$defs/DirectiveNoteSetResult" },
             { "$ref": "#/$defs/PersonAvailability" },
@@ -3959,6 +3982,7 @@
             "session.import",
             "work.ask",
             "work.done",
+            "work.override",
             "work.cancel-ask",
             "work.claim",
             "work.renew",
@@ -4019,6 +4043,18 @@
     "PersonStepParameters": {
       "type": "object", "additionalProperties": false, "required": ["target_id", "summary", "episode"],
       "properties": {"target_id": {"$ref": "#/$defs/Id"}, "summary": {"type": "string", "minLength": 1}, "episode": {"type": "string"}, "evidence": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "answer": {"$ref": "#/$defs/PersonAnswerInput"}}
+    },
+    "PersonOverrideParameters": {
+      "type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"],
+      "properties": {
+        "target_id": {"$ref": "#/$defs/Id"},
+        "episode": {"type": "string"},
+        "summary": {"type": "string", "minLength": 1},
+        "answer": {
+          "type": "object", "additionalProperties": false, "required": ["id"],
+          "properties": {"id": {"type": "string", "minLength": 1}, "text": {"type": "string"}}
+        }
+      }
     },
     "StructuredRequest": {
       "type": "object", "additionalProperties": false, "required": ["version", "type", "question", "why_person"],
@@ -4157,6 +4193,7 @@
         {"properties": {"type": {"const": "terminal.end"}, "parameters": {"$ref": "#/$defs/TargetParameters"}}},
         {"properties": {"type": {"const": "work.ask"}, "parameters": {"$ref": "#/$defs/PersonAskParameters"}}},
         {"properties": {"type": {"enum": ["work.done", "work.cancel-ask"]}, "parameters": {"$ref": "#/$defs/PersonStepParameters"}}},
+        {"properties": {"type": {"const": "work.override"}, "parameters": {"$ref": "#/$defs/PersonOverrideParameters"}}},
         {
           "properties": {
             "type": { "const": "attention.resolve" },

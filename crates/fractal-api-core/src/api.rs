@@ -88,6 +88,7 @@ use crate::model::{
     SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
+pub mod effects;
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
@@ -157,6 +158,7 @@ pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
 }
 mod availability;
 mod directive_notes;
+mod auto_resolved;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
@@ -665,6 +667,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
                 .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
         )
         .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
+        .route("/v1/client/auto-resolved", get(auto_resolved::read))
         .route("/v1/client/availability", get(availability::list).put(availability::set))
         .route("/v1/client/availability/history", get(availability::history))
         .route("/v1/client/presence", post(availability::report))
@@ -865,6 +868,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(messages::message_delivery))
         .route("/v1/messages/by-key", get(messages::message_by_key))
+        .route("/v1/effects/by-key", get(effects::by_key))
+        .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
@@ -1187,6 +1192,9 @@ async fn response_envelope_unbounded(
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
+    let effect_resolution = request.method() == axum::http::Method::POST
+        && request.uri().path().starts_with("/v1/effects/")
+        && request.uri().path().ends_with("/resolve");
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -1288,6 +1296,7 @@ async fn response_envelope_unbounded(
     // must leave the async acceptor free to admit independent requests when SQLite is busy.
     // Bearers on native Unix routes must not evade the assistant route boundary.
     let (client_authentication, client_snapshot) = if client_request
+        || effect_resolution
         || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
@@ -8508,7 +8517,15 @@ pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bo
     }
 }
 
-async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// Read-only supervisor diagnostics supplied by the daemon's process boundary.
+/// Reading health must never start a service-manager command.
+#[derive(Clone)]
+pub struct SupervisorHealth(pub Arc<dyn Fn() -> Option<Value> + Send + Sync>);
+
+async fn health(
+    State(state): State<AppState>,
+    supervisor: Option<Extension<SupervisorHealth>>,
+) -> Result<Json<Value>, ApiError> {
     let mut health = json!({
         "status": "ready",
         "node": state.node,
@@ -8519,6 +8536,9 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
+    if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
+        health["service_manager"] = supervisor;
+    }
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
     if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)

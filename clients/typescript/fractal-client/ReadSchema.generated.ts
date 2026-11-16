@@ -1618,6 +1618,52 @@ export const AttentionBudgetReport = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionBudgetReport = typeof AttentionBudgetReport.Type
 export type AttentionBudgetReportEncoded = typeof AttentionBudgetReport.Encoded
 
+export const NoticeDigestOverride = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Schema.String.check(Schema.isMinCodePoints(1)),
+  "target_id": Schema.String.check(Schema.isMinCodePoints(1))
+}).annotate({ identifier: "NoticeDigestOverride" }))()
+export type NoticeDigestOverride = typeof NoticeDigestOverride.Type
+export type NoticeDigestOverrideEncoded = typeof NoticeDigestOverride.Encoded
+
+export const NoticeDigestActions = /*#__PURE__*/ (() => Schema.Struct({
+  "work.override": NoticeDigestOverride
+}).annotate({ identifier: "NoticeDigestActions" }))()
+export type NoticeDigestActions = typeof NoticeDigestActions.Type
+export type NoticeDigestActionsEncoded = typeof NoticeDigestActions.Encoded
+
+export const NoticeDigestDefaultAnswer = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String.check(Schema.isMinCodePoints(1)),
+  "label": Schema.String.check(Schema.isMinCodePoints(1))
+}).annotate({ identifier: "NoticeDigestDefaultAnswer" }))()
+export type NoticeDigestDefaultAnswer = typeof NoticeDigestDefaultAnswer.Type
+export type NoticeDigestDefaultAnswerEncoded = typeof NoticeDigestDefaultAnswer.Encoded
+
+/** RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission. */
+export const NoticeTimestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$", "u"))).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isLosslessInstant).pipe(Schema.decodeTo(LosslessTimestamp, losslessFromIso)).annotate({ identifier: "NoticeTimestamp", description: "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission." }))()
+export type NoticeTimestamp = typeof NoticeTimestamp.Type
+export type NoticeTimestampEncoded = typeof NoticeTimestamp.Encoded
+
+export const AutoResolvedAsk = /*#__PURE__*/ (() => Schema.Struct({
+  "action_parameters": optionalKey(NoticeDigestActions),
+  "default_answer": optionalKey(NoticeDigestDefaultAnswer),
+  "episode": Schema.String,
+  "request": optionalKey(StructuredRequest),
+  "requester_id": Id,
+  "resolution_id": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
+  "resolved_at": NoticeTimestamp,
+  "target_id": Id,
+  "title": Schema.String
+}).annotate({ identifier: "AutoResolvedAsk" }))()
+export type AutoResolvedAsk = typeof AutoResolvedAsk.Type
+export type AutoResolvedAskEncoded = typeof AutoResolvedAsk.Encoded
+
+export const AutoResolvedAsks = /*#__PURE__*/ (() => Schema.Struct({
+  "complete": Schema.Boolean,
+  "items": Schema.Array(AutoResolvedAsk).check(Schema.isMaxLength(128))
+}).annotate({ identifier: "AutoResolvedAsks" }))()
+export type AutoResolvedAsks = typeof AutoResolvedAsks.Type
+export type AutoResolvedAsksEncoded = typeof AutoResolvedAsks.Encoded
+
 /** A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown. */
 export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","hold-routine","hold-all"]).annotate({ identifier: "AvailabilityDeadlineClock", description: "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown." }))()
 export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type

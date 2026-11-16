@@ -1258,7 +1258,28 @@ impl Store {
         let connection = self.readers.get();
         let mut items = Vec::new();
         for failure in failures {
-            items.extend(self.broken_gate_item(&connection, failure, person, as_of)?);
+            if let Some(item) = self.broken_gate_item(&connection, failure, None, as_of)? {
+                if item.kind == "effect-unresolved" {
+                    // The same durable episode is a fault for its owning agent and one
+                    // attention card for the person responsible for that work.
+                    let requester = item.mission_run.as_deref()
+                        .map(|run| mission_run_header_tx(&connection, run.trim_start_matches("mission-run/")))
+                        .transpose()?.map(|run| run.requester);
+                    let reviewer = match requester.filter(|actor| actor.starts_with("person/")) {
+                        Some(person) => person,
+                        None => self.agent_person(&item.person)?
+                            .unwrap_or_else(|| "person/operator".into()),
+                    };
+                    let mut attention = item.clone();
+                    attention.person = reviewer;
+                    if person.is_none_or(|person| person == attention.person) {
+                        items.push(attention);
+                    }
+                }
+                if person.is_none_or(|person| person == item.person) {
+                    items.push(item);
+                }
+            }
         }
         Ok(items)
     }
@@ -1287,13 +1308,17 @@ impl Store {
         for target in &failure.targets {
             smallclaims::touched::note_read(|| target.clone());
         }
-        if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION {
+        let effect_unresolved = claim.body["fields"]["condition"] == "effect-unresolved";
+        if claim.body["fields"]["condition"] != GATE_BROKEN_CONDITION && !effect_unresolved {
             return Ok(None);
         }
         let [run, generation, result, rest @ ..] = failure.targets.as_slice() else {
             return Ok(None);
         };
         if !person_work::run_live(connection, run, Some(generation), false)? {
+            return Ok(None);
+        }
+        if effect_unresolved && !effects::effect_is_unresolved_tx(connection, result)? {
             return Ok(None);
         }
         let step = rest.first().cloned();
@@ -1311,10 +1336,18 @@ impl Store {
         item.subject = run.clone();
         item.mission_run = Some(run.clone());
         item.step = step;
-        item.actions = vec![
-            attention_action("inspect gate", &["st", "subject", "show", &result]),
-            attention_action("inspect run", &["st", "missions", "show", &run]),
-        ];
+        item.actions = if effect_unresolved {
+            item.kind = "effect-unresolved".into();
+            vec![
+                attention_action("inspect effect", &["st", "subject", "show", &result]),
+                attention_action("inspect run", &["st", "missions", "show", &run]),
+            ]
+        } else {
+            vec![
+                attention_action("inspect gate", &["st", "subject", "show", &result]),
+                attention_action("inspect run", &["st", "missions", "show", &run]),
+            ]
+        };
         Ok(Some(item))
     }
 
@@ -1415,8 +1448,10 @@ impl Store {
         if source.starts_with("loop-run/") || source.starts_with("observer/") {
             return Ok(None);
         }
-        // `broken_gate_items` reads broken gates, for their publisher.
-        if claim.body["fields"]["condition"] == GATE_BROKEN_CONDITION {
+        // Broken gates and unresolved effects have their own revision/resolution-aware fold.
+        if claim.body["fields"]["condition"] == GATE_BROKEN_CONDITION
+            || claim.body["fields"]["condition"] == "effect-unresolved"
+        {
             return Ok(None);
         }
         if source.starts_with("mission-run/") {

@@ -190,6 +190,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
+        .route("/v1/client/mission-runs", get(mission_runs_by_prefix))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
         .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
@@ -4258,6 +4259,43 @@ pub async fn missions(
         sync: client_sync_notice(&state),
         replicated: None,
     };
+    Ok((Extension(snapshot), Json(page)))
+}
+
+#[derive(Deserialize)]
+pub struct MissionRunsQuery {
+    mission_prefix: String,
+    #[serde(default)]
+    active: bool,
+    limit: Option<usize>,
+}
+
+/// Prefix-indexed automation read, deliberately independent of the fleet tree.
+/// Response middleware frames the page under `value` with its pinned read snapshot.
+pub async fn mission_runs_by_prefix(
+    State(state): State<AppState>,
+    Extension(_snapshot): Extension<ClientSnapshot>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<MissionRunsQuery>,
+) -> Result<(Extension<ClientSnapshot>, Json<crate::store::mission_run_query::MissionRunsPage>), ApiError> {
+    require_scope(&session, "read.projections")?;
+    if !(1..=500).contains(&query.limit.unwrap_or(100)) {
+        return Err(ApiError::bad(FractalError::new(
+            "validation-failed", "run limit must be 1 through 500",
+        )));
+    }
+    let store = state.store.clone();
+    let (snapshot, page) = super::blocking_store(move || {
+        store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&state, index);
+            let page = store.mission_runs_by_prefix(
+                &query.mission_prefix,
+                query.active,
+                query.limit.unwrap_or(100),
+            )?;
+            Ok((snapshot, page))
+        })
+    }).await?;
     Ok((Extension(snapshot), Json(page)))
 }
 
@@ -8419,6 +8457,23 @@ async fn dispatch_action(
             signal_changed(state);
             Ok(vec![result.subject])
         }
+        "work.override" => {
+            let result = state.store.override_person_step(&PersonStepResponse {
+                delegation: None,
+                subject: parameter_string(p, "target_id")?,
+                actor: authority_actor.clone(),
+                summary: p.get("summary").map(|_| parameter_string(p, "summary")).transpose()?.unwrap_or_default(),
+                evidence: Vec::new(),
+                episode: Some(parameter_string(p, "episode")?),
+                idempotency_key: request.idempotency_key.clone(),
+                answer: Some(serde_json::from_value(p.get("answer").cloned().ok_or_else(|| validation("answer is required"))?)
+                    .map_err(|_| validation("answer requires a named id and optional text"))?),
+            }).map_err(|error| {
+                if error.code == "forbidden" { forbidden(error.message) } else { ApiError::bad(error) }
+            })?;
+            signal_changed(state);
+            Ok(vec![result.subject])
+        }
         action @ ("work.done" | "work.cancel-ask") => {
             let target = parameter_string(p, "target_id")?;
             let result = state
@@ -10317,6 +10372,83 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt as _;
     use std::sync::Barrier;
+
+    #[tokio::test]
+    async fn mission_runs_prefix_read_requires_scope_and_bounds_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = || ClientSession::for_tests_scoped("person/operator", "person/operator", &["read.projections"]);
+        let query = |limit| MissionRunsQuery { mission_prefix: "roll/".into(), active: true, limit };
+        let (Extension(snapshot), Json(response)) = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session()), Query(query(None)),
+        ).await.unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), json!({"runs": [], "truncated": false}));
+        assert_eq!(snapshot.store_index, state.store.index().unwrap());
+        for limit in [0, 501] {
+            let error = mission_runs_by_prefix(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session()), Query(query(Some(limit))),
+            ).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        let error = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(ClientSession::for_tests_scoped("person/operator", "person/operator", &[])),
+            Query(query(None)),
+        ).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mission_runs_http_envelope_uses_the_pinned_snapshot() {
+        use axum::middleware::{self, Next};
+        use tower::ServiceExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let admitted = new_client_snapshot(&state);
+        state.store.append_claim(&ClaimInput {
+            subject: "custom/test/mission-runs-envelope".into(),
+            kind: "custom.test.marker".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let pinned_index = state.store.index().unwrap();
+        assert!(pinned_index > admitted.store_index);
+        let context = super::super::response_body::Context {
+            state: state.clone(), client_request: true, local_only_response: false,
+            request_id: "request/mission-runs-envelope".into(),
+            client_snapshot: Some(admitted.clone()), server: None, roster: false,
+        };
+        let app = Router::new()
+            .route("/v1/client/mission-runs", get(mission_runs_by_prefix))
+            .layer(Extension(ClientSession::for_tests_scoped(
+                "person/operator", "person/operator", &["read.projections"],
+            )))
+            .layer(Extension(admitted))
+            .layer(middleware::from_fn(move |request: Request<Body>, next: Next| {
+                let context = context.clone();
+                async move { context.wrap(next.run(request).await).await }
+            }))
+            .with_state(state.clone());
+        let response = app.oneshot(Request::builder()
+            .uri("/v1/client/mission-runs?mission_prefix=roll%2F&active=true")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["value"], json!({"runs": [], "truncated": false}));
+        assert_eq!(response["snapshot"]["store_index"], pinned_index);
+        assert_eq!(response["snapshot"]["host_id"], client_host_id(&state.node));
+        assert_eq!(response["request_id"], "request/mission-runs-envelope");
+        assert!(response["snapshot"]["created_at"].is_string());
+        assert!(response["value"].get("snapshot").is_none());
+        assert!(response["value"].get("value").is_none());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn published_runtimes_refresher_publishes_after_commits() {
@@ -16757,9 +16889,10 @@ subscription "watch/source" {
         let mut changed = claim.clone();
         changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
         assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        // Exact withdrawal must not select a completion using the wall clock.
         state.store.append_client_operation_claim(&ClaimInput {
             subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
-            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            actor:Some("person/alex".into()), fields:BTreeMap::from([("completion_id".into(), json!(claim.id))]),
             evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
         }).unwrap();
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
