@@ -537,8 +537,6 @@ pub struct Summary {
     pub state: &'static str,
     pub message_count: u64,
     pub unread: bool,
-    // COMPILE-ONLY CONTRACT STUB: supplied by the root store patch.
-    pub unread_reminder: Option<fractal_schema::threads::ThreadUnreadReminder>,
 }
 
 /// Read metadata for the authenticated owner. All fields come from one graph snapshot.
@@ -612,7 +610,6 @@ fn summary_conn(
         state,
         message_count,
         unread,
-        unread_reminder: None,
     })
 }
 

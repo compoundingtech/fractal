@@ -47,17 +47,3 @@ pub fn is_reserved_kind(kind: &str) -> bool {
 pub fn is_reserved_record(subject: &str, kind: &str) -> bool {
     is_reserved_subject(subject) || is_reserved_kind(kind)
 }
-
-// COMPILE-ONLY CONTRACT STUB: drop this commit when the root store patch arrives.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ThreadUnreadMark {
-    /// Opaque stable signed operation ID, never a claim ID.
-    pub mark_id: String,
-    pub anchor_message_id: String,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct ThreadUnreadReminder {
-    pub marks: Vec<ThreadUnreadMark>,
-    pub anchor_message_id: String,
-}
