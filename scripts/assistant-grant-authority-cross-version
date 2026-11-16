@@ -173,6 +173,8 @@ def main():
         identity["version"] = subprocess.check_output(
             [str(binary), "--version"], env=env, text=True, timeout=10).strip()
     (root / "executables.json").write_text(json.dumps(identities, indent=2) + "\n")
+    hook(binaries[2], root, "init", env)
+    daemon_round(binaries[1], root, "bootstrap", env)
     hook(binaries[2], root, "setup", env)
     daemon_round(binaries[0], root, "old", env)
     hook(binaries[2], root, "assert-old", env)

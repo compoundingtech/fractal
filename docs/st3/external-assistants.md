@@ -423,6 +423,10 @@ not unrelated source writes. Generic unrelated appends remain allowed: the store
 future schema owns its persistent trigger contract, and those triggers may maintain
 its queue subjects without the current binary interpreting or reinstalling them.
 Schema-on-open preserves that future authority DDL and metadata.
+The `scripts/assistant-grant-authority-cross-version` harness initializes its
+isolated store through the new daemon before adding converted grant fixtures.
+It then executes the old daemon's native writes and the new daemon's rollforward;
+startup writer identity checks remain active throughout.
 
 
 Subject readiness seeks the four queue subject indexes directly, rather than

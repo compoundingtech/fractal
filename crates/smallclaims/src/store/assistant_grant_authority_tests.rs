@@ -2812,10 +2812,8 @@ fn assistant_grant_authority_cross_version_fixture() {
     let root = PathBuf::from(std::env::var_os("AUTHORITY_CROSS_VERSION_ROOT").unwrap());
     let path = root.join("store/claims.sqlite3");
     let phase = std::env::var("AUTHORITY_CROSS_VERSION_PHASE").unwrap();
-    if phase == "setup" {
-        assert!(!path.exists(), "cross-version setup requires a fresh fixture");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let store = Store::open(&path,"authority-rollback",Arc::new(Plain)).unwrap();
+    if phase == "init" {
+        assert!(!path.exists(), "cross-version init requires a fresh fixture");
         let state = root.join("state");
         let founded = crate::fleet::join::found(&state,"authority-rollback",
             &crate::fleet::join::MemberSettings {
@@ -2824,8 +2822,16 @@ fn assistant_grant_authority_cross_version_fixture() {
             },
         ).unwrap();
         let fleet = crate::fleet::FleetFile::load(&state).unwrap().unwrap();
-        crate::fleet::activate(&store,&state,&fleet).unwrap();
         assert_eq!(fleet.anchor_key.as_deref(),Some(founded.anchor_key.as_str()));
+    } else if phase == "setup" {
+        // The real new daemon initializes the store and its writer identity.
+        // Never synthesize daemon-owned metadata to bypass startup admission.
+        assert!(path.exists(), "the new daemon must initialize the fixture first");
+        assert!(root.join("state/node-identity.json").exists());
+        let store = Store::open(&path,"authority-rollback",Arc::new(Plain)).unwrap();
+        let state = root.join("state");
+        let fleet = crate::fleet::FleetFile::load(&state).unwrap().unwrap();
+        crate::fleet::activate(&store,&state,&fleet).unwrap();
         let mut value = fields();
         value["issuer"] = json!("person/owner");
         value["expires_at_unix_ms"] = json!(4_102_444_800_000_u64);
