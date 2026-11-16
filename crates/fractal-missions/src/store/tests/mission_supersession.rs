@@ -170,8 +170,9 @@ fn mission_supersession_person_responses_wait_without_reasking() {
     use crate::store::person_work::PersonWorkStore;
 
     for cancel in [false, true] {
-        let store = Store::open_memory("owner").unwrap();
-        publish_mission(&store, ORIGINAL, "answer-original");
+        let store = Store::open_memory("controller").unwrap();
+        let original = ORIGINAL.replace("step \"prepare\" {", "step \"prepare\" { assigned-to \"agent/controller.worker\";");
+        publish_mission(&store, &original, "answer-original");
         apply_source(&store,
             "version 2\nagent \"worker\" { workspace \"/work/retry\"; command \"true\"; restart always; }\n",
             "answer-worker");
@@ -179,19 +180,20 @@ fn mission_supersession_person_responses_wait_without_reasking() {
         let work = source.steps.iter().find(|step| step.step == "prepare").unwrap();
         store.set_step_state(&work.subject, "ready", None).unwrap();
         store.work_action(&work.subject, "claim", &WorkRequest {
-            actor: Some("agent/worker".into()), incarnation: Some("answer-worker".into()),
+            actor: Some("agent/controller.worker".into()), incarnation: Some("answer-worker".into()),
             wait_ms: None, summary: None, reason: None, evidence: Vec::new(),
             idempotency_key: "answer-claim".into(),
         }).unwrap();
         let ask = store.ask_person(&crate::model::PersonAskRequest {
             person: "person/requester".into(), title: "Choose the input".into(),
-            reason: "The worker needs the requested choice.".into(), actor: "agent/worker".into(),
+            reason: "The worker needs the requested choice.".into(), actor: "agent/controller.worker".into(),
             step: Some(work.subject.clone()), incarnation: Some("answer-worker".into()),
             new_run: None, request: None, priority: None, deadline_ms: None,
             default_answer: None, legacy_request: None, idempotency_key: "answer-ask".into(),
         }).unwrap();
         store.finish_person_step(&crate::model::PersonStepResponse {
-            subject: ask.subject.clone(), actor: "person/requester".into(),
+            subject: ask.subject.clone(),
+            actor: if cancel { "agent/controller.worker" } else { "person/requester" }.into(),
             summary: "Use the existing input.".into(), delegation: None,
             evidence: Vec::new(), episode: None, answer: None,
             idempotency_key: "answer-response".into(),
@@ -201,7 +203,7 @@ fn mission_supersession_person_responses_wait_without_reasking() {
                 "a cancellation response must be protected independently of completed steps");
         }
         let asks = store.claims_for(&ask.subject, Some("work.person-asked")).unwrap();
-        publish_mission(&store, &ORIGINAL.replace("Prepare.", "Prepare the same work."), "answer-prose");
+        publish_mission(&store, &original.replace("Prepare.", "Prepare the same work."), "answer-prose");
         rebuild(&store, &[&source]);
         requeue_heads(&store);
         store.supersede_mission_publications().unwrap();
@@ -546,7 +548,15 @@ fn mission_supersession_equivalent_publication_preserves_pins_and_refusal_episod
         let original = ORIGINAL.replace("host \"local\"", "host \"orchid\"");
         publish_mission(&owner, &original, "equivalent-original");
         let source = start(&owner);
-        let source = if pinned { fail(&owner, &source) } else { source };
+        let source = if pinned {
+            // A same-revision retry is pinned independently of completed evidence. Keep
+            // this fixture free of carried completions, which require explicit recovery.
+            for step in &source.steps {
+                owner.set_step_state(&step.subject, "failed", Some("script failed")).unwrap();
+            }
+            owner.set_mission_run_state(&source.id, "failed", "terminal", Some("script failed")).unwrap();
+            current(&owner, &source)
+        } else { source };
         let fixed = original.replace("exit 1", "exit 0");
         let fixed = if pinned { fixed } else {
             fixed.replace("input \"value\"", "input \"replacement\"")
@@ -555,6 +565,9 @@ fn mission_supersession_equivalent_publication_preserves_pins_and_refusal_episod
         let run = if pinned {
             owner.retry_mission_run(&source.subject, &retry_options("equivalent-pin", true)).unwrap()
         } else { source };
+        if pinned {
+            assert!(run.steps.iter().all(|step| step.status == "pending"));
+        }
         let head = || owner.readers.get().query_row(
             "SELECT claim_id FROM mission_definitions WHERE mission_id='retry-work'",
             [], |row| row.get::<_, String>(0),

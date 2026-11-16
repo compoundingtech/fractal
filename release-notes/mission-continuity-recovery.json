@@ -3,15 +3,15 @@
   "summary": "Mission retries and approved revisions retain compatible completed work and bound person answers by reference; automatic supersession protects completed evidence and successors resolve the current launching-declaration workspace.",
   "replay": {
     "status": "changed",
-    "detail": "Existing step-run.carried references retain original completed evidence and person responses. New asks record a typed continuity binding; historical unbound answers are not automatically adopted. No person answers or completion evidence are fabricated."
+    "detail": "Existing carried references retain original completed evidence and person responses, including denials. A carried denial leaves the gate refused, never falsely completed. New asks record a typed continuity binding; historical unbound answers are not automatically adopted. No person answers or completion evidence are fabricated."
   },
   "schema": {
     "status": "changed",
-    "detail": "Optional claim fields record ask continuity bindings, carried source attempts, and launching declaration workspace provenance. No storage table migration or client-v0 schema change."
+    "detail": "mission-run.gate-carried references original root decisions; optional claim fields record ask bindings, carried source attempts, and launching declaration workspace provenance. No storage table migration or client-v0 schema change."
   },
   "rules": {
     "status": "changed",
-    "detail": "Completed work and person responses prevent automatic supersession without existing explicit revision approval. Adoption checks step and dependency contracts, declared resolved inputs including head/ref values, requester and authority, and standing answer state. Schedule and subscription successors resolve workspace from their current launching declaration."
+    "detail": "Completed work and person responses prevent automatic supersession without existing explicit revision approval. Adoption checks step and dependency contracts, declared resolved inputs including head/ref values, requester and authority, and standing answer state. Human gate reuse tracks equivalent requests across runs, including unanswered candidates, so an original answer wakes dependent runs without polling. Revoking an old answer never resumes a different outstanding ask or makes the revoked answer reusable. Schedule and subscription successors resolve workspace from their current launching declaration."
   },
   "compatibility": {
     "status": "changed",

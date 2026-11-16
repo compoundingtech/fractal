@@ -26,15 +26,20 @@ pub(super) fn gate_binding_tx(connection: &Connection, run: &MissionRunView, own
 impl Store {
     /// Bind authored human gates before emission and reuse only authenticated original approval.
     pub fn human_gate_continuity(&self, run: &MissionRunView, owner: &str, fields: &BTreeMap<String, Value>) -> Result<(Value, Option<ClaimRecord>), FractalError> {
-        self.with_run_fence(owner, |tx| {
+        // Equivalent requests can originate in another run. Track the candidate
+        // collection even when empty, and each candidate before looking for its answer.
+        smallclaims::touched::note_read(|| "kind:gate.requested".to_owned());
+        // The fenced callback can run on the batched writer thread. Its read
+        // recorder is thread-local, so return that frontier to the evaluating caller.
+        let (result, reads) = self.with_run_fence(owner, |tx| Ok::<_, FractalError>(smallclaims::touched::record(|| {
             let target = run.steps.iter().find(|step| step.subject == owner);
             let binding = gate_binding_tx(tx, run, owner, fields).map_err(internal)?;
             let value = serde_json::to_value(&binding).map_err(internal)?;
             if target.is_none() {
                 for request in root_gate_evidence_tx(tx, run).map_err(internal)? {
+                    smallclaims::touched::note_read(|| request.subject.clone());
                     let Some(answer) = crate::store::human_review_answer_tx(tx, &request.id).map_err(internal)? else { continue; };
-                    if answer.body["fields"]["verdict"] == "pass"
-                        && super::root_gates::root_reference_matches_tx(tx,run,&request,&answer,&value).map_err(internal)? {
+                    if super::root_gates::root_reference_matches_tx(tx,run,&request,&answer,&value).map_err(internal)? {
                         return Ok((value,Some(request)));
                     }
                 }
@@ -47,9 +52,9 @@ impl Store {
             for request in query.query_map(params![binding.person, binding.step], claim_from_row).map_err(internal)? {
                 let request = request.map_err(internal)?;
                 if request.body["fields"]["continuity"] != value { continue; }
+                smallclaims::touched::note_read(|| request.subject.clone());
                 let Some(answer) = crate::store::human_review_answer_tx(tx, &request.id).map_err(internal)? else { continue; };
-                // A refusal or request for changes is not approval to repeat effects.
-                if answer.body["fields"]["verdict"] != "pass" { continue; }
+                // Carry the standing decision, never promote a refusal to approval.
                 if let Some(target) = target {
                     let recorded: bool = tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='step-run.carried'
@@ -72,6 +77,10 @@ impl Store {
                 return Ok((value, Some(request)));
             }
             Ok((value, None))
-        })
+        })))?;
+        for key in reads {
+            smallclaims::touched::note_read(|| key);
+        }
+        result
     }
 }

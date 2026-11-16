@@ -39,7 +39,8 @@ fn recovery_runs(
     run: &str,
 ) -> Result<(MissionRunView, MissionRunView), FractalError> {
     let source = mission_run_view_tx(connection, run.strip_prefix("mission-run/").unwrap_or(run))
-        .map_err(internal)?;
+        .optional().map_err(internal)?
+        .ok_or_else(|| FractalError::new("missing-mission-run", format!("mission run `{run}` does not exist")))?;
     let mut next = mission_run_lineage_tx(connection, &source.subject).map_err(internal)?
         .superseded_by.ok_or_else(|| FractalError::new("mission-not-superseded",
             "recovery requires an original run with a recorded supersession"))?;

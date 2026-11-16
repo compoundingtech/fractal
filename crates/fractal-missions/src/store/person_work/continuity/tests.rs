@@ -49,8 +49,9 @@ fn answer(store: &Store, ask: &StepRunView) {
 fn same_input_reask_reuses_original_answer_by_reference() {
     let store = Store::open_memory("controller").unwrap();
     setup(&store);
-    let (_, first) = ask(&store, "first");
+    let (origin, first) = ask(&store, "first");
     answer(&store, &first);
+    store.set_step_state(&origin.subject, "completed", None).unwrap();
     let (second_step, second) = ask(&store, "second");
     assert_eq!(first.subject, second.subject);
     let reader = store.readers.get();
@@ -68,8 +69,9 @@ fn restart_reuses_original_answer_without_new_ask() {
     let original = {
         let store = Store::open(&path, "controller").unwrap();
         setup(&store);
-        let (_, first) = ask(&store, "first");
+        let (origin, first) = ask(&store, "first");
         answer(&store, &first);
+        store.set_step_state(&origin.subject, "completed", None).unwrap();
         first.subject
     };
     let store = Store::open(&path, "controller").unwrap();
@@ -81,8 +83,9 @@ fn changed_head_and_relevant_input_refuse_answer_reuse() {
     for (head, context) in [("head-b", "context-a"), ("head-a", "context-b")] {
         let store = Store::open_memory("controller").unwrap();
         setup(&store);
-        let (_, first) = ask(&store, "first");
+        let (origin, first) = ask(&store, "first");
         answer(&store, &first);
+        store.set_step_state(&origin.subject, "completed", None).unwrap();
         let (_, second) = ask_with_inputs(&store, "changed", head, context);
         assert_ne!(first.subject, second.subject);
     }
@@ -92,8 +95,9 @@ fn changed_head_and_relevant_input_refuse_answer_reuse() {
 fn changed_authority_refuses_answer_reuse() {
     let store = Store::open_memory("controller").unwrap();
     setup(&store);
-    let (_, first) = ask(&store, "first");
+    let (origin, first) = ask(&store, "first");
     answer(&store, &first);
+    store.set_step_state(&origin.subject, "completed", None).unwrap();
     publish(&store, "version 2\nmission \"answer\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/controller.worker\"; } }", "authority-change");
     assert_ne!(ask(&store, "changed").1.subject, first.subject);
 }
@@ -102,8 +106,9 @@ fn changed_authority_refuses_answer_reuse() {
 fn legacy_missing_binding_is_not_automatically_reused() {
     let store = Store::open_memory("controller").unwrap();
     setup(&store);
-    let (_, first) = ask(&store, "first");
+    let (origin, first) = ask(&store, "first");
     answer(&store, &first);
+    store.set_step_state(&origin.subject, "completed", None).unwrap();
     // Model retained pre-binding history without rebuilding or replaying it.
     store.connection.batched(|tx| -> Result<()> {
         tx.execute(/* sqlite-large-value: allow-for-now lv-hfa4ed7c2d377 owner=fractal_missions::store::person_work::continuity::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.continuity') WHERE subject=?1 AND kind='work.person-asked'", [&first.subject])?;
@@ -168,8 +173,9 @@ fn spontaneous_work_asks_do_not_gain_native_binding_or_cross_key_carry() {
 fn cancelled_answer_source_is_never_reused() {
     let store = Store::open_memory("controller").unwrap();
     setup(&store);
-    let (_, first) = ask(&store, "first");
+    let (origin, first) = ask(&store, "first");
     answer(&store, &first);
+    store.set_step_state(&origin.subject, "completed", None).unwrap();
     store.connection.batched(|tx| -> Result<()> {
         append_claim_tx(tx, &store.origin, &first.subject, "work.person-cancelled", Some("person/test"),
             &json!({"fields":{"attempt":1,"status":"cancelled","summary":"Withdrawn","key":"withdraw"}}),
@@ -204,7 +210,7 @@ fn answered_ask_same_input_retry_and_prose_revision_reuse_one_original_answer_ac
         actor: "person/test".into(), same_revision: true, reason: Some("Retry unchanged work".into()), idempotency_key: "same-input".into(),
     }).unwrap();
     assert_single_original_answer(&store, &original_ask, &same.steps[0]);
-    publish(&store, "version 2\nmission \"answer\" state=\"ready\" { goal \"Clarify the mission introduction.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/controller.worker\"; } }", "prose");
+    publish(&store, "version 2\nmission \"answer\" state=\"ready\" { goal \"Clarify the mission introduction.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/controller.worker\"; } }", "publish-prose");
     let prose = store.retry_mission_run(&origin.run, &crate::model::MissionRunRetryRequest {
         actor: "person/test".into(), same_revision: false, reason: Some("Prose-only revision".into()), idempotency_key: "prose".into(),
     }).unwrap();
@@ -222,8 +228,9 @@ fn changed_transitive_effect_contract_refuses_answer_reuse() {
     setup(&store);
     let source = "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"prepare\" { goal \"Original effect.\"; }; step \"work\" { assigned-to \"agent/controller.worker\"; depends-on { step \"prepare\" completed; }; } }";
     publish(&store, source, "dependency");
-    let (_, first) = ask(&store, "first");
+    let (origin, first) = ask(&store, "first");
     answer(&store, &first);
+    store.set_step_state(&origin.subject, "completed", None).unwrap();
     publish(&store, &source.replace("Original effect.", "Changed effect."), "changed-effect");
     assert_ne!(ask(&store, "changed").1.subject, first.subject);
 }
@@ -351,7 +358,7 @@ fn legacy_run_human_gate_requires_confirmation_and_reuses_original_approval_by_r
         inputs:BTreeMap::from([("head".into(),"head-b".into()),("context".into(),"context-a".into())]),idempotency_key:"changed-root-head".into(),
     }).unwrap();
     assert!(continuity::eligible_root_gate_requests_tx(&store.readers.get(),&source,&changed_input,&confirmed).unwrap().is_empty());
-    publish(&store,&definition.replace("person/test","person/other"),"changed-root-authority");
+    publish(&store,&definition.replace("person/test","person/other"),"publish-changed-root-authority");
     let changed_authority = gate_run(&store,"changed-root-authority");
     assert!(continuity::eligible_root_gate_requests_tx(&store.readers.get(),&source,&changed_authority,&confirmed).unwrap().is_empty());
 }
@@ -398,5 +405,138 @@ fn legacy_root_gate_omitted_optional_fields_keep_reader_defaults_and_confirmatio
     for kind in ["gate.requested", "gate.result"] {
         let count: u64 = reader.query_row("SELECT count(*) FROM claims WHERE kind=?1", [kind], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
+    }
+}
+
+#[test]
+fn standing_root_refusals_survive_same_input_retry_prose_and_reopen_without_new_decisions() {
+    for verdict in ["fail", "feedback"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let store = Store::open(&path, "controller").unwrap();
+        setup(&store);
+        let source = gate_run(&store, "denial-source");
+        let mut fields = gate_fields(&source.steps[0]);
+        fields.insert("owner".into(), json!(source.subject));
+        let (binding, previous) = store.human_gate_continuity(&source, &source.subject, &fields).unwrap();
+        assert!(previous.is_none());
+        fields.insert("continuity".into(), binding);
+        let (request, answer) = store.connection.batched(|tx| -> Result<_> {
+            let request = append_claim_tx(tx, &store.origin, "gate-operation/root-denial", "gate.requested", None,
+                &json!({"fields":fields}), &[], None)?;
+            let answer = append_claim_tx(tx, &store.origin, &request.subject, "gate.result", Some("person/test"),
+                &json!({"fields":{"request":request.id,"verdict":verdict}}), std::slice::from_ref(&request.id), None)?;
+            Ok((request, answer))
+        }).unwrap().unwrap();
+        store.set_mission_run_state(&source.subject, "failed", "terminal", Some("root decision refused")).unwrap();
+        let retry = store.retry_mission_run(&source.subject, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(), same_revision: true, reason: None, idempotency_key: "denial-retry".into(),
+        }).unwrap();
+        let references = store.claims_for(&retry.subject, Some("mission-run.gate-carried")).unwrap();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].body["fields"]["source_request"], request.id);
+        assert_eq!(references[0].body["fields"]["source_answer"], answer.id);
+        publish(&store, "version 2\nmission \"answer\" state=\"ready\" { goal \"Clarify approval context.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/controller.worker\"; } }", "publish-denial-prose");
+        let prose = store.retry_mission_run(&source.subject, &crate::model::MissionRunRetryRequest {
+            actor: "person/test".into(), same_revision: false, reason: None, idempotency_key: "denial-prose-retry".into(),
+        }).unwrap();
+        for run in [&retry, &prose] {
+            assert!(run.steps.iter().all(|step| step.status != "completed"));
+            fields.insert("owner".into(), json!(run.subject));
+            assert_eq!(store.human_gate_continuity(run, &run.subject, &fields).unwrap().1.unwrap().id, request.id);
+            let original = crate::store::human_review_answer_tx(&store.readers.get(), &request.id).unwrap().unwrap();
+            assert_eq!(original.id, answer.id);
+            assert_eq!(original.body["fields"]["verdict"], verdict);
+        }
+        let prose_subject = prose.subject.clone();
+        drop(store);
+        let store = Store::open(&path, "controller").unwrap();
+        let reopened = store.mission_run(&prose_subject).unwrap().unwrap();
+        fields.insert("owner".into(), json!(reopened.subject));
+        assert_eq!(store.human_gate_continuity(&reopened, &reopened.subject, &fields).unwrap().1.unwrap().id, request.id);
+        let reference = store.claims_for(&reopened.subject, Some("mission-run.gate-carried")).unwrap();
+        assert_eq!(reference[0].body["fields"]["source_answer"], answer.id);
+        assert!(reopened.steps.iter().all(|step| step.status != "completed"));
+        let reader = store.readers.get();
+        for kind in ["gate.requested", "gate.result"] {
+            let count: u64 = reader.query_row("SELECT count(*) FROM claims WHERE kind=?1", [kind], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1, "continuity must not replace a standing {verdict}");
+        }
+        let asks: u64 = reader.query_row("SELECT count(*) FROM claims WHERE kind='work.person-asked'", [], |row| row.get(0)).unwrap();
+        assert_eq!(asks, 0);
+    }
+}
+
+#[test]
+fn legacy_root_denial_preview_requires_person_confirmation_and_recovery_preserves_refusal() {
+    let store = Store::open_memory("controller").unwrap();
+    setup(&store);
+    let source = gate_run(&store, "legacy-denial-source");
+    let mut fields = gate_fields(&source.steps[0]);
+    fields.insert("owner".into(), json!(source.subject));
+    let (request, answer) = store.connection.batched(|tx| -> Result<_> {
+        let request = append_claim_tx(tx, &store.origin, "gate-operation/legacy-denial", "gate.requested", None,
+            &json!({"fields":fields}), &[], None)?;
+        let answer = append_claim_tx(tx, &store.origin, &request.subject, "gate.result", Some("person/test"),
+            &json!({"fields":{"request":request.id,"verdict":"fail"}}), std::slice::from_ref(&request.id), None)?;
+        Ok((request, answer))
+    }).unwrap().unwrap();
+    let current = store.mission_run(&source.subject).unwrap().unwrap();
+    let target = store.with_all_runs_fenced_internal(|tx| {
+        store.supersede_mission_run_at_revision_tx(tx, &current, &current.revision)
+    }).unwrap();
+    assert!(store.claims_for(&target.subject, Some("mission-run.gate-carried")).unwrap().is_empty());
+    let index = store.index().unwrap();
+    let preview = store.mission_continuity_preview(&source.subject).unwrap();
+    assert_eq!(store.index().unwrap(), index);
+    let evidence = &preview["original_root_gates"][0];
+    assert_eq!(evidence["evidence_id"], request.id);
+    assert_eq!(evidence["answer"]["id"], answer.id);
+    assert_eq!(evidence["eligibility"], "requires-person-confirmation");
+    let hash = preview["preview_hash"].as_str().unwrap();
+    assert_eq!(store.recover_mission_continuity(&source.subject, hash, "agent/controller.worker",
+        std::slice::from_ref(&request.id)).unwrap_err().code, "person-confirmation-required");
+    assert_eq!(store.index().unwrap(), index);
+    let recovered = store.recover_mission_continuity(&source.subject, hash, "person/test",
+        std::slice::from_ref(&request.id)).unwrap();
+    let run = store.mission_run(recovered["recovered_run"].as_str().unwrap()).unwrap().unwrap();
+    let references = store.claims_for(&run.subject, Some("mission-run.gate-carried")).unwrap();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].body["fields"]["source_request"], request.id);
+    assert_eq!(references[0].body["fields"]["source_answer"], answer.id);
+    assert_eq!(references[0].body["fields"]["legacy_confirmed"], true);
+    fields.insert("owner".into(), json!(run.subject));
+    assert_eq!(store.human_gate_continuity(&run, &run.subject, &fields).unwrap().1.unwrap().id, request.id);
+    assert_eq!(crate::store::human_review_answer_tx(&store.readers.get(), &request.id).unwrap().unwrap().body["fields"]["verdict"], "fail");
+    assert!(run.steps.iter().all(|step| step.status != "completed"));
+    let reader = store.readers.get();
+    for kind in ["gate.requested", "gate.result"] {
+        let count: u64 = reader.query_row("SELECT count(*) FROM claims WHERE kind=?1", [kind], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+}
+
+#[test]
+fn root_decision_carry_does_not_promote_errors_or_unauthenticated_denials() {
+    for (verdict, actor) in [("error", "person/test"), ("fail", "person/other")] {
+        let store = Store::open_memory("controller").unwrap();
+        setup(&store);
+        let source = gate_run(&store, "invalid-decision-source");
+        let mut fields = gate_fields(&source.steps[0]);
+        fields.insert("owner".into(), json!(source.subject));
+        let (binding, _) = store.human_gate_continuity(&source, &source.subject, &fields).unwrap();
+        fields.insert("continuity".into(), binding);
+        let request = store.connection.batched(|tx| -> Result<_> {
+            let request = append_claim_tx(tx, &store.origin, "gate-operation/invalid-decision", "gate.requested", None,
+                &json!({"fields":fields}), &[], None)?;
+            append_claim_tx(tx, &store.origin, &request.subject, "gate.result", Some(actor),
+                &json!({"fields":{"request":request.id,"verdict":verdict}}), std::slice::from_ref(&request.id), None)?;
+            Ok(request)
+        }).unwrap().unwrap();
+        let target = gate_run(&store, "invalid-decision-target");
+        assert!(continuity::eligible_root_gate_requests_tx(
+            &store.readers.get(), &source, &target, &BTreeSet::from([request.id]),
+        ).unwrap().is_empty());
+        assert!(store.claims_for(&target.subject, Some("mission-run.gate-carried")).unwrap().is_empty());
     }
 }

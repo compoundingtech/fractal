@@ -226,3 +226,62 @@ fn legacy_root_approval_is_previewed_and_recovered_only_by_explicit_reference() 
     assert_eq!(store.claims_for(&request.subject,Some("gate.result")).unwrap().len(),1);
     assert!(store.claims_for(&cutover.subject,Some("gate.result")).unwrap().is_empty());
 }
+
+#[test]
+fn human_gate_continuity_tracks_unanswered_cross_run_candidates() {
+    let store = Store::open_memory("controller").unwrap();
+    publish_mission(&store, ORIGINAL, "reactive-gate-original");
+    let source = start(&store);
+    let source_step = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    let mut fields = BTreeMap::from([
+        ("owner".into(), json!(source_step.subject)),
+        ("reviewer".into(), json!("person/reviewer")),
+        ("question".into(), json!("Approve this work?")),
+        ("attempt".into(), json!(source_step.attempt)),
+    ]);
+    let ((binding, previous), reads) = smallclaims::touched::record(|| {
+        store.human_gate_continuity(&source, &source_step.subject, &fields).unwrap()
+    });
+    assert!(previous.is_none());
+    assert!(reads.contains("kind:gate.requested"),
+        "an empty candidate lookup must wake when another run requests equivalent approval");
+    fields.insert("continuity".into(), binding);
+    let request = store.append_claim(&ClaimInput {
+        subject: "gate-operation/reactive-source/approval".into(),
+        kind: "gate.requested".into(), actor: None, fields,
+        evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some("reactive-source-request".into()),
+    }).unwrap();
+    let target = store.create_mission_run(&MissionRunRequest {
+        mission: "retry-work".into(), revision: None, workspace: source.workspace.clone(),
+        requester: Some(source.requester.clone()), mode: None,
+        inputs: BTreeMap::from([("value".into(), "unchanged".into())]),
+        idempotency_key: "reactive-target-run".into(),
+    }).unwrap();
+    let target_step = target.steps.iter().find(|step| step.step == "prepare").unwrap();
+    let fields = BTreeMap::from([
+        ("owner".into(), json!(target_step.subject)),
+        ("reviewer".into(), json!("person/reviewer")),
+        ("question".into(), json!("Approve this work?")),
+        ("attempt".into(), json!(target_step.attempt)),
+    ]);
+    let ((_, previous), reads) = smallclaims::touched::record(|| {
+        store.human_gate_continuity(&target, &target_step.subject, &fields).unwrap()
+    });
+    assert!(previous.is_none());
+    assert!(reads.contains(&request.subject),
+        "the other run's unanswered request must remain in the dependency frontier");
+    let answer = store.append_claim(&ClaimInput {
+        subject: request.subject.clone(), kind: "gate.result".into(),
+        actor: Some("person/reviewer".into()),
+        fields: BTreeMap::from([("request".into(), json!(request.id)), ("verdict".into(), json!("pass"))]),
+        evidence: vec![request.id.clone()], expected_subject: None,
+        idempotency_key: Some("reactive-source-answer".into()),
+    }).unwrap();
+    let (_, reused) = store.human_gate_continuity(&target, &target_step.subject, &fields).unwrap();
+    assert_eq!(reused.unwrap().id, request.id);
+    let carried = store.claims_for(&target_step.subject, Some("step-run.carried")).unwrap();
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].body["evidence"], json!([request.id, answer.id]));
+    assert!(store.claims_for(&target_step.subject, Some("gate.result")).unwrap().is_empty());
+}

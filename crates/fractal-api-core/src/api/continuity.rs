@@ -118,7 +118,8 @@ mod tests {
     async fn harness_person_header_cannot_confirm_legacy_sources() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(root.path());
-        let app = router(state.clone());
+        let app = router(state.clone())
+            .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
         let before = state.store.index().unwrap();
         let response = app.oneshot(Request::builder().method("POST")
             .uri("/v1/mission-runs/continuity/recover")
@@ -127,7 +128,10 @@ mod tests {
             .extension(BoundAgent("agent/helper".into()))
             .body(Body::from(json!({"run":"absent", "preview_hash":"stale",
                 "confirmed_legacy_evidence":["approval"]}).to_string())).unwrap()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refusal["code"], "foreign-agent-actor");
         assert_eq!(state.store.index().unwrap(), before);
     }
 
@@ -142,11 +146,15 @@ mod tests {
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), expected);
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["api_version"], "st3.v1");
+        assert_eq!(envelope["store_index"], json!(before));
+        assert_eq!(envelope["value"], expected);
         let (status, value) = post(router(state.clone()), "/v1/mission-runs/continuity/preview", None,
             json!({"run":"absent"})).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(value["code"], state.store.mission_continuity_preview("absent").unwrap_err().code);
+        assert_eq!(value["code"], "missing-mission-run");
+        assert_eq!(state.store.mission_continuity_preview("absent").unwrap_err().code, "missing-mission-run");
         assert_eq!(state.store.index().unwrap(), before);
     }
 }

@@ -69,6 +69,7 @@ pub(super) fn root_reference_matches_tx(connection: &Connection, run: &MissionRu
 }
 
 /// Confirming an old question cannot override changed contracts, inputs, or authority.
+/// Standing authenticated refusals and feedback carry too; reference carry never changes their verdict.
 pub fn eligible_root_gate_requests_tx(connection: &Connection, source: &MissionRunView, target: &MissionRunView, confirmed_request_ids: &BTreeSet<String>) -> Result<Vec<ClaimRecord>> {
     let requests = root_gate_evidence_tx(connection, source)?;
     if requests.is_empty() { return Ok(Vec::new()); }
@@ -77,7 +78,6 @@ pub fn eligible_root_gate_requests_tx(connection: &Connection, source: &MissionR
     let mut eligible = Vec::new();
     for request in requests {
         let Some(answer) = crate::store::human_review_answer_tx(connection,&request.id)? else { continue; };
-        if answer.body["fields"]["verdict"] != "pass" { continue; }
         let fields = serde_json::from_value::<BTreeMap<String,Value>>(request.body["fields"].clone())?;
         let expected = serde_json::to_value(gate_binding_tx(connection,source,&source.subject,&fields)?)?;
         let stored = &request.body["fields"]["continuity"];
