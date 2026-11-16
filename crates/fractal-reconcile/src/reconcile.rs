@@ -6855,8 +6855,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         if selected != *subject {
             return Ok(());
         }
+        let reason = self.store.latest_actual_value(&subject.subject)?
+            .as_ref().and_then(runtime_exit_reason)
+            .unwrap_or_else(|| format!("{}-without-exit-evidence", observation.status));
         let mut intent = crate::graph::parse_internal_intent(
-            &format!("version 2\nstop {:?}\n", subject.subject),
+            &format!("version 2\nstop {:?} {{ reason {:?}; }}\n", subject.subject, reason),
             &self.host,
         )?;
         let stopped = intent.subjects.get_mut(&subject.subject)
@@ -6877,15 +6880,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         match result {
             Ok(_) => {
                 self.signal_changed();
-                if let Some(actual) = self.store.latest_actual_value(&subject.subject)?
-                    && let Some(reason) = runtime_exit_reason(&actual)
-                {
-                    self.record_once(&subject.subject, "runtime.reconcile-decision", BTreeMap::from([
-                        ("key".into(), Value::String("one-shot-retirement".into())),
-                        ("decision".into(), Value::String("retire".into())),
-                        ("reason".into(), Value::String(reason)),
-                    ]))?;
-                }
+                self.record_once(&subject.subject, "runtime.reconcile-decision", BTreeMap::from([
+                    ("key".into(), Value::String("one-shot-retirement".into())),
+                    ("decision".into(), Value::String("retire".into())),
+                    ("reason".into(), Value::String(reason)),
+                ]))?;
             }
             Err(error) if error.code == "stale-subject" => {}
             Err(error) => return Err(error.into()),
@@ -10642,8 +10641,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if matches!(fields.get("status").and_then(Value::as_str), Some("running" | "starting")) {
             return Ok(());
         }
-        let Some(incarnation) = incarnation else { return Ok(()); };
+        let previous = self.store.latest_observation(subject, "runtime.observed")?
+            .filter(|claim| claim.body.pointer("/fields/incarnation_id").and_then(Value::as_str) == incarnation);
         if terminal
+            && let Some(incarnation) = incarnation
             && let Some(evidence) = self.runtime.exit_evidence(runtime_id, incarnation)?
             && evidence.incarnation == incarnation
         {
@@ -10653,12 +10654,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(signal) = evidence.signal {
                 fields.insert("exit_signal".into(), Value::from(signal));
             }
-            fields.insert("exit_evidence".into(), serde_json::to_value(evidence)?);
+            let mut evidence = serde_json::to_value(evidence)?;
+            evidence["observedAtUnixMs"] = previous.as_ref()
+                .and_then(|claim| claim.body.pointer("/fields/exit_evidence/observedAtUnixMs"))
+                .cloned().unwrap_or_else(|| serde_json::json!(now_ms()));
+            evidence["lastObservedState"] = previous.as_ref()
+                .and_then(|claim| claim.body.pointer("/fields/exit_evidence/lastObservedState"))
+                .cloned().unwrap_or_else(|| fields.get("status").cloned().unwrap_or(Value::Null));
+            fields.insert("exit_evidence".into(), evidence);
             return Ok(());
         }
-        if let Some(previous) = self.store.latest_observation(subject, "runtime.observed")?
-            && previous.body.pointer("/fields/incarnation_id").and_then(Value::as_str) == Some(incarnation)
-        {
+        if let Some(previous) = previous {
             for key in ["exit_code", "exit_signal", "exit_evidence"] {
                 if fields.get(key).is_none_or(Value::is_null)
                     && let Some(value) = previous.body["fields"].get(key)
@@ -10666,6 +10672,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                     fields.insert(key.into(), value.clone());
                 }
             }
+        }
+        if matches!(fields.get("status").and_then(Value::as_str), Some("exited" | "vanished"))
+            && fields.get("exit_evidence").is_none_or(Value::is_null)
+        {
+            let status = fields.get("status").and_then(Value::as_str).unwrap();
+            let unknown = fields.get("exit_code").is_none_or(Value::is_null)
+                && fields.get("exit_signal").is_none_or(Value::is_null);
+            fields.insert("exit_evidence".into(), serde_json::json!({
+                "incarnation": incarnation,
+                "observedAtUnixMs": now_ms(),
+                "lastObservedState": status,
+                "exitStatus": if unknown { "unknown" } else { "known" },
+                "reason": if unknown { Some(format!("{status}-without-exit-evidence")) } else { None },
+            }));
         }
         Ok(())
     }
@@ -22326,9 +22346,17 @@ fn runtime_exit_reason(actual: &Value) -> Option<String> {
     let code = actual_field(actual, "exit_code").and_then(Value::as_i64);
     let signal = actual_field(actual, "exit_signal").and_then(Value::as_i64);
     if evidence.is_none() && code.is_none() && signal.is_none() {
-        return None;
+        return match actual_field(actual, "status").and_then(Value::as_str) {
+            Some(status @ ("exited" | "vanished")) => Some(format!("{status}-without-exit-evidence")),
+            _ => actual_field(actual, "reason").and_then(Value::as_str)
+                .filter(|reason| reason.ends_with("-without-exit-evidence")).map(str::to_owned),
+        };
     }
-    let mut reason = String::from("exited");
+    let mut reason = if code.is_none() && signal.is_none() {
+        evidence.and_then(|value| value.get("reason")).and_then(Value::as_str).unwrap_or("exited")
+    } else {
+        "exited"
+    }.to_owned();
     if let Some(code) = code {
         reason.push_str(&format!(" with code {code}"));
     }
