@@ -836,13 +836,13 @@ fn supersession_has_evidence(
                SELECT subject FROM step_runs WHERE run_id=?1
                UNION SELECT 'mission-run/'||?1))",
     ).map_err(internal)?;
-    if query.query_row([&source.id], |row| row.get::<_, bool>(0)).map_err(internal)? {
+    if query.query_row(/* sqlite-large-value: allow-for-now lv-h14287b24821e owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ [&source.id], |row| row.get::<_, bool>(0)).map_err(internal)? {
         return Ok(true);
     }
     // Cancelling a parent also cancels its owned descendants, whose evidence needs
     // the same protection even when the parent's nested step has not completed.
     for descendant in descendant_mission_run_ids_tx(connection, generation_id_from_subject(&source.generation)).map_err(internal)? {
-        if query.query_row([&descendant], |row| row.get::<_, bool>(0)).map_err(internal)? {
+        if query.query_row(/* sqlite-large-value: allow-for-now lv-h0b04cb0418e9 owner=fractal_store::store::mission_supersession TODO=trace-statement-and-value-representation */ [&descendant], |row| row.get::<_, bool>(0)).map_err(internal)? {
             return Ok(true);
         }
     }

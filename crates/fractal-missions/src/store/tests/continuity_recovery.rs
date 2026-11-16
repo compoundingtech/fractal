@@ -19,6 +19,7 @@ fn supersede_and_damage(store: &Store, source: &MissionRunView) -> (MissionRunVi
     let mut connection = store.connection.write();
     let transaction = connection.transaction().unwrap();
     transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hcd02eab85cd9 owner=fractal_missions::store::tests::continuity_recovery TODO=prepare-body-and-predecessor-values */
         "DELETE FROM claims WHERE kind='step-run.carried' AND subject IN (SELECT subject FROM step_runs WHERE run_id=?1)",
         [&target.id],
     ).unwrap();
@@ -120,6 +121,7 @@ fn direct_person_answer_preview_names_bound_and_legacy_originals() {
         if legacy {
             // Historical responses predate native binding fields; preserve their original identity.
             store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hde57e33804a6 owner=fractal_missions::store::tests::continuity_recovery TODO=prepare-body-and-predecessor-values */
                 "UPDATE claims SET body=json_remove(body,'$.fields.continuity') WHERE id=?1", [&answer.id],
             ).unwrap();
         }

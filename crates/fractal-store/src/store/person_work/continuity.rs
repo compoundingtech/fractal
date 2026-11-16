@@ -48,6 +48,7 @@ pub fn legacy_step_confirmation_tx(connection: &Connection, source: &StepRunView
 fn inherited_step_confirmations_tx(connection: &Connection, source: &StepRunView, target: &StepRunView) -> Result<BTreeSet<String>> {
     let expected = continuity_step_binding_tx(connection, target)?;
     let mut query = connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-h909c95573ae4 owner=fractal_store::store::person_work::continuity TODO=trace-statement-and-value-representation */
         "WITH RECURSIVE sources(subject,attempt) AS (
            SELECT ?1,?2 UNION SELECT json_extract(c.body,'$.fields.source_step_run'),
              coalesce(json_extract(c.body,'$.fields.source_attempt'),sources.attempt)
@@ -123,7 +124,7 @@ pub fn direct_person_binding_tx(connection: &Connection, step: &StepRunView, act
 }
 
 pub fn person_evidence_tx(connection: &Connection, source: &StepRunView) -> Result<Vec<ClaimRecord>> {
-    connection.prepare_cached(&canonical_sql(
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h608979b5ef99 owner=fractal_store::store::person_work::continuity TODO=trace-statement-and-value-representation */ &canonical_sql(
         "WITH RECURSIVE sources(subject,attempt) AS (
            SELECT ?1,?2 UNION SELECT json_extract(c.body,'$.fields.source_step_run'),
              coalesce(json_extract(c.body,'$.fields.source_attempt'),sources.attempt)
@@ -201,7 +202,7 @@ pub fn step_answers_eligible_tx(connection: &Connection, source: &StepRunView, t
 }
 
 pub fn equivalent_answer_tx(connection: &Connection, origin: &StepRunView, binding: &AskContinuityBinding) -> Result<Option<ClaimRecord>> {
-    let mut query = connection.prepare_cached(&canonical_sql(
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hdb770a2c69e8 owner=fractal_store::store::person_work::continuity TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
          FROM claims WHERE kind='work.person-asked' AND actor=?1
          AND json_extract(body,'$.fields.continuity.step')=?2

@@ -246,7 +246,7 @@ impl Store {
                     .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
             };
             let candidates = {
-                let mut query = transaction.prepare(mission_supersession::SUPERSESSION_SOURCE_QUERY).map_err(internal)?;
+                let mut query = transaction.prepare(/* sqlite-large-value: allow-for-now lv-hb958d1c36009 owner=fractal_store::store::continuity TODO=trace-statement-and-value-representation */ mission_supersession::SUPERSESSION_SOURCE_QUERY).map_err(internal)?;
                 query.query_map(params![mission, revision, self.origin, index, publication,
                     mission_supersession::FAULT_SCOPE, Option::<String>::None,
                     serde_json::to_string(&ids).map_err(internal)?], |row| row.get::<_, String>(0))

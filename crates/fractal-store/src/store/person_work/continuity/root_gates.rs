@@ -3,7 +3,7 @@ use super::human_gates::gate_binding_tx;
 
 /// Original run-level human requests, including originals carried into this generation.
 pub fn root_gate_evidence_tx(connection: &Connection, source: &MissionRunView) -> Result<Vec<ClaimRecord>> {
-    connection.prepare_cached(&canonical_sql(
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h929ee3c2fca9 owner=fractal_store::store::person_work::continuity::root_gates TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
          FROM claims WHERE kind='gate.requested' AND json_type(body,'$.fields.reviewer')='text'
            AND (json_extract(body,'$.fields.owner')=?1 OR id IN (

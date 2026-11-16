@@ -32,7 +32,7 @@ impl Store {
                     }
                 }
             }
-            let mut query = tx.prepare_cached(&canonical_sql(
+            let mut query = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbc159cbc677e owner=fractal_store::store::person_work::continuity::human_gates TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
                  FROM claims WHERE kind='gate.requested' AND json_extract(body,'$.fields.reviewer')=?1
                    AND json_extract(body,'$.fields.continuity.step')=?2 ORDER BY CANONICAL_DESC(claims)"

@@ -712,7 +712,7 @@ pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h96e1535e2ac0 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h58b7fa26fa6e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
         "WITH RECURSIVE sources(subject,attempt) AS (
           SELECT ?1,?2 UNION
           SELECT json_extract(carried.body,'$.fields.source_step_run'),

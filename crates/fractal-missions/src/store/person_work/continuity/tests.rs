@@ -106,7 +106,7 @@ fn legacy_missing_binding_is_not_automatically_reused() {
     answer(&store, &first);
     // Model retained pre-binding history without rebuilding or replaying it.
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute("UPDATE claims SET body=json_remove(body,'$.fields.continuity') WHERE subject=?1 AND kind='work.person-asked'", [&first.subject])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hfa4ed7c2d377 owner=fractal_missions::store::person_work::continuity::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.continuity') WHERE subject=?1 AND kind='work.person-asked'", [&first.subject])?;
         Ok(())
     }).unwrap().unwrap();
     assert_ne!(ask(&store, "legacy").1.subject, first.subject);
@@ -246,7 +246,7 @@ fn authored_human_gate_reuses_original_authenticated_approval_without_new_reques
     assert!(store.human_gate_continuity(&second, &second.steps[0].subject, &changed_authority).unwrap().1.is_none());
     drop(reader);
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute("UPDATE claims SET body=json_remove(body,'$.fields.continuity') WHERE id=?1", [&original.id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hd8cd52bb4190 owner=fractal_missions::store::person_work::continuity::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_remove(body,'$.fields.continuity') WHERE id=?1", [&original.id])?;
         Ok(())
     }).unwrap().unwrap();
     assert!(store.human_gate_continuity(&second, &second.steps[0].subject, &gate_fields(&second.steps[0])).unwrap().1.is_none());
