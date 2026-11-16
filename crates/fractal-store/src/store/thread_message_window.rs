@@ -509,7 +509,6 @@ fn materialize_window(
         })
         .collect()
 }
-
 fn query_window(
     connection: &Connection,
     thread: &str,
@@ -525,8 +524,9 @@ fn query_window(
     )
 }
 
-/// Canonical ordering may inspect a tied-time header bucket. Body hydration happens
-/// only after the bounded ID window is selected, never inside that canonical sort.
+/// Decimal u128 time is indexed as (length,text). SQLite does not range-seek an
+/// expression row-value tuple, so each varying component gets its own bounded arm.
+/// The remaining canonical tie keys stay exactly those of canonical::components.
 fn query_window_headers(
     connection: &Connection,
     thread: &str,
@@ -536,41 +536,91 @@ fn query_window_headers(
     newer: bool,
     limit: usize,
 ) -> Result<Vec<(String, String)>, FractalError> {
-    let after = if newer {
-        smallclaims::store::canonical::after_sql("claims", "anchor")
-    } else {
-        smallclaims::store::canonical::after_sql("anchor", "claims")
-    };
     let direction = if newer { "ASC" } else { "DESC" };
-    let comparison = if newer { ">=" } else { "<=" };
-    // An anchored seek uses an unconditional tuple range. The optional-OR shape
-    // prevents SQLite from using the accepted-time part of the routing index.
-    let range = if anchor.is_some() {
-        format!("AND (length(claims.accepted_at_unix_ms),claims.accepted_at_unix_ms) {comparison} (length(?6),?6)
-        AND EXISTS(SELECT 1 FROM claims anchor WHERE anchor.id=?5 AND {after})")
+    let comparison = if newer { ">" } else { "<" };
+    let after = if newer {
+        canonical::after_sql("claims", "anchor")
+    } else {
+        canonical::after_sql("anchor", "claims")
+    };
+    let strict = if anchor.is_some() {
+        format!("AND EXISTS(SELECT 1 FROM claims anchor WHERE anchor.id=?5 AND {after})")
     } else {
         String::new()
     };
     let headers = "claims.id,claims.batch_id,claims.store_index,claims.accepted_at_unix_ms";
-    let sql=canonical_sql(&format!("WITH explicit AS (
-        SELECT {headers},'active' AS operation_state FROM claims INDEXED BY claims_thread_message_accepted_index
-        JOIN operations active_operation ON active_operation.canonical_claim_id=claims.id AND active_operation.state='active'
-        WHERE claims.kind='message.sent' AND json_extract(claims.body,'$.fields.thread_id')=?1
-          AND json_extract(claims.body,'$.fields.thread_id') IS NOT NULL AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} {range}
-        ORDER BY CANONICAL_{direction}(claims) LIMIT ?7
-    ), legacy AS (
-        SELECT {headers},'active' AS operation_state FROM claims
-        JOIN operations active_operation ON active_operation.canonical_claim_id=claims.id AND active_operation.state='active'
-        WHERE claims.subject=?2 AND claims.batch_id=?3 AND claims.kind='message.sent'
-          AND json_extract(claims.body,'$.fields.thread_id') IS NULL AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} {range}
-    ), lifecycle AS (
-        SELECT {headers},operations.state AS operation_state FROM claims INDEXED BY claims_subject_accepted_index
-        JOIN operations ON operations.id=json_extract(claims.body,'$._operation.id')
-        WHERE claims.subject=?1 AND claims.kind IN ('thread.title-set','thread.state-set') AND claims.store_index<=?4
-          AND (operations.state='conflict' OR operations.canonical_claim_id=claims.id) AND {UNREPAIRED_CLAIM} {range}
-        ORDER BY CANONICAL_{direction}(claims) LIMIT ?7
-    ) SELECT claims.id,operation_state FROM (SELECT * FROM explicit UNION ALL SELECT * FROM legacy UNION ALL SELECT * FROM lifecycle) claims
-      ORDER BY CANONICAL_{direction}(claims) LIMIT ?7"));
+    let arm =
+        |from: &str, condition: &str, state: &str, range: &str, constant_components: usize| {
+            let order = canonical::components("claims")
+                .into_iter()
+                .skip(constant_components)
+                .map(|key| format!("{key} {direction}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "SELECT {headers},{state} AS operation_state FROM {from} WHERE {condition}
+          AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} {range} {strict}
+          ORDER BY {order} LIMIT ?7"
+            )
+        };
+    let slices = |from: &str, condition: &str, state: &str| {
+        let arms = if anchor.is_some() {
+            vec![
+                arm(
+                    from,
+                    condition,
+                    state,
+                    &format!("AND length(claims.accepted_at_unix_ms){comparison}length(?6)"),
+                    0,
+                ),
+                arm(
+                    from,
+                    condition,
+                    state,
+                    &format!(
+                        "AND length(claims.accepted_at_unix_ms)=length(?6) AND claims.accepted_at_unix_ms{comparison}?6"
+                    ),
+                    1,
+                ),
+                arm(
+                    from,
+                    condition,
+                    state,
+                    "AND length(claims.accepted_at_unix_ms)=length(?6) AND claims.accepted_at_unix_ms=?6",
+                    2,
+                ),
+            ]
+        } else {
+            vec![arm(from, condition, state, "", 0)]
+        };
+        arms.into_iter()
+            .map(|sql| format!("SELECT * FROM ({sql})"))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ")
+    };
+    let active = "JOIN operations active_operation ON active_operation.canonical_claim_id=claims.id AND active_operation.state='active'";
+    let explicit = slices(
+        &format!("claims INDEXED BY claims_thread_message_accepted_index {active}"),
+        "claims.kind='message.sent' AND json_extract(claims.body,'$.fields.thread_id')=?1 AND json_extract(claims.body,'$.fields.thread_id') IS NOT NULL",
+        "'active'",
+    );
+    // The legacy arm reads only the exact first-message subject/batch, never thread history.
+    let legacy = arm(
+        &format!("claims {active}"),
+        "claims.subject=?2 AND claims.batch_id=?3 AND claims.kind='message.sent' AND json_extract(claims.body,'$.fields.thread_id') IS NULL",
+        "'active'",
+        "",
+        0,
+    );
+    let lifecycle = slices(
+        "claims INDEXED BY claims_subject_accepted_index JOIN operations ON operations.id=json_extract(claims.body,'$._operation.id')",
+        "claims.subject=?1 AND claims.kind IN ('thread.title-set','thread.state-set') AND (operations.state='conflict' OR operations.canonical_claim_id=claims.id)",
+        "operations.state",
+    );
+    let order = canonical::order_sql("claims", !newer);
+    let sql=format!("WITH explicit AS ({explicit}),legacy AS ({legacy}),lifecycle AS ({lifecycle})
+        SELECT claims.id,operation_state FROM (SELECT * FROM explicit UNION ALL SELECT * FROM legacy UNION ALL SELECT * FROM lifecycle) claims
+        ORDER BY {order} LIMIT ?7");
     let mut statement=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he5a2848d26a3 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
     let rows = statement
         .query_map(

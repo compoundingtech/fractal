@@ -916,25 +916,50 @@ fn scoped_cursor<'a>(
 }
 
 fn marked_candidate_sql(has_cursor: bool) -> String {
-    let seek = if has_cursor {
-        "AND (length(claims.accepted_at_unix_ms),claims.accepted_at_unix_ms)<=(length(?2),?2) AND (claims.accepted_at_unix_ms<>?2 OR claims.subject>?3)"
-    } else {
-        ""
-    };
     let unrepaired = UNREPAIRED_CLAIM.replace("claims.", "earlier.");
-    format!("SELECT claims.subject,claims.accepted_at_unix_ms
+    // JSON=JSON keeps the expression index's affinity, unlike JSON=TEXT-column.
+    let base=format!("SELECT claims.subject,claims.accepted_at_unix_ms
         FROM claims INDEXED BY claims_thread_unread_owner_time_index
         JOIN operations ON operations.id=json_extract(claims.body,'$._operation.id')
           AND operations.state='active' AND operations.request_digest=json_extract(claims.body,'$._operation.request_digest')
         WHERE claims.actor=?1 AND claims.kind='thread.unread-marked' AND {UNREPAIRED_CLAIM}
           AND claims.id=(SELECT earlier.id FROM claims earlier INDEXED BY claims_operation_index
-            WHERE json_extract(earlier.body,'$._operation.id')=operations.id
+            WHERE json_extract(earlier.body,'$._operation.id')=json_extract(claims.body,'$._operation.id')
               AND json_extract(earlier.body,'$._operation.id') IS NOT NULL
               AND json_extract(earlier.body,'$._operation.request_digest')=operations.request_digest
               AND {unrepaired}
-            ORDER BY length(earlier.accepted_at_unix_ms),earlier.accepted_at_unix_ms,earlier.id LIMIT 1)
-          {seek}
-        ORDER BY length(claims.accepted_at_unix_ms) DESC,claims.accepted_at_unix_ms DESC,claims.subject LIMIT ?4")
+            ORDER BY length(earlier.accepted_at_unix_ms),earlier.accepted_at_unix_ms,earlier.id LIMIT 1)");
+    if !has_cursor {
+        return format!(
+            "{base} ORDER BY length(claims.accepted_at_unix_ms) DESC,claims.accepted_at_unix_ms DESC,claims.subject LIMIT ?4"
+        );
+    }
+    // Do not ORDER BY a constant expression prefix: SQLite otherwise sorts the
+    // entire qualifying branch instead of stopping at the index's bounded LIMIT.
+    let ranges = [
+        (
+            "length(claims.accepted_at_unix_ms)<length(?2)",
+            "length(claims.accepted_at_unix_ms) DESC,claims.accepted_at_unix_ms DESC,claims.subject",
+        ),
+        (
+            "length(claims.accepted_at_unix_ms)=length(?2) AND claims.accepted_at_unix_ms<?2",
+            "claims.accepted_at_unix_ms DESC,claims.subject",
+        ),
+        (
+            "length(claims.accepted_at_unix_ms)=length(?2) AND claims.accepted_at_unix_ms=?2 AND claims.subject>?3",
+            "claims.subject",
+        ),
+    ];
+    let arms = ranges
+        .into_iter()
+        .map(|(range, order)| {
+            format!("SELECT * FROM ({base} AND {range} ORDER BY {order} LIMIT ?4)")
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "SELECT * FROM ({arms}) ORDER BY length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC,subject LIMIT ?4"
+    )
 }
 
 /// Scan owner reminder-operation headers, never an ordinary/recent thread page.
