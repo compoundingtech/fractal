@@ -85,7 +85,7 @@ const benchmarks: readonly {
   {
     what: 'Panel width',
     native: '≈306–310 pt (Tahoe CC and module pages)',
-    v4: '360 pt (W3): a row carries title, asker and age on one line (n2). Open: W1 320, W2 336',
+    v4: '360 pt (W3): a row carries title, asker and age on one line (n2)',
   },
   { what: 'Content inset', native: '14 pt', v4: '14 pt' },
   { what: 'Row highlight', native: 'inset 6 pt, 10 pt continuous radius', v4: 'same' },
@@ -97,7 +97,7 @@ const benchmarks: readonly {
   {
     what: 'Tiles',
     native: '4-slot grid, 2×1 capsule 140 × 64 pt, 34–36 pt circle',
-    v4: 'T1: three equal capsules ≈ 110 × 38 pt, 28 pt circle, each toggles and drills. Open: T2, the 4-slot grid',
+    v4: 'T1: three equal compact capsules ≈ 110 × 38 pt, 28 pt circle, each toggles and drills',
   },
   { what: 'On state', native: 'white circle, tinted symbol', v4: 'same' },
   {
@@ -288,52 +288,22 @@ const Question = ({
   </section>
 )
 
-/**
- * The open questions: answer placement (D), panel width (W), tile layout (T) and the
- * availability history (H). Until Ada picks, the panel ships D1 · W3 · T1 · H1. Every option
- * is the real panel at the live scroll limit.
- */
-export const OpenVariants: Story = {
+/** The selected design, rendered at the live scroll limit, and the history picker. */
+export const SelectedDesign: Story = {
   render: () => (
     <div className="at-gallery">
       <p className="at-gallery-description">
-        Pick one per question. Open: nothing here is decided; the panel ships D1 · W3 · T1 · H1
-        until the pick.
+        D2 · W3 · T1: pinned answer controls, a 360 pt panel and compact status capsules.
       </p>
       <Question
-        title="D · Where an ask’s answers sit"
-        note="D1 is the order n3 asked for, and at the live scroll limit its answers can sit below the fold. D2 pins them under the scrolling request and conversation, always in reach."
-        rows={[[{ scenario: 'variant-d1' }, { scenario: 'variant-d2' }]]}
+        title="D2 · Pinned answer controls"
+        note="Header, then the scrolling request and conversation, then fixed answer controls. Answer submission and required-text validation are unchanged."
+        rows={[[{ scenario: 'variant-d2' }]]}
       />
       <Question
-        title="W · Panel width"
-        note="Control Center is ≈306–310 pt. Narrower panels keep the 14 pt inset and the one-line rows: titles truncate at the tail, askers keep 18 (W3), 15 (W2) or 13 (W1) characters with the middle elided, and the tiles share what is left. Pages wrap to the column."
-        rows={[
-          [
-            { scenario: 'variant-w1-home' },
-            { scenario: 'variant-w2-home' },
-            { scenario: 'variant-w3-home' },
-          ],
-          [
-            { scenario: 'variant-w1-page' },
-            { scenario: 'variant-w2-page' },
-            { scenario: 'variant-w3-page' },
-          ],
-        ]}
-      />
-      <Question
-        title="T · Tiles"
-        note="T1: three equal capsules in one row; each circle toggles and each title opens the page. T2: Control Center’s 4-slot grid (≈64 pt slots, 12 pt apart). Availability is a Medium tile with Control Center’s 36 pt circle; speech and objectives are Small circles that open their pages, so muting moves to the speech page’s switch and objectives show a count badge. Shown at W3 and W1."
-        rows={[
-          [
-            { scenario: 'variant-w3-home', title: 'T1 at 360 pt: three capsules' },
-            { scenario: 'variant-t2-w3' },
-          ],
-          [
-            { scenario: 'variant-w1-home', title: 'T1 at 320 pt: three capsules' },
-            { scenario: 'variant-t2-w1' },
-          ],
-        ]}
+        title="W3 · T1 · 360 pt with compact capsules"
+        note="Three equal capsules above the capped inbox. Each circle toggles and each title opens its page. The More row opens the full inbox; signals stay below the inbox."
+        rows={[[{ scenario: 'variant-w3-home' }, { scenario: 'variant-w3-page' }]]}
       />
       <Question
         title="H · Availability history"

@@ -2,31 +2,11 @@ import AppKit
 import AttentionCore
 import SwiftUI
 
-/// Where an ask's answers sit on its page. An open design question (V4 variant D): D1 follows
-/// the requested order (answers after the request, before the conversation); D2 pins them under
-/// the scrolling content, always in reach.
-public enum AnswerPlacement: String, Sendable, CaseIterable {
-  case inline = "D1"
-  case pinned = "D2"
-}
-
-private struct AnswerPlacementKey: EnvironmentKey {
-  static let defaultValue = AnswerPlacement.inline
-}
-
-extension EnvironmentValues {
-  public var answerPlacement: AnswerPlacement {
-    get { self[AnswerPlacementKey.self] }
-    set { self[AnswerPlacementKey.self] = newValue }
-  }
-}
-
-/// One ask or update drilled into: the whole request, its subjects and attachments, the answers,
-/// and the asking agent's recent conversation; it scrolls inside the panel.
+/// One ask or update drilled into: the request and conversation scroll inside the panel.
+/// Native answer controls stay pinned below them, outside the scrolling region.
 struct AttentionPage: View {
   let record: AttentionRecord
   let model: AttentionModel
-  @Environment(\.answerPlacement) private var placement
 
   private var answersHere: Bool { record.role == .ask(.native) && model.canAnswer }
 
@@ -42,17 +22,19 @@ struct AttentionPage: View {
         VStack(alignment: .leading, spacing: 14) {
           Heading(record: record, model: model)
           RequestBody(record: record, model: model)
-          if placement == .inline || !answersHere { actions }
+          if !answersHere { actions }
           ConversationSection(record: record, model: model)
         }
         .padding(.horizontal, PanelMetrics.inset)
         .padding(.vertical, 8)
       }
-      if placement == .pinned && answersHere {
+      if answersHere {
         Divider().padding(.horizontal, PanelMetrics.inset)
         actions
           .padding(.horizontal, PanelMetrics.inset)
           .padding(.vertical, 10)
+          .accessibilityElement(children: .contain)
+          .accessibilityIdentifier("attention-answer-controls")
       }
     }
     .modifier(MarksSeen(record: record, model: model))

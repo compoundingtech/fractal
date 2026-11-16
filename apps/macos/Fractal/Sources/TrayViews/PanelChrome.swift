@@ -7,7 +7,7 @@ import SwiftUI
 /// (orchetect/MacControlCenterUI). See the design README.
 public enum PanelMetrics {
   /// Control Center is about 310 pt wide; the tray takes 50 pt more so a row's title, asker and
-  /// age share one line. W1 (320) and W2 (336) are the open narrower options.
+  /// age share one line.
   public static let width: CGFloat = 360
   /// Leading and trailing content inset: titles, rows and section labels share this edge.
   static let inset: CGFloat = 14
@@ -27,17 +27,6 @@ public enum PanelMetrics {
   /// its group's edge. Measured from its renders; the Form publishes neither.
   static let formMargin: CGFloat = 20
   static let formHeaderIndent: CGFloat = 10
-  /// Control Center's tile grid (T2): four slots across, 8 pt from the panel edge, 12 pt apart,
-  /// one slot about 64 pt tall. A Small tile takes one slot, a Medium tile two.
-  static let gridColumns: CGFloat = 4
-  static let gridPadding: CGFloat = 8
-  static let gridGap: CGFloat = 12
-  static let gridTileHeight: CGFloat = 64
-
-  /// One grid slot's width in a panel this wide.
-  static func gridSlot(_ width: CGFloat) -> CGFloat {
-    (width - 2 * gridPadding - (gridColumns - 1) * gridGap) / gridColumns
-  }
 
   /// How many characters of an asker's name a row keeps: fewer as the panel narrows, so the
   /// title keeps room to read.
@@ -46,17 +35,11 @@ public enum PanelMetrics {
   }
 }
 
-/// The open design questions the gallery renders side by side: answer placement (D), panel
-/// width (W), tile layout (T) and the availability histogram (H). The live panel uses `shipped`,
-/// except H: it follows the availability page's picker, which the gallery pins.
+/// Gallery override for the availability histogram. The live page follows its picker.
 public struct PanelVariant: Sendable {
-  public var placement: AnswerPlacement
-  public var width: CGFloat
-  public var tiles: TileLayout
   public var histogram: AvailabilityHistogramStyle
 
-  public static let shipped = PanelVariant(
-    placement: .inline, width: PanelMetrics.width, tiles: .capsules, histogram: .week)
+  public static let shipped = PanelVariant(histogram: .week)
 }
 
 private struct PanelWidthKey: EnvironmentKey {
@@ -64,7 +47,7 @@ private struct PanelWidthKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-  /// The panel's width: `PanelMetrics.width` live, a W option in the gallery.
+  /// The panel's content width.
   public var panelWidth: CGFloat {
     get { self[PanelWidthKey.self] }
     set { self[PanelWidthKey.self] = newValue }
@@ -72,12 +55,9 @@ extension EnvironmentValues {
 }
 
 extension View {
-  /// Applies one option of each open design question.
+  /// Pins the histogram for fixture renders without changing the person's saved picker.
   public func panelVariant(_ variant: PanelVariant) -> some View {
-    environment(\.answerPlacement, variant.placement)
-      .environment(\.panelWidth, variant.width)
-      .environment(\.tileLayout, variant.tiles)
-      .environment(\.availabilityHistogram, variant.histogram)
+    environment(\.availabilityHistogram, variant.histogram)
   }
 }
 
