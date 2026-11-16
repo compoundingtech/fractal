@@ -22,6 +22,31 @@ class PublicRepositoryCheck(unittest.TestCase):
             'agent/fleet/fixture-web/standing/web agent%2Ffleet%2Ffixture-web%2Fworker'
         ), [])
 
+    def test_only_the_observed_plain_prose_compound_is_exempt(self):
+        compound = 'per-' + 'person' + '/per-message'
+        self.assertEqual(self.findings(compound), [])
+        for text in [compound + '.extra', 'per-' + 'person' + '%2Fper-message',
+                     compound + ' person' + '/unknown-fixture',
+                     compound + ' person' + '%2Funknown-fixture']:
+            with self.subTest(text=text):
+                self.assertTrue(self.findings(text))
+
+    def test_reference_detection_matches_main_outside_reviewed_exceptions(self):
+        for separator in ['/', '%2F', '%2f']:
+            reference = 'person' + separator + 'unknown-fixture'
+            for prefix in ['', r'\n', r'\r', r'\t', 'word', 'per-',
+                           '%22', '%2522', '%252527', '%25252528',
+                           'https://example.invalid/', 'per-' + 'person' + '/',
+                           'per-' + 'person' + '%2F', 'per-' + 'person' + '/another.']:
+                with self.subTest(prefix=prefix, separator=separator):
+                    self.assertTrue(self.findings(prefix + reference))
+
+    def test_reserved_authorization_fixture_principals(self):
+        for name in ['another', 'foreign', 'outsider', 'private', 'reader-floor']:
+            for reference in [f'person/{name}', f'person%2F{name}']:
+                with self.subTest(reference=reference):
+                    self.assertEqual(self.findings(reference), [])
+
     def test_unknown_identity_and_home(self):
         for text in ['person' + '/unknown-fixture', 'person' + '%2Funknown-fixture',
                      '/home/' + 'unknown-fixture/src', '/Users/' + 'unknown-fixture/src']:
