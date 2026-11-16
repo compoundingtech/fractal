@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Enable capability-gated manual-return Snooze through client-v0 and the CLI",
+  "replay": {"status": "none", "detail": "This writer uses the explicit indefinite claim state and replayable control projection provided by the prerequisite reader expansion. No projector changes are introduced here."},
+  "schema": {"status": "none", "detail": "No further database or authoritative claim schema change. Client-v0 adds an optional indefinite action parameter; generated clients and the CLI can send it."},
+  "rules": {"status": "none", "detail": "Only a person's own session with control.attention can use Snooze. Deferral changes no request outcome, deadline, asker notification or decision authority."},
+  "compatibility": {"status": "changed", "detail": "Upgrade daemons and read clients before enabling indefinite writers. attention-snooze-indefinite version 1 advertises support. Manual-return requests send until null and indefinite true; timed/clear callers omit the new parameter so older daemons keep their exact existing calls. Missing until, conflicting time and indefinite, malformed flags and nonfuture times are refused."},
+  "downtime": {"status": "none", "detail": "No planned downtime; the writer adds no background service or migration."},
+  "manual": {"status": "changed", "detail": "alerts snooze ATTENTION_ID --indefinite keeps an item deferred until manual return. --clear brings timed or manual-return items back. The new mode requires the advertised capability."},
+  "recovery": {"status": "changed", "detail": "Bring items back on an updated daemon before reverting a member that cannot read manual-return state. Until null without indefinite retains its existing bring-back meaning; no sentinel timestamp is used."}
+}
