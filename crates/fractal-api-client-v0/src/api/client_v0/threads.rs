@@ -126,9 +126,7 @@ pub(super) async fn timeline(
     Query(query): Query<TimelineQuery>,
 ) -> ReadResult<TimelinePage> {
     if query.cursor.is_some() && query.around.is_some() {
-        let mut error = validation("around and cursor are mutually exclusive");
-        error.code = "invalid-thread-cursor".into();
-        return Err(error);
+        return Err(validation("around and cursor are mutually exclusive"));
     }
     with_owner(state, session, id, move |store, person, subject, _| {
         thread_metadata::mixed_timeline(
@@ -752,7 +750,7 @@ mod tests {
         ).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
-        assert_eq!(body["code"], "invalid-thread-cursor", "{body}");
+        assert_eq!(body["code"], "validation-failed", "{body}");
         assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
     }
 
