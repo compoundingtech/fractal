@@ -137,5 +137,8 @@ collection produces a refusal without an edit.
 `quickAccessWrite.ts` is the internal delivery engine for one immutable compound
 edit. It retains the original gateway, request bodies, identities and fences in
 memory after an unconfirmed response. An explicit identical check is required;
-reads never settle delivery. Only a matching completed action receipt settles a
-replayed stage. This commit adds no followed UI or public editing controller.
+reads never settle ambiguous writes. Only a matching completed action receipt
+settles a replayed stage. A first-attempt canonical `arrangement-exists` refusal
+starts adoption of the exact live owner/v2 identity. A failed adoption read retains
+validation; explicit recovery repeats only GET, then sends the original membership.
+Unknown or replay-unsafe errors never start adoption. This commit adds no followed UI or public editing controller.
