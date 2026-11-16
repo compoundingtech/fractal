@@ -599,6 +599,35 @@ fn run_liveness_uncached(
     }
 }
 
+pub fn episode_owner(connection: &Connection, ask: &ClaimRecord) -> Result<Option<(String, Option<String>)>> {
+    let fields = &ask.body["fields"];
+    if fields.get("owner_run").is_some() {
+        return Ok(fields["owner_run"].as_str().map(|run| (
+            run.to_owned(), fields["owner_generation"].as_str().map(str::to_owned),
+        )));
+    }
+    let requester = ask.actor.as_deref().unwrap_or_default();
+    if !requester.starts_with("agent/") {
+        return Ok(None);
+    }
+    let ask_key = canonical::claim_key(connection, &ask.id)?;
+    let mut declarations = connection.prepare_cached(&canonical_sql(
+        "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+         FROM claims WHERE subject=?1 AND kind='intent.desired' ORDER BY CANONICAL_ASC(claims)",
+    ))?;
+    let mut owner = None;
+    for declaration in declarations.query_map([requester], claim_from_row)? {
+        let declaration = declaration?;
+        if canonical::claim_key(connection, &declaration.id)? > ask_key {
+            break;
+        }
+        owner = declaration.body["owner_run"].as_str().map(|run| (
+            run.to_owned(), declaration.body["owner_generation"].as_str().map(str::to_owned),
+        ));
+    }
+    Ok(owner)
+}
+
 pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Result<bool> {
     if ask.accepted_at_unix_ms > as_of {
         return Ok(false);
@@ -624,8 +653,8 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
     }
     let requester = ask.actor.as_deref().unwrap_or_default();
     // Unowned asks survive runtime turns; an episode-owned ask keeps its original fence.
-    if let Some(owner) = fields["owner_run"].as_str()
-        && !run_live(connection, owner, fields["owner_generation"].as_str(), false)?
+    if let Some((owner, generation)) = episode_owner(connection, ask)?
+        && !run_live(connection, &owner, generation.as_deref(), false)?
     {
         return Ok(false);
     }

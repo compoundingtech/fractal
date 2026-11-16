@@ -267,13 +267,11 @@ fn person_row(
                 }
             }
         }
-        for field in ["owner_run", "origin_step"] {
-            if let Some(key) = ask.body["fields"][field].as_str() {
-                dependency(tx, "person", source, key)?;
-                if key.starts_with("mission-run/") {
-                    run_dependencies(tx, source, key)?;
-                }
-            }
+        if let Some((run, _)) = person_work::episode_owner(tx, ask)? {
+            run_dependencies(tx, source, &run)?;
+        }
+        if let Some(origin) = ask.body["fields"]["origin_step"].as_str() {
+            dependency(tx, "person", source, origin)?;
         }
         if person_work::is_update(ask)
             && let Some(about) = ask.body["fields"]["request"]["about"].as_str()

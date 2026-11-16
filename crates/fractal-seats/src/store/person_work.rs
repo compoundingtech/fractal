@@ -920,7 +920,7 @@ mission "person-work" state="ready" {{
 
     #[test]
     fn owned_asks_withdraw_but_unowned_decisions_survive_owner_work_and_redeclaration() {
-        for ending in ["completed", "cancelled", "failed"] {
+        for ending in ["completed", "cancelled", "failed", "superseded"] {
             let (store, origin, mut input) = fixture();
             input.step = None;
             let genuine = store.ask_person(&input).unwrap();
@@ -935,7 +935,15 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             store.apply_internal(&owned, "managed-requester").unwrap();
             input.idempotency_key = "operational-episode".into();
             let ask = store.ask_person(&input).unwrap();
-            store.set_mission_run_state(&origin.run, ending, "terminal", None).unwrap();
+            let update = store.connection.batched(|tx| store.append_update_tx(
+                tx, &input.actor, &input.person, "Operational progress", "Informational",
+                "owned-update", &json!({"version": 1, "type": "update", "about": origin.run}),
+            )).unwrap().unwrap();
+            if ending == "superseded" {
+                revise_fixture(&store, &origin, true);
+            } else {
+                store.set_mission_run_state(&origin.run, ending, "terminal", None).unwrap();
+            }
             assert!(store.attention_items(Some(&input.person)).unwrap().iter()
                 .all(|item| item.subject != ask.subject));
             store.reconcile_person_asks().unwrap();
@@ -943,6 +951,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             store.replay_replication_graph().unwrap();
             assert!(!store.reconcile_person_asks().unwrap());
             assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+            assert_eq!(store.step_run(&update.subject).unwrap().unwrap().status, "cancelled");
             assert_eq!(store.step_run(&genuine.subject).unwrap().unwrap().status, "ready");
             assert!(store.attention_items(Some(&input.person)).unwrap().iter()
                 .any(|item| item.subject == genuine.subject));
@@ -2550,13 +2559,36 @@ mission "writer-load" state="ready" {
 
     #[test]
     fn frozen_inbox_withdraws_eight_operational_cards_and_preserves_six_decisions() {
-        for ending in ["completed", "cancelled", "failed"] {
+        fn retained_ask(store: &Store, input: &PersonAskRequest) -> StepRunView {
+            let generation = format!("retained-{}", input.idempotency_key);
+            let mission_id = format!("person-ask/{generation}");
+            let source = format!(
+                "version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}",
+                input.title, input.person, input.reason,
+            );
+            let mut intent = crate::graph::parse_internal_intent(&source, "alder").unwrap();
+            let mission = intent.missions.remove(&mission_id).unwrap();
+            let subject = format!("step-run/{generation}/ask");
+            store.connection.batched(|tx| -> Result<StepRunView> {
+                let asking = append_claim_tx(tx, "alder", &subject, "work.person-asked", Some(&input.actor),
+                    &json!({"fields": {
+                        "run": format!("mission-run/{mission_id}"),
+                        "generation": format!("run-generation/{generation}"),
+                        "person": input.person, "title": input.title, "reason": input.reason,
+                        "key": input.idempotency_key, "attempt": 1, "status": "ready",
+                        "mission_spec": mission
+                    }}), &[], None)?;
+                project(tx, &asking)?;
+                Ok(step(tx, &subject)?.unwrap())
+            }).unwrap().unwrap()
+        }
+        for ending in ["completed", "cancelled", "failed", "superseded"] {
             let (store, origin, mut input) = fixture();
             input.step = None;
             let mut genuine = Vec::new();
             for index in 0..6 {
                 input.idempotency_key = format!("genuine-{index}");
-                genuine.push(store.ask_person(&input).unwrap().subject);
+                genuine.push(retained_ask(&store, &input).subject);
             }
             let mut owned = crate::graph::parse_internal_intent(
                 r#"version 2
@@ -2570,7 +2602,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             let mut withdrawn = Vec::new();
             for index in 0..4 {
                 input.idempotency_key = format!("operational-{index}");
-                let ask = store.ask_person(&input).unwrap();
+                let ask = retained_ask(&store, &input);
                 let update = store.connection.batched(|tx| store.append_update_tx(
                     tx, "daemon/runtime", &input.person, "Operational notice", "Informational",
                     &format!("notice-{index}"),
@@ -2578,8 +2610,13 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
                 )).unwrap().unwrap();
                 withdrawn.extend([ask.subject, update.subject]);
             }
+            store.replay_replication_graph().unwrap();
             assert_eq!(store.attention_items(Some(&input.person)).unwrap().len(), 14);
-            store.set_mission_run_state(&origin.run, ending, "episode ended", None).unwrap();
+            if ending == "superseded" {
+                revise_fixture(&store, &origin, true);
+            } else {
+                store.set_mission_run_state(&origin.run, ending, "episode ended", None).unwrap();
+            }
             while store.reconcile_person_asks().unwrap() {}
             for replay in [false, true] {
                 if replay { store.replay_replication_graph().unwrap(); }
