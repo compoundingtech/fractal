@@ -62,10 +62,8 @@ fn append_projects_each_claim_kind_in_order() {
         ("intent.desired", &["identities", "custom", "resource-preparation", "ordered-membership-flush"]),
         ("work.claimed", &["custom", "resource-preparation", "ordered-membership-flush"]),
         ("message.read", &["custom", "resource-preparation", "ordered-membership-flush"]),
+        ("subscription.mission-requested", &["custom", "resource-preparation", "subscription-request-frontier", "ordered-membership-flush"]),
     ] {
-        let mut expected = expected.to_vec();
-        let position = expected.iter().position(|name| name.starts_with("ordered-membership")).unwrap();
-        expected.insert(position, "subscription-request-frontier");
         assert_eq!(taking(projectors::APPEND, kind), expected, "append order for {kind}");
     }
     assert_eq!(

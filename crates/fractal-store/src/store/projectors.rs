@@ -137,7 +137,7 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "subscription-request-frontier",
-        takes: Takes::Every,
+        takes: Takes::Kinds(&["subscription.mission-requested"]),
         project: |transaction, _| subscription_request_frontier::flush(transaction),
     },
     AppendProjector {
