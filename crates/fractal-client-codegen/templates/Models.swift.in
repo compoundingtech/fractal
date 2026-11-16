@@ -2055,13 +2055,14 @@ public struct AttentionSeenParameters: Codable, Sendable {
     public init(attentionID: String) { self.attentionID = attentionID }
     enum CodingKeys: String, CodingKey { case attentionID = "attention_id" }
 }
-/// `until` nil brings the row back now; it is always sent, as null.
+/// `until` nil brings the row back now unless `indefinite` is true; nil is always sent as null.
 public struct AttentionSnoozeParameters: Codable, Sendable {
     public let attentionID: String
     public let until: String?
-    public init(attentionID: String, until: String?) { self.attentionID = attentionID; self.until = until }
-    enum CodingKeys: String, CodingKey { case attentionID = "attention_id", until }
-    public func encode(to encoder: Encoder) throws { var container = encoder.container(keyedBy: CodingKeys.self); try container.encode(attentionID, forKey: .attentionID); try container.encode(until, forKey: .until) }
+    public let indefinite: Bool?
+    public init(attentionID: String, until: String?, indefinite: Bool? = nil) { self.attentionID = attentionID; self.until = until; self.indefinite = indefinite }
+    enum CodingKeys: String, CodingKey { case attentionID = "attention_id", until, indefinite }
+    public func encode(to encoder: Encoder) throws { var container = encoder.container(keyedBy: CodingKeys.self); try container.encode(attentionID, forKey: .attentionID); try container.encode(until, forKey: .until); try container.encodeIfPresent(indefinite, forKey: .indefinite) }
 }
 public struct AttentionDismissParameters: Codable, Sendable {
     public let attentionID: String

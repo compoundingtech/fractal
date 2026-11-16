@@ -338,19 +338,19 @@ pub(super) async fn run_attention(
             run_attention_control(endpoint, configured_person, target, AttentionControl::Seen, json_output).await
         }
         AttentionCommand::Snooze(args) => {
-            let until = if args.clear {
+            let until = if args.clear || args.indefinite {
                 None
             } else if let Some(until) = args.until {
                 Some(until)
             } else {
-                let duration = args.duration.as_deref().context("name --for, --until or --clear")?;
+                let duration = args.duration.as_deref().context("name --for, --until, --indefinite or --clear")?;
                 let ms = fractal_daemon::graph::parse_duration(duration, true)?;
                 let until = i64::try_from(now_ms() + u128::from(ms)).ok()
                     .and_then(chrono::DateTime::from_timestamp_millis)
                     .context("--for reaches past the last representable time")?;
                 Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
             };
-            run_attention_control(endpoint, configured_person, args.target, AttentionControl::Snooze(until), json_output).await
+            run_attention_control(endpoint, configured_person, args.target, AttentionControl::Snooze(until, args.indefinite), json_output).await
         }
         AttentionCommand::Dismiss(args) => {
             run_attention_control(endpoint, configured_person, args.target, AttentionControl::Dismiss(args.text), json_output).await
@@ -360,7 +360,7 @@ pub(super) async fn run_attention(
 
 enum AttentionControl {
     Seen,
-    Snooze(Option<String>),
+    Snooze(Option<String>, bool),
     Dismiss(Option<String>),
 }
 
@@ -382,14 +382,21 @@ async fn run_attention_control(
     )
     .await?;
     let client = generated_client(endpoint, Some(&actor))?;
-    let fence = ClientFence { snapshot_id: client.capabilities().await?.snapshot.id, ..Default::default() };
+    let capabilities = client.capabilities().await?;
+    if matches!(&control, AttentionControl::Snooze(_, true)) {
+        anyhow::ensure!(capabilities.value.capabilities.iter().any(|capability| {
+            capability.id == "attention-snooze-indefinite" && capability.version >= 1
+                && capability.state == fractal_client::CapabilityState::Granted
+        }), "this daemon does not grant indefinite snooze; upgrade it before using --indefinite");
+    }
+    let fence = ClientFence { snapshot_id: capabilities.snapshot.id, ..Default::default() };
     let key = uuid::Uuid::now_v7();
     let (id, idempotency_key) = (format!("action/attention-{key}"), format!("attention-control-{key}"));
     let (verb, result) = match control {
         AttentionControl::Seen => ("seen", client.attention_seen(id, idempotency_key, fence,
             fractal_client::AttentionSeenParameters { attention_id: attention_id.clone() }).await?),
-        AttentionControl::Snooze(until) => (if until.is_some() { "snoozed" } else { "back" }, client.attention_snooze(id, idempotency_key, fence,
-            fractal_client::AttentionSnoozeParameters { attention_id: attention_id.clone(), until }).await?),
+        AttentionControl::Snooze(until, indefinite) => (if indefinite || until.is_some() { "snoozed" } else { "back" }, client.attention_snooze(id, idempotency_key, fence,
+            fractal_client::AttentionSnoozeParameters { attention_id: attention_id.clone(), until, indefinite: indefinite.then_some(true) }).await?),
         AttentionControl::Dismiss(text) => ("dismissed", client.attention_dismiss(id, idempotency_key, fence,
             fractal_client::AttentionDismissParameters { attention_id: attention_id.clone(), text }).await?),
     };
@@ -400,7 +407,7 @@ async fn run_attention_control(
         Some(state) => println!(
             "{verb}\t{attention_id}\tseen {}\tsnoozed until {}",
             state.seen_at.as_deref().unwrap_or("never"),
-            state.snoozed_until.as_deref().unwrap_or("-"),
+            if state.snoozed_indefinitely == Some(true) { "manual return" } else { state.snoozed_until.as_deref().unwrap_or("-") },
         ),
         None => println!("{verb}\t{attention_id}"),
     }

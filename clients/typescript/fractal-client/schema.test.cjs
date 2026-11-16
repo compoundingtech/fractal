@@ -1446,3 +1446,20 @@ test('manual-return attention read state is optional and explicit', async () => 
     assert.equal(Rich.decodeUnknownSync(Rich.AttentionControlState, 'strict')({ ...state, snoozed_indefinitely: true }).snoozed_indefinitely, true);
     assert.throws(() => Rich.decodeUnknownSync(Rich.AttentionControlState, 'strict')({ ...state, snoozed_indefinitely: null }));
 });
+
+test('manual-return snooze is explicit while legacy null remains bring-back', async () => {
+    const [{ Schema, Option }, Rich] = await modules;
+    const id = 'attention/0123456789abcdef0123456789abcdef';
+    const decode = Rich.decodeUnknownSync(Rich.AttentionSnoozeParameters, 'strict');
+    const clear = decode({ attention_id: id, until: null });
+    assert.ok(Option.isNone(clear.until));
+    assert.equal(clear.indefinite, undefined);
+    const manual = decode({ attention_id: id, until: null, indefinite: true });
+    assert.ok(Option.isNone(manual.until));
+    assert.equal(manual.indefinite, true);
+    assert.deepEqual(Schema.encodeSync(Rich.AttentionSnoozeParameters)(manual), {
+        attention_id: id, until: null, indefinite: true,
+    });
+    assert.throws(() => decode({ attention_id: id, indefinite: true }));
+    assert.throws(() => decode({ attention_id: id, until: null, indefinite: null }));
+});

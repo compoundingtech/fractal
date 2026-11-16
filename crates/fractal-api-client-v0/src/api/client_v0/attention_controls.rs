@@ -25,7 +25,15 @@ struct Seen {
 #[serde(deny_unknown_fields)]
 struct Snooze {
     attention_id: String,
+    #[serde(deserialize_with = "required_until")]
     until: Option<String>,
+    #[serde(default)]
+    indefinite: bool,
+}
+
+// `until` is nullable, not optional: omitting it must not silently bring an item back.
+fn required_until<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
 }
 
 #[derive(Deserialize)]
@@ -74,6 +82,23 @@ fn state_value(id: &str, controls: Controls) -> Value {
     state
 }
 
+fn snooze_control(until: Option<String>, indefinite: bool, now: u128) -> Result<Control, ApiError> {
+    if indefinite {
+        if until.is_some() {
+            return Err(validation("indefinite snooze requires until: null"));
+        }
+        return Ok(Control::SnoozeIndefinitely);
+    }
+    let until = until.map(|until| {
+        chrono::DateTime::parse_from_rfc3339(&until)
+            .ok()
+            .and_then(|at| u128::try_from(at.timestamp_millis()).ok())
+            .filter(|at| *at > now)
+            .ok_or_else(|| validation("until must be a future RFC 3339 instant, or null to end the snooze"))
+    }).transpose()?;
+    Ok(Control::Snooze(until))
+}
+
 pub(super) async fn control(
     state: &AppState,
     session: &ClientSession,
@@ -95,17 +120,8 @@ pub(super) async fn control(
             (attention_id, Control::Seen)
         }
         "attention.snooze" => {
-            let Snooze { attention_id, until } = parameters(request)?;
-            let until = until
-                .map(|until| {
-                    chrono::DateTime::parse_from_rfc3339(&until)
-                        .ok()
-                        .and_then(|at| u128::try_from(at.timestamp_millis()).ok())
-                        .filter(|at| *at > client_now_ms())
-                        .ok_or_else(|| validation("until must be a future RFC 3339 instant, or null to end the snooze"))
-                })
-                .transpose()?;
-            (attention_id, Control::Snooze(until))
+            let Snooze { attention_id, until, indefinite } = parameters(request)?;
+            (attention_id, snooze_control(until, indefinite, client_now_ms())?)
         }
         _ => return dismiss(state, session, &person, request).await,
     };
@@ -204,4 +220,20 @@ mod tests {
         assert_eq!(state_value(id, manual)["snoozed_until"], Value::Null);
     }
 
+    #[test]
+    fn explicit_indefinite_and_legacy_null_have_distinct_meanings() {
+        assert_eq!(snooze_control(None, true, 1_000).unwrap(), Control::SnoozeIndefinitely);
+        assert_eq!(snooze_control(None, false, 1_000).unwrap(), Control::Snooze(None));
+        assert_eq!(snooze_control(Some("1970-01-01T00:00:02Z".into()), false, 1_000).unwrap(), Control::Snooze(Some(2_000)));
+    }
+
+    #[test]
+    fn conflicting_invalid_or_nonfuture_snoozes_are_refused_before_writing() {
+        for until in ["1970-01-01T00:00:01Z", "1969-12-31T23:59:59Z", "not-a-time"] {
+            assert!(snooze_control(Some(until.into()), false, 1_000).is_err(), "{until}");
+        }
+        assert!(snooze_control(Some("1970-01-01T00:00:02Z".into()), true, 1_000).is_err());
+        assert!(serde_json::from_value::<Snooze>(json!({"attention_id":"attention/test", "until":null, "indefinite":"yes"})).is_err());
+        assert!(serde_json::from_value::<Snooze>(json!({"attention_id":"attention/test", "indefinite":true})).is_err());
+    }
 }

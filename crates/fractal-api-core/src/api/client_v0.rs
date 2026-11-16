@@ -712,6 +712,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"person-answer-option-notes", "version":1, "state":"granted"}));
+    capabilities.push(json!({"id":"attention-snooze-indefinite", "version":1, "state":if session.allows("control.attention") && session.assistant_write.is_none() && session.authority_actor.starts_with("person/") { "granted" } else { "ungranted" }}));
     // Pairing accepts `fabric_node_id` and reports `fabric_grant`.
     capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-message-participants", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
