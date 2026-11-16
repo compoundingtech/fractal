@@ -3031,7 +3031,8 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   proof-typescript-client:
     name: post-merge typescript-client
-    needs: [main-checks, proof-pick-runner, proof-genie-freshness, proof-evidence-gate-typescript-client]
+    needs:
+      [main-checks, proof-pick-runner, proof-genie-freshness, proof-evidence-gate-typescript-client]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.proof-genie-freshness.result == 'success') ) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -4813,7 +4814,13 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   proof-linux-clippy:
     name: post-merge linux-clippy
-    needs: [main-checks, proof-pick-runner, proof-evidence-gate-linux-gate, proof-evidence-gate-linux-clippy]
+    needs:
+      [
+        main-checks,
+        proof-pick-runner,
+        proof-evidence-gate-linux-gate,
+        proof-evidence-gate-linux-clippy,
+      ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-linux-clippy.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -6218,7 +6225,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.proof-fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1,2,3]}' || '{"shard":[0]}') }}
-    needs: [main-checks, proof-fractal-web-changes, proof-genie-freshness, proof-evidence-gate-fractal-web]
+    needs:
+      [
+        main-checks,
+        proof-fractal-web-changes,
+        proof-genie-freshness,
+        proof-evidence-gate-fractal-web,
+      ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.proof-fractal-web-changes.result == 'success' && needs.proof-fractal-web-changes.outputs.relevant == 'true' && needs.proof-genie-freshness.result == 'success' && needs.proof-evidence-gate-fractal-web.outputs.skip != 'true' && !(github.event_name == 'pull_request' && needs.proof-evidence-gate-fractal-web.outputs.refuse == 'true')) ) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -6383,7 +6396,13 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   proof-fractal-web:
     name: post-merge fractal-web
-    needs: [main-checks, proof-fractal-web-changes, proof-fractal-web-execution, proof-evidence-gate-fractal-web]
+    needs:
+      [
+        main-checks,
+        proof-fractal-web-changes,
+        proof-fractal-web-execution,
+        proof-evidence-gate-fractal-web,
+      ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) ) }}
     runs-on: ubuntu-latest
     timeout-minutes: 3

@@ -2277,7 +2277,13 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   linux-test-build:
     name: linux-test-build
-    needs: [pick-runner, evidence-gate-linux-gate, evidence-gate-rust-tests, compat-archives-x86_64-unknown-linux-gnu]
+    needs:
+      [
+        pick-runner,
+        evidence-gate-linux-gate,
+        evidence-gate-rust-tests,
+        compat-archives-x86_64-unknown-linux-gnu,
+      ]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-rust-tests.outputs.skip == 'true')) && !(needs.evidence-gate-linux-gate.outputs.refuse == 'true')) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && vars.CI_MERGE_TEST_BUILD_OWNED && (needs.pick-runner.outputs.ci1_build || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) || github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'pull_request' && needs.pick-runner.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
