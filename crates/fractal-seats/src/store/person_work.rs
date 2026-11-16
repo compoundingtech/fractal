@@ -919,9 +919,11 @@ mission "person-work" state="ready" {{
     }
 
     #[test]
-    fn independent_asks_outlive_managed_owner_work_and_redeclaration() {
+    fn owned_asks_withdraw_but_unowned_decisions_survive_owner_work_and_redeclaration() {
         for ending in ["completed", "cancelled", "failed"] {
             let (store, origin, mut input) = fixture();
+            input.step = None;
+            let genuine = store.ask_person(&input).unwrap();
             let mut owned = crate::graph::parse_internal_intent(
                 r#"version 2
 agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
@@ -931,27 +933,21 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             declaration.owner_run = Some(origin.run.clone());
             declaration.owner_generation = Some(origin.generation.clone());
             store.apply_internal(&owned, "managed-requester").unwrap();
-            input.step = None;
+            input.idempotency_key = "operational-episode".into();
             let ask = store.ask_person(&input).unwrap();
             store.set_mission_run_state(&origin.run, ending, "terminal", None).unwrap();
-            store.reconcile_person_asks().unwrap();
-            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
             assert!(store.attention_items(Some(&input.person)).unwrap().iter()
-                .any(|item| item.subject == ask.subject));
-            // Idle managed agents can also raise another independent question.
-            input.idempotency_key = "after-work-ended".into();
-            let later = store.ask_person(&input).unwrap();
+                .all(|item| item.subject != ask.subject));
+            store.reconcile_person_asks().unwrap();
             store.apply_internal(&owned, "requester-next-turn").unwrap();
             store.replay_replication_graph().unwrap();
-            store.reconcile_person_asks().unwrap();
-            assert_eq!(store.ask_person(&input).unwrap().subject, later.subject);
-            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "ready");
-            let response = PersonStepResponse {
-                delegation: None, subject: ask.subject.clone(), actor: input.actor.clone(),
-                summary: "Withdrawn".into(), evidence: vec![], episode: None,
-                idempotency_key: "withdraw-independent".into(), answer: None,
-            };
-            assert_eq!(store.finish_person_step(&response, true).unwrap().status, "cancelled");
+            assert!(!store.reconcile_person_asks().unwrap());
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+            assert_eq!(store.step_run(&genuine.subject).unwrap().unwrap().status, "ready");
+            assert!(store.attention_items(Some(&input.person)).unwrap().iter()
+                .any(|item| item.subject == genuine.subject));
+            assert!(store.step_run(&ask.subject).unwrap().unwrap().person_answers.iter()
+                .all(|response| response.answer.is_none() && response.status == "cancelled"));
         }
     }
 
@@ -2524,10 +2520,8 @@ mission "writer-load" state="ready" {
         );
     }
 
-    /// An ask whose requester ended does not vanish silently: the requester hears once, and the
-    /// person gets one update in place of the alert.
     #[test]
-    fn an_ask_cancelled_because_its_owner_ended_tells_the_requester_and_the_person_once() {
+    fn an_ask_cancelled_because_its_owner_ended_tells_only_the_requester_once() {
         let (store, _origin, input) = fixture();
         let ask = store.ask_person(&input).unwrap();
         let stop =
@@ -2551,51 +2545,60 @@ mission "writer-load" state="ready" {
             .filter(|item| item.request.as_ref().is_some_and(|r| r["type"] == "update"))
             .map(|item| item.title.clone())
             .collect::<Vec<_>>();
-        assert_eq!(updates, vec!["Cancelled: Choose a release date".to_owned()]);
+        assert!(updates.is_empty());
     }
 
-    /// A notice that cannot be written never undoes the cancellation: the ask still ends, and
-    /// nothing half-told is left behind.
     #[test]
-    fn a_notice_that_fails_does_not_undo_the_cancellation() {
-        let (store, _origin, input) = fixture();
-        let ask = store.ask_person(&input).unwrap();
-        let asked = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
-        // The update the notice would post already exists with other words, so posting it fails.
-        store
-            .connection
-            .batched(|tx| {
-                store
-                    .append_update_tx(
-                        tx,
-                        "daemon/runtime",
-                        "person/avery",
-                        "Something else",
-                        "Something else.",
-                        &format!("st3-ask-ended:{}", asked.id),
-                        &json!({"version": 1, "type": "update", "about": ask.subject}),
-                    )
-                    .map(|_| ())
-            })
-            .unwrap()
-            .unwrap();
-        let stop =
-            crate::graph::parse_internal_intent("version 2\nstop \"agent/alder.asker\"", "alder")
-                .unwrap();
-        store.apply_internal(&stop, "stop-asker").unwrap();
-        assert!(store.reconcile_person_asks().unwrap());
-        assert_eq!(
-            store.step_run(&ask.subject).unwrap().unwrap().status,
-            "cancelled"
-        );
-        assert!(
-            store
-                .messages(Some("agent/alder.asker"), true)
-                .unwrap()
-                .iter()
-                .all(|message| message.from != "daemon/runtime"),
-            "the message rolls back with the failed update"
-        );
+    fn frozen_inbox_withdraws_eight_operational_cards_and_preserves_six_decisions() {
+        for ending in ["completed", "cancelled", "failed"] {
+            let (store, origin, mut input) = fixture();
+            input.step = None;
+            let mut genuine = Vec::new();
+            for index in 0..6 {
+                input.idempotency_key = format!("genuine-{index}");
+                genuine.push(store.ask_person(&input).unwrap().subject);
+            }
+            let mut owned = crate::graph::parse_internal_intent(
+                r#"version 2
+agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
+                "alder",
+            ).unwrap();
+            let declaration = owned.subjects.get_mut(&input.actor).unwrap();
+            declaration.owner_run = Some(origin.run.clone());
+            declaration.owner_generation = Some(origin.generation.clone());
+            store.apply_internal(&owned, "managed-operational-episode").unwrap();
+            let mut withdrawn = Vec::new();
+            for index in 0..4 {
+                input.idempotency_key = format!("operational-{index}");
+                let ask = store.ask_person(&input).unwrap();
+                let update = store.connection.batched(|tx| store.append_update_tx(
+                    tx, "daemon/runtime", &input.person, "Operational notice", "Informational",
+                    &format!("notice-{index}"),
+                    &json!({"version": 1, "type": "update", "about": ask.subject}),
+                )).unwrap().unwrap();
+                withdrawn.extend([ask.subject, update.subject]);
+            }
+            assert_eq!(store.attention_items(Some(&input.person)).unwrap().len(), 14);
+            store.set_mission_run_state(&origin.run, ending, "episode ended", None).unwrap();
+            while store.reconcile_person_asks().unwrap() {}
+            for replay in [false, true] {
+                if replay { store.replay_replication_graph().unwrap(); }
+                let mut remaining = store.attention_items(Some(&input.person)).unwrap()
+                    .into_iter().map(|item| item.subject).collect::<Vec<_>>();
+                remaining.sort();
+                genuine.sort();
+                assert_eq!(remaining, genuine);
+                for subject in &withdrawn {
+                    let history = store.step_run(subject).unwrap().unwrap();
+                    assert_eq!(history.status, "cancelled");
+                    assert!(history.person_answers.iter().all(|response|
+                        response.answer.is_none() && response.status == "cancelled"),
+                        "withdrawal must not fabricate an answer");
+                    assert!(request(&store.readers.get(), subject).unwrap().is_some());
+                }
+                assert!(!store.reconcile_person_asks().unwrap(), "completed episodes leave no residue");
+            }
+        }
     }
 
     #[test]

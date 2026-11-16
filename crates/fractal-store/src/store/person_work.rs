@@ -623,11 +623,27 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         return Ok(false);
     }
     let requester = ask.actor.as_deref().unwrap_or_default();
-    // Independent asks belong to the agent, not its current work or runtime turn.
-    // This also preserves asks written before owner-run fencing was removed.
+    // Unowned asks survive runtime turns; an episode-owned ask keeps its original fence.
+    if let Some(owner) = fields["owner_run"].as_str()
+        && !run_live(connection, owner, fields["owner_generation"].as_str(), false)?
+    {
+        return Ok(false);
+    }
+    if is_update(ask) {
+        let about = fields["request"]["about"].as_str().unwrap_or_default();
+        if about.starts_with("mission-run/") && !run_live(connection, about, None, false)? {
+            return Ok(false);
+        }
+        if about.starts_with("step-run/")
+            && let Some(origin) = step(connection, about)?
+            && (matches!(origin.status.as_str(), "completed" | "cancelled" | "failed")
+                || !run_live(connection, &origin.run, Some(&origin.generation), false)?)
+        {
+            return Ok(false);
+        }
+    }
     let independent = view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null();
-    // A daemon asks for its own policy, not for a seat, so no declaration fences it. An update
-    // waits for nobody, so it stays until the person reads it, even after its poster stops.
+    // Updates need no live poster, but their owning episode still fences them.
     let unfenced = requester.starts_with("daemon/") || is_update(ask);
     if !matches!(view.status.as_str(), "pending" | "ready")
         || (!independent && !run_live(connection, &view.run, Some(&view.generation), false)?)

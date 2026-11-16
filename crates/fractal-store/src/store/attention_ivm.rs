@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v4.urgent",
+            fingerprint: "projected-source.v1;canonical-person-fences.v4.episode-owner;custom-source.v1;u128-time.v1;public-row.v4.urgent",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -273,6 +273,16 @@ fn person_row(
                 if key.starts_with("mission-run/") {
                     run_dependencies(tx, source, key)?;
                 }
+            }
+        }
+        if person_work::is_update(ask)
+            && let Some(about) = ask.body["fields"]["request"]["about"].as_str()
+        {
+            dependency(tx, "person", source, about)?;
+            if about.starts_with("mission-run/") {
+                run_dependencies(tx, source, about)?;
+            } else if let Some(about) = person_work::step(tx, about)? {
+                run_dependencies(tx, source, &about.run)?;
             }
         }
     }
