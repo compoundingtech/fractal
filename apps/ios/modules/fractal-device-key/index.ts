@@ -7,6 +7,8 @@ export type DeviceKeyInfo = { key: string; storage: 'secure-enclave' | 'software
 type Native = {
   current(handle?: string): Promise<Omit<DeviceKeyInfo, 'handle'> | null>;
   create(): Promise<DeviceKeyInfo>;
+  createRenewal(): Promise<DeviceKeyInfo>;
+  approveRenewal(text: string, handle: string): Promise<string>;
   sign(text: string, handle?: string): Promise<string>;
   remove(handle?: string): Promise<void>;
   verify(key: string, text: string, signature: string): Promise<boolean>;
@@ -17,6 +19,18 @@ const native = requireOptionalNativeModule<Native>('FractalDeviceKey');
 /** A new key kept separately until its handle is committed with the paired credential. */
 export async function createDeviceKey(): Promise<DeviceKeyInfo | null> {
   return native ? native.create() : null;
+}
+
+/** No software fallback: renewal candidates require the physical phone's Secure Enclave. */
+export async function createRenewalKey(): Promise<DeviceKeyInfo> {
+  if (!native?.createRenewal) throw new Error('This build cannot approve renewal; update the phone app.');
+  return native.createRenewal();
+}
+
+/** A fresh native device-owner authentication gates only this renewal signature. */
+export async function approveWithDeviceKey(text: string, handle: string): Promise<string> {
+  if (!native?.approveRenewal) throw new Error('This build cannot approve renewal; update the phone app.');
+  return native.approveRenewal(text, handle);
 }
 
 /** Inspect a saved profile's key by handle, or the legacy default key. */

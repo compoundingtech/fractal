@@ -609,6 +609,10 @@ fn a_local_cut_keeps_the_replication_snapshot_and_a_peer_syncing_through_it_agre
     }));
     assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
     store.trim_chunk_hook.lock().unwrap().take();
+    // The first exchange after the stop builds on from the patched snapshot.
+    smallclaims::store::FULL_INVENTORY_LOADS.with(|loads| loads.set(0));
+    store.replication_snapshot().unwrap();
+    assert_eq!(smallclaims::store::FULL_INVENTORY_LOADS.with(std::cell::Cell::get), 0, "the run's stop loaded the inventory from nothing");
     let seen = seen.lock().unwrap();
     assert!(seen.len() > 4, "the cut deletes in many chunks ({})", seen.len());
     assert!(seen.iter().all(|(_, same, _)| *same), "a chunk rebuilt the replication snapshot: {seen:?}");
@@ -620,8 +624,239 @@ fn a_local_cut_keeps_the_replication_snapshot_and_a_peer_syncing_through_it_agre
     let from_nothing = store.replication_snapshot().unwrap();
     assert!(!Arc::ptr_eq(&built_on, &from_nothing));
     assert_eq!(built_on.inventory.digest, from_nothing.inventory.digest, "the snapshot built on through the run matches one built from nothing");
-    assert_eq!(built_on.inventory.payloadless, from_nothing.inventory.payloadless, "the run's stop rebuilt which payloads it holds");
+    assert_eq!(built_on.inventory.payloadless, from_nothing.inventory.payloadless, "the run's stop patched which payloads it holds");
+    assert_eq!(built_on.envelope_rows, from_nothing.envelope_rows, "the run's stop patched how many envelope rows it holds");
     assert_eq!(peer.replication_snapshot().unwrap().inventory.digest, from_nothing.inventory.digest, "the peer lists the same identities");
+}
+
+/// Each patch of the replication snapshot logs one line: what it marked, whether an exchange
+/// still held the snapshot so the patch copied all of it first, how long it held the build lock,
+/// and the generation every peer's next exchange then builds on from.
+#[test]
+fn a_trim_logs_each_snapshot_patch_and_whether_an_exchange_s_hold_made_it_copy() {
+    for hold in [false, true] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Arc::new(local_member("alder"));
+        store.set_trim_pause(std::time::Duration::ZERO);
+        store.set_trim_chunk_envelopes(1);
+        // No catch-up within the run: its stop is the one patch.
+        store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
+        for n in 0..30 {
+            apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&lines);
+        *store.trim_log_hook.lock().unwrap() = Some(Box::new(move |line: &str| seen.lock().unwrap().push(line.to_owned())));
+        // An exchange that answered during the run keeps its snapshot until the run stops.
+        let exchange = Arc::new(Mutex::new(None));
+        let (hook_store, hook_exchange) = (Arc::clone(&store), Arc::clone(&exchange));
+        *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+            if chunk == 1 {
+                let snapshot = hook_store.replication_snapshot().unwrap();
+                if hold {
+                    *hook_exchange.lock().unwrap() = Some(snapshot);
+                }
+            }
+        }));
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+        store.trim_chunk_hook.lock().unwrap().take();
+        let patches = lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|line| line.strip_prefix("st3: a trim patched the replication snapshot "))
+            .map(|fields| serde_json::from_str::<serde_json::Value>(fields).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(patches.len(), 1, "hold {hold}: {patches:?}");
+        let patch = &patches[0];
+        assert_eq!((patch["cached"].as_bool(), patch["cloned"].as_bool()), (Some(true), Some(hold)), "{patch}");
+        let marked = patch["marked"].as_u64().unwrap();
+        assert!(marked > 0 && marked <= patch["envelopes"].as_u64().unwrap(), "{patch}");
+        for field in ["lock_wait_ms", "held_ms", "generation"] {
+            assert!(patch[field].is_u64(), "{field}: {patch}");
+        }
+    }
+}
+
+/// A trim step's delete is timed statement by statement, each under its own name, so a slow
+/// chunk's line names the statement behind it; a delete's triggers count under the statement
+/// that fires them.
+#[test]
+fn a_trim_step_s_delete_times_each_of_its_statements() {
+    let store = local_member("alder");
+    for n in 0..6 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let ids = store
+        .readers
+        .get()
+        .prepare("SELECT id FROM claims WHERE kind='observer.observed' ORDER BY store_index LIMIT 3")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(ids.len(), 3);
+    let ((), stages) = super::checkpoint::stage_times::timing_deletes(|| delete_as_a_trim_step(&store, &ids));
+    let stages = stages.largest(usize::MAX);
+    for stage in ["claims", "events", "principals", "retire_claim"] {
+        assert_eq!(stages[stage]["count"].as_u64(), Some(3), "{stage}: {stages}");
+    }
+    // Outside a chunk nothing collects, and the delete works as before.
+    let rest = store
+        .readers
+        .get()
+        .query_row("SELECT id FROM claims WHERE kind='observer.observed' ORDER BY store_index LIMIT 1", [], |row| row.get::<_, String>(0))
+        .unwrap();
+    delete_as_a_trim_step(&store, &[rest]);
+}
+
+fn max_envelope_rowid(store: &Store) -> i64 {
+    store.readers.get().query_row("SELECT COALESCE(MAX(rowid), 0) FROM replica_envelopes", [], |row| row.get(0)).unwrap()
+}
+
+/// Make the envelope of the newest observer claim the trim drops the newest envelope row, where an
+/// old envelope a peer sent late sits, and return its rowid. The trim deletes it after the other
+/// dropped ones, and envelope rows have no AUTOINCREMENT, so the next envelope this member admits
+/// reuses that rowid.
+fn last_dropped_observer_envelope_to_the_tail(store: &Store) -> i64 {
+    store.seal_local_batches().unwrap();
+    store
+        .connection
+        .write()
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-he5f64674d59f owner=fractal_store::store::local_trim_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET rowid=(SELECT MAX(rowid)+1 FROM replica_envelopes)
+             WHERE batch_id=(SELECT batch_id FROM claims WHERE kind='observer.observed' ORDER BY store_index DESC LIMIT 1 OFFSET 1)",
+            [],
+        )
+        .unwrap();
+    max_envelope_rowid(store)
+}
+
+/// Build the replication snapshot once, after the run's first chunk: a run starts by recording
+/// its cut, which moves the inventory generation, so only a snapshot built within the run is one
+/// the run's catch-ups and its stop build on. Return the inventory generation it was built at,
+/// and whether `tail` was still held then.
+fn snapshot_after_the_first_chunk(store: &Arc<Store>, tail: i64) -> Arc<Mutex<Option<(i64, bool)>>> {
+    let built = Arc::new(Mutex::new(None));
+    let (hook_store, hook_built) = (Arc::clone(store), Arc::clone(&built));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        if chunk == 1 {
+            hook_store.replication_snapshot().unwrap();
+            *hook_built.lock().unwrap() = Some((inventory_generation(&hook_store), max_envelope_rowid(&hook_store) == tail));
+        }
+    }));
+    built
+}
+
+/// `peer` writes one claim and `store` admits its envelope; return the rowid it took.
+fn admit_a_peer_envelope(store: &Store, peer: &Store) -> i64 {
+    apply(peer, &Write::Observer { observer: 7, status: 0, cursor: None }, 1_000);
+    peer.seal_local_batches().unwrap();
+    assert_eq!(sync_into(peer, store), 1);
+    store
+        .readers
+        .get()
+        .query_row("SELECT MAX(rowid) FROM replica_envelopes WHERE writer=?1", [&peer.origin], |row| row.get(0))
+        .unwrap()
+}
+
+/// The replication snapshot lists what a load from nothing lists, without forgetting it.
+fn snapshot_lists_the_store(store: &Store) -> bool {
+    let (full, _) = smallclaims::store::full_compact_replication_inventory(&store.readers.get()).unwrap();
+    store.replication_snapshot().unwrap().inventory.digest == full.digest
+}
+
+/// A member with one observer's history whose last dropped envelope sits at the tail, and a peer
+/// that holds all of it.
+fn tail_member() -> (Arc<Store>, Arc<Store>, i64) {
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    for n in 0..12 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let tail = last_dropped_observer_envelope_to_the_tail(&store);
+    let peer = Arc::new(Store::open_memory("birch").unwrap());
+    peer.bind_fleet(TEST_FLEET).unwrap();
+    while sync_into(&store, &peer) != 0 {}
+    (store, peer, tail)
+}
+
+/// A trim that deletes the newest envelope row moves the inventory generation, so the envelope
+/// admitted next, which reuses its rowid, is listed: a snapshot built on from one that ended at
+/// that rowid looks only past it. After the run's stop, which patches the snapshot instead of
+/// forgetting it.
+#[test]
+fn after_a_trim_deletes_the_newest_envelope_row_the_envelope_that_reuses_it_is_listed() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (store, peer, tail) = tail_member();
+    store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
+    let built = snapshot_after_the_first_chunk(&store, tail);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let (generation, held) = built.lock().unwrap().expect("the run deleted in chunks");
+    assert!(held, "the snapshot built within the run ends at the tail");
+    assert!(max_envelope_rowid(&store) < tail, "the trim deleted the newest envelope row");
+    let moved = inventory_generation(&store) != generation;
+    assert_eq!(admit_a_peer_envelope(&store, &peer), tail, "the envelope admitted next reuses the rowid");
+    assert!(snapshot_lists_the_store(&store), "the snapshot lists the envelope that reused the rowid");
+    assert!(moved, "deleting the newest envelope row moved the inventory generation");
+}
+
+/// The same within a run: the snapshot is patched and built on at each catch-up, and an envelope
+/// admitted between two chunks reuses the rowid of the newest row a chunk deleted.
+#[test]
+fn within_a_trim_s_run_the_envelope_that_reuses_a_deleted_newest_rowid_is_listed() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (store, peer, tail) = tail_member();
+    store.set_trim_view_refold_interval(std::time::Duration::ZERO);
+    let seen = Arc::new(Mutex::new((false, None)));
+    let (hook_store, hook_peer, hook_seen) = (Arc::clone(&store), Arc::clone(&peer), Arc::clone(&seen));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |chunk| {
+        let mut seen = hook_seen.lock().unwrap();
+        if chunk == 1 {
+            hook_store.replication_snapshot().unwrap();
+            seen.0 = max_envelope_rowid(&hook_store) == tail;
+        } else if seen.1.is_none() && max_envelope_rowid(&hook_store) < tail {
+            let reused = admit_a_peer_envelope(&hook_store, &hook_peer);
+            seen.1 = Some((reused, snapshot_lists_the_store(&hook_store)));
+        }
+    }));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    let seen = *seen.lock().unwrap();
+    assert!(seen.0, "the snapshot built within the run ends at the tail");
+    assert_eq!(seen.1, Some((tail, true)), "admitted between chunks, reusing the rowid, and listed");
+    assert!(snapshot_lists_the_store(&store));
+}
+
+/// After a run's stop, a lagging peer that holds nothing in a range of trimmed envelopes is sent
+/// the envelope it lacks: the patched snapshot knows their payloads are gone, so the page it lists
+/// is not filled with identities export then skips, exchange after exchange.
+#[test]
+fn after_a_trim_s_stop_a_lagging_peer_is_not_listed_the_same_empty_page_twice() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    store.set_trim_view_refold_interval(std::time::Duration::from_secs(3_600));
+    let peer = Store::open_memory("birch").unwrap();
+    peer.bind_fleet(TEST_FLEET).unwrap();
+    while sync_into(&store, &peer) != 0 {}
+    // Enough that the newest fill a sequence range the peer holds nothing in.
+    for n in 0..smallclaims::store::REPLICATION_BUCKET_WIDTH as usize + 16 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    store.seal_local_batches().unwrap();
+    let built = snapshot_after_the_first_chunk(&store, 0);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))).first(), Some(&"trimmed"));
+    store.trim_chunk_hook.lock().unwrap().take();
+    assert!(built.lock().unwrap().is_some(), "the run deleted in chunks");
+    let mut remote = peer.export_replication_summary(TEST_FLEET).unwrap().inventory;
+    remote.accepts = Some(3);
+    let sent: Vec<_> = (0..2).map(|_| store.export_replication_exchange(TEST_FLEET, &remote).unwrap().envelopes.len()).collect();
+    assert!(sent.iter().all(|sent| *sent > 0), "a lagging peer was listed an empty page: {sent:?}");
 }
 
 fn triggers(store: &Store) -> BTreeSet<String> {
@@ -666,6 +901,17 @@ fn opening_a_store_replaces_the_inventory_triggers_and_an_older_build_s_come_bac
     let names = triggers(&store);
     assert!(!names.contains("replica_envelopes_inventory_DELETE"), "this build's open drops it again: {names:?}");
     assert!(names.contains("replica_envelopes_inventory_DELETE_v2"), "{names:?}");
+    // The trigger that counts deleting the newest envelope row is created once, whatever opens
+    // the store: an older build's open drops only the two triggers named above, and it already
+    // compares the inventory generation this one moves, so it builds its next snapshot from
+    // nothing.
+    assert!(names.contains("replica_envelopes_inventory_DELETE_TAIL"), "{names:?}");
+    let tail_triggers: i64 = store
+        .readers
+        .get()
+        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='replica_envelopes_inventory_DELETE_TAIL'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(tail_triggers, 1, "a second open does not add another");
 }
 
 /// The claims sequence a page cursor carries, which the final mark of a trim moves on.
@@ -896,6 +1142,225 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
         let state = if day < 2 { "trimming" } else { "trimmed" };
         assert_eq!(cut_states(&store).last().map(String::as_str), Some(state), "day {day}");
     }
+}
+
+/// The subjects waiting for `resources::refresh`.
+fn pending_resources(store: &Store) -> BTreeSet<String> {
+    let readers = store.readers.get();
+    let mut statement = readers.prepare("SELECT subject FROM local_resource_projection_pending").unwrap();
+    statement.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+/// The resource projection's rows: subject, claim, facts and openers.
+type ProjectedRows = Vec<Vec<Option<String>>>;
+
+/// What the resource projection holds, and what a rebuild from every claim present holds.
+fn projected_and_rebuilt(store: &Store) -> (ProjectedRows, ProjectedRows) {
+    let rows = |transaction: &Transaction<'_>| -> ProjectedRows {
+        let mut statement = transaction
+            .prepare("SELECT subject, claim_id, facts, opened_by, opened_by_run FROM resource_observations ORDER BY subject")
+            .unwrap();
+        statement.query_map([], |row| (0..5).map(|column| row.get(column)).collect()).unwrap().map(Result::unwrap).collect()
+    };
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let projected = rows(&transaction);
+    super::resources::rebuild(&transaction).unwrap();
+    let rebuilt = rows(&transaction);
+    transaction.rollback().unwrap();
+    (projected, rebuilt)
+}
+
+/// Refresh every pending subject, as the next write that projects would.
+fn flush_resources(store: &Store) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    super::resources::flush(&transaction).unwrap();
+    transaction.commit().unwrap();
+}
+
+/// The observation `refresh` projects `subject` from.
+fn projected_claim(store: &Store, subject: &str) -> String {
+    store.readers.get().query_row("SELECT claim_id FROM resource_observations WHERE subject=?1", [subject], |row| row.get(0)).unwrap()
+}
+
+/// Delete the claims `ids` as a trim's step does, through the runtime's hook around the delete.
+fn delete_as_a_trim_step(store: &Store, ids: &[String]) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let claims: Vec<ClaimTombstone> = ids
+        .iter()
+        .map(|id| {
+            let (subject, kind, operation_id) = transaction
+                .query_row(
+                    "SELECT subject, kind, (SELECT id FROM operations WHERE canonical_claim_id=claims.id) FROM claims WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            ClaimTombstone {
+                id: id.clone(), writer: String::new(), sequence: 0, envelope_hash: String::new(), subject, kind,
+                actor: None, predecessors: Vec::new(), operation_id, request_digest: None, accepted_at_unix_ms: 0,
+            }
+        })
+        .collect();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h5caea1023c5d owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+             VALUES ('checkpoint/example-step', 0, 'trimming', 0) ON CONFLICT(id) DO NOTHING",
+            [],
+        )
+        .unwrap();
+    super::checkpoint::record_checkpoint_tombstones_tx(&transaction, "checkpoint/example-step", &[], &claims).unwrap();
+    store
+        .runtime
+        .delete_trimmed_claims_tx(&transaction, &claims, &mut || super::checkpoint::delete_dropped_rows_tx(&transaction, &[], &claims))
+        .unwrap();
+    transaction.commit().unwrap();
+}
+
+/// A trim deletes only observations a subject's projection doesn't read, so its chunks leave no
+/// subject for the next write that projects to refresh while it holds the writer (#5382).
+#[test]
+fn a_chunk_that_deletes_superseded_observations_queues_no_subject() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Arc::new(local_member("alder"));
+    store.set_trim_pause(std::time::Duration::ZERO);
+    store.set_trim_chunk_envelopes(1);
+    // Open, queued, merged, a receipt, and open with its opener named, over three pull requests.
+    for n in 0..40 {
+        apply(&store, &Write::Resource { resource: (n % 3) as u8, shape: [0, 1, 2, 4, 5][n % 5] }, n);
+    }
+    flush_resources(&store);
+    let observed = claims_of(&store, "resource.observed");
+    let context = context(scratch.path(), 0);
+    let before = answers(&store, context.now_unix_ms);
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+    let (hook_store, hook_chunks) = (Arc::clone(&store), Arc::clone(&chunks));
+    *store.trim_chunk_hook.lock().unwrap() = Some(Box::new(move |_| {
+        hook_chunks.lock().unwrap().push((claims_of(&hook_store, "resource.observed"), pending_resources(&hook_store)));
+    }));
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    store.trim_chunk_hook.lock().unwrap().take();
+    let chunks = chunks.lock().unwrap();
+    assert!(chunks.iter().any(|(left, _)| *left < observed), "the cut deletes resource observations ({observed} before)");
+    assert!(chunks.iter().all(|(_, pending)| pending.is_empty()), "no chunk leaves a subject pending: {chunks:?}");
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
+    assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
+}
+
+/// A step that deletes the observation a subject projects from refreshes the subject itself, so
+/// no later write does, and the projection is what a rebuild answers. The keep rule never drops
+/// it; this is the backstop for one that would.
+#[test]
+fn a_step_that_deletes_the_observation_a_subject_projects_from_refreshes_it_itself() {
+    let store = local_member("alder");
+    for (n, shape) in [0, 5, 0].into_iter().enumerate() {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        apply(&store, &Write::Resource { resource: 7, shape }, n);
+    }
+    flush_resources(&store);
+    let subject = pull_request(7);
+    let newest = projected_claim(&store, &subject);
+    delete_as_a_trim_step(&store, std::slice::from_ref(&newest));
+    assert!(pending_resources(&store).is_empty(), "the step refreshed the subject");
+    assert_ne!(projected_claim(&store, &subject), newest);
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
+}
+
+/// A step whose deletes change what more than `TRIM_STEP_REFRESHES` subjects project refreshes that
+/// many itself and leaves the rest pending; the run's stop (`Runtime::rebuild_deferred`) refreshes
+/// them, so none waits for a later write.
+#[test]
+fn past_its_cap_a_step_leaves_subjects_to_the_run_s_stop() {
+    let store = local_member("alder");
+    let extra = 3;
+    let resources: Vec<u8> = (0..(super::resources::TRIM_STEP_REFRESHES + extra) as u8).map(|n| 10 + n).collect();
+    for (n, resource) in resources.iter().chain(&resources).enumerate() {
+        apply(&store, &Write::Resource { resource: *resource, shape: 0 }, n);
+    }
+    flush_resources(&store);
+    let newest: Vec<String> = resources.iter().map(|resource| projected_claim(&store, &pull_request(*resource))).collect();
+    delete_as_a_trim_step(&store, &newest);
+    assert_eq!(pending_resources(&store).len(), extra, "the step refreshed its cap");
+    assert!(store.runtime.deferred_pending(&store.readers.get()).unwrap(), "the run's stop sees them");
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    assert!(!store.runtime.rebuild_deferred(&transaction, std::time::Duration::from_secs(5)).unwrap());
+    transaction.commit().unwrap();
+    drop(writer);
+    assert!(pending_resources(&store).is_empty(), "the run's stop refreshed what the step left");
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
+}
+
+/// What the next write that projects holds the writer for: the hooks it runs after projecting,
+/// `resources::flush` among them, in a transaction rolled back after.
+fn next_writer_hold(store: &Store, before: &str) -> std::time::Duration {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h6cc0bf36e69e owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ before).unwrap();
+    let started = std::time::Instant::now();
+    store.runtime.after_projection(&transaction).unwrap();
+    let held = started.elapsed();
+    transaction.rollback().unwrap();
+    held
+}
+
+/// The next writer's hold after a trim's run that deletes 500 pull requests' superseded resource
+/// observations (#5382). As before this change, every subject the run touched stayed queued, and
+/// the next write that projected (a replication receive, a document put) refreshed them all while it
+/// held the writer; now the run settles them itself. `ST_TRIM_DIR` keeps the store.
+#[test]
+#[ignore = "large-store trim measurement (#5382): run alone"]
+fn the_next_writer_after_a_trim_s_run_holds_the_writer_briefly() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("ST_TRIM_DIR").map_or_else(|| temporary.path().to_owned(), std::path::PathBuf::from);
+    let _ = std::fs::remove_file(root.join("claims.sqlite3"));
+    let store = declared(Store::open(&root.join("claims.sqlite3"), "node").unwrap(), true);
+    store.set_trim_pause(std::time::Duration::ZERO);
+    let subjects = 500;
+    // Open, open, queued, merged, each pull request's a round apart: the trim keeps the merged one.
+    for (round, shape) in [0, 0, 1, 2].into_iter().enumerate() {
+        for subject in 0..subjects {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("resource/github/acme/garden/pull-request/{subject}"),
+                    kind: "resource.observed".into(),
+                    actor: None,
+                    fields: resource_fields(shape, "observer/watch-0").into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("scale-{round}-{subject}")),
+                })
+                .unwrap();
+        }
+    }
+    flush_resources(&store);
+    let scratch = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["trimmed"]);
+    let run = started.elapsed();
+    assert_eq!(claims_of(&store, "resource.observed"), subjects as i64, "the newest of each stays");
+    assert!(pending_resources(&store).is_empty(), "the run left nothing for the next writer");
+    let now = next_writer_hold(&store, "");
+    // As before: every subject whose observations the run deleted still queued.
+    let before = next_writer_hold(
+        &store,
+        /* sqlite-large-value: allow-for-now lv-hb859fde7dd63 owner=fractal_store::store::local_trim_tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'",
+    );
+    println!(
+        "{}",
+        serde_json::json!({
+            "subjects": subjects, "observations_deleted": subjects * 3, "run_ms": run.as_millis(),
+            "next_writer_hold_ms": {"now": now.as_secs_f64() * 1000.0, "before": before.as_secs_f64() * 1000.0},
+        })
+    );
+    assert!(now < std::time::Duration::from_millis(100), "the next writer held the writer {now:?}");
+    let (projected, rebuilt) = projected_and_rebuilt(&store);
+    assert_eq!(projected, rebuilt);
 }
 
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its

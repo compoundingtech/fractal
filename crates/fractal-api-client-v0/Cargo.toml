@@ -11,6 +11,7 @@ test-support = ["fractal-api-core/test-support"]
 
 [dependencies]
 fractal-api-core = { path = "../fractal-api-core" }
+fractal-store = { path = "../fractal-store" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
@@ -24,9 +25,10 @@ kdl = "6"
 libc = "0.2"
 notify = "8"
 opentelemetry = "0.30"
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
 parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
 serde = { version = "1", features = ["derive"] }
@@ -50,7 +52,6 @@ uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 socket2 = "0.6"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 fractal_api_client_v0_self = { package = "fractal-api-client-v0", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

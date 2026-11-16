@@ -7,17 +7,17 @@
         "tsgo": "tsgo"
       },
       "locked": {
-        "lastModified": 1793249746,
-        "narHash": "sha256-0jklcur3TLRMeIwSl64QWBz+bfyuJOkqlB/4nS11kAQ=",
+        "lastModified": 1794696145,
+        "narHash": "sha256-Tn3sAw3xxm6nOgMYYVYA/RUP04FLfO+Btyc1RnYaegI=",
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "d883d18e3ad7609602db0ec8687c14a77625b905",
+        "rev": "d85c8f7f78007fb56dac5cc23be5cbe3443a7e6b",
         "type": "github"
       },
       "original": {
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "d883d18e3ad7609602db0ec8687c14a77625b905",
+        "rev": "d85c8f7f78007fb56dac5cc23be5cbe3443a7e6b",
         "type": "github"
       }
     },
@@ -141,13 +141,56 @@
         "type": "github"
       }
     },
+    "fractal-fixture": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794265163,
+        "narHash": "sha256-pGJRiUHcongVBrYEWT2w3TZTS8UdcZJjHRJvTDhrpYg=",
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "e2721e52463428b4ff655addee129cecd2839763",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "e2721e52463428b4ff655addee129cecd2839763",
+        "type": "github"
+      }
+    },
+    "mergemaster": {
+      "inputs": {
+        "effect-utils": [
+          "effect-utils"
+        ],
+        "fractal-fixture": "fractal-fixture",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "python-oracle": "python-oracle"
+      },
+      "locked": {
+        "lastModified": 1794298270,
+        "narHash": "sha256-UeHYs08Nzqy50cvlWu1n5Z0bR2I/J2Ectj7ztd5gfNI=",
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "cff667cd53bdb6c024f9d7a06259b8f9a3fbb0cb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "ref": "v0.6.0",
+        "repo": "mergemaster",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1789178647,
-        "narHash": "sha256-QKzNhJrBkLagm1tF3ifpCptUygt5eBYUxjdNWRSgzHc=",
+        "lastModified": 1794042290,
+        "narHash": "sha256-ziZn2PvCJE5JEEpqTdxXwJpPB+L3YqoCpTAMCzyaP3U=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "4ba99f3209788ed04f01af38f77ddb803ad6ec63",
+        "rev": "f4a03c008967841f2a0b3cb7c436fc6fc31671f6",
         "type": "github"
       },
       "original": {
@@ -159,11 +202,11 @@
     },
     "nixpkgsUnstable": {
       "locked": {
-        "lastModified": 1789921291,
-        "narHash": "sha256-Ft/BRnIqw1MywFoXydKobjjWmDFgDdYtSpJliE8+yUw=",
+        "lastModified": 1794042290,
+        "narHash": "sha256-ziZn2PvCJE5JEEpqTdxXwJpPB+L3YqoCpTAMCzyaP3U=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "44a91898084f46797b5fac650c7e8c9ac38c43d4",
+        "rev": "f4a03c008967841f2a0b3cb7c436fc6fc31671f6",
         "type": "github"
       },
       "original": {
@@ -262,17 +305,34 @@
         ]
       },
       "locked": {
-        "lastModified": 1792793749,
-        "narHash": "sha256-SvBLC5XDieiklYrFq4WlCQCYB+UHA2QGg2n5kzXPNvU=",
+        "lastModified": 1794522227,
+        "narHash": "sha256-vn24EWrRzI89Se1gyygo3adqzc9iQaJtpotGHuPAvd4=",
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
+        "rev": "d0e816ac4129c97f39473855bb4fe527701ea07c",
         "type": "github"
       },
       "original": {
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
+        "rev": "d0e816ac4129c97f39473855bb4fe527701ea07c",
+        "type": "github"
+      }
+    },
+    "python-oracle": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793953851,
+        "narHash": "sha256-NL/NWSn+YfpwP7h+CGZkeNmRh9hnQOH3OkF9GtyPXgM=",
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "1392a516e969be46d9516d904b76a4db98c55030",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "1392a516e969be46d9516d904b76a4db98c55030",
         "type": "github"
       }
     },
@@ -282,6 +342,7 @@
         "fabric": "fabric",
         "fenix": "fenix",
         "flake-utils": "flake-utils_2",
+        "mergemaster": "mergemaster",
         "nixpkgs": "nixpkgs_3",
         "pty": "pty"
       }

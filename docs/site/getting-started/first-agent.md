@@ -6,7 +6,7 @@ order: 4
 
 # Your first agent
 
-KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+KDL is the runnable format. TS and Effect samples declare the same file with the in-repo [`fractal` package](https://github.com/compoundingtech/fractal/tree/main/packages/fractal), which renders exactly the KDL shown; it is not published to npm yet. Use KDL for the runnable commands in these guides.
 
 Finish [installation](install.md). These examples use the invented person `ada` and agent `garden/worker`; substitute your configured person. They use Claude Code, installed and fully signed in under the daemon's user account. Complete native welcome, trust, and login screens before proceeding.
 
@@ -22,25 +22,25 @@ cd "$HOME/fractal/garden"
 Save the KDL variant as `worker.kdl`. Replace `/work/garden` with the absolute workspace path printed by `pwd`.
 
 ```ts group=worker variant=effect
-import { Fractal } from 'fractal/effect'
+// garden/worker/agent.ts
+import { Fractal } from 'fractal'
 
-export const worker = Fractal.agent({
-  id: 'garden/worker',
-  lifecycle: 'standing',
-  host: 'local',
+export default Fractal.agent({
+  meta: import.meta,
   workspace: '/work/garden',
+  restart: 'always',
   harness: { kind: 'claude', model: 'sonnet' },
 })
 ```
 
 ```ts group=worker variant=ts
+// garden/worker/agent.ts
 import { Fractal } from 'fractal'
 
-export const worker = Fractal.agent({
-  id: 'garden/worker',
-  lifecycle: 'standing',
-  host: 'local',
+export default Fractal.agent({
+  meta: import.meta,
   workspace: '/work/garden',
+  restart: 'always',
   harness: { kind: 'claude', model: 'sonnet' },
 })
 ```

@@ -21,7 +21,7 @@ import {
   Fractal,
   FractalLive,
   type WindowValue,
-} from '@fractal/sdk/effect'
+} from '@fractal/sdk/read'
 
 /** Collections a window follow can name; the wire CollectionName also carries unfollowable ones. */
 type WindowCollection = Extract<FollowSpec, { readonly _tag: 'Window' }>['collection']

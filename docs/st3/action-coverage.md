@@ -17,13 +17,22 @@ person or agent actions.
 
 ## Restart and stale-state model
 
-The new integration fixture owns a private disk store, Unix socket, configuration, HOME/XDG directories, native transcripts and PTYs. A restart ends the listener/router, reopens the store, and constructs fresh daemon state, notification channels and action gates. It never starts or changes the user's daemon. Readiness requires a successful public capabilities response; a socket path alone is insufficient. CI retries are disabled for these action coverage tests. Runtime restart tests acknowledge signal delivery, then wait with a bounded timeout for the PTY to publish process exit. The fleet fixture runs real `st up` and replication workers in private directories and uses `--no-service` for administrative operations. Service tests use a private manager shim which launches real daemon processes and records only fixture service changes.
+The new integration fixture owns a private disk store, Unix socket, configuration, HOME/XDG directories, native transcripts and PTYs. A restart ends the listener/router, reopens the store, and constructs fresh daemon state, notification channels and action gates. It never starts or changes the user's daemon. Readiness requires a successful public capabilities response; a socket path alone is insufficient. CI retries are disabled for these action coverage tests. Runtime restart tests acknowledge signal delivery, then wait with a bounded timeout for the PTY to publish process exit. The fleet fixture runs real `fractal up` and replication workers in private directories and uses `--no-service` for administrative operations. Service tests use a private manager shim which launches real daemon processes and records only fixture service changes.
 
 For the restart-matrix typed actions, the test first submits a stale applicable fence and checks that the store index does not change. It then restarts, submits the original valid fence, checks the domain result, restarts again, and replays the exact request. The replay must return the original affected IDs without duplicate domain writes or receipts. Execution-specific cases also check old runtime incarnations, stale terminal sequences, old native discovery revisions, obsolete desired revisions, changed review cards, and replaced proposal preview tokens.
 
 The CLI drives real public command paths. Reads are compared before and after restart; writes are checked in the reopened graph. Messaging checks explicit idempotency keys, replies, attachments and lifecycle receipts. Review tests use current source cards and inspect the single attributed verdict. Launch tests ask and answer questions, submit/compare variants, preview, approve, request revision, cancel, start approved definitions, and propose a variant against one run generation. Terminal tests send real input, keys and signals to a private PTY, inspect its screen, and reject revoked attachments. Fleet tests cover creation/join/history, mode changes, revoke/remove/leave, migrations, checkpoints and repairs. The GitHub watch/unwatch/list/comment/own test drives real CLI and daemon processes against a private HTTP fixture, including restart, repeated unwatch, comment and review posting, foreign-author refusal and idempotent ownership registration.
 
 The live terminal UI test drives send/attachment upload, discussion, retry, agent/shell/launch creation, launch revision, device revocation and mission cancellation through its real adapter across disk-store restarts. The gate fixture drives the real attention adapter after a changed card and a restart. Terminal key encoding, native attachment/reconnection, visibility/read receipts, palette/layout and local draft/navigation controls retain their own focused tests.
+
+Read-position evidence separates presentation from transport:
+`presented_reads_queue_the_latest_advance_only_when_live_and_supported` exercises
+the presented-prose reducer and its effect queue, including capability/offline
+gates, latest-position coalescing and one advance in flight.
+`read_positions_advance_in_st_and_list_by_the_larger_from_any_device` drives the
+actual read-position adapter over a private Unix socket, checks monotonic advances
+from two clients and server-confirmation merging, and refuses another person's
+reads. It does not claim to drive the interactive terminal or a daemon restart.
 
 Suspension and new-seat readiness tests supply explicit fixture owner acknowledgements. They verify the public request, wait, native identity and durable protocol phases; native process continuation belongs to the runtime canaries and restart suite. GitHub gates use real CLI commands with a private HTTP fixture for pass/wait/broken behavior, obsolete commit refs and malformed-input refusal across daemon restarts; they make no live GitHub API calls. GitHub comment posting offers no public snapshot fence or retry token: tests prove refusal of a foreign seat actor before HTTP posting and durable ownership across restarts; they do not claim exactly-once external posting. Local-only UI operations have no graph fence. Glass base revisions intentionally report last-writer-wins replacement and are not execution fences.
 
@@ -96,10 +105,10 @@ Unix daemon: all six windows, typed client/usage adaptation, period replacement,
 unsubscription and authoritative reconnect snapshots.
 `crates/fractal/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
 and `…::the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
-drive the actual binary with `scripts/fractal-ui-test-client` and `STUI_TIMING_LOG`.
+drive the actual binary with `scripts/fractal-ui-test-client` and `FRACTAL_TUI_TIMING_LOG`.
 Fleet and Usage each remain idle for 72 seconds; their first snapshots must occur
 once, every inventory HTTP read is forbidden, and no request follows ready frames
 for longer than the old 60-second interval.
 
 The usage inventory empty-graph socket test verifies that an open period uses the same wall-clock end as the HTTP read, then reconnects without a graph write.
-`st ui` opens the terminal interface; plain `st` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/fractal/tests` exercise this entry point. Pair with `st devices complete`. `st ui open` asks that interface to show an agent, mission or document; `crates/fractal/tests/ui_open.rs` drives it from a seat process against the real interface under a PTY. `st demo play` plays a scripted demo in that interface, in its own instance; `crates/fractal/tests/demo_play.rs` plays one under a PTY in a throwaway home.
+`fractal ui` opens the terminal interface; plain `fractal` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/fractal/tests` exercise this entry point. Pair with `fractal devices complete`. `fractal ui open` asks that interface to show an agent, mission or document; `crates/fractal/tests/ui_open.rs` drives it from a seat process against the real interface under a PTY. `fractal demo play` plays a scripted demo in that interface, in its own instance; `crates/fractal/tests/demo_play.rs` plays one under a PTY in a throwaway home.

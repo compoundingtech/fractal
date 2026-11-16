@@ -14,7 +14,7 @@ try {
   const origin = `http://127.0.0.1:${address.port}`
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
   browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}) })
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const context = await browser.newContext({ locale: 'de-DE', viewport: { width: 1440, height: 900 } })
   await context.addInitScript(() => {
     window.__embedNetworkCalls = []
     const forbidden = (name) => { window.__embedNetworkCalls.push(name); throw new Error(`Embed attempted ${name}`) }
@@ -37,6 +37,24 @@ try {
   await light.locator('[data-testid="live-agent-workspace"][data-scheme="light"]').waitFor()
   await dark.locator('[data-testid="live-agent-workspace"][data-scheme="dark"]').waitFor()
   await dark.getByRole('button', { name: 'Expand sidebar', exact: true }).waitFor()
+  const lightFrameForDrag = await (await page.$('#light')).contentFrame()
+  assert.equal(await lightFrameForDrag.evaluate(() => navigator.language), 'de-DE')
+  const move = light.getByRole('button', { name: /^Move / }).first()
+  await move.focus()
+  // Keyboard modality must be active before reading Aria's context-specific instruction.
+  await page.keyboard.press('Tab')
+  await move.focus()
+  await lightFrameForDrag.waitForFunction(() => {
+    const ids = document.activeElement?.getAttribute('aria-describedby')?.split(' ') ?? []
+    return ids.some(id => document.getElementById(id)?.textContent === 'Press Enter to start dragging.')
+  })
+  await move.press('Enter')
+  await lightFrameForDrag.waitForFunction(() =>
+    [...document.querySelectorAll('[aria-live]')].some(node => node.textContent?.includes('Started dragging.')))
+  await page.keyboard.press('Escape')
+  await lightFrameForDrag.waitForFunction(() =>
+    [...document.querySelectorAll('[aria-live]')].some(node => node.textContent?.includes('Drop canceled.')))
+  console.log('PASS: de-DE browser receives English keyboard drag instructions and announcements without missing-locale errors')
   assert.equal(await dark.getByRole('button', { name: 'Collapse agents', exact: true }).count(), 0)
   const darkFrame = await (await page.$('#dark')).contentFrame()
   assert(await darkFrame.evaluate(() => window.innerWidth) >= 1000, 'narrow branch must work inside a wide iframe')

@@ -405,6 +405,16 @@ def secret_problem(text):
     return None
 
 
+def harness_launch(settings, command, platform=sys.platform):
+    """(command, env) to start a harness with. A harness that reads through its own sandboxed shell runs by its real path, because a
+    symlink on the way to it (a Nix profile) lies outside {harness_root} and the sandbox cannot exec through it. On macOS it also gets the
+    system PATH, because it picks the shell for its commands from PATH and a shell outside the profile cannot start. Reads stay as confined."""
+    if settings.get("reads") != "shell":
+        return command, None
+    resolved = [str(Path(shutil.which(command[0]) or command[0]).resolve()), *command[1:]]
+    return resolved, ({**os.environ, "PATH": "/usr/bin:/bin"} if platform == "darwin" else None)
+
+
 def run_harness(config, name, model, prompt, cwd, timeout):
     settings = config["harnesses"].get(name)
     if settings is None:
@@ -421,9 +431,10 @@ def run_harness(config, name, model, prompt, cwd, timeout):
     root = str(Path(shutil.which(command[0]) or command[0]).resolve().parent.parent)
     command = [part.replace("{model}", model or "").replace("{cwd}", str(cwd)).replace("{out}", out_file.name).replace("{harness_root}", root)
                for part in command]
+    command, env = harness_launch(settings, command)
     started = time.time()
     try:
-        done = subprocess.run(command, cwd=cwd, input=prompt, text=True, capture_output=True, timeout=timeout)
+        done = subprocess.run(command, cwd=cwd, input=prompt, text=True, capture_output=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         raise Failed(f"{name} did not answer within {timeout} s")
     except OSError as error:

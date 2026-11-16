@@ -128,7 +128,8 @@ const api = {
               const claim = await post(`/v1/messages/${subject.slice(8)}/claims`, {
                 lifecycle, actor, idempotency_key: `fault-reader:${subject}:${lifecycle}`,
               });
-              record({ event: lifecycle, subject, accepted_at_unix_ms: (claim.value ?? claim).accepted_at_unix_ms });
+              const receipt = claim.value ?? claim;
+              record({ event: lifecycle, subject, id: receipt.id, accepted_at_unix_ms: receipt.accepted_at_unix_ms });
               break;
             } catch (error) {
               record({ event: 'ack-retry', subject, lifecycle, error: String(error) });

@@ -40,12 +40,54 @@ class SignalOwnershipTests(unittest.TestCase):
         target = self.child('reachable-after-denied')
         # Only inspect these owned fixtures; never sweep the host's processes.
         entries = [Path(f'/proc/{inaccessible.pid}'), Path(f'/proc/{target.pid}')]
+        signalled = {}
+        error = io.StringIO()
+
+        def observe_signal(pid, *args, **kwargs):
+            signalled[pid] = signal_private(pid, *args, **kwargs)
+            return signalled[pid]
+
         with patch.object(Path, 'glob', return_value=iter(entries)), \
+             patch.object(script_process, 'signal_private', side_effect=observe_signal), \
+             redirect_stderr(error), \
              patch.object(sys, 'argv', ['script_process.py', 'all', str(signal.SIGTERM),
                                       '--env', 'SCRIPT_TEST_OWNER=reachable-after-denied']):
             self.assertEqual(script_process.main(), 0)
+        self.assertEqual(signalled, {inaccessible.pid: False, target.pid: True},
+                         'sweep must skip the denied neighbor and signal the ready fixture')
+        self.assertIn(f'{inaccessible.pid}: skipped unreadable process identity:', error.getvalue())
         self.assertEqual(target.wait(timeout=3), -signal.SIGTERM)
         self.assertIsNone(inaccessible.poll())
+
+    def test_sweep_reports_mid_exec_environment_and_continues(self):
+        starting = self.child('mid-exec-sweep')
+        ready = self.child('mid-exec-sweep')
+        entries = [Path(f'/proc/{starting.pid}'), Path(f'/proc/{ready.pid}')]
+        read_bytes = Path.read_bytes
+        signalled = {}
+        error = io.StringIO()
+
+        def during_exec(path):
+            if path == entries[0] / 'environ':
+                return b''
+            return read_bytes(path)
+
+        def observe_signal(pid, *args, **kwargs):
+            signalled[pid] = signal_private(pid, *args, **kwargs)
+            return signalled[pid]
+
+        with patch.object(Path, 'glob', return_value=iter(entries)), \
+             patch.object(Path, 'read_bytes', during_exec), \
+             patch.object(script_process, 'signal_private', side_effect=observe_signal), \
+             patch.object(sys, 'argv', ['script_process.py', 'all', str(signal.SIGTERM),
+                                      '--env', 'SCRIPT_TEST_OWNER=mid-exec-sweep']), \
+             redirect_stderr(error):
+            self.assertEqual(script_process.main(), 0)
+        self.assertEqual(signalled, {starting.pid: False, ready.pid: True})
+        self.assertEqual(error.getvalue(),
+                         f'{starting.pid}: skipped unreadable process identity: empty process environment\n')
+        self.assertIsNone(starting.poll())
+        self.assertEqual(ready.wait(timeout=3), -signal.SIGTERM)
 
     def test_metadata_io_failure_closes_pidfd_without_signalling(self):
         child = self.child('metadata-denied')
@@ -134,9 +176,15 @@ class SignalOwnershipTests(unittest.TestCase):
                 self.assertIsNone(re.search(pattern, content), str(path))
 
     def child(self, marker):
-        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
-                                 env={**os.environ, 'SCRIPT_TEST_OWNER': marker})
+        child = subprocess.Popen([sys.executable, '-c',
+                                  "import time; print('ready', flush=True); time.sleep(30)"],
+                                 env={**os.environ, 'SCRIPT_TEST_OWNER': marker},
+                                 stdout=subprocess.PIPE, text=True)
         self.addCleanup(self.finish, child)
+        self.addCleanup(child.stdout.close)
+        # Popen can return during exec, before /proc exposes the new environment.
+        # Wait for the fixture itself before inspecting its ownership marker.
+        self.assertEqual(child.stdout.readline().strip(), 'ready')
         return child
 
     @staticmethod

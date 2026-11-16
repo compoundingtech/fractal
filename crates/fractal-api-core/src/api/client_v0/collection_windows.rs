@@ -2,6 +2,7 @@
 //! A future graph-watch consumer can replace `revision` with view/frontier invalidations;
 //! authorized row reads and socket snapshot/diff delivery remain the same.
 use crate::ArrangementsStore;
+use crate::ReadPositionsStore;
 use crate::SeatsStore;
 use crate::PublishedViewsStore;
 use super::*;
@@ -12,7 +13,7 @@ const STORES: usize = 64;
 pub const WINDOWS: usize = 64;
 pub const SESSION_WINDOWS: usize = 16;
 const KIND_LIMIT: usize = 10_000;
-pub const COLLECTIONS: [&str; 15] = [
+pub const COLLECTIONS: [&str; 16] = [
     "missions",
     "attention",
     "agents",
@@ -20,6 +21,7 @@ pub const COLLECTIONS: [&str; 15] = [
     "glasses",
     "arrangements",
     "ordered-memberships",
+    "read-positions",
     "summary",
     "summary-missions",
     "clients", "usage", "machines", "devices", "sessions", "terminals",
@@ -244,10 +246,12 @@ impl Windows {
                 || kinds.len() > KIND_LIMIT;
             let arrangements = store.arrangements_changed(revisions.index, index)?;
             let memberships = store.ordered_memberships_changed(revisions.index, index)?;
+            let read_positions = store.read_positions_changed(revisions.index, index)?;
             for (position, name) in COLLECTIONS.iter().enumerate() {
                 if all
                     || (*name == "arrangements" && arrangements)
                     || (*name == "ordered-memberships" && memberships)
+                    || (*name == "read-positions" && read_positions)
                     || kinds.iter().any(|kind| !collection_ignores(name, kind))
                 {
                     revisions.values[position] = revisions.values[position].wrapping_add(1);
@@ -317,13 +321,15 @@ impl Windows {
         {
             return json!({"node":state.node, "fleet":state.fleet_id,
                 "collection":"attention", "person":person,
-                "custom_forms":session.custom_forms}).to_string();
+                "custom_forms":session.custom_forms,
+                "model_drift_attention":session.model_drift_attention}).to_string();
         }
         json!({
             "node":state.node, "fleet":state.fleet_id,
             "actor":session.actor, "authority":session.authority_actor,
             "grant":session.pairing_grant, "transport":session.transport,
             "scopes":session.scopes, "custom_forms":session.custom_forms,
+            "model_drift_attention":session.model_drift_attention,
             "conversation_blocks":session.conversation_blocks,
             "collection":request.collection, "limit":request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS),
             "since_ms":request.since_ms, "until_ms":request.until_ms,

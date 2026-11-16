@@ -18,14 +18,14 @@ const DIVERGENCE_BUSY_BACKOFF: Duration = Duration::from_secs(60);
 pub fn daemon_busy(store: &Store) -> bool {
     use smallclaims::windows::{StoreWork, store_series};
     let now = Instant::now();
-    let max_ms = crate::slo::targets().transaction.max_ms as f64;
-    let over = |kind| {
+    let targets = crate::slo::targets();
+    let over = |kind, max_ms: u64| {
         let minute = &store_series(kind).snapshot(now)["1m"];
         minute["over_target"].as_u64().unwrap_or(0) > 0
-            || minute["max_ms"].as_f64().unwrap_or(0.0) > max_ms
+            || minute["max_ms"].as_f64().unwrap_or(0.0) > max_ms as f64
     };
-    over(StoreWork::WriterHold)
-        || over(StoreWork::WriteTransaction)
+    over(StoreWork::WriterHold, targets.writer_hold.max_ms)
+        || over(StoreWork::WriteTransaction, targets.transaction.max_ms)
         || store.replication_catching_up()
         || store.replication_projection_deferred()
 }

@@ -402,4 +402,107 @@ mod tests {
         let replicated = other.step_run(&work.subject).unwrap().unwrap();
         assert!(!crate::store::adhoc_work::pending_handoff(&other.readers.get(), &replicated).unwrap(), "the handoff stays pending elsewhere");
     }
+    fn return_fixture() -> (Store, StepRunView, HandoffReturnRequest) {
+        let store = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_internal_intent(
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }", "alder").unwrap();
+        store.apply_internal(&intent, "return-fixture").unwrap();
+        let actor = "agent/example/worker";
+        let work = store.start_work(&WorkStartRequest {
+            actor: actor.into(), title: "Inspect return semantics".into(), idempotency_key: "start".into(),
+        }).unwrap();
+        store.work_action(&work.subject, "claim", &request(actor, "claim")).unwrap();
+        let mut progress = request(actor, "progress");
+        progress.summary = Some("Checkpoint retained".into());
+        progress.evidence = vec!["doc/example/checkpoint".into()];
+        store.work_action(&work.subject, "progress", &progress).unwrap();
+        let work = store.handoff_work(&work.subject, &WorkHandoffRequest {
+            actor: actor.into(), incarnation: Some(format!("{actor}-one")), to: "person/reviewer".into(),
+            note: "Inspect this checkpoint".into(), evidence: progress.evidence, idempotency_key: "handoff".into(),
+        }).unwrap();
+        let handoff = store.latest_claim(&work.subject, Some("work.released")).unwrap().unwrap();
+        let input = HandoffReturnRequest {
+            actor: actor.into(), message: handoff.body["fields"]["handoff_message"].as_str().unwrap().into(),
+            attempt: work.attempt, disposition: HandoffDisposition::Withdrawn,
+            reason: "Continue on the handing seat".into(), idempotency_key: "return".into(),
+        };
+        (store, work, input)
+    }
+
+    #[test]
+    fn person_handoff_returns_preserve_work_and_replay_then_allow_claim() {
+        for acknowledged in [false, true] {
+            for disposition in [HandoffDisposition::Withdrawn, HandoffDisposition::Declined] {
+                let (store, before, mut input) = return_fixture();
+                input.disposition = disposition;
+                if input.disposition == HandoffDisposition::Declined { input.actor = "person/reviewer".into(); }
+                if acknowledged {
+                    store.acknowledge_work(&before.subject, &WorkAcknowledgeRequest {
+                        actor: "person/reviewer".into(), message: input.message.clone(),
+                    }).unwrap();
+                }
+                let claims = store.claims_for(&before.subject, None).unwrap();
+                let mail = store.claims_for(&input.message, None).unwrap();
+                let run_claims = store.claims_for(&before.run, None).unwrap();
+                let result = store.return_handoff(&before.subject, &input).unwrap();
+                let after = store.step_run(&before.subject).unwrap().unwrap();
+                assert_eq!(after.assigned_to.as_deref(), Some("agent/example/worker"));
+                assert!(after.available_to.is_empty() && after.claimant.is_none()
+                    && after.claim_incarnation.is_none() && after.claim_expires_at_unix_ms.is_none());
+                assert_eq!((after.status.as_str(), after.attempt, after.readiness_epoch),
+                    ("ready", before.attempt, before.readiness_epoch + 1));
+                assert_eq!(after.worker_reported, before.worker_reported);
+                assert_eq!(json!(after.person_answers), json!(before.person_answers));
+                assert_eq!(after.progress_summary, before.progress_summary);
+                assert_eq!(after.completion_summary, before.completion_summary);
+                assert_eq!(json!(store.claims_for(&before.run, None).unwrap()), json!(run_claims));
+                assert_eq!(store.claims_for(&before.subject, None).unwrap().len(), claims.len() + 1);
+                assert_eq!(json!(store.claims_for(&input.message, None).unwrap()), json!(mail));
+                assert!(!pending_handoff(&store.readers.get(), &after).unwrap());
+                assert!(!after.constraints.iter().any(|c| c.contains("awaiting acknowledgment")));
+                let replica = Store::open_memory("birch").unwrap();
+                receive_and_project(&replica, "alder", &exchange_from(&store, &ReplicationInventory::default()));
+                let projected = person_work::step(&store.readers.get(), &before.subject).unwrap().unwrap();
+                let replayed = person_work::step(&replica.readers.get(), &before.subject).unwrap().unwrap();
+                assert_eq!(json!(replayed), json!(projected));
+                assert_eq!(replica.return_handoff(&before.subject, &input).unwrap().id, result.id);
+                store.work_action(&before.subject, "claim", &request("agent/example/worker", "reclaim")).unwrap();
+                assert_eq!(json!(store.return_handoff(&before.subject, &input).unwrap()), json!(result));
+                let mut conflict = input.clone();
+                conflict.reason.push('!');
+                assert_eq!(store.return_handoff(&before.subject, &conflict).unwrap_err().code, "idempotency-conflict");
+                conflict = input.clone();
+                conflict.actor = "person/other".into();
+                assert_eq!(store.return_handoff(&before.subject, &conflict).unwrap_err().code, "idempotency-conflict");
+                assert_eq!(store.return_handoff("step-run/other/work", &input).unwrap_err().code, "idempotency-conflict");
+            }
+        }
+    }
+
+    #[test]
+    fn person_handoff_return_refuses_stale_foreign_claimed_and_terminal_work() {
+        for change in ["note", "attempt", "foreign", "wrong-role", "claimed", "terminal", "generation", "resolved"] {
+            let (store, work, mut input) = return_fixture();
+            match change {
+                "note" => input.message = "message/older".into(),
+                "attempt" => input.attempt += 1,
+                "foreign" => input.actor = "person/other".into(),
+                "wrong-role" => input.actor = "person/reviewer".into(),
+                "claimed" => { store.connection.write().execute(
+                    "UPDATE step_runs SET lease_owner='agent/other' WHERE subject=?1", [&work.subject]).unwrap(); }
+                "terminal" => { store.set_step_state(&work.subject, "completed", None).unwrap(); }
+                "generation" => { store.connection.write().execute(
+                    "UPDATE mission_runs SET current_generation_id='newer' WHERE id=?1",
+                    [work.run.trim_start_matches("mission-run/")]).unwrap(); }
+                "resolved" => {
+                    store.return_handoff(&work.subject, &input).unwrap();
+                    input.idempotency_key = "another-return".into();
+                }
+                _ => unreachable!(),
+            }
+            let count = store.claims_for(&work.subject, None).unwrap().len();
+            assert!(store.return_handoff(&work.subject, &input).is_err(), "{change}");
+            assert_eq!(store.claims_for(&work.subject, None).unwrap().len(), count, "{change}");
+        }
+    }
 }

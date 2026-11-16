@@ -133,6 +133,8 @@ mission "parent" state="ready" {{
         store.mission_spec("parent", None).unwrap().unwrap()
     };
     let initial = publish_parent("Keep the orchard scheduled.", "initial");
+    // The timer contract concerns explicit same-run adoption, not S3 publication.
+    let replacement = publish_parent("Keep the revised orchard scheduled.", "replacement");
     let parent = store.create_mission_run(&MissionRunRequest {
         mission: initial.id.clone(), revision: Some(initial.revision.clone()),
         workspace: "/workspace/orchard".into(), requester: None, mode: None,
@@ -145,7 +147,6 @@ mission "parent" state="ready" {{
     measure(&store, "peer", 7, now - 60_000);
     reconciler.reconcile_once().unwrap();
     let subject = format!("schedule/{}/orchard", parent.id);
-    let replacement = publish_parent("Keep the revised orchard scheduled.", "replacement");
     let revised = store.adopt_mission_revision(&parent.id, &replacement, "person/test",
         "Revise the same owning run.", "revise-parent").unwrap();
     assert_ne!(parent.generation, revised.generation);

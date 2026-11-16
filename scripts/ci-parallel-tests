@@ -8,7 +8,13 @@
 parallel_tests() {
   local logs failed root kept
   logs=$(mktemp -d)
-  printf '%s\n' "$@" | xargs -P "${GENIE_FRESHNESS_JOBS:-6}" -I{} bash -c 'python3 "scripts/$1" >"$2/$1.log" 2>&1 || echo "$1" >>"$2/failed"' _ {} "$logs"
+  printf '%s\n' "$@" | xargs -P "${GENIE_FRESHNESS_JOBS:-6}" -I{} bash -c '
+    started=$SECONDS
+    status=0
+    python3 "scripts/$1" >"$2/$1.log" 2>&1 || status=$?
+    printf "scripts/%s completed in %ss (exit %s)\n" "$1" "$((SECONDS - started))" "$status" >&2
+    if [ "$status" -ne 0 ]; then echo "$1" >>"$2/failed"; fi
+  ' _ {} "$logs"
   if [ -f "$logs/failed" ]; then
     root=${CI_PARALLEL_TESTS_KEEP:-${XDG_CACHE_HOME:-$HOME/.cache}/ci-parallel-tests}
     kept="$root/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"

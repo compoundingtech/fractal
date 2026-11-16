@@ -234,7 +234,7 @@ assert 'runner: macos-15' in release and 'namespace-profile-linux-x86-64;job.pri
 assert 'namespace-profile-macos' not in release, 'native Mac releases must not depend on saturated Namespace'
 assert 'ubuntu-latest' in release, 'installer checks and assembly stay off compiler capacity'
 release_blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", release.split("\njobs:\n", 1)[1]))
-for job in ('assemble', 'publish'):
+for job in ('validate-source', 'assemble', 'publishEmbed', 'publishEdge', 'observePublishers'):
     assert 'runs-on: ubuntu-latest' in release_blocks[job], (job, 'artifact verification must not wait for a compiler runner')
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/release-daily.yml').read_text()
 assert "linux-tests-shard-2" in blocks["linux-gate"], "both shards must be required"

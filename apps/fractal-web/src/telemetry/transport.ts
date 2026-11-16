@@ -1,8 +1,62 @@
-import * as Atom from 'effect/reactivity/Atom'
-import type { FractalOptions } from '@fractal/sdk/effect'
+import type { ConnectionState, FractalOptions } from '@fractal/sdk/read'
 import { wrapTraceFetch } from '../data/sdk-browser/trace.ts'
 
 import { getDebug, incrDebug, setDebug } from './meters.tsx'
+
+/** One finished request, by route only: query strings can carry identifiers. */
+export interface RequestRecord {
+  readonly method: string
+  readonly path: string
+  readonly outcome: number | 'network'
+  readonly durationMs: number
+}
+const requestLogSize = 8
+/** What the error count and latency tails are made of, newest errors first and slowest responses first. */
+export interface RequestLog {
+  readonly errors: readonly RequestRecord[]
+  readonly slowest: readonly RequestRecord[]
+}
+const emptyRequestLog: RequestLog = { errors: [], slowest: [] }
+let requestLog = emptyRequestLog
+const requestLogListeners = new Set<() => void>()
+const publishRequestLog = (next: RequestLog): void => {
+  requestLog = next
+  for (const notify of requestLogListeners) notify()
+}
+
+/** An immutable snapshot, replaced only when a request changes it, so readers can compare by identity. */
+export const readRequestLog = (): RequestLog => requestLog
+export const subscribeRequestLog = (notify: () => void): (() => void) => {
+  requestLogListeners.add(notify)
+  return () => requestLogListeners.delete(notify)
+}
+
+const requestRecord = (
+  input: Parameters<typeof globalThis.fetch>[0],
+  init: Parameters<typeof globalThis.fetch>[1],
+  outcome: RequestRecord['outcome'],
+  durationMs: number,
+): RequestRecord => {
+  const request = input instanceof Request ? input : undefined
+  const url = request?.url ?? String(input)
+  return {
+    method: init?.method ?? request?.method ?? 'GET',
+    path: URL.canParse(url) ? new URL(url).pathname : url.split('?')[0]!,
+    outcome,
+    durationMs,
+  }
+}
+const logError = (record: RequestRecord): void => {
+  publishRequestLog({ ...requestLog, errors: [record, ...requestLog.errors].slice(0, requestLogSize) })
+}
+const logSlowest = (record: RequestRecord): void => {
+  const { slowest } = requestLog
+  if (slowest.length === requestLogSize && record.durationMs <= slowest[requestLogSize - 1]!.durationMs) return
+  publishRequestLog({
+    ...requestLog,
+    slowest: [...slowest, record].toSorted((a, b) => b.durationMs - a.durationMs).slice(0, requestLogSize),
+  })
+}
 
 /** Observe fetches and propagate UX context only to the admitted same-origin data boundary. */
 export const instrumentFetch = ({ fetchImpl, origin, traceContext }: {
@@ -14,78 +68,60 @@ export const instrumentFetch = ({ fetchImpl, origin, traceContext }: {
   const samples: number[] = []
   let cursor = 0
   let inFlight = 0
+  // Absent keys read as 0, so meters need these to tell "measured zero" from "not measured".
+  setDebug('Wf.httpInstrumented', 1)
+  setDebug('Wf.httpSamples', 0)
   setDebug('Wf.httpInFlight', 0)
   setDebug('Wf.httpErrors', 0)
   setDebug('Wf.httpP50Ms', 0)
   setDebug('Wf.httpP95Ms', 0)
+  publishRequestLog(emptyRequestLog)
   return async (...[input, init]) => {
     const started = performance.now()
     setDebug('Wf.httpInFlight', ++inFlight)
     try {
       const response = await fetch(input, init)
-      if (!response.ok) incrDebug('Wf.httpErrors')
-      return response
-    } catch (error) {
-      // User cancellation is not a failed transport request.
-      if (!(error instanceof Error && error.name === 'AbortError')) incrDebug('Wf.httpErrors')
-      throw error
-    } finally {
-      setDebug('Wf.httpInFlight', --inFlight)
+      if (!response.ok) {
+        incrDebug('Wf.httpErrors')
+        logError(requestRecord(input, init, response.status, performance.now() - started))
+      }
+      logSlowest(requestRecord(input, init, response.status, performance.now() - started))
+      // Only a response is latency: cancellation and network failure time something else.
       samples[cursor] = performance.now() - started
       cursor = (cursor + 1) % 256
       const sorted = samples.toSorted((a, b) => a - b)
+      setDebug('Wf.httpSamples', sorted.length)
       setDebug('Wf.httpP50Ms', sorted[Math.ceil(sorted.length * 0.5) - 1]!)
       setDebug('Wf.httpP95Ms', sorted[Math.ceil(sorted.length * 0.95) - 1]!)
+      return response
+    } catch (error) {
+      // User cancellation is not a failed transport request.
+      if (!(error instanceof Error && error.name === 'AbortError')) {
+        incrDebug('Wf.httpErrors')
+        logError(requestRecord(input, init, 'network', performance.now() - started))
+      }
+      throw error
+    } finally {
+      setDebug('Wf.httpInFlight', --inFlight)
     }
   }
 }
 
-/** Sampled SDK transport health and activity reported by the debug bag. */
-export interface TransportSnapshot {
-  readonly socketLive: boolean
-  readonly requests: number
-  readonly p50Ms: number
-  readonly p95Ms: number
-  readonly errors: number
-  readonly subscriptions: number
-  readonly subscriptionCap: number
-  readonly messagesPerSecond: number
+/** The latest SDK connection state; numeric debug counters cannot carry its attempt or issue. */
+export interface SocketObservation {
+  readonly state: ConnectionState
+  readonly sinceMs: number
 }
-/** A sampling view of DebugBag, never a second telemetry writer; only this row subscribes. */
-export const transportSnapshot = Atom.make((get): TransportSnapshot => {
-  let previousFrames = getDebug('Wf.frames')
-  let previousAt = performance.now()
-  const sample = (): TransportSnapshot => {
-    const now = performance.now()
-    const frames = getDebug('Wf.frames')
-    const messagesPerSecond =
-      now === previousAt ? 0 : (Math.max(0, frames - previousFrames) * 1000) / (now - previousAt)
-    previousFrames = frames
-    previousAt = now
-    return {
-      socketLive: getDebug('Wf.socketLive') === 1,
-      requests: getDebug('Wf.httpInFlight'),
-      p50Ms: getDebug('Wf.httpP50Ms'),
-      p95Ms: getDebug('Wf.httpP95Ms'),
-      errors: getDebug('Wf.httpErrors'),
-      subscriptions: getDebug('Wf.activeFollows'),
-      subscriptionCap: getDebug('Wf.followCap'),
-      messagesPerSecond,
-    }
-  }
-  const timer = setInterval(() => get.setSelf(sample()), 500)
-  get.addFinalizer(() => clearInterval(timer))
-  return sample()
-}).pipe(
-  Atom.withEquality(
-    (a: TransportSnapshot, b: TransportSnapshot) =>
-      a.socketLive === b.socketLive &&
-      a.requests === b.requests &&
-      a.p50Ms === b.p50Ms &&
-      a.p95Ms === b.p95Ms &&
-      a.errors === b.errors &&
-      a.subscriptions === b.subscriptions &&
-      a.subscriptionCap === b.subscriptionCap &&
-      a.messagesPerSecond === b.messagesPerSecond,
-  ),
-)
+let socketObservation: SocketObservation | undefined
+const socketListeners = new Set<() => void>()
+
+/** Undefined means no live source has reported yet, which is not the same as being down. */
+export const readSocketObservation = (): SocketObservation | undefined => socketObservation
+export const subscribeSocketObservation = (notify: () => void): (() => void) => {
+  socketListeners.add(notify)
+  return () => socketListeners.delete(notify)
+}
+export const recordSocketState = (state: ConnectionState): void => {
+  socketObservation = { state, sinceMs: Date.now() }
+  for (const notify of socketListeners) notify()
+}

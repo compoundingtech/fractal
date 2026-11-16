@@ -167,7 +167,7 @@ fn subagent_claim_tx(
     agent: &str,
     kind: &str,
     subagent_id: &str,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     debug_assert!(SUBAGENT_KINDS.contains(&kind));
     // The kind is written into the statement so SQLite can use that kind's partial index.
     transaction
@@ -191,7 +191,7 @@ fn subagent_claim_tx(
 pub fn check_subagent_claim_tx(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     if !SUBAGENT_KINDS.contains(&input.kind.as_str()) {
         return Ok(None);
     }
@@ -201,7 +201,7 @@ pub fn check_subagent_claim_tx(
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
     else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-subagent",
             "a subagent claim needs the harness's subagent ID",
         ));
@@ -216,7 +216,7 @@ pub fn check_subagent_claim_tx(
         return Ok(appeared);
     }
     if appeared.is_none() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unknown-subagent",
             format!(
                 "subagent `{subagent_id}` never appeared on `{}`",
@@ -227,7 +227,7 @@ pub fn check_subagent_claim_tx(
     let ended = subagent_claim_tx(transaction, &input.subject, "subagent.ended", subagent_id)?;
     match (input.kind.as_str(), ended) {
         ("subagent.ended", ended) => Ok(ended),
-        (_, Some(_)) => Err(St3Error::new(
+        (_, Some(_)) => Err(FractalError::new(
             "subagent-ended",
             format!(
                 "subagent `{subagent_id}` on `{}` already ended",

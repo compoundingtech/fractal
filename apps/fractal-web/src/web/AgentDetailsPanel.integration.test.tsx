@@ -5,7 +5,7 @@ import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { FractalClient } from '@fractal/client'
 import { Agent, decodeUnknownSync } from '@fractal/client/schema'
-import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Option from 'effect/Option'
@@ -13,12 +13,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { observed } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable } from '../data/source.ts'
 import type { Feed } from '../data/source.ts'
 import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
 import { gatewaySubjectReads } from '../data/subjectReadPort.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
+import { inspectorViewPreference } from './conversationPreferences.ts'
 import { ompDetailsSource } from './ompDetailsFixtures.ts'
 import { ompAgentRef, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from '../../../../packages/fractal-ui/src/assistant-ui/details/omp-fixtures.ts'
 import { accountingNoteSummary, spendWindowReason } from './detailsSupplement.ts'
@@ -43,6 +44,8 @@ beforeEach(async () => {
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
   window.localStorage.clear()
   registry = AtomRegistry.make()
+  // The last-used tab is global, so each test states where it starts.
+  registry.set(inspectorViewPreference, 'details')
   agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [row] }))
   const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents }
   host = document.createElement('div')
@@ -59,7 +62,7 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(host.textContent).toContain('Synthetic Details seat')
     expect(host.textContent).toContain('synthetic-reported-model')
     const row = host.querySelector<HTMLElement>('[data-agent-inspector-tabs]')!
-    expect(within(row).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Changes', 'Details'])
+    expect(within(row).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Details', 'Changes', 'Resources'])
     expect(within(row).getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true')
     // Details' controls and the dock's close share the tab row; no generic workbench copy/theme/panel actions.
     expect(within(row).getByRole('button', { name: 'Visible sections' })).not.toBeNull()
@@ -145,8 +148,8 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(registry.get(declaration)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' })
     await act(async () => within(host).getByRole('button', { name: 'Details for agent details' }).click())
     await act(async () => within(document.body).getByRole('button', { name: 'Retry' }).click())
-    await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Declared workspace')) })
-    expect(declarationReads).toBe(2)
+    await act(async () => { await vi.waitFor(() => expect(declarationReads).toBe(2)) })
+    await act(async () => { await vi.waitFor(() => expect(host.querySelector('[data-details-sync-state]')?.getAttribute('data-details-sync-state')).not.toBe('Failed')) })
     expect(registry.get(declaration)).toMatchObject({ _tag: 'Observed', value: { bindings: [{ kind: 'workspace', count: 1 }] } })
   })
   it('dates spend with Refresh and recovers failed spend and queue reads with their own Try again', async () => {
@@ -256,6 +259,16 @@ describe('OMP subagent activity on the production inspector', () => {
     const trigger = within(scope).getByRole('button', { name })
     return { trigger, panel: document.getElementById(trigger.getAttribute('aria-controls')!)! }
   }
+  it('uses the shared recovery copy for rejected supplement credentials', async () => {
+    await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
+      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} detailsSupplement={() => unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })} />
+    </DataSourceProvider>))
+    const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
+    expect(within(line).getByRole('status').textContent).toBe(credentialExpiredMessage)
+    expect(line.querySelector('button')).toBeNull()
+    expect(line.textContent).not.toContain('private diagnostic')
+  })
+
   it('announces loading in plain words, with no technical paragraph', async () => {
     await mount('loading')
     const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
@@ -329,13 +342,11 @@ describe('OMP subagent activity on the production inspector', () => {
     expect(panel.textContent).toBe("The latest update couldn't be loaded, so earlier activity is shown.")
     assertPlain(host)
   })
-  it('opens a subagent’s reported details in plain words', async () => {
+  it('shows a subagent’s reported details in plain words, with nothing to open', async () => {
     await mount('reported')
-    const card = [...host.querySelectorAll<HTMLElement>('button')].find(button => button.textContent?.includes(ompSubagent.label))!
-    await act(async () => card.click())
-    const dialog = within(document.body).getByRole('dialog', { name: 'Reported resource details' })
-    expect(dialog.textContent).toContain("Reported details only; this resource can't be opened from here.")
-    expect(dialog.textContent).toContain(`Session ${ompSubagent.sessionId} · 12 requests · $2.86 · ${ompSubagent.model}`)
-    assertPlain(dialog)
+    const row = [...host.querySelectorAll<HTMLElement>('[data-details-resource-static]')].find(each => each.textContent?.includes(ompSubagent.label))!
+    expect(row.querySelector('button')).toBeNull()
+    expect(within(document.body).queryByRole('dialog')).toBeNull()
+    assertPlain(row)
   })
 })

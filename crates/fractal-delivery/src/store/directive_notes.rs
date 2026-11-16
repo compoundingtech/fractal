@@ -11,15 +11,17 @@ pub use fractal_store::store::directive_notes::{DirectiveNote, create_schema, cu
 mod tests;
 
 pub trait DirectiveNotesStore {
-    fn set_directive_note(&self, person: &str, actor: &str, text: Option<&str>, expires_at: Option<&str>) -> Result<Option<DirectiveNote>, St3Error>;
-    fn directive_notes(&self, actor: &str) -> Result<Vec<DirectiveNote>, St3Error>;
+    /// Set or clear `person`'s note as `actor`, recording `source`: the daemon-assigned writer,
+    /// a pairing grant or `host/<member>`.
+    fn set_directive_note(&self, person: &str, actor: &str, source: &str, text: Option<&str>, expires_at: Option<&str>) -> Result<Option<DirectiveNote>, FractalError>;
+    fn directive_notes(&self, actor: &str) -> Result<Vec<DirectiveNote>, FractalError>;
     fn directive_note_people(&self, actor: &str) -> Result<BTreeSet<String>>;
 }
 
 impl DirectiveNotesStore for Store {
 
-    fn set_directive_note(&self, person: &str, actor: &str, text: Option<&str>, expires_at: Option<&str>) -> Result<Option<DirectiveNote>, St3Error> {
-        let mut fields = BTreeMap::from([("text".into(), json!(text))]);
+    fn set_directive_note(&self, person: &str, actor: &str, source: &str, text: Option<&str>, expires_at: Option<&str>) -> Result<Option<DirectiveNote>, FractalError> {
+        let mut fields = BTreeMap::from([("text".into(), json!(text)), ("source".into(), json!(source))]);
         if let Some(at) = expires_at { fields.insert("expires_at".into(), json!(at)); }
         self.append_claim(&ClaimInput {
             subject: person.into(), kind: KIND.into(), actor: Some(actor.into()), fields,
@@ -28,7 +30,7 @@ impl DirectiveNotesStore for Store {
         current(&self.readers.get(), person, now_ms()).map_err(internal)
     }
 
-    fn directive_notes(&self, actor: &str) -> Result<Vec<DirectiveNote>, St3Error> {
+    fn directive_notes(&self, actor: &str) -> Result<Vec<DirectiveNote>, FractalError> {
         validate_actor(actor)?;
         self.read_snapshot(|_| {
             let people = self.directive_note_people(actor)?;

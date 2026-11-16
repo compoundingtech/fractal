@@ -61,6 +61,7 @@ pub mod hooks;
 pub mod host;
 pub mod host_lock;
 pub mod identity;
+pub mod managed_launch;
 pub mod materialize;
 pub mod message;
 pub mod metrics;
@@ -80,6 +81,7 @@ pub mod provider_session;
 pub mod push_mailbox;
 pub mod reconcile;
 pub mod reexec;
+pub mod refresh_gate;
 
 pub mod residency;
 pub mod run;
@@ -88,7 +90,6 @@ pub mod session_control;
 pub mod status;
 pub mod subagents;
 pub mod supervisor_chain;
-pub mod telemetry;
 pub mod validate;
 pub mod version;
 pub mod work_claim_failure;
@@ -107,7 +108,6 @@ pub use agent_spec::spec::{
 };
 pub use catalog_lock::CatalogLock;
 pub use expand::{expand_env, expand_vars};
-pub use host_lock::HostLock;
 pub use reconcile::{
     Launch, PtyPresentation, ReconcilePlan, Session, TaskLaunch, TaskTarget, Teardown, reconcile,
 };

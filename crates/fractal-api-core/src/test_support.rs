@@ -10,3 +10,72 @@ pub use fractal_reconcile::test_support::*;
 pub fn skew_client_clock(skew_ms: u64) {
     crate::api::set_client_clock_skew_ms(skew_ms);
 }
+
+/// A message sent through `store`: a claim that node writes, and one no published list reads.
+pub fn note_local_claim(store: &crate::store::Store, subject: &str) {
+    store
+        .append_claim(&crate::model::ClaimInput {
+            subject: subject.into(),
+            kind: "message.sent".into(),
+            actor: Some("person/example".into()),
+            fields: serde_json::from_value(serde_json::json!({"from": "person/example", "to": "agent/example",
+                "status": "sent", "content": "a write someone waits to see"}))
+            .unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+/// Progress on a step this node writes: a claim the work list's check reads (a `step-run/`
+/// subject), and one the missions list's does not when no step of that name exists.
+pub fn note_local_progress(store: &crate::store::Store, step: &str) {
+    store
+        .append_claim(&crate::model::ClaimInput {
+            subject: step.into(),
+            kind: "work.progress".into(),
+            actor: Some("person/example".into()),
+            fields: serde_json::from_value(serde_json::json!({"summary": "a step moved"})).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+/// A resource observation this node writes: a claim the missions list's check reads, as it is
+/// not one of the kinds that check counts as neutral.
+pub fn note_local_resource(store: &crate::store::Store, subject: &str) {
+    store
+        .append_claim(&crate::model::ClaimInput {
+            subject: subject.into(),
+            kind: "resource.observed".into(),
+            actor: Some("person/example".into()),
+            fields: serde_json::from_value(serde_json::json!({"kind": "custom.example.notification", "facts": {}})).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+/// The fleet [`fleet_member`] binds every member to.
+pub const PAUSE_FLEET: &str = "6c5c2b9f-8d4e-4f3a-8b2c-1d7e6f5a4b3c";
+
+/// One member of a fleet, at `dir`, as a peer that [`replicate`] reaches.
+pub fn fleet_member(dir: &std::path::Path, name: &str) -> std::sync::Arc<crate::store::Store> {
+    std::fs::create_dir_all(dir).unwrap();
+    let store = crate::store::Store::open(&dir.join("graph.db"), name).unwrap();
+    store.bind_fleet(PAUSE_FLEET).unwrap();
+    std::sync::Arc::new(store)
+}
+
+/// Everything `from` holds, admitted by `to` the way a peer exchange does it.
+pub fn replicate(from: &crate::store::Store, to: &crate::store::Store) {
+    let exchange = from.export_replication_exchange(PAUSE_FLEET, &to.replication_inventory().unwrap()).unwrap();
+    to.receive_replication_exchange(from.origin(), PAUSE_FLEET, &exchange).unwrap();
+    to.validate_replication_backlog().unwrap();
+    to.apply_replication_repairs().unwrap();
+    assert!(to.project_replication_backlog().unwrap());
+}

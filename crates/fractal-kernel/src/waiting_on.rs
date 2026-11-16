@@ -13,7 +13,8 @@ pub enum WaitKind {
     Ask,
     /// The seat that holds or would take the step is stopped, failed, suspended, down or retired.
     SeatDown,
-    /// A seat holds the step and has recorded no progress for longer than the quiet limit.
+    /// A seat holds the step and has recorded no progress for longer than the quiet limit, or a
+    /// program step's journal has no new entry within its `stalled-after`.
     NoProgress,
     /// Ready for longer than the quiet limit, and no seat has claimed it.
     Unclaimed,
@@ -22,6 +23,9 @@ pub enum WaitKind {
     Hold,
     /// A seat holds it and has recorded progress within the quiet limit.
     Working,
+    /// A program step whose journal moved within its `stalled-after`; the detail names its
+    /// innermost open key.
+    Program,
     /// Submitted, and st is checking its gates.
     Verifying,
     /// Ready within the quiet limit; nobody has claimed it yet.
@@ -59,6 +63,7 @@ impl WaitKind {
             WaitKind::Unclaimed => "unclaimed",
             WaitKind::Hold => "hold",
             WaitKind::Working => "working",
+            WaitKind::Program => "program",
             WaitKind::Verifying => "verifying",
             WaitKind::Ready => "ready",
             WaitKind::Queued => "queued",
@@ -75,6 +80,7 @@ impl WaitKind {
             WaitKind::Unclaimed => "ready, nobody claims it",
             WaitKind::Hold => "held",
             WaitKind::Working => "working",
+            WaitKind::Program => "program running",
             WaitKind::Verifying => "verifying",
             WaitKind::Ready => "ready",
             WaitKind::Queued => "queued",

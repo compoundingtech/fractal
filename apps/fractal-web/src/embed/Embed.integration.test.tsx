@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { createRoot } from 'react-dom/client'
 import { Embed } from './Embed.tsx'
+import { createEmbedNavigation } from './navigation.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 // The same adapter replacement as vite.embed.config.ts, without changing the live app tests.
@@ -90,6 +91,23 @@ it('uses the narrow container inside a desktop window and keeps agent navigation
     expect(push).not.toHaveBeenCalled()
     expect(network).not.toHaveBeenCalled()
   } finally { await act(async () => dispose()); host.remove() }
+})
+
+it('publishes both push and replace navigation inside the embed without changing browser history', () => {
+  const before = window.location.href
+  const historyLength = window.history.length
+  const navigation = createEmbedNavigation('/w/agent/example?open=thread')
+  const locations: string[] = []
+  const unsubscribe = navigation.subscribe(() => locations.push(navigation.getLocation()))
+  navigation.navigate('/w/agent/example?open=terminal/example:detail')
+  navigation.navigate('/w/agent/example?open=thread', { replace: true })
+  expect(locations).toEqual(['/w/agent/example?open=terminal/example:detail', '/w/agent/example?open=thread'])
+  expect(navigation.getLocation()).toBe('/w/agent/example?open=thread')
+  expect(window.location.href).toBe(before)
+  expect(window.history.length).toBe(historyLength)
+  unsubscribe()
+  navigation.navigate('/w/agent/other?open=thread', { replace: true })
+  expect(locations).toHaveLength(2)
 })
 
 it('keeps repeated embed work logs and composers as named groups, not duplicate landmarks', async () => {

@@ -212,7 +212,7 @@ fn private_open(path: &Path) -> io::Result<std::fs::File> {
     }
     options.open(path)
 }
-/// Writers from simultaneous stuis add to the same hour under a disk lock. Daily files
+/// Writers from simultaneous TUIs add to the same hour under a disk lock. Daily files
 /// rotate on the hour boundary; exactly 336 hourly rows survive, including partial hours.
 fn write_line(dir: &Path, line: Line) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;

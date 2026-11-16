@@ -1029,12 +1029,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a live local st3 daemon"]
     async fn live_full_snapshot_latency() {
-        let path =
-            fractal_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(Into::into))
+        let identity =
+            fractal_client::discover_unix_identity(std::env::var_os("ST3_ENDPOINT").map(Into::into))
                 .unwrap();
         let actor =
             std::env::var("ST3_PERSON").expect("ST3_PERSON selects the person for this live test");
-        let client = Client::unix_as(path, actor);
+        let client = Client::discovered_unix_as(identity, actor);
         let started = std::time::Instant::now();
         let mut model = Model::bootstrap(&client).await.unwrap();
         model.reload(&client).await.unwrap();
@@ -1052,12 +1052,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a live local st3 daemon"]
     async fn live_bootstrap_latency() {
-        let path =
-            fractal_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(Into::into))
+        let identity =
+            fractal_client::discover_unix_identity(std::env::var_os("ST3_ENDPOINT").map(Into::into))
                 .unwrap();
         let actor =
             std::env::var("ST3_PERSON").expect("ST3_PERSON selects the person for this live test");
-        let client = Client::unix_as(path, actor);
+        let client = Client::discovered_unix_as(identity, actor);
         let started = std::time::Instant::now();
         let model = Model::bootstrap(&client).await.unwrap();
         eprintln!(

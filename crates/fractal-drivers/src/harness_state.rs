@@ -165,7 +165,9 @@ struct Record {
     ask: Ask,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     background_jobs: Option<u64>,
-    /// Diagnostic only. No consumer branches on it.
+    /// Why the harness ended, as text. A seat's end reason shows it as the diagnostic of a
+    /// `harness-exited` end, and a resume that ended with one fails as `harness-refused` unless
+    /// the driver stopped its provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     /// Positive credential evidence: true accepted, false rejected; absent proves neither.
@@ -565,10 +567,15 @@ impl Writer {
     /// Write the terminal record for this session. Idempotent-shaped: callers on racing teardown
     /// paths may both call it.
     pub fn ended(&mut self, exit: impl Into<String>) -> anyhow::Result<()> {
-        self.observe(
-            Observation::new(Activity::Ended, BlockedOn::None, InputBuffer::Unknown)
-                .with_exit(exit),
-        )
+        let ended = Observation::new(Activity::Ended, BlockedOn::None, InputBuffer::Unknown)
+            .with_exit(exit);
+        // A driver that could no longer serve its provider stopped it, so the record says so
+        // rather than reading as the provider's own end (#4743).
+        self.observe(if crate::provider_session::driver_stop_requested() {
+            ended.with_reason(crate::provider_session::DRIVER_STOPPED)
+        } else {
+            ended
+        })
     }
 }
 
@@ -968,6 +975,16 @@ pub fn claim(
     let writer = Writer::new(agent_dir, agent, harness, None);
     let _lock = writer.locked()?;
     claim_locked(&writer, token)
+}
+
+/// Serialize lifecycle reconciliation with provider takeover without granting ownership
+/// to the caller. The action must inspect the current evidence before its own decision.
+pub fn with_record_lock<T>(
+    agent_dir: &Path,
+    action: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _lock = lock_exclusive(&agent_dir.join(LOCK_NAME))?;
+    action()
 }
 
 /// Run `action` only while `incarnation` and `seq` are the exact current owner of an agent's

@@ -105,6 +105,7 @@ start_daemon() {
   local root=$1 login_path
   mkdir -p "$root/bin" "$root/state" "$root/pty"
   cp "$bin_dir/st3" "$bin_dir/st2" "$root/bin/"
+  ln -s st3 "$root/bin/fractal"
   cat >"$root/config.toml" <<TOML
 node = "evalnode"
 person = "person/eval-operator"

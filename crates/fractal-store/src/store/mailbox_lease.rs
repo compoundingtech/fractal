@@ -34,7 +34,7 @@ impl Store {
 pub fn lease(
     connection: &Connection,
     fence: &Fence,
-) -> Result<Option<(Fence, Authority, bool)>, St3Error> {
+) -> Result<Option<(Fence, Authority, bool)>, FractalError> {
     connection
         .prepare_cached(
             "SELECT incarnation,token,epoch,provider,session,sequence,pid,process_token,revoked
@@ -71,13 +71,13 @@ pub fn lease(
 }
 
 
-pub fn refused(reason: &str) -> St3Error {
-    St3Error::new("stale-mailbox-session", reason)
+pub fn refused(reason: &str) -> FractalError {
+    FractalError::new("stale-mailbox-session", reason)
 }
 
 /// Durable designation of a physically admitted argv capability. It is not a
 /// native provider lease and cannot be inferred from the current declaration.
-fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberSpec>, St3Error> {
+fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberSpec>, FractalError> {
     let held: Option<(Fence, String)> = connection.prepare_cached(
         "SELECT subject,component,incarnation,epoch,member FROM local_mailbox_argv_bindings WHERE token=?1",
     ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-h49163266974a owner=fractal_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ [&fence.token], |row| Ok((Fence {
@@ -93,11 +93,29 @@ fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberS
     serde_json::from_str(&member).map(Some).map_err(internal)
 }
 
+/// The member a seat's selected declaration authorizes its mailbox for: the declared member, or
+/// for a stop a run declared, the member that stop ended, which the reconciler may still be
+/// running past its stop (`stopping_seat`). `None` when the seat is intentionally stopped. This
+/// is the reconciler's own test for holding a seat past its stop, `owner_run` on the stop: only a
+/// run's cleanup, or a run stopping a seat it declared, sets it, and a stop a person or an agent
+/// applies has none (`intentional_stop_cannot_become_automatic_repair_or_new_admission`).
+pub fn mailbox_member(
+    connection: &Connection,
+    subject: &str,
+    kind: &str,
+    member: Option<&str>,
+) -> Result<Option<MemberSpec>, FractalError> {
+    if kind == "stop" {
+        return super::stopping_seat::stopping_member(connection, subject).map_err(internal);
+    }
+    member.map(serde_json::from_str).transpose().map_err(internal)
+}
+
 pub fn check_lease_fence(
     connection: &Connection,
     fence: &Fence,
     host: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if let Some(member) = argv_binding(connection, fence)? {
         check_argv_declaration(connection, fence, &member, host)?;
     }
@@ -114,22 +132,15 @@ pub fn check_lease_fence(
     let desired = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member: Option<MemberSpec> = desired
-        .member
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(internal)?;
-    if desired.kind == "stop"
-        || member.as_ref().is_none_or(|member| {
-            member.driver.as_deref() != Some(&owner.provider)
-                || member.host != host
-                || member
-                    .terminal_binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.agent_incarnation() != fence.incarnation)
-        })
-    {
+    let member = mailbox_member(connection, &fence.subject, &desired.kind, desired.member.as_deref())?;
+    if member.as_ref().is_none_or(|member| {
+        member.driver.as_deref() != Some(&owner.provider)
+            || member.host != host
+            || member
+                .terminal_binding
+                .as_ref()
+                .is_some_and(|binding| binding.agent_incarnation() != fence.incarnation)
+    }) {
         return Err(refused(
             "the lease's declared provider was stopped or replaced",
         ));
@@ -142,18 +153,16 @@ pub fn check_argv_declaration(
     fence: &Fence,
     captured: &MemberSpec,
     host: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if lease(connection, fence)?.is_some() {
         return Err(refused("qualified mailbox history cannot become an argv-only transport"));
     }
     let desired = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the argv seat is no longer declared"))?;
-    let current: MemberSpec = desired.member.as_deref()
-        .map(serde_json::from_str).transpose().map_err(internal)?
+    let current = mailbox_member(connection, &fence.subject, &desired.kind, desired.member.as_deref())?
         .ok_or_else(|| refused("the argv seat is intentionally stopped"))?;
-    if desired.kind == "stop"
-        || current.kind != MemberKind::Agent
+    if current.kind != MemberKind::Agent
         || current.host != host
         || current.driver.is_some()
         || current.terminal_binding.is_some()
@@ -175,7 +184,7 @@ pub fn admit(
     connection: &Connection,
     request: &Fence,
     authority: &Authority,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     admit_with_probe(connection, request, authority, |owner| {
         channel_liveness(owner, fractal_runtime::process_start_token(owner.pid), || {
             (unsafe { libc::kill(owner.pid as i32, 0) }) != 0
@@ -216,7 +225,7 @@ pub fn admit_with_probe(
     request: &Fence,
     authority: &Authority,
     liveness: impl FnOnce(&Authority) -> ChannelLiveness,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if authority.session.is_empty()
         || (authority.sequence == 0
             && (authority.provider != "codex"
@@ -300,7 +309,7 @@ pub fn record(
     connection: &Connection,
     fence: &Fence,
     authority: &Authority,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     connection
         .execute(
             /* sqlite-large-value: allow-for-now lv-h835ec44dfb1a owner=fractal_store::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_leases VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0)

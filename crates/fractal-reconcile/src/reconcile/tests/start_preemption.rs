@@ -1973,6 +1973,11 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
             .to_str()
             .expect("python3 executable path must be UTF-8")
             .replace('\'', "'\\''");
+        // macOS strips DYLD_* when entering /bin/sh. Restore the test runner's
+        // dylib search path at the real PTY invocation, after that boundary.
+        let dylib_environment = std::env::var("DYLD_FALLBACK_LIBRARY_PATH")
+            .map(|value| format!("DYLD_FALLBACK_LIBRARY_PATH='{}' ", value.replace('\'', "'\\''")))
+            .unwrap_or_default();
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -1990,7 +1995,7 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
         std::fs::write(&pty, format!(r#"#!/bin/sh
 (
   IFS= read -r permitted < "$0.gate" || exit 1
-  "$(cat "$0.real")" "$@"
+  {dylib_environment}"$(cat "$0.real")" "$@"
   outcome=$?
   '{python3}' -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall(bytes([int(sys.argv[2])]))' "$0.event" "$outcome"
 ) </dev/null >"$0.output" 2>&1 &

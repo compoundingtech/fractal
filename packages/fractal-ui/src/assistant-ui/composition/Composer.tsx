@@ -76,10 +76,9 @@ function ComposerEditor({ agent, conversationLabel, running, folder, branch, onS
     void dispatch(message, onSend)
   }, [running, queued, onSend, storageKey, dispatching])
   React.useLayoutEffect(() => {
+    // `/` belongs to search; the message box is reached with Mod+L, or by clicking it.
     const focus = (event: KeyboardEvent) => {
-      const target = event.target
-      const editable = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
-      if ((event.key === '/' && !editable) || (event.key.toLowerCase() === 'l' && (event.metaKey || event.ctrlKey))) { event.preventDefault(); input.current?.focus() }
+      if (event.key.toLowerCase() === 'l' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); input.current?.focus() }
     }
     window.addEventListener('keydown', focus)
     return () => { window.removeEventListener('keydown', focus); clearTimeout(saveTimer.current); try { sessionStorage.setItem(`composition.draft.${storageKey}`, current.current) } catch {} }

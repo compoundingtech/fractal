@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The agents roster follows this node's own writes within about one fold. A claim this node commits now cuts the refresher's pause to its floor (100 ms, or as long as the last fold took), the way a read waiting for a fresh roster already did. Before, the refresher folded on a fixed one-second pace, so a write waited up to a second plus a fold to appear in the published roster. That was most of the 'publish agents' latency on a busy host. Commits that hold only replicated claims keep the one-second pace.",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or migrations."},
+  "rules": {"status": "none", "detail": "No checkpoint rule, registry or coordinated member upgrade change."},
+  "compatibility": {"status": "none", "detail": "Readers, the published roster and its cuts are unchanged; only how soon a refresh follows a local commit changes."},
+  "downtime": {"status": "none", "detail": "Takes effect on the next daemon start."},
+  "manual": {"status": "none", "detail": "To see it, read the 'publish agents' path of /v1/client/request-latency (projection-fresh) after the roll. Its median and p99 should drop from about a second to about one fold. The refresher still pauses at least as long as each fold took, so it stays under about half a core."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the fixed one-second pace."}
+}

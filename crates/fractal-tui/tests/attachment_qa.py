@@ -36,7 +36,7 @@ def attach(session) -> None:
 
 
 def main(binary: str, name: str) -> None:
-    session = start(binary, "stui-attach-qa")
+    session = start(binary, "fractal-tui-attach-qa")
     try:
         open_agent(session, name)
         for _ in range(3):
@@ -64,5 +64,5 @@ def main(binary: str, name: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        raise SystemExit("usage: attachment_qa.py STUI AGENT_NAME")
+        raise SystemExit("usage: attachment_qa.py FRACTAL_BINARY AGENT_NAME")
     main(sys.argv[1], sys.argv[2])

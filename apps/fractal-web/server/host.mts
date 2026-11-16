@@ -6,10 +6,9 @@ import { createFractalWebServer, type FractalWebServer } from './core.mts'
 
 /**
  * An opt-in host for one person's web app on a tailnet: a loopback listener that `tailscale serve`
- * publishes over HTTPS. The paired bearer is injected for every admitted request, so admission is
- * the whole authorization: the tailnet login `tailscale serve` attaches must be one of the allowed
- * logins, and any browser Origin must be exactly the published origin. Never publish it with Funnel,
- * which carries no tailnet identity.
+ * publishes over HTTPS. The server bearer grants read access; individually paired browsers carry
+ * their own message grants. The login attached by `tailscale serve` must be allowed and browser
+ * Origins must match the published origin. Never publish it with Funnel, which carries no identity.
  */
 export interface TailnetAdmissionOptions {
   /** The exact published HTTPS origin. */
@@ -28,7 +27,7 @@ export const tailnetAdmission = ({ origin, logins, listener }: TailnetAdmissionO
   if (logins.length === 0) throw new TypeError('At least one tailnet login is required')
   return (request: IncomingMessage): boolean => {
     const login = request.headers['tailscale-user-login']
-    if (typeof login !== 'string' || !logins.includes(login)) return false
+    if (typeof login !== 'string' || login.startsWith('tag:') || !logins.includes(login)) return false
     const host = request.headers.host
     if (host !== published.host && (host === undefined || host !== listener())) return false
     const requestOrigin = request.headers.origin
@@ -135,6 +134,7 @@ export const startHost = (config: HostConfig, readText: (path: string) => string
     host: config.host,
     port: config.port,
     admit: tailnetAdmission({ origin: config.origin, logins: config.logins, listener: () => listening }),
+    pairing: { admit: tailnetAdmission({ origin: config.origin, logins: config.logins, listener: () => listening }) },
     tracer: Tracer.make({ span: (options) => new Tracer.NativeSpan(options) }),
     gateway: { socketPath: config.socketPath, host: '127.0.0.1', authorization: config.authorization, timeoutMs: 30_000 },
     identity: { deploymentId: config.deploymentId, buildIdentity: buildIdentity as never },

@@ -5,7 +5,7 @@ import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
-import { storyIdsFromIndex } from './kit-play-index.mjs'
+import { storyIdsFromIndex, playSetIdsFromIndex } from './kit-play-index.mjs'
 import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
@@ -25,12 +25,12 @@ export function assertStrictEvidence(records, id, a11y) {
 
 
 // The CLI always supplies the reviewed source policy; fixture tests may inject theirs directly.
-export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES }) {
+export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES, assessCost = assessKitPlayCost }) {
   const shardIndex = Number(process.env.KIT_PLAY_SHARD_INDEX ?? 0)
   const shardCount = Number(process.env.KIT_PLAY_SHARD_COUNT ?? 1)
   // KIT_PLAY_SET=critical runs only stories tagged `critical`; KIT_PLAY_SET=commit is the per-commit
   // set, a narrowing of those (see kit-play-commit-set.mjs for what it leaves out);
-  // Commit plays use raw CPU seconds; wall time is only a hang guard.
+  // Commit plays use CPU seconds per play; wall time is only a hang guard.
   // Empty environment values mean unset.
   const option = (name, allowed, fallback) => {
     const value = process.env[name] || fallback
@@ -78,8 +78,8 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError, storyFiles = {}
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
-    const cost = assessKitPlayCost(budget, {
-      elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit',
+    const cost = assessCost(budget, {
+      elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit', plays: rows.length,
     })
     const receipt = {
       pass: !fatalError && !cost.overBudget && (shardCount > 1 ? fullIds : ids).length > 0 && rows.length === expectedCases && rows.every(row => row.pass),
@@ -106,7 +106,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\n| Shard | Cases (completed/expected) | Passed | Failed | Play minutes | Result |\n| --- | --- | --- | --- | --- | --- |\n| kit ${shardIndex}/${shardCount} | ${receipt.cases}/${receipt.expectedCases} | ${receipt.passed} | ${receipt.failed} | ${receipt.playMinutes.toFixed(2)} | ${receipt.pass ? 'PASS' : 'FAIL'} |\n`)
       await appendFile(process.env.GITHUB_STEP_SUMMARY, `\nkit ${shardIndex}/${shardCount} Storybook build: ${(receipt.storybookBuildSeconds / 60).toFixed(2)} runner-minutes (included in this shard; duplicate build cost is the sum of nonzero-shard builds).\n`)
     }
-    if (cost.overCpuBudget) console.error(`Kit plays (${set}) used ${cost.cpuSeconds.toFixed(2)} CPU s, over the ${cost.maxCpuSeconds} CPU s limit (anchor ${cost.cpuAnchorSeconds} s +10%).`)
+    if (cost.overCpuBudget) console.error(`Kit plays (${set}) used ${cost.cpuSecondsPerPlay.toFixed(6)} CPU s/play across ${rows.length} plays (${cost.cpuSeconds.toFixed(2)} CPU s), over the ${cost.maxCpuSecondsPerPlay.toFixed(6)} CPU s/play limit (anchor ${cost.cpuAnchorSecondsPerPlay.toFixed(6)} CPU s/play +${cost.cpuMargin * 100}%).`)
     if (cost.overWallGuard) console.error(`Kit plays (${set}) took ${elapsedSeconds.toFixed(1)} s, over the ${cost.wallGuardSeconds} s wall hang guard.`)
     return receipt
   }
@@ -116,13 +116,14 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     // Validate the complete index; fullIds is the selected set's inventory, which the union gate
     // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
     const index = await response.json()
+    const playSets = playSetIdsFromIndex(index)
     fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
     validateCaseOverrides(index.entries, overrides)
     storyFiles = Object.fromEntries(Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry.importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
     let cases
     if (set === 'commit') {
-      const selection = commitSetCases(ids, { overrides })
+      const selection = commitSetCases(ids, { ...playSets, overrides })
       ;({ ids, cases } = selection)
       omitted = { stories: selection.omittedStories, cases: selection.omittedCases }
     } else {
@@ -185,6 +186,9 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         row.strict = guard?.records ?? []
         const probes = await page?.evaluate(() => window.__kitFilterBenchmark ?? []).catch(() => []) ?? []
         if (probes.length) row.filterBenchmark = probes
+        const prepends = await page?.evaluate(() => window.__kitPrependBenchmark ?? []).catch(() => []) ?? []
+        if (prepends.length) row.prependBenchmark = prepends
+        for (const prepend of prepends) console.log(`HISTORY_PREPEND_DIAGNOSTIC ${JSON.stringify({ id, ...prepend })}`)
         // Keep the original elapsed definition (before page.close) for comparison.
         row.elapsedSeconds = (performance.now() - caseStarted) / 1000
         const closeStarted = performance.now()

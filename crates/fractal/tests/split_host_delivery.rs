@@ -36,12 +36,14 @@ impl Host {
         let socket = root.join("st3.sock");
         let store = Arc::new(Store::open(&root.join("store.db"), name).unwrap());
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: name.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.to_path_buf(),
             pty_root: root.join("pty"),
             pty_binary: PathBuf::from("pty"),
@@ -163,14 +165,15 @@ async fn split_host_report_and_handoff_documents_known_limitation_3104() {
         replicate(&alder, "alder", &birch);
 
         let report = MessageSendRequest {
-            idempotency_key: "split-host-report".into(),
-            from: ALDER.into(),
-            to: BIRCH.into(),
-            content: "Report ready; inspect the delivery fixture.".into(),
-            title: Some("Delivery report".into()),
-            in_reply_to: None,
-            tags: vec![],
-            attachments: vec![],
+        owner: None,
+        idempotency_key: "split-host-report".into(),
+        from: ALDER.into(),
+        to: BIRCH.into(),
+        content: "Report ready; inspect the delivery fixture.".into(),
+        title: Some("Delivery report".into()),
+        in_reply_to: None,
+        tags: vec![],
+        attachments: vec![],
         };
         let front = root.path().join("lossy.sock");
         let proxy = lose_both_send_answers(&front, alder.socket.clone()).await;

@@ -33,11 +33,15 @@ pub struct Seen {
     last_ms: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamCategory { Collections, Conversation, Terminal }
+
 #[derive(Clone, Debug)]
 pub struct Stream {
     key: Key,
     person: String,
     since_ms: u128,
+    category: StreamCategory,
     /// What it follows, by subscription id: a window, a conversation, a terminal.
     follows: BTreeMap<String, String>,
 }
@@ -61,6 +65,12 @@ fn changes() -> &'static tokio::sync::broadcast::Sender<String> {
 
 pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
     changes().subscribe()
+}
+
+/// Only a collection stream holds the foreground phone command window.
+pub fn has_collection_stream(member: &str, actor: &str) -> bool {
+    presence().lock().is_ok_and(|presence| presence.streams.values()
+        .any(|stream| stream.key.member == member && stream.key.actor == actor && stream.category == StreamCategory::Collections))
 }
 
 pub fn changed(member: &str) {
@@ -131,12 +141,13 @@ pub fn note_request(
 /// An open stream, listed until it is dropped.
 pub struct StreamGuard(u64);
 
-/// Note an open collection or terminal stream; it leaves the list when the guard drops.
+/// Note an open stream of any category; it leaves the list when the guard drops.
 pub fn open_stream(
     member: &str,
     session: &ClientSession,
     headers: &HeaderMap,
     now_ms: u128,
+    category: StreamCategory,
 ) -> StreamGuard {
     let key = key(member, session, client_name(headers), via(session, headers));
     let Ok(mut presence) = presence().lock() else {
@@ -150,6 +161,7 @@ pub fn open_stream(
             key,
             person: session.authority_actor.clone(),
             since_ms: now_ms,
+            category,
             follows: BTreeMap::new(),
         },
     );
@@ -296,6 +308,7 @@ mod tests {
             &phone,
             &headers(Some("smalltalk-ios 1.0 (42)")),
             1_000,
+            StreamCategory::Collections,
         );
         stream.follow("agents", "agents".into());
         stream.follow("chat", "conversation:agent/example/harbor".into());

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -21,23 +22,53 @@ python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": 
 
 
 def kill_tree(process):
-    """SIGKILL a test's run and everything under it (read from /proc's PPid lines), then reap it: killed alone, a run frozen
-    mid-stop leaves its lane stopped for good (20 stopped lanes after a day of failing runs of the worker test, 2026-11-03)."""
-    tree, grew = {process.pid}, True
-    while grew:
-        grew = False
-        for status in Path('/proc').glob('[0-9]*/status'):
-            try:
-                parent = int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
-            except (OSError, StopIteration, ValueError):
-                continue
-            if parent in tree and int(status.parent.name) not in tree:
-                tree.add(int(status.parent.name))
-                grew = True
-    for pid in tree:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-    process.wait()
+    """SIGKILL a test's run and everything under it (read from /proc's PPid lines), then wait until every one of them has exited and reap
+    the run: killed alone, a run frozen mid-stop leaves its lane stopped for good (20 stopped lanes after a day of failing runs of the
+    worker test, 2026-11-03). Each process is held by a pidfd from the moment it is found, so a PID that is reused is never signalled, and
+    the return waits on each exit itself: a killed process can take seconds to exit on a loaded runner (two merge-group failures of the
+    frozen-lane test, 2026-11-07, which polled for 2 s)."""
+    held = {process.pid: os.pidfd_open(process.pid)}
+    try:
+        grew = True
+        while grew:
+            grew = False
+            for status in Path('/proc').glob('[0-9]*/status'):
+                pid = int(status.parent.name)
+                if pid in held or parent_of(status) not in held:
+                    continue
+                with contextlib.suppress(ProcessLookupError):
+                    pidfd = os.pidfd_open(pid)
+                    # Held, and still the child found above: it is the same process, not a reuse of its PID.
+                    if parent_of(status) in held:
+                        held[pid] = pidfd
+                        grew = True
+                    else:
+                        os.close(pidfd)
+        for pidfd in held.values():
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        poller, deadline = select.poll(), time.monotonic() + 60
+        for pidfd in held.values():
+            poller.register(pidfd, select.POLLIN)
+        alive = set(held.values())
+        while alive and time.monotonic() < deadline:
+            # An exited process's pidfd stays readable: each is dropped from the poll once it is.
+            for pidfd, _ in poller.poll(1000):
+                poller.unregister(pidfd)
+                alive.discard(pidfd)
+        if alive:
+            raise AssertionError(f'killed but still alive after 60 s: {sorted(pid for pid, pidfd in held.items() if pidfd in alive)}')
+    finally:
+        for pidfd in held.values():
+            os.close(pidfd)
+        process.wait()
+
+
+def parent_of(status):
+    try:
+        return int(next(line.split()[1] for line in status.read_text().splitlines() if line.startswith('PPid:')))
+    except (OSError, StopIteration, ValueError):
+        return None
 
 
 class CiLocal(unittest.TestCase):
@@ -227,23 +258,44 @@ class CiLocal(unittest.TestCase):
 
     def test_a_stage_s_wait_at_the_admission_gate_after_its_slot_is_queue_time_too(self):
         events = Path(self.tmp.name) / 'queue-events'
+        # This test controls log-observation time, not the scheduling of a pipe reader.
+        # Only the private ci-local copy is instrumented; its parser and arithmetic stay intact.
+        script = self.work / 'scripts/ci-local'
+        source = script.read_text()
+        opener = 'queue_times() {\n'
+        dispatch = '    case "$line" in\n'
+        event_clock = '"$(date +%s)" "$2"'
+        self.assertEqual(source.count(opener), 1)
+        self.assertEqual(source.count(dispatch), 1)
+        self.assertEqual(source.count(event_clock), 1)
+        # Unsetting SECONDS removes Bash's special ticking behavior in this pipeline process.
+        source = source.replace(opener, opener + '  unset SECONDS\n  SECONDS=0\n', 1)
+        source = source.replace(dispatch,
+            '    case "$line" in\n'
+            '      "cargo: waiting in order"*) SECONDS=100 ;;\n'
+            '      "cargo: got build slot"*) SECONDS=101 ;;\n'
+            '      "build-admission:"*) SECONDS=101 ;;\n'
+            '      "   Compiling"*) SECONDS=103 ;;\n'
+            '      done) SECONDS=104 ;;\n'
+            '    esac\n' + dispatch, 1)
+        source = source.replace(event_clock, '"$SECONDS" "$2"', 1)
+        script.write_text(source)
         # The cargo shim holds its slot, then waits at the admission gate, which prints no end: the build's own output ends the wait.
-        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\nsleep 1.1\n'
+        queue = ('#!/usr/bin/env bash\necho "cargo: waiting in order for a host build slot (all 6 busy)"\n'
                  'echo "cargo: got build slot 0 and a heavy slot"\n'
-                 'echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2\nsleep 2.1\n'
-                 'echo "   Compiling fractal v0.1.0"\nsleep 1.1\necho done\n')
+                 'echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2\n'
+                 'echo "   Compiling fractal v0.1.0"\necho done\n')
         done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
         self.assertEqual(done.returncode, 0, done.stderr)
         row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   tests')]
         waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s', row).groups()
         self.assertEqual(waits, '2')
-        self.assertGreaterEqual(int(seconds), 3)
-        self.assertLess(int(seconds), int(re.search(r'(\d+)s +exit', row).group(1)))  # the compile after it ran
+        self.assertEqual(int(seconds), 3)  # 1s slot wait + 2s gate wait; compilation is excluded.
         self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] tests: waiting for build admission', done.stdout)), 1)
         lines = [line.split(' ') for line in events.read_text().splitlines()]
         self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
         at = [int(when) for _, when, _ in lines]
-        self.assertGreaterEqual(at[3] - at[2], 2)
+        self.assertEqual(at, [100, 101, 101, 103])
 
     def test_each_wait_for_a_build_slot_is_written_as_it_starts_and_ends_to_the_queue_log(self):
         events = Path(self.tmp.name) / 'queue-events'
@@ -452,6 +504,7 @@ elif stage == 'clippy':
             with self.subTest(target=target):
                 self.log.unlink(missing_ok=True)
                 extra = {'CARGO_TARGET_DIR': target} if target else {}
+                extra['CARGO_BUILD_BUILD_DIR'] = '/srv/build/cargo/{workspace-path-hash}'
                 done, calls = self.run_local('tests', 'fleet-compat', CI_LOCAL_SERIAL='1', **extra)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 stages = [call for call in calls if call['argv'] in (['tests'], ['fleet-compat'])]
@@ -461,6 +514,10 @@ elif stage == 'clippy':
                 if not expected.is_absolute(): expected = self.work / expected
                 expected = str(expected) + '-fleet-compat' if target else str(self.work / 'target/fleet-compat')
                 self.assertEqual(stages[1]['env']['CARGO_TARGET_DIR'], expected)
+                # Its intermediates follow it, whatever build-dir the caller had: one shared with the tests' target relinks their
+                # binaries as surely as a shared target (#4128).
+                self.assertEqual(stages[1]['env']['CARGO_BUILD_BUILD_DIR'], expected)
+                self.assertEqual(stages[0]['env'].get('CARGO_BUILD_BUILD_DIR'), '/srv/build/cargo/{workspace-path-hash}')
 
     def test_default_compat_build_outputs_are_ignored_in_a_plain_checkout(self):
         # A plain run (or ST_EVIDENCE_TARGET=off) has no CARGO_TARGET_DIR. Cargo's normal /target ignore must cover the new
@@ -646,16 +703,15 @@ exit 0
             os.kill(pid, signal.SIGSTOP)
 
         def gone(pid):
+            # Exited: a zombie (Z), or dead and being reaped by its parent this moment (X), or already reaped. A pidfd turns readable at
+            # the first of these, so right after kill_tree a lane can still show X for an instant.
             try:
-                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] in ('Z', 'X')
             except OSError:
                 return True
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in (lane, stage) if not gone(pid)])
+        self.addCleanup(run.stdout.close)
         kill_tree(run)
-        for _ in range(200):
-            if gone(lane) and gone(stage):
-                break
-            time.sleep(0.01)
         self.assertTrue(gone(lane) and gone(stage), 'the frozen lane outlived the cleanup of its run')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):

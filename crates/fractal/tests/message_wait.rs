@@ -64,6 +64,7 @@ async fn stream_daemon(
 ) -> (PathBuf, Arc<Store>, Arc<Requests>, tokio::task::JoinHandle<()>, watch::Sender<u64>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         // A file, like the daemon's own store: an in-memory store locks a table against a reader
@@ -72,6 +73,7 @@ async fn stream_daemon(
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "message-wait".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),

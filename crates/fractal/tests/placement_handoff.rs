@@ -431,12 +431,14 @@ impl Node {
         let reconciler =
             Reconciler::new(store.clone(), runtime.clone(), name.into(), notify.clone());
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify,
             event_notify: watch::channel(0).0,
             node: name.into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),

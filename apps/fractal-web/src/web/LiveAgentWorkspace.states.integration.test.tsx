@@ -2,9 +2,9 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { Agent, SloList, decodeUnknownSync } from '@fractal/client/schema'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
-import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Option from 'effect/Option'
@@ -12,10 +12,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { initialFeedSync, type FeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { observed, unavailable, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 // Evaluate the real pane before mounting the workspace's lazy boundary.
 import './ConversationPane.tsx'
+import { UsagePane } from '../monitor/UsagePane.tsx'
+import { projectNativeDetails } from '../data/nativeDetails.ts'
+import { CapturedChangesView } from './ChangesInspector.tsx'
+import { AgentTodos } from '../conversation/todos/AgentTodos.tsx'
+import { projectTodos } from '../conversation/todos/model.ts'
 
 // Only the build-time CSS runtime and absent jsdom layout APIs are substituted.
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -100,6 +105,60 @@ const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const retry = (within: ParentNode) => [...within.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === 'Retry')
 const transcript = () => host.querySelector('[data-testid="transcript-scroll"], [data-testid="transcript-unavailable"]')!
 describe('RM1 workspace source states', () => {
+  it('replaces loading with a quiet credential-expired notice and no ineffective retry', async () => {
+    registry.set(agents, waiting)
+    await mount()
+    await act(async () => registry.set(agents, unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })))
+    const notice = sidebar().querySelector('[data-wf-roster-reason="unauthorized"]')!
+    expect(notice.textContent).toBe("This browser's access to the daemon has expired or was revoked. Pair the device again.")
+    expect(notice.querySelector('[role="status"]')).not.toBeNull()
+    expect(notice.querySelector('[role="alert"]')).toBeNull()
+    expect(sidebar().textContent).not.toContain('private diagnostic')
+    expect(sidebar().querySelector('[data-system-state="loading"]')).toBeNull()
+    expect(roster().querySelector('[data-wf-roster-skeleton]')).toBeNull()
+    expect(retry(sidebar())).toBeUndefined()
+  })
+
+  it('keeps expired conversation, generic feed, usage and native-detail reads out of generic failure recovery', async () => {
+    const denied = { _tag: 'Unavailable', reason: 'unauthorized', detail: 'private diagnostic' } as const
+    registry.set(conversation, denied)
+    await mount()
+    expect(transcript().textContent).toContain(credentialExpiredMessage)
+    expect(transcript().textContent).not.toMatch(/private diagnostic|Retry/)
+    const refresh = vi.fn()
+    source = { ...source, objectives: { list: Atom.make(denied), accounts: Atom.make(denied), history: () => Atom.make(denied), refresh } }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><UsagePane /></DataSourceProvider>))
+    const usage = host.querySelector('[data-testid="usage-pane"]')!
+    expect(usage.textContent).toContain(credentialExpiredMessage)
+    expect(usage.querySelector('[role="alert"], button')).toBeNull()
+    expect(host.textContent).not.toContain('private diagnostic')
+    const details = projectNativeDetails({ agentRef: agent.id, agent: denied, row: denied, session: denied, period: denied, declarations: denied, missions: denied, queue: denied, now: 118_000, onRetry: refresh, reads: { refreshUsage: refresh, retrySession: refresh, retryQueue: refresh } })
+    expect(details.overview.durations?.[0]?.detail).toBe(credentialExpiredMessage)
+    expect(details.credentialNotice).toBe(credentialExpiredMessage)
+    expect(JSON.stringify(details)).not.toContain('private diagnostic')
+    expect(details.spendRead ?? details.sessionFailure).toBeUndefined()
+    expect(refresh).not.toHaveBeenCalled()
+  })
+  it.each(['dock', 'fill', 320] as const)('keeps rejected captured changes quiet at width %s', async width => {
+    const denied = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
+    await act(async () => root.render(<><CapturedChangesView feed={denied} width={width} /><AgentTodos state={projectTodos({ feed: denied, agentRef: agent.id })} /></>))
+    expect(host.querySelector('aside [role="status"]')?.textContent).toBe(credentialExpiredMessage)
+    expect(host.textContent?.split(credentialExpiredMessage)).toHaveLength(3)
+    expect(host.textContent).not.toMatch(/private diagnostic|Retry|Refresh/)
+    expect(host.querySelector('button')).toBeNull()
+  })
+  it('hides refresh when an opened objective history rejects the credential', async () => {
+    const value = decodeUnknownSync(SloList)({ as_of_unix_ms: 90_000_000, rows: [{ id: 'synthetic-budget', kind: 'budget', about: 'Synthetic allowance', current: '92% used', target: '100%', window: 'weekly', remaining_percent: 8, status: 'met', tone: 'yellow', explain: 'Synthetic allowance.', forecast_used_percent: 99, forecast_basis_minutes: 120, runs_out_at_unix_ms: 90_000_000 }], otel_ui_url: 'https://otel.example.invalid' })
+    const history = Atom.make(unavailable({ reason: 'unauthorized', detail: 'private diagnostic' }))
+    source = { ...source, objectives: { list: Atom.make(observed({ value })), accounts: Atom.make(waiting), history: () => history, refresh: vi.fn() } }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><UsagePane /></DataSourceProvider>))
+    const row = [...host.querySelectorAll('button')].find(button => button.textContent?.includes('Synthetic allowance'))!
+    await act(async () => row.click())
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(credentialExpiredMessage)
+    expect(host.querySelector('button')).toBeNull()
+    expect(host.textContent).not.toContain('private diagnostic')
+  })
+
   it('replaces roster loading with an observed empty roster, not a filter no-match', async () => {
     registry.set(agents, waiting)
     registry.set(agentsSync, initialFeedSync(118_000))
@@ -225,7 +284,6 @@ describe('RM1 workspace source states', () => {
     expect(sidebar().textContent).toContain('Last observed 18 s ago')
     expect(host.textContent).toContain('Last seen working · 18 s ago')
     expect(host.querySelector('[data-last-seen]')?.textContent).toContain('Last seen working · 18 s ago')
-    expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
     expect(roster().querySelector('[data-status="working"][data-frozen="true"]')).not.toBeNull()
     expect(transcript().textContent).toContain('The retained answer remains readable.')
     const retainedAgents = registry.get(agents)
@@ -269,7 +327,6 @@ describe('RM1 workspace source states', () => {
     expect(log.querySelector('button[aria-expanded="true"]')).not.toBeNull()
     expect(host.textContent).toContain('Last seen working · 18 s ago')
     expect(transcript().textContent).not.toContain('Run running')
-    expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
   })
 
   it('freezes the working cue on disconnect without requiring replacement feed values', async () => {

@@ -175,6 +175,9 @@ pub fn merge_observation(
                 return;
             }
             let initial = current.is_empty();
+            if initial {
+                current.insert("receipt_only".into(), Value::Bool(true));
+            }
             for name in ["repository", "number", "url", "opened_by", "opened_by_run"] {
                 if (initial || matches!(name, "opened_by" | "opened_by_run")) && let Some(value) = incoming.get(name) {
                     current.entry(name).or_insert_with(|| value.clone());
@@ -234,6 +237,11 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
             Some(fields) => serde_json::from_value(fields)?,
         };
         let mut facts = resource_facts(&fields).map_err(anyhow::Error::new)?;
+        if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener)
+            && fields.get("attribution_only") == Some(&Value::Bool(true))
+        {
+            facts.insert("receipt_only".into(), Value::Bool(true));
+        }
         if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener) {
             let first_opener = transaction.query_row(
                 /* sqlite-large-value: allow-for-now lv-h4c329b1274fe owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &format!("SELECT body FROM claims WHERE subject=?1 AND kind='resource.observed'
@@ -303,6 +311,100 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         [subject],
     )?;
     preparation::flush(transaction)
+}
+
+/// How many subjects a trim's step refreshes itself when its deletes may have changed what they
+/// project. The rest stay pending until the run stops (`flush_pending`). Each refresh is two
+/// subject queries, about 25 ms each on a large store's cold pages.
+pub(super) const TRIM_STEP_REFRESHES: usize = 8;
+
+// Whether deleting this observation leaves its subject's projection as it was. A trim deletes only
+// what `checkpoint_rules::resource_observed_keep` leaves, which keeps the claims `refresh` reads:
+// the newest of each `attribution_only` value and the earliest that names an opener in its facts.
+// The keep rule keeps everything for a subject with an observation without object facts, and it
+// misses an opener named only at the top level, which `refresh` does read (#5401).
+const TRIMMED_LEAVES_PROJECTION: &str = "SELECT json_type(body, '$.fields.facts')='object'
+    AND (json_extract(body, '$.fields.facts.opened_by') IS NOT NULL
+         OR json_extract(body, '$.fields.facts.opened_by_run') IS NOT NULL
+         OR (json_extract(body, '$.fields.opened_by') IS NULL AND json_extract(body, '$.fields.opened_by_run') IS NULL))
+    FROM claims WHERE id=?1";
+
+/// A trim's step deletes `claims` (`Runtime::delete_trimmed_claims_tx`). The delete trigger queues
+/// the subject of each resource observation it deletes, and the next write that projects would
+/// refresh every one of them while it holds the writer. A subject whose deleted observations
+/// leave its projection as it was leaves the queue: none is the observation it projects from, and
+/// each passes `TRIMMED_LEAVES_PROJECTION`. The step refreshes the others itself, at most
+/// `TRIM_STEP_REFRESHES` of them. A subject queued before the step stays queued.
+pub(super) fn delete_trimmed_tx(
+    transaction: &Transaction<'_>,
+    claims: &[ClaimTombstone],
+    delete: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    let mut subjects = BTreeMap::<&str, (bool, Vec<&str>)>::new();
+    for claim in claims {
+        let unchanged = match claim.kind.as_str() {
+            "resource.observed" => transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hff2c7d840c05 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ TRIMMED_LEAVES_PROJECTION)?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h820a8d8b9bbc owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, Option<bool>>(0))
+                .optional()?
+                .flatten()
+                .unwrap_or(false),
+            fractal_schema::github_plugin::ITEM_STATE => false,
+            _ => continue,
+        };
+        let subject = subjects.entry(claim.subject.as_str()).or_insert((true, Vec::new()));
+        subject.0 &= unchanged;
+        subject.1.push(claim.id.as_str());
+    }
+    if subjects.is_empty() {
+        return delete();
+    }
+    let mut fresh = Vec::new();
+    {
+        let mut queued = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM local_resource_projection_pending WHERE subject=?1)")?;
+        let mut projected = transaction.prepare_cached("SELECT claim_id FROM resource_observations WHERE subject=?1")?;
+        for (subject, (unchanged, deleted)) in subjects {
+            if queued.query_row(/* sqlite-large-value: allow-for-now lv-h7c39eb662d6b owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ [subject], |row| row.get::<_, bool>(0))? {
+                continue;
+            }
+            let unchanged = unchanged
+                && projected
+                    .query_row(/* sqlite-large-value: allow-for-now lv-hdc89a1f149f2 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ [subject], |row| row.get::<_, String>(0))
+                    .optional()?
+                    .is_some_and(|id| !deleted.contains(&id.as_str()));
+            fresh.push((subject, unchanged));
+        }
+    }
+    delete()?;
+    let mut refreshed = 0;
+    for (subject, unchanged) in fresh {
+        if unchanged {
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hdbfe4e55565b owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_projection_pending WHERE subject=?1")?
+                .execute(/* sqlite-large-value: allow-for-now lv-h60b7cd1314a2 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ [subject])?;
+        } else if refreshed < TRIM_STEP_REFRESHES {
+            refresh(transaction, subject)?;
+            refreshed += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Refresh the pending subjects until `budget` is spent (at least one subject), and say whether any
+/// is left. A trim's run calls it when it stops (`Runtime::rebuild_deferred`), for what its steps
+/// left past `TRIM_STEP_REFRESHES`, so no later write refreshes them while it holds the writer.
+pub(super) fn flush_pending(transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let subject: Option<String> = transaction
+            .query_row("SELECT subject FROM local_resource_projection_pending ORDER BY subject LIMIT 1", [], |row| row.get(0))
+            .optional()?;
+        let Some(subject) = subject else { return Ok(false) };
+        refresh(transaction, &subject)?;
+        if std::time::Instant::now() >= deadline {
+            return Ok(transaction.query_row("SELECT EXISTS(SELECT 1 FROM local_resource_projection_pending)", [], |row| row.get(0))?);
+        }
+    }
 }
 
 /// Whether `subject` changed in compact facts since its newest snapshot: its newest compact
@@ -447,10 +549,15 @@ impl Store {
         };
         let upper = prefix_successor(&prefix).unwrap_or_default();
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
+        // Old global operations and new observation operations share the event subject.
+        // Select its canonical first observation before applying the listing limit.
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h05417f7bc8ab owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT subject, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
-             WHERE subject>=?1 AND subject<?2 AND kind='github.event'",
-        )?;
+             WHERE subject>=?1 AND subject<?2 AND kind='github.event'
+               AND id=(SELECT request.id FROM claims request
+                       WHERE request.subject=claims.subject AND request.kind='github.event'
+                       ORDER BY CANONICAL_ASC(request) LIMIT 1)",
+        ))?;
         let mut events = statement
             .query_map(params![prefix, upper], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
@@ -476,7 +583,9 @@ impl Store {
                 })))
             })
             .collect::<Vec<_>>();
-        events.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        events.sort_by(|(left_at, left), (right_at, right)| {
+            right_at.cmp(left_at).then_with(|| left["subject"].as_str().cmp(&right["subject"].as_str()))
+        });
         events.truncate(limit);
         Ok(events.into_iter().map(|(_, event)| event).collect())
     }
@@ -1311,7 +1420,7 @@ END;
         };
         record_invalid_replica_envelope(
             &transaction, &envelope,
-            &St3Error::new("internal", "pending control failure"),
+            &FractalError::new("internal", "pending control failure"),
         ).unwrap();
         let (position, claim_id, state): (i64, Option<String>, String) = transaction.query_row(
             "SELECT position,claim_id,state FROM replica_records WHERE writer='writer' AND sequence=1 AND envelope_hash='hash'",

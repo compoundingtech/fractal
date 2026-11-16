@@ -79,6 +79,8 @@ pub struct MailLine {
 #[derive(Clone, Debug)]
 pub struct Context {
     pub agent: String,
+    /// The `description` of the seat's current declaration: its charter.
+    pub charter: Option<String>,
     pub handoff: Option<Handoff>,
     pub work: Vec<StepRunView>,
     pub mail: Vec<MailLine>,
@@ -86,6 +88,10 @@ pub struct Context {
 
 /// Read a seat's handoff and live state from the graph.
 pub fn gather(store: &Store, agent: &str) -> Result<Context> {
+    let charter = store
+        .desired_subject_with_writer(agent)?
+        .filter(|(desired, _)| desired.kind == "agent")
+        .and_then(|(desired, _)| crate::model::canonical_child_string(&desired.desired, "description"));
     let handoff = match document_name(agent) {
         Some(name) => latest_handoff(store, &name)?,
         None => None,
@@ -126,6 +132,7 @@ pub fn gather(store: &Store, agent: &str) -> Result<Context> {
         .collect();
     Ok(Context {
         agent: agent.to_owned(),
+        charter,
         handoff,
         work,
         mail,
@@ -157,6 +164,24 @@ pub fn acknowledged_since(store: &Store, agent: &str, since_unix_ms: u128) -> Re
         }))
 }
 
+/// A fresh session needs both acknowledgement and a readable handoff document.
+/// Readiness by itself can acknowledge an ordinary restart, but cannot create its
+/// replacement session's context.
+pub fn acknowledged_handoff_since(store: &Store, agent: &str, since_unix_ms: u128) -> Result<bool> {
+    if !acknowledged_since(store, agent, since_unix_ms)? {
+        return Ok(false);
+    }
+    let Some(name) = document_name(agent) else {
+        return Ok(false);
+    };
+    let Some(version) = store.list_documents(Some(&name), false, 1)?
+        .into_iter().find(|version| version.latest)
+    else {
+        return Ok(false);
+    };
+    Ok(store.get_document(&version.name, &version.hash)?.is_some())
+}
+
 /// Whether the seat has a handoff that it wrote or marked ready since its last turn began, so
 /// the session after it can start from that handoff alone. A seat that has not taken a turn
 /// since its handoff was written counts: nothing happened that the handoff does not cover.
@@ -184,12 +209,17 @@ pub fn ready_since_last_turn(store: &Store, agent: &str) -> Result<bool> {
 }
 
 /// The "prepare for restart" message: why, by when, and what to do.
-pub fn render_prepare(reason: &str, deadline_unix_ms: u128, now_unix_ms: u128) -> String {
-    let seconds = deadline_unix_ms.saturating_sub(now_unix_ms).div_ceil(1000);
+pub fn render_prepare(reason: &str, deadline_unix_ms: Option<u128>, now_unix_ms: u128) -> String {
+    let timing = deadline_unix_ms.map_or_else(
+        || "It restarts into a fresh session only once you acknowledge; it never restarts without your acknowledgement".to_owned(),
+        |deadline| format!(
+            "It restarts as soon as you acknowledge, or in {} s, whichever comes first",
+            deadline.saturating_sub(now_unix_ms).div_ceil(1000),
+        ),
+    );
     format!(
-        "st is about to restart this seat: {reason}. It restarts as soon as you acknowledge, or in \
-         {seconds} s, whichever comes first, and the session after this one will not remember \
-         this conversation.\n\n\
+        "st is about to restart this seat: {reason}. {timing}, and the session after this one \
+         will not remember this conversation.\n\n\
          Write your handoff now with `st agents handoff write --as \"$ST_AGENT\"` (stdin or a \
          file): what you were doing, open pull requests and branches, what you wait on, the next \
          steps, and anything running that you started. Writing it is the acknowledgement. If the \
@@ -243,7 +273,9 @@ fn is_session_start(message: &MessageView) -> bool {
 }
 
 /// The message a fresh session starts with, or none when the seat has nothing to carry over: no
-/// handoff and no work. Unread mail reaches the session on its own, so it alone says nothing.
+/// handoff and no work. Unread mail reaches the session on its own, so it alone says nothing, and
+/// neither does the charter: a seat with nothing in flight takes no turn, as at its first start,
+/// and reads its charter when work arrives.
 pub fn render(context: &Context, now_unix_ms: u128) -> Option<String> {
     if context.handoff.is_none() && context.work.is_empty() {
         return None;
@@ -254,6 +286,9 @@ pub fn render(context: &Context, now_unix_ms: u128) -> Option<String> {
          this. If you do not, this is where the session before you was: carry on from here \
          without waiting to be told.\n",
     );
+    if let Some(charter) = &context.charter {
+        let _ = write!(out, "\n## Your charter\n\n{}\n", charter.trim_end());
+    }
     match &context.handoff {
         Some(handoff) => {
             let age = age(now_unix_ms.saturating_sub(handoff.written_at_unix_ms));
@@ -359,6 +394,51 @@ fn age(ms: u128) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn run_scoped_subject_does_not_inherit_author_handoff_or_mail() {
+        let store = Store::open_memory("node").unwrap();
+        let author = "agent/example/author";
+        store
+            .put_document(
+                &document_name(author).unwrap(),
+                b"The author's private conversation summary.",
+                &None,
+                "author-handoff",
+            )
+            .unwrap();
+        crate::store::message_routing::send(
+            &store,
+            &crate::model::ClaimInput {
+                subject: "message/author-mail".into(),
+                kind: "message.sent".into(),
+                actor: Some("person/requester".into()),
+                fields: std::collections::BTreeMap::from([
+                    ("from".into(), serde_json::json!("person/requester")),
+                    ("to".into(), serde_json::json!(author)),
+                    ("content".into(), serde_json::json!("Only for the author.")),
+                    ("title".into(), serde_json::json!("Author context")),
+                    ("status".into(), serde_json::json!("sent")),
+                    ("in_reply_to".into(), serde_json::Value::Null),
+                    ("tags".into(), serde_json::json!([])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("author-mail".into()),
+            },
+        )
+        .unwrap();
+        let author_context = gather(&store, author).unwrap();
+        assert!(author_context.handoff.is_some());
+        assert_eq!(author_context.mail.len(), 1);
+        for worker in ["agent/mission-run/first/worker", "agent/mission-run/second/worker"] {
+            let context = gather(&store, worker).unwrap();
+            assert!(context.handoff.is_none());
+            assert!(context.mail.is_empty());
+            assert!(context.work.is_empty());
+            assert!(render(&context, 0).is_none());
+        }
+    }
+
     fn step(status: &str) -> StepRunView {
         serde_json::from_value(serde_json::json!({
             "subject": "step-run/abc/build",
@@ -388,6 +468,7 @@ mod tests {
     fn context() -> Context {
         Context {
             agent: "agent/garden/ash".into(),
+            charter: Some("Keep the widget build green.\nOwn its release notes.".into()),
             handoff: Some(Handoff {
                 reference: "doc/agents/garden/ash/handoff@abc".into(),
                 written_at_unix_ms: 0,
@@ -435,12 +516,33 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_session_reads_its_charter_before_where_it_was() {
+        let text = render(&context(), 0).expect("a message");
+        let charter = text
+            .find("\n## Your charter\n\nKeep the widget build green.\nOwn its release notes.\n")
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(charter < text.find("## Handoff").unwrap(), "{text}");
+        let mut uncharted = context();
+        uncharted.charter = None;
+        assert!(!render(&uncharted, 0).unwrap().contains("## Your charter"));
+    }
+
+    #[test]
     fn the_prepare_message_says_why_when_and_how_to_acknowledge() {
-        let text = render_prepare("the declared model changed", 130_000, 10_000);
+        let text = render_prepare("the declared model changed", Some(130_000), 10_000);
         assert!(text.contains("the declared model changed"), "{text}");
         assert!(text.contains("in 120 s"));
         assert!(text.contains("st agents handoff write"));
         assert!(text.contains("st agents handoff ready"));
+    }
+
+    #[test]
+    fn a_fresh_restart_prepare_message_has_no_restart_anyway_deadline() {
+        let text = render_prepare("a fresh session was requested", None, 10_000);
+        assert!(text.contains("only once you acknowledge"), "{text}");
+        assert!(text.contains("never restarts without your acknowledgement"), "{text}");
+        assert!(!text.contains("whichever comes first"), "{text}");
+        assert!(text.contains("st agents handoff write"), "{text}");
     }
 
     #[test]
@@ -454,6 +556,8 @@ mod tests {
         let mut empty = context();
         empty.handoff = None;
         empty.work.clear();
+        // A charter alone is no reason for a turn: the seat reads it when work arrives.
+        assert!(empty.charter.is_some());
         assert_eq!(render(&empty, 0), None);
     }
 

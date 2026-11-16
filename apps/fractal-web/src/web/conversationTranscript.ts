@@ -3,6 +3,7 @@ import type {
   TranscriptAvailability,
   TranscriptEmptyState,
   TranscriptHistory,
+  TranscriptOlderRequest,
   TranscriptTurn,
 } from '@fractal/ui/assistant-ui'
 import { workLogTurnFromItems, type WorkKind } from '@fractal/ui/assistant-ui/work-log'
@@ -10,9 +11,10 @@ import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import { Schema } from 'effect'
 import { ConversationItem, type RunStatus, type SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
-import type { ConversationPage, Feed } from '../data/source.ts'
+import { credentialExpiredMessage, type ConversationPage, type Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
 import { toolKindFor } from '../conversation/toolClassification.ts'
+import { isHiddenSystemRecord } from '../conversation/systemRecords.ts'
 
 /** Unknown protocol events are hidden by default; mixed messages retain an explicit body disclosure. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
@@ -51,7 +53,7 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
   item._tag === 'Text' && item.role === 'user'
 
 
-const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent' && item.mixedContent !== true
+const isOmittedItem = (item: ConversationItem): boolean => (item._tag === 'UnknownEvent' && item.mixedContent !== true) || isHiddenSystemRecord(item)
 
 
 /** Fallback titles when the call records no human intent; read/run/edit keep their established wording. */
@@ -90,13 +92,29 @@ const elapsedBetween = (start: string, end: string): number | undefined => {
   return Number.isFinite(from) && Number.isFinite(to) && to >= from ? to - from : undefined
 }
 
-/** Run lifecycle comes from the run's own status entries; an unanswered call stays in flight. */
+/** The latest time an item records: a call's result lands after the call itself. */
+const lastTimeOf = (items: readonly KitConversationItem[]): string | undefined => {
+  let latest: string | undefined
+  let latestMs = -Infinity
+  for (const item of items) {
+    for (const at of [item.at, item._tag === 'ToolCall' ? item.result?.at : undefined]) {
+      const ms = at === undefined ? NaN : Date.parse(at)
+      if (Number.isFinite(ms) && ms > latestMs) { latestMs = ms; latest = at }
+    }
+  }
+  return latest
+}
+
+/**
+ * Run lifecycle comes from the run's own status entries; an unanswered call stays in flight. A settled
+ * run without a settling status still reports how long it worked: from its first entry to its last.
+ */
 const workFactsFor = (promptAt: string, items: readonly KitConversationItem[]) => {
   const status = lastStatusOf(items)
   const running = status !== undefined
     ? activeRunStatuses[status.status]
     : items.some(item => item._tag === 'ToolCall' && item.status === 'running')
-  const settledAt = status !== undefined && !activeRunStatuses[status.status] ? status.at : undefined
+  const settledAt = status !== undefined && !activeRunStatuses[status.status] ? status.at : running ? undefined : lastTimeOf(items)
   return {
     running,
     failed: status?.status === 'failed',
@@ -106,6 +124,63 @@ const workFactsFor = (promptAt: string, items: readonly KitConversationItem[]) =
   }
 }
 
+/** Driver errors the agent recovers from by itself; repeats fold into one quiet row. */
+const recoverableErrorCodes: ReadonlySet<string> = new Set(['transcript-not-bound', 'claude-channel-unattached'])
+const recoverableCode = (item: KitConversationItem): string | undefined => {
+  if (item._tag !== 'Notice' || item.kind !== 'error') return undefined
+  const code = /^Code: (\S+)$/.exec(item.detail ?? '')?.[1]
+  return code !== undefined && recoverableErrorCodes.has(code) ? code : undefined
+}
+
+/**
+ * Machine rows read as one quiet line each. Run status (queued, running, waiting, …) keeps only the episode's
+ * latest; repeats of a recoverable driver error fold into its latest occurrence, which keeps its own reason and
+ * counts the rest. Any other error, and so any explanation of why an agent is stuck, stays as it is. Work facts
+ * are taken from every item before this runs; "Show all system events" skips it.
+ */
+const quietMachineRows = (items: readonly KitConversationItem[]): KitConversationItem[] => {
+  const lastStatus = items.findLast(item => item._tag === 'Status')
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    const code = recoverableCode(item)
+    if (code !== undefined) counts.set(code, (counts.get(code) ?? 0) + 1)
+  }
+  if (counts.size === 0 && items.filter(item => item._tag === 'Status').length <= 1) return [...items]
+  const seen = new Map<string, number>()
+  return items.flatMap((item): KitConversationItem[] => {
+    if (item._tag === 'Status') return item === lastStatus ? [item] : []
+    const code = recoverableCode(item)
+    if (code === undefined || item._tag !== 'Notice') return [item]
+    const count = counts.get(code)!
+    const index = (seen.get(code) ?? 0) + 1
+    seen.set(code, index)
+    if (index < count) return []
+    return [count === 1 ? item : { ...item, detail: `Code: ${code} · ${count} times` }]
+  })
+}
+
+/** A participant as the transcript names it: the roster name, else the ref's last segment; `ref` is the full path for hover. */
+export interface ParticipantName { readonly label: string; readonly ref?: string }
+export const participantName = (ref: string | undefined, names: TranscriptTurnOptions['names']): ParticipantName | undefined => {
+  if (ref === undefined || ref === '') return undefined
+  if (ref.startsWith('daemon/')) return { label: 'Fractal', ref }
+  const named = names?.(ref)
+  if (named !== undefined && named !== '') return { label: named, ref }
+  if (ref.startsWith('person/')) return { label: ref.slice('person/'.length), ref }
+  return { label: ref.split('/').filter(part => part !== '').at(-1) ?? ref, ref }
+}
+
+/**
+ * Input that starts an episode without being a person's prompt: machine mail that woke the agent, or
+ * mail another agent sent it. The agent's own outgoing mail belongs to the episode it was sent from.
+ */
+const isTrigger = (item: KitConversationItem, agentRef: string | undefined): boolean => {
+  if (item._tag === 'Event') return item.kind === 'delivery'
+  if (item._tag !== 'Message') return false
+  const author = item.author ?? item.from
+  return agentRef === undefined ? item.to !== undefined && author !== undefined : author !== agentRef && (item.to === undefined || item.to === agentRef)
+}
+
 export interface TranscriptTurnOptions {
   /** Roster display name for assistant captions; never invented when absent. */
   readonly agentName?: string
@@ -113,6 +188,10 @@ export interface TranscriptTurnOptions {
   readonly firstTurnComplete: boolean
   /** A view preference; known internal entries become payload-free notices when enabled. */
   readonly showSystemEvents?: boolean
+  /** This conversation's agent: mail it sends stays in its episode, mail to it starts one. */
+  readonly agentRef?: string
+  /** Roster display name for a participant ref; unresolved refs read as their last segment. */
+  readonly names?: (ref: string) => string | undefined
 }
 
 /** Prepared turns preserve the leading native tail without synthesizing a human prompt. */
@@ -126,12 +205,23 @@ export const prepareTranscriptTurns = (
 ): readonly PreparedTranscriptTurn[] => {
   const turns: PreparedTranscriptTurn[] = []
   let prompt: (KitTextItem & { readonly role: 'user' }) | undefined
+  let trigger: KitConversationItem | undefined
   let turnItems: KitConversationItem[] = []
   const flush = () => {
     const first = prompt ?? turnItems[0]
     if (first === undefined) return
     const senderCaptions: Record<string, string | undefined> = {}
+    const participants: Record<string, NonNullable<TranscriptTurn['participants']>[string]> = {}
     for (const item of turnItems) {
+      if (item._tag === 'Message') {
+        const from = participantName(item.author ?? item.from, options.names)
+        const to = participantName(item.to, options.names)
+        participants[item.id] = {
+          from: from ?? { label: 'Unknown sender' },
+          ...(to === undefined ? {} : { to }),
+          involvesPerson: [item.author, item.from, item.to].some(ref => ref?.startsWith('person/') === true),
+        }
+      }
       if (item._tag !== 'Text' && item._tag !== 'Message') continue
       const label = item.sender?.label ?? (item._tag === 'Message' ? item.from : item.role === 'assistant' ? options.agentName : undefined)
       const caption = label !== undefined && /^(?:proc|agent):\/\//i.test(label)
@@ -149,14 +239,17 @@ export const prepareTranscriptTurns = (
     turns.push({
       id: first.id,
       ...(prompt === undefined ? {} : { prompt }),
-      items: turnItems,
+      ...(trigger === undefined ? {} : { triggerId: trigger.id }),
+      items: options.showSystemEvents === true ? turnItems : quietMachineRows(turnItems),
       work: { ...work, calls: work.calls.map(call => {
         const item = tools.get(call.id)
         return { ...call, title: item === undefined ? 'Working' : toolSummary(item), summary: item === undefined ? 'Working' : toolSummary(item), argsSummary: undefined }
       }) },
       ...(Object.keys(senderCaptions).length === 0 ? {} : { senderCaptions }),
+      ...(Object.keys(participants).length === 0 ? {} : { participants }),
     })
     turnItems = []
+    trigger = undefined
   }
   for (const sourceItem of items) {
     // Unsupported is always retained: F2 markers are not a system-events preference.
@@ -173,10 +266,32 @@ export const prepareTranscriptTurns = (
       prompt = item
       continue
     }
+    // A wake or incoming mail opens the next episode, unless it is the first input of an empty one.
+    if (isTrigger(item, options.agentRef)) {
+      if (prompt !== undefined || turnItems.length > 0) flush()
+      prompt = undefined
+      trigger = item
+    }
     turnItems.push(item)
   }
   flush()
-  return turns
+  return liveAtTheTail(turns)
+}
+
+/**
+ * Only the latest episode shows live work. An earlier episode whose calls are still unanswered (the agent kept
+ * working while new input arrived) settles in place, and the latest episode, unless its own status settled it,
+ * carries the Working row instead, so the live row never sits mid-thread above later turns.
+ */
+const liveAtTheTail = (turns: PreparedTranscriptTurn[]): readonly PreparedTranscriptTurn[] => {
+  const last = turns.length - 1
+  const earlier = turns.slice(0, Math.max(0, last)).some(turn => turn.work.running)
+  if (!earlier) return turns
+  return turns.map((turn, index) => {
+    if (index < last) return turn.work.running ? { ...turn, work: { ...turn.work, running: false } } : turn
+    if (turn.work.running || lastStatusOf(turn.items) !== undefined) return turn
+    return { ...turn, work: { ...turn.work, running: true } }
+  })
 }
 
 /** Prompt-less native tails are supported by the kit without a synthetic user bubble. */
@@ -207,10 +322,11 @@ export type ConversationTranscriptState =
     }
 
 /** Why the pane cannot show a conversation; `not-found` comes from the read error's code, never its message. */
-export type UnavailableClassification = 'ungranted' | 'unsupported' | 'peer-too-old' | 'not-found' | 'failed'
+export type UnavailableClassification = 'unauthorized' | 'ungranted' | 'unsupported' | 'peer-too-old' | 'not-found' | 'failed'
 
 /** Fixed copy only: feed.detail carries source diagnostics and never reaches rendered or accessible text. */
 const unavailableCopy: Readonly<Record<UnavailableClassification, { readonly reason: string; readonly detail: string }>> = {
+  unauthorized: { reason: 'Credential expired', detail: credentialExpiredMessage },
   ungranted: { reason: 'Conversation access not granted', detail: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
   unsupported: { reason: 'Conversation not supported', detail: 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.' },
   'not-found': { reason: 'Conversation not found', detail: 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
@@ -223,7 +339,7 @@ const diagnosticCode = /^[a-z][a-z0-9-]{0,39}$/
 
 export const mapConversationFeed = (
   feed: Feed<ConversationPage>,
-  options: { readonly agentName?: string; readonly showSystemEvents?: boolean },
+  options: { readonly agentName?: string; readonly showSystemEvents?: boolean; readonly onLoadEarlier?: () => void; readonly agentRef?: string; readonly names?: (ref: string) => string | undefined },
 ): ConversationTranscriptState => {
   switch (feed._tag) {
     case 'Waiting':
@@ -235,17 +351,23 @@ export const mapConversationFeed = (
       return { _tag: 'Unavailable', classification, code, availability: { _tag: 'Unavailable', ...unavailableCopy[classification] } }
     }
     case 'Observed': {
-      const hasOlder = feed.value.hasOlder
-      const turns = transcriptTurnsForItems(feed.value.items, { agentName: options.agentName, firstTurnComplete: !hasOlder, showSystemEvents: options.showSystemEvents })
+      const { hasOlder, older } = feed.value
+      const turns = transcriptTurnsForItems(feed.value.items, { agentName: options.agentName, firstTurnComplete: !hasOlder, showSystemEvents: options.showSystemEvents, agentRef: options.agentRef, names: options.names })
       // Native page provenance decides emptiness: a non-empty page whose rows are all omitted
       // (or that arrived with none) is filtered, not an empty conversation.
       const filteredEmpty = feed.value.observation?.empty === false
         && (feed.value.items.length === 0 || (!options.showSystemEvents && feed.value.items.every(isOmittedItem)))
+      // `hasOlder` alone places the boundary; a failed request's detail is diagnostic and never rendered.
+      const request: TranscriptOlderRequest | undefined = older === undefined ? undefined : older._tag === 'Loading' ? { _tag: 'Loading' } : { _tag: 'Failed' }
       return {
         _tag: 'Observed',
         turns,
         items: turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]),
-        history: hasOlder ? { _tag: 'HasOlder' } : { _tag: 'Complete' },
+        history: hasOlder ? {
+          _tag: 'HasOlder',
+          ...(options.onLoadEarlier === undefined ? {} : { onLoadEarlier: options.onLoadEarlier }),
+          ...(request === undefined ? {} : { older: request }),
+        } : { _tag: 'Complete' },
         filteredEmpty,
         emptyState: filteredEmpty ? { title: 'This page contains no displayable conversation entries.' } : undefined,
         isRunning: turns.some(turn => turn.work.running),
@@ -261,12 +383,16 @@ export const createConversationTranscript = (): typeof mapConversationFeed => {
   let previousFeed: Feed<ConversationPage> | undefined
   let previousName: string | undefined
   let previousSystemEvents: boolean | undefined
+  let previousLoadEarlier: (() => void) | undefined
+  let previousNames: ((ref: string) => string | undefined) | undefined
+  let previousRef: string | undefined
   let previousState: ConversationTranscriptState | undefined
   return (feed, options) => {
-    if (previousState !== undefined && previousName === options.agentName && previousSystemEvents === options.showSystemEvents && (
+    if (previousState !== undefined && previousName === options.agentName && previousSystemEvents === options.showSystemEvents && previousLoadEarlier === options.onLoadEarlier && previousNames === options.names && previousRef === options.agentRef && (
       previousFeed === feed
       || (feed._tag === 'Observed' && previousFeed?._tag === 'Observed'
         && feed.value.hasOlder === previousFeed.value.hasOlder
+        && feed.value.older?._tag === previousFeed.value.older?._tag
         && feed.value.observation?.empty === previousFeed.value.observation?.empty
         && sameConversationItems(feed.value.items, previousFeed.value.items))
       || (feed._tag === 'Waiting' && previousFeed?._tag === 'Waiting')
@@ -279,6 +405,9 @@ export const createConversationTranscript = (): typeof mapConversationFeed => {
     previousFeed = feed
     previousName = options.agentName
     previousSystemEvents = options.showSystemEvents
+    previousLoadEarlier = options.onLoadEarlier
+    previousNames = options.names
+    previousRef = options.agentRef
     previousState = mapConversationFeed(feed, options)
     return previousState
   }
@@ -310,7 +439,7 @@ export interface LastSeenActivity {
 
 /**
  * A stale conversation is last-known, not live: in-flight work stops reading as running, and each call still running
- * at the last observation leaves the work log for the "Last seen" tail. Settled history is untouched.
+ * at the last observation leaves the work log for the "Last seen" tail, and thinking stops streaming. Settled history is untouched.
  */
 export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly turns: readonly TranscriptTurn[]; readonly lastSeen: LastSeenActivity } => {
   const lastRunning = turns.findLast(turn => turn.work.running)
@@ -318,10 +447,13 @@ export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly t
   return {
     turns: turns.map(turn => {
       const running = new Set(turn.work.calls.filter(call => call.status === 'running').map(call => call.id))
-      if (!turn.work.running && running.size === 0) return turn
+      const thinking = turn.items.some(item => item._tag === 'Reasoning' && item.streaming)
+      if (!turn.work.running && running.size === 0 && !thinking) return turn
       return {
         ...turn,
-        items: turn.items.filter(item => !running.has(item.id) && (item._tag !== 'Status' || !activeRunStatuses[item.status])),
+        items: turn.items
+          .filter(item => !running.has(item.id) && (item._tag !== 'Status' || !activeRunStatuses[item.status]))
+          .map(item => item._tag === 'Reasoning' && item.streaming ? { ...item, streaming: false } : item),
         work: { ...turn.work, running: false, foldable: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
       }
     }),

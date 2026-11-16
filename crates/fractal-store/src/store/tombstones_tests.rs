@@ -762,7 +762,8 @@ fn production_history_has_bounded_journal_writes() {
 }
 
 /// A trim chunk that holds the writer over a second logs one line with what it deleted, the bytes
-/// of the bodies, and its hold split into the steps and the commit; a faster chunk logs nothing.
+/// of the bodies, its hold split into the steps and the commit, and the steps' longest stages,
+/// down to each statement of the delete; a faster chunk logs nothing.
 #[test]
 fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
     let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -800,6 +801,14 @@ fn a_slow_trim_chunk_logs_what_it_deleted_and_where_its_hold_went() {
     assert!(field("body_bytes") > 0, "{line}");
     assert!(field("step_ms") >= 1_000, "{line}");
     assert!(field("held_ms") >= field("step_ms"), "{line}");
+    // The row cost stands in for a slow statement: the line names it first, and its stages run
+    // longest first.
+    let stages = line["stages"].as_object().unwrap();
+    assert_eq!(stages.keys().next().map(String::as_str), Some("row_cost_pause"), "{line}");
+    assert!(stages["row_cost_pause"]["ms"].as_u64().unwrap() >= 1_000, "{line}");
+    assert!((2..=6).contains(&stages.len()), "{line}");
+    let ms = stages.values().map(|stage| stage["ms"].as_u64().unwrap()).collect::<Vec<_>>();
+    assert!(ms.windows(2).all(|pair| pair[0] >= pair[1]), "{line}");
     store.set_trim_row_cost(std::time::Duration::ZERO);
     store.finish_trim(CHECKPOINT, &mut actions).unwrap();
     assert_eq!(slow_chunks(&lines).len(), 1, "a chunk under a second logs nothing");

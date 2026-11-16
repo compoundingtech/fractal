@@ -15,8 +15,8 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "fractal-ui-test-client"
-loader = importlib.machinery.SourceFileLoader("stui_test_client", str(SCRIPT))
-spec = importlib.util.spec_from_loader("stui_test_client", loader)
+loader = importlib.machinery.SourceFileLoader("fractal_ui_test_client", str(SCRIPT))
+spec = importlib.util.spec_from_loader("fractal_ui_test_client", loader)
 client = importlib.util.module_from_spec(spec)
 loader.exec_module(client)
 
@@ -69,7 +69,7 @@ class Fake:
         self.dir = tempfile.TemporaryDirectory()
         if test is not None:
             test.addCleanup(self.dir.cleanup)
-        self.binary = Path(self.dir.name) / "fake-stui"
+        self.binary = Path(self.dir.name) / "fake-fractal-tui"
         self.binary.write_text(FAKE)
         self.binary.chmod(0o755)
         self.events = Path(self.dir.name) / "events.jsonl"

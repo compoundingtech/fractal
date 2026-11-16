@@ -25,6 +25,11 @@ fn terminal_tab_action_publication() {
     check_terminal_tab_probe(&["--check-action-publication"]);
 }
 
+#[test]
+fn terminal_tab_program_runs_on_through_resize_signals() {
+    check_terminal_tab_probe(&["--check-program-signals"]);
+}
+
 fn check_terminal_tab_probe(check: &[&str]) {
     let output = std::process::Command::new("python3")
         .arg(test_env!(
@@ -49,19 +54,19 @@ fn check_terminal_tab_probe(check: &[&str]) {
 #[test]
 #[ignore = "worker for terminal_tab_protocols; needs harness-owned PTYs"]
 fn terminal_tab_probe_worker() -> Result<()> {
-    let root = PathBuf::from(std::env::var_os("STUI_PROBE_ROOT").expect("probe root"));
-    let socket = std::env::var_os("STUI_PROBE_SOCKET").expect("probe socket");
+    let root = PathBuf::from(std::env::var_os("FRACTAL_TUI_PROBE_ROOT").expect("probe root"));
+    let socket = std::env::var_os("FRACTAL_TUI_PROBE_SOCKET").expect("probe socket");
     let _guard = Guard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut ui = Ui::new(demo::test_world());
-    if std::env::var_os("STUI_PROBE_GRAPHICS").is_some() {
+    if std::env::var_os("FRACTAL_TUI_PROBE_GRAPHICS").is_some() {
         #[allow(deprecated)] // Fixed metrics belong to the harness-owned PTY.
         let mut picker =
             ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 16));
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
         ui.picker = Some(picker);
     }
-    let agent = if std::env::var_os("STUI_PROBE_AGENT").is_some() {
+    let agent = if std::env::var_os("FRACTAL_TUI_PROBE_AGENT").is_some() {
         "agent/example/atlas/builder"
     } else {
         "terminal/probe"
@@ -82,6 +87,7 @@ fn terminal_tab_probe_worker() -> Result<()> {
             "one".into(),
             24,
             80,
+            None,
         )),
     });
     let mut last = String::new();

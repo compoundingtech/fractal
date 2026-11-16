@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::model::{MessageAttachment, MessageView, St3Error};
+use crate::model::{MessageAttachment, MessageView, FractalError};
 
 /// The most a message may carry in its claim without a file.
 pub const INLINE_MAX_BYTES: usize = 8192;
@@ -293,7 +293,7 @@ impl Bodies {
     /// Whether this member may take a body of `size` bytes for `subject` from `actor`: the one it
     /// already holds costs nothing, and the rest must fit under the limit on what a sender may
     /// have and the limit on what the member keeps.
-    pub fn ensure_room(&self, actor: &str, subject: &str, size: usize) -> Result<(), St3Error> {
+    pub fn ensure_room(&self, actor: &str, subject: &str, size: usize) -> Result<(), FractalError> {
         let limit = |name: &str, default: u64| {
             std::env::var(name)
                 .ok()
@@ -319,7 +319,7 @@ impl Bodies {
         }
         let size = size as u64;
         if sender.saturating_add(size) > actor_limit {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "message-store-full",
                 format!(
                     "{actor} already has {} MiB of long messages on this machine, the most it keeps for one sender; send a shorter message",
@@ -328,7 +328,7 @@ impl Bodies {
             ));
         }
         if total.saturating_add(size) > total_limit {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "message-store-full",
                 format!(
                     "this machine already keeps {} MiB of long messages, its limit; send a shorter message or ask whoever runs it to raise ST3_MESSAGE_BODIES_MAX_MB",

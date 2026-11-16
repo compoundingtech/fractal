@@ -1,21 +1,28 @@
-import { createHash } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fullCases } from './kit-play-commit-set.mjs'
+import costs from './kit-play-costs.json' with { type: 'json' }
 
-export function shardNumber(id, count) {
-  if (!Number.isSafeInteger(count) || count < 1) throw new Error('Shard count must be a positive integer')
-  return Number(BigInt(`0x${createHash('sha256').update(id).digest('hex')}`) % BigInt(count))
-}
-
+// Longest-processing-time scheduling uses committed full-matrix measurements, never this
+// runner's speed or index order. Reserve 20% of the total play work on shard 0 for its
+// app/typecheck/browser-control lanes; the other shards only build Storybook and play.
 export function shardStories(ids, index, count) {
-  shardNumber('', count)
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error('Shard count must be a positive integer')
   if (!Number.isSafeInteger(index) || index < 0 || index >= count) throw new Error('Invalid shard index')
   if (!ids.length || new Set(ids).size !== ids.length) throw new Error('Invalid full story index')
-  const selected = ids.filter(id => shardNumber(id, count) === index)
-  if (!selected.length && count <= ids.length) throw new Error(`Unexpected empty shard ${index}/${count}`)
-  return selected
+  const cost = id => costs.storyMilliseconds[id] ?? costs.newStoryMilliseconds
+  const ordered = [...ids].sort((a, b) => cost(b) - cost(a) || (a < b ? -1 : a > b ? 1 : 0))
+  const loads = Array(count).fill(0)
+  if (count > 1) loads[0] = ids.reduce((total, id) => total + cost(id), 0) * 0.2
+  const selected = []
+  for (const id of ordered) {
+    let target = 0
+    for (let shard = 1; shard < count; shard++) if (loads[shard] < loads[target]) target = shard
+    loads[target] += cost(id)
+    if (target === index) selected.push(id)
+  }
+  return selected.sort()
 }
 
 export function shardArtifactName(receipt) {

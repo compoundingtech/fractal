@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
 import { ResponsiveAgentSidebar, useSidebarNavigation } from './ResponsiveAgentSidebar.tsx'
-import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
+import { SettingsControl } from './SettingsDialog.tsx'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { NarrowLayoutContext, ResizableSplit } from '@fractal/ui/assistant-ui/shell'
 import { defaultFilters } from '../shell/sidebar/state.ts'
@@ -37,30 +37,29 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-const ChromeFixture = ({ width, onCollapse, onTheme }: {
+const ChromeFixture = ({ width, onCollapse }: {
   readonly width: number
   readonly onCollapse: () => void
-  readonly onTheme: () => void
 }) => {
   const [filters, setFilters] = React.useState(defaultFilters)
-  return <ResponsiveAgentSidebar viewport={1440} width={width} maxWidth={440} collapsed={false} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={onCollapse} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}>
+  return <ResponsiveAgentSidebar viewport={1440} width={width} maxWidth={440} collapsed={false} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={onCollapse} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined} headerActions={<SettingsControl scheme="dark" onSchemeChange={() => undefined} />}>
     <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} showRows={[]} />
-    <SidebarChromeFooter onToggleScheme={onTheme} />
   </ResponsiveAgentSidebar>
 }
 
 describe.each([240, 256, 320, 440])('sidebar chrome at %ipx', width => {
-  it('preserves named, focusable collapse and theme buttons with decorative stroke icons', async () => {
-    const collapse = vi.fn(), theme = vi.fn()
-    await act(async () => root.render(<ChromeFixture width={width} onCollapse={collapse} onTheme={theme} />))
+  it('preserves named, focusable collapse and settings buttons with decorative stroke icons', async () => {
+    const collapse = vi.fn()
+    await act(async () => root.render(<ChromeFixture width={width} onCollapse={collapse} />))
     const sidebar = within(host).getByRole('complementary', { name: 'Agents' })
-    for (const [name, callback] of [['Collapse agents', collapse], ['Toggle color scheme', theme]] as const) {
+    await act(async () => within(sidebar).getByRole('button', { name: 'Collapse agents' }).click())
+    expect(collapse).toHaveBeenCalledOnce()
+    for (const name of ['Collapse agents', 'Settings']) {
       const button = within(sidebar).getByRole('button', { name })
+      expect(button.closest('header')).not.toBeNull()
       expect(button.getAttribute('disabled')).toBeNull()
       button.focus()
       expect(document.activeElement).toBe(button)
-      await act(async () => button.click())
-      expect(callback).toHaveBeenCalledOnce()
       const svg = button.querySelector('svg')!
       expect(svg.getAttribute('aria-hidden')).toBe('true')
       expect(svg.getAttribute('fill')).toBe('none')
@@ -73,35 +72,30 @@ describe.each([240, 256, 320, 440])('sidebar chrome at %ipx', width => {
   })
 
   it('uses equal 8px search insets and border-box sizing at every supported dock width', async () => {
-    await act(async () => root.render(<ChromeFixture width={width} onCollapse={() => undefined} onTheme={() => undefined} />))
+    await act(async () => root.render(<ChromeFixture width={width} onCollapse={() => undefined} />))
     const field = within(host).getByRole('textbox', { name: 'Search agents' })
     const toolbar = field.parentElement!.parentElement!
     expect(toolbar.style.paddingInline).toBe('8px')
     expect(field.style.width).toBe('100%')
     expect(field.style.boxSizing).toBe('border-box')
     expect(field.style.borderRadius).toBe('6px')
+    expect(within(host).getByRole('button', { name: 'Filter agents' })).not.toBeNull()
     expect(within(host).getByRole('button', { name: 'Show' })).not.toBeNull()
-    expect(within(host).getByRole('button', { name: /Filter agents/ })).not.toBeNull()
+    expect(within(host).getByRole('button', { name: 'Show finished agents' }).getAttribute('aria-pressed')).toBe('true')
     expect(within(host).getByRole('button', { name: /Sort agents/ })).not.toBeNull()
     field.focus()
     expect(document.activeElement).toBe(field)
   })
 })
 
-it('chrome footer adds no status or action of its own beyond the theme toggle', async () => {
-  await act(async () => root.render(<ChromeFixture width={256} onCollapse={() => undefined} onTheme={() => undefined} />))
-  const footer = host.querySelector('footer')!
-  expect(within(footer).queryByRole('status')).toBeNull()
-  expect(within(footer).getAllByRole('button')).toHaveLength(1)
-  expect(within(footer).queryByRole('button', { name: /Reconnect/ })).toBeNull()
+it('the sidebar has no footer: the header carries the chrome and reclaims its height', async () => {
+  await act(async () => root.render(<ChromeFixture width={256} onCollapse={() => undefined} />))
+  expect(host.querySelector('footer')).toBeNull()
 })
 
-it('the phone footer contains its full 44px chrome touch targets', async () => {
-  await act(async () => root.render(<NarrowLayoutContext.Provider value><SidebarChromeFooter onToggleScheme={() => undefined} /></NarrowLayoutContext.Provider>))
-  const footer = host.querySelector('footer')!
-  const toggle = within(footer).getByRole('button', { name: 'Toggle color scheme' })
-  expect(Number.parseFloat(footer.style.minHeight)).toBeGreaterThanOrEqual(44)
-  expect(Number.parseFloat(toggle.style.height)).toBeGreaterThanOrEqual(44)
+it('the settings gear is a full 44px touch target in a touch layout', async () => {
+  await act(async () => root.render(<NarrowLayoutContext.Provider value><SettingsControl scheme="dark" onSchemeChange={() => undefined} /></NarrowLayoutContext.Provider>))
+  expect(Number.parseFloat(within(host).getByRole('button', { name: 'Settings' }).style.height)).toBeGreaterThanOrEqual(44)
 })
 
 describe('sidebar split (real kit ResizableSplit)', () => {
@@ -180,7 +174,7 @@ describe('sidebar split (real kit ResizableSplit)', () => {
   })
 })
 
-const NavigationFixture = ({ show }: { readonly show: () => void }) => <>{useSidebarNavigation(show)}</>
+const NavigationFixture = ({ show }: { readonly show: (tab: 'agents' | 'alerts' | 'missions') => void }) => <>{useSidebarNavigation(show)}</>
 describe('sidebar navigation chords', () => {
   const press = (key: string, target: EventTarget = document) => target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
   it('opens Agents on g a and lists the available chord in help', async () => {
@@ -188,11 +182,18 @@ describe('sidebar navigation chords', () => {
     await act(async () => root.render(<NavigationFixture show={show} />))
     await act(async () => { press('g'); press('a') })
     expect(show).toHaveBeenCalledOnce()
+    expect(show).toHaveBeenLastCalledWith('agents')
+    await act(async () => { press('g'); press('l') })
+    expect(show).toHaveBeenLastCalledWith('alerts')
+    await act(async () => { press('g'); press('m') })
+    expect(show).toHaveBeenLastCalledWith('missions')
     await act(async () => press('?'))
     const help = within(document.body).getByRole('dialog', { name: 'Keyboard shortcuts' })
-    expect(help.textContent).toContain('g a')
+    expect(help.textContent?.toLowerCase()).toContain('g a')
     expect(help.textContent).toContain('Show Agents')
-    expect(help.textContent).not.toContain('g l')
+    expect(help.textContent?.toLowerCase()).toContain('g l')
+    expect(help.textContent).toContain('Show Missions')
+    expect(help.textContent).toContain('Show Alerts')
     await act(async () => within(help).getByRole('button', { name: 'Close' }).click())
     expect(within(document.body).queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
   })
@@ -210,7 +211,7 @@ describe('sidebar navigation chords', () => {
     const show = vi.fn()
     await act(async () => root.render(<><NavigationFixture show={show} />{kind === 'input' ? <input /> : kind === 'textarea' ? <textarea /> : <div {...(kind === 'terminal' ? { 'aria-roledescription': 'terminal' } : { contentEditable: true })} />}</>))
     const target = host.lastElementChild!
-    await act(async () => { press('g', target); press('a', target); press('?', target) })
+    await act(async () => { press('g', target); press('a', target); press('g', target); press('l', target); press('?', target) })
     expect(show).not.toHaveBeenCalled()
     expect(within(document.body).queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
   })
@@ -221,7 +222,7 @@ describe('sidebar navigation chords', () => {
     press('g')
     clock.mockReturnValue(1002)
     press('a')
-    for (const key of ['l', 'm', 'f']) { press('g'); expect(press(key)).toBe(true) }
+    for (const key of ['x', 'f']) { press('g'); expect(press(key)).toBe(true) }
     expect(show).not.toHaveBeenCalled()
     clock.mockRestore()
   })

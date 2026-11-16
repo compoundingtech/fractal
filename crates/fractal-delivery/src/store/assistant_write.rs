@@ -5,6 +5,6 @@ pub use fractal_store::store::assistant_write::*;
 pub use fractal_store::store::assistant_write::{AssistantWriteAuthorization, authorize_grant, refuse_unverified, validate_replicated};
 
 /// The connection must be the writer transaction that commits the protected mutation.
-pub fn authorize(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<(), St3Error> {
+pub fn authorize(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<(), FractalError> {
     authorized_grant(connection, origin, authorization).map(|_| ())
 }

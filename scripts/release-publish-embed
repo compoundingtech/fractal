@@ -14,12 +14,14 @@ uploaded, is removed from the draft and uploaded again; nobody can have read it.
 import argparse
 import json
 import pathlib
+import os
 import re
 import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from release_gh import gh as gh_call, missing  # noqa: E402
+from release_tag import ensure_tag  # noqa: E402
 
 SHA = re.compile(r'[0-9a-f]{40}')
 
@@ -72,11 +74,20 @@ def main():
         raise SystemExit(f'release-publish-embed: the archives do not match their sidecars: {checked.stdout}{checked.stderr}')
     tag = f'embed-{args.source}'
     names = {f.name for f in files}
+    # Push before even the draft POST, so no release write needs to create a ref.
+    try:
+        ensure_tag(os.environ.get('GH_REPO', 'compoundingtech/fractal'), tag, args.source,
+                   cwd=pathlib.Path(__file__).resolve().parent.parent)
+    except (ValueError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f'release-publish-embed: tag preparation failed: {error}')
 
     release = view(tag)
     if release is None:
         # A create that timed out may still have made the draft, with some of its files.
-        gh('release', 'create', tag, '--target', args.source, '--draft', '--prerelease', '--latest=false',
+        # The verified tag already pins the source. Supplying target_commitish as well makes
+        # GitHub's Actions-token release POST time out even for an empty body; omit that redundant
+        # ref-creation input rather than asking the release endpoint to resolve it again.
+        gh('release', 'create', tag, '--verify-tag', '--draft', '--prerelease', '--latest=false',
            '--title', f'Fractal web embed {args.source}',
            '--notes', f'Offline embed, four posters and provenance for source {args.source}. '
                       'Verify the archive against its SHA-256 sidecar.',

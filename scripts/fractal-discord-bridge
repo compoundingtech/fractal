@@ -243,7 +243,7 @@ class St:
             info = self.path.lstat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o007:
                 raise Stop('Use your own Fractal Unix socket; it must not be accessible to other users.')
-            headers = {'Content-Type': media or 'application/json'}
+            headers = {'Content-Type': media or 'application/json', 'X-St3-Client': 'fractal-discord-bridge'}
             if actor:
                 headers['X-St3-Person'] = actor
             connection.request(method, path, body=body if media else None if body is None else json.dumps(body), headers=headers)
@@ -675,10 +675,14 @@ class Bridge:
 
 def default_socket():
     runtime = os.environ.get('XDG_RUNTIME_DIR')
-    if runtime is not None:
-        return Path(runtime) / 'st3.sock'
     state = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'st3'
-    endpoint = state / 'run/st3.sock'
+    directory = Path(runtime) if runtime is not None else state / 'run'
+    endpoint = directory / 'fractal.sock'
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+    legacy = directory / 'st3.sock'
+    if not endpoint.exists() and legacy.exists():
+        endpoint = legacy
+    # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
     # The daemon publishes its endpoint here for clients without its runtime directory.
     if endpoint.is_symlink():
         target = endpoint.readlink()

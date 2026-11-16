@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A client-message selector fold pass now folds at least one row before its 10 ms budget can stop it, so a loaded host whose own reads outlast the budget still finishes the fold instead of saving the same place every loan; the marks lifecycle test drains the fold on both twins before comparing them",
+  "replay": {"status": "none", "detail": "No claim or projection replay; the fold resumes from its saved FOLD_MARKER work as before."},
+  "schema": {"status": "none", "detail": "No table or schema change. Test-support builds read one optional meta key that pins a store's fold budget; release builds never read or write it."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Mixed-version fleets are unaffected: the change is local to how much of the local selector fold one pass does; no wire, client or replicated-state change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

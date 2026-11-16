@@ -7,7 +7,7 @@ test "$(cat captured-message.txt)" = "$EXPECTED_MESSAGE"
 test "$(cat captured-source.txt)" = "$EXPECTED_SOURCE"
 
 claim_id="${EXPECTED_SOURCE##*@}"
-st3 --json inspect "$EXPECTED_SOURCE" |
+fractal --json inspect "$EXPECTED_SOURCE" |
   jq -e \
     --arg reference "$EXPECTED_SOURCE" \
     --arg claim_id "$claim_id" \

@@ -30,6 +30,8 @@ export type AgentRowView = {
   progress?: string;
   host: string;
   parent?: string;
+  /** The roster's newest prose of the agent (`last_prose_at`), for its unread mark; absent from an older Fractal. */
+  lastProseAt?: string;
 };
 
 const labelWords: Record<string, string> = { st3: 'ST', fractal: 'Fractal', cos: 'COS', ios: 'iOS', tui: 'TUI', pty: 'PTY', omp: 'OMP' };
@@ -177,6 +179,7 @@ export function agentRows(agents: Agent[], sessions: SessionView[], gatewayHost:
     path: agent.id.replace(/^agent\//, ''),
     host: host(agent.host_id),
     parent: agent.under?.[0]?.agent_id,
+    lastProseAt: agent.last_prose_at ?? undefined,
   }));
   const found = sessions.filter(session => session.state === 'running' && session.managed === false).map((session): AgentRowView => {
     const workspace = (session as { workspace?: unknown }).workspace;

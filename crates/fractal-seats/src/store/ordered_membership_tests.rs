@@ -113,6 +113,100 @@ fn sync(source: &Store, target: &Store) {
     receive_and_project(target, &source.origin, &exchange_from(source, &ReplicationInventory::default()));
 }
 #[test]
+fn membership_page_frontier_ignores_unreferenced_writes() {
+    let store = Store::open_memory("membership-page-scope").unwrap();
+    create(&store);
+    declare(&store, SEAT_A, "true", "page-a");
+    declare(&store, SEAT_B, "true", "page-b");
+    edit(&store, json!([place(SEAT_B, None, "a0"), place(SEAT_A, None, "a0")]));
+    let first = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!(first.state.live_count, 2);
+    assert_eq!(first.items[0]["member"], SEAT_A);
+    declare(&store, SEAT_C, "true", "page-unreferenced");
+    let last = store.ordered_membership_page(CONTAINER, Some(("", "a0", SEAT_A)), 2).unwrap();
+    assert!(last.store_index > first.store_index);
+    assert_eq!(last.state, first.state);
+    assert_eq!(last.generation, first.generation);
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0]["member"], SEAT_B);
+    let terminal = store.ordered_membership_page(CONTAINER, Some(("", "a0", SEAT_B)), 2).unwrap();
+    assert!(terminal.items.is_empty());
+    assert_eq!(terminal.state, first.state);
+    edit(&store, json!([place(SEAT_B, None, "a1")]));
+    let changed = store.ordered_membership_page(CONTAINER, None, 2).unwrap();
+    assert_eq!(changed.state.live_count, first.state.live_count);
+    assert!(changed.state.changed_index > first.state.changed_index);
+    assert!(store.ordered_membership_page(CONTAINER, None, 1002).is_err());
+}
+
+#[test]
+fn membership_page_joins_metadata_snapshot_across_barrier_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("claims.sqlite3"), "membership-page-cut").unwrap();
+    create(&store);
+    declare(&store, SEAT_A, "true", "cut-a");
+    declare(&store, SEAT_B, "true", "cut-b");
+    edit(&store, json!([place(SEAT_A, None, "a0")]));
+    std::thread::scope(|scope| {
+        let (start, started) = std::sync::mpsc::sync_channel(0);
+        let (done, committed) = std::sync::mpsc::sync_channel(0);
+        let writer = &store;
+        scope.spawn(move || {
+            started.recv().unwrap();
+            edit(writer, json!([place(SEAT_B, None, "a1")]));
+            done.send(()).unwrap();
+        });
+        store.read_snapshot(|index| {
+            let metadata = store.ordered_membership_state(CONTAINER)?;
+            start.send(()).unwrap();
+            committed.recv().unwrap();
+            let page = store.ordered_membership_page(CONTAINER, None, 2)?;
+            assert_eq!(page.store_index, index);
+            assert_eq!(page.state, metadata);
+            assert_eq!(page.items.len() as u64, metadata.live_count);
+            assert_eq!(page.items[0]["member"], SEAT_A);
+            Ok(())
+        }).unwrap();
+    });
+    let current = store.ordered_membership_page(CONTAINER, None, 2).unwrap();
+    assert_eq!(current.state.live_count, 2);
+    assert_eq!(current.items.len(), 2);
+}
+
+#[test]
+fn membership_page_generation_is_transactional_and_survives_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let store = Store::open(&path, "membership-page-generation").unwrap();
+    create(&store);
+    let before = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert!(before.items.is_empty());
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        repair_frontier(&transaction, CONTAINER).unwrap();
+        transaction.rollback().unwrap();
+    }
+    assert_eq!(store.ordered_membership_page(CONTAINER, None, 1).unwrap().generation, before.generation);
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        repair_frontier(&transaction, CONTAINER).unwrap();
+        transaction.commit().unwrap();
+    }
+    let repaired = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!(repaired.store_index, before.store_index);
+    assert!(repaired.generation > before.generation);
+    store.rebuild_claim_projections().unwrap();
+    let rebuilt = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!(rebuilt.store_index, before.store_index);
+    assert!(rebuilt.generation > repaired.generation);
+    drop(store);
+    let reopened = Store::open(&path, "membership-page-generation").unwrap();
+    assert_eq!(reopened.ordered_membership_page(CONTAINER, None, 1).unwrap().generation, rebuilt.generation);
+}
+
+#[test]
 fn membership_state_tracks_same_count_edits_and_is_not_checkpoint_authority() {
     let store = Store::open_memory("membership-state").unwrap();
     assert_eq!(store.ordered_membership_state(CONTAINER).unwrap(),
@@ -506,7 +600,7 @@ fn concurrent_default_v1_and_explicit_v2_creates_preserve_legacy_in_both_orders(
         for target in [&forward, &reverse] {
             assert_eq!(target.arrangement(CONTAINER, u64::MAX).unwrap().unwrap(), expected);
             let read_error = target.ordered_memberships(CONTAINER, u64::MAX, None, 1000).unwrap_err();
-            assert_eq!(read_error.downcast_ref::<St3Error>().unwrap().code, "invalid-arrangement-operations");
+            assert_eq!(read_error.downcast_ref::<FractalError>().unwrap().code, "invalid-arrangement-operations");
             assert_eq!(target.ordered_membership_count(CONTAINER).unwrap(), 0);
             assert_eq!(head(target, SEAT_A).1, placed.id, "v2 raw authority remains retained but inactive");
             assert_eq!(target.edit_ordered_memberships(
@@ -648,7 +742,7 @@ fn creation_repair_invalidates_even_when_the_membership_count_row_disappears() {
         // The surviving rename does not declare a container after its create is repaired.
         // Strict reads must refuse the unknown ID, not return an empty membership page.
         let error = receiver.ordered_memberships(CONTAINER, repaired, None, 1000).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "not-found");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "not-found");
         assert_eq!(layout_digests(&receiver), digests);
         assert_eq!(receiver.ordered_membership_state(CONTAINER).unwrap().changed_index, repaired);
     }
@@ -725,14 +819,14 @@ fn repairing_legacy_creation_releases_only_unrepaired_v2_authority() {
     sync(&legacy, &receiver);
     assert_eq!(receiver.arrangement(CONTAINER, u64::MAX).unwrap().unwrap()["body"]["version"], 1);
     let read_error = receiver.ordered_memberships(CONTAINER, u64::MAX, None, 1000).unwrap_err();
-    assert_eq!(read_error.downcast_ref::<St3Error>().unwrap().code, "invalid-arrangement-operations");
+    assert_eq!(read_error.downcast_ref::<FractalError>().unwrap().code, "invalid-arrangement-operations");
     assert_eq!(receiver.ordered_membership_count(CONTAINER).unwrap(), 0);
     repair(&receiver, &original, &replacement, "repair-legacy-creation");
     let still_legacy = receiver.arrangement(CONTAINER, u64::MAX).unwrap().unwrap();
     assert_eq!(still_legacy["body"]["version"], 1, "unrepaired placements independently prevent implicit migration");
     assert_eq!(still_legacy["body"]["placements"][SEAT_A]["value"]["key"], "a0");
     let read_error = receiver.ordered_memberships(CONTAINER, u64::MAX, None, 1000).unwrap_err();
-    assert_eq!(read_error.downcast_ref::<St3Error>().unwrap().code, "invalid-arrangement-operations");
+    assert_eq!(read_error.downcast_ref::<FractalError>().unwrap().code, "invalid-arrangement-operations");
     assert_eq!(receiver.ordered_membership_count(CONTAINER).unwrap(), 0);
     repair(&receiver, &legacy_placement, &replacement, "repair-legacy-placement");
     let expected = receiver.arrangement(CONTAINER, u64::MAX).unwrap().unwrap();
@@ -764,7 +858,7 @@ fn direct_mission_retirement_flushes_membership_visibility_in_the_same_transacti
     edit(&store, json!([place(member, None, "a0")]));
     let retained = head(&store, member);
     assert_eq!(members(&store), vec![member]);
-    store.retire_mission(member, "person/ada", "retire-membership-mission").unwrap();
+    store.retire_mission(member, "person/ada", "retire-membership-mission", None).unwrap();
     assert!(rows(&store).is_empty());
     assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0);
     assert_eq!(head(&store, member), retained);
@@ -1035,6 +1129,331 @@ fn replay_rebuild_replication_and_checkpoint_retain_raw_hidden_and_absent_author
     assert_eq!(head(&store, SEAT_C), retained[2]);
 }
 
+fn legacy_migration_fixture(store: &Store) -> ClaimRecord {
+    declare(store, SEAT_A, "true", "migration-declare-a");
+    declare(store, SEAT_B, "true", "migration-declare-b");
+    desired_retirement_fixture(store, SEAT_B, "migration-retire-b");
+    let mut input = arrangement_input(json!([
+        {"op":"create","name":"Sidebar"},
+        {"op":"folder.create","id":FOLDER_A,"name":"Parent","parent":null,"key":"a0"},
+        {"op":"folder.create","id":FOLDER_B,"name":"Child","parent":FOLDER_A,"key":"a1"},
+        {"op":"subject.place","subject":SEAT_A,"folder":FOLDER_B,"key":"a2"},
+        {"op":"subject.place","subject":SEAT_B,"folder":FOLDER_A,"key":"a0"},
+        {"op":"subject.place","subject":SEAT_C,"folder":null,"key":"a1"}
+    ]));
+    input.actor = Some("agent/fleet/fixture-migration/seat".into());
+    let placement = store.edit_arrangement(&input, &BTreeMap::new()).unwrap();
+    folder_edit(store, json!([{"op":"folder.delete","id":FOLDER_B}]));
+    placement
+}
+
+fn migrate_placements(store: &Store) -> ClaimRecord {
+    let mut input = arrangement_input(json!([{"op":"membership.migrate"}]));
+    input.actor = Some("agent/fleet/fixture-migration/seat".into());
+    store.edit_arrangement(&input, &BTreeMap::new()).unwrap()
+}
+
+#[test]
+fn placement_migration_preserves_identity_folders_winners_and_real_actor() {
+    let store = Store::open_memory("migration-fixture").unwrap();
+    let original = legacy_migration_fixture(&store);
+    let before = store.arrangement(CONTAINER, u64::MAX).unwrap().unwrap();
+    let source: Vec<_> = [SEAT_A, SEAT_B, SEAT_C].iter().map(|member| {
+        store.readers.get().query_row("SELECT revision,quote(winner) FROM arrangement_registers WHERE subject=?1 AND register=?2",
+            params![CONTAINER,format!("placement/{member}")], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?))).unwrap()
+    }).collect();
+    let marker = migrate_placements(&store);
+    let after = store.arrangement(CONTAINER, u64::MAX).unwrap().unwrap();
+    assert_eq!(after["id"], before["id"]);
+    assert_eq!(after["owner"], before["owner"]);
+    assert_eq!(after["body"]["name"], before["body"]["name"]);
+    assert_eq!(after["body"]["folders"], before["body"]["folders"]);
+    assert_eq!(after["resolved"]["parents"], before["resolved"]["parents"]);
+    assert_eq!(after["body"]["version"], 2);
+    assert!(after["body"].get("placements").is_none());
+    assert_eq!(after["resolved"]["folders"], json!({}));
+    assert!(serde_json::from_value::<fractal_schema::arrangements::Body>(after["body"].clone()).is_err());
+    assert!(fractal_schema::arrangements::body_for_read(&after["body"]).is_ok());
+    for ((member, expected), source) in [SEAT_A, SEAT_B, SEAT_C].iter()
+        .zip([Some(FOLDER_B),Some(FOLDER_A),None]).zip(source) {
+        let migrated = head(&store, member);
+        assert_eq!(migrated.0.unwrap()["bucket"], json!(expected));
+        assert_eq!((migrated.1,migrated.2), source);
+    }
+    assert_eq!(members(&store), [SEAT_A]);
+    assert_eq!(rows(&store)[0]["position"]["bucket"], FOLDER_A);
+    assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 1);
+    assert_eq!(marker.actor, original.actor);
+    assert_eq!(serde_json::to_value(store.claim_by_id(&original.id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&original).unwrap());
+    declare(&store, SEAT_B, "true", "migration-restore-b");
+    declare(&store, SEAT_C, "true", "migration-restore-c");
+    assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 3);
+}
+
+#[test]
+fn placement_migration_rerun_keeps_pair_winners_and_accepts_only_new_placement_actions() {
+    let store = Store::open_memory("migration-rerun").unwrap();
+    legacy_migration_fixture(&store);
+    migrate_placements(&store);
+    edit(&store, json!([place(SEAT_A, None, "a9"),{"op":"remove","member":SEAT_B}]));
+    let before: Vec<_> = [SEAT_A,SEAT_B,SEAT_C].iter().map(|member| head(&store, member)).collect();
+    migrate_placements(&store);
+    for (member, expected) in [SEAT_A,SEAT_B,SEAT_C].iter().zip(before) {
+        assert_eq!(head(&store, member), expected);
+    }
+    let index = store.index().unwrap();
+    let refused = store.edit_arrangement(&arrangement_input(json!([
+        {"op":"subject.place","subject":SEAT_A,"folder":null,"key":"a0"}
+    ])), &BTreeMap::new()).unwrap_err();
+    assert_eq!(refused.code, "invalid-arrangement-operations");
+    assert_eq!(store.index().unwrap(), index);
+}
+
+#[test]
+fn placement_migration_concurrent_legacy_writer_is_included_or_refused_atomically() {
+    for round in 0..8 {
+        let store = Arc::new(Store::open_memory(format!("migration-race-{round}")).unwrap());
+        legacy_migration_fixture(&store);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let writer = store.clone();
+        let writer_barrier = barrier.clone();
+        let task = std::thread::spawn(move || {
+            writer_barrier.wait();
+            writer.edit_arrangement(&arrangement_input(json!([
+                {"op":"subject.place","subject":SEAT_A,"folder":null,"key":"a9"}
+            ])), &BTreeMap::new())
+        });
+        barrier.wait();
+        migrate_placements(&store);
+        match task.join().unwrap() {
+            Ok(claim) => {
+                assert_eq!(head(&store, SEAT_A).1, claim.id);
+                assert_eq!(head(&store, SEAT_A).0.unwrap()["key"], "a9");
+            }
+            Err(error) => assert_eq!(error.code, "invalid-arrangement-operations"),
+        }
+        assert_eq!(store.arrangement(CONTAINER, u64::MAX).unwrap().unwrap()["body"]["version"], 2);
+    }
+}
+
+#[test]
+fn placement_migration_replication_routes_offline_v1_writes_without_reverting_authority() {
+    let source = Store::open_memory("migration-modern").unwrap();
+    legacy_migration_fixture(&source);
+    let offline = Store::open_memory("migration-offline").unwrap();
+    sync(&source, &offline);
+    migrate_placements(&source);
+    let legacy = folder_edit(&offline, json!([
+        {"op":"subject.place","subject":SEAT_A,"folder":null,"key":"a8"},
+        {"op":"subject.place","subject":SEAT_C,"folder":FOLDER_A,"key":"a7"}
+    ]));
+    sync(&offline, &source);
+    assert_eq!(head(&source, SEAT_A).1, legacy.id);
+    assert_eq!(head(&source, SEAT_C).1, legacy.id);
+    assert_eq!(source.arrangement(CONTAINER, u64::MAX).unwrap().unwrap()["body"]["version"], 2);
+    sync(&source, &offline);
+    assert_eq!(layout_digests(&source), layout_digests(&offline));
+    let fresh = Store::open_memory("migration-fresh-peer").unwrap();
+    sync(&source, &fresh);
+    assert_eq!(layout_digests(&source), layout_digests(&fresh));
+    for store in [&source,&offline,&fresh] {
+        let before = layout_digests(store);
+        store.rebuild_claim_projections().unwrap();
+        assert_eq!(layout_digests(store), before);
+        store.replay_replication_graph().unwrap();
+        assert_eq!(layout_digests(store), before);
+    }
+}
+
+#[test]
+fn placement_migration_checkpoint_and_replay_preserve_hidden_original_winners() {
+    let store = Store::open_memory("migration-checkpoint").unwrap();
+    let original = legacy_migration_fixture(&store);
+    let marker = migrate_placements(&store);
+    for number in 0..5 {
+        let mut noise = claim("daemon/migration-noise", "daemon.diagnostic",
+            json!({"severity":"warning","code":"migration-noise","reason":format!("sample {number}")}));
+        noise.actor = None;
+        store.append_as_older_build_for_test(&noise).unwrap();
+    }
+    let before = layout_digests(&store);
+    let directory = tempfile::tempdir().unwrap();
+    let (plan, proof) = store.plan_checkpoint(now_ms()+1, directory.path()).unwrap();
+    assert!(proof.passed);
+    assert!(plan.claims.iter().any(|claim| claim.kind == "daemon.diagnostic"));
+    assert!(plan.claims.iter().all(|claim| !matches!(claim.kind.as_str(), "arrangement.edited" | "ordered-membership.edited")));
+    store.apply_checkpoint_drop("checkpoint/migration", &plan.envelopes, &plan.claims).unwrap();
+    assert_eq!(layout_digests(&store), before);
+    store.rebuild_claim_projections().unwrap();
+    assert_eq!(layout_digests(&store), before);
+    assert!(store.claim_by_id(&original.id).unwrap().is_some());
+    assert!(store.claim_by_id(&marker.id).unwrap().is_some());
+    assert_eq!(head(&store, SEAT_C).1, original.id);
+}
+
+#[test]
+fn placement_migration_failed_backfill_rolls_back_and_retry_survives_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("migration.sqlite");
+    let store = Store::open(&path, "migration-restart").unwrap();
+    legacy_migration_fixture(&store);
+    let before = layout_digests(&store);
+    store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h02a9984c8cb3 owner=fractal_seats::store::ordered_membership_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER migration_failure BEFORE INSERT ON ordered_membership_heads
+         WHEN NEW.member='agent/ada/seat-c' BEGIN SELECT RAISE(ABORT,'interrupted migration'); END;"
+    ).unwrap();
+    assert!(store.edit_arrangement(&arrangement_input(json!([{"op":"membership.migrate"}])),
+        &BTreeMap::new()).is_err());
+    assert_eq!(layout_digests(&store), before);
+    assert_eq!(store.arrangement(CONTAINER, u64::MAX).unwrap().unwrap()["body"]["version"], 1);
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h9fafc13e1337 owner=fractal_seats::store::ordered_membership_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER migration_failure").unwrap();
+    drop(store);
+    let store = Store::open(&path, "migration-restart").unwrap();
+    assert_eq!(layout_digests(&store), before);
+    migrate_placements(&store);
+    let migrated = layout_digests(&store);
+    let retained = head(&store, SEAT_C);
+    drop(store);
+    let store = Store::open(&path, "migration-restart").unwrap();
+    assert_eq!(layout_digests(&store), migrated);
+    assert_eq!(head(&store, SEAT_C), retained);
+    migrate_placements(&store);
+    assert_eq!(head(&store, SEAT_C), retained);
+}
+
+#[test]
+fn placement_migration_empty_container_dependency_tracks_edits_and_retirement() {
+    let store = Store::open_memory("migration-empty-dependency").unwrap();
+    folder_edit(&store, json!([{"op":"create","name":"Empty"}]));
+    let marker = migrate_placements(&store);
+    assert_eq!(lifecycle(&store, CONTAINER), (true,marker.id));
+    for operations in [
+        json!([{"op":"rename","name":"Renamed empty"}]),
+        json!([{"op":"folder.create","id":FOLDER_A,"name":"Empty folder","parent":null,"key":"a0"}]),
+        json!([{"op":"folder.rename","id":FOLDER_A,"name":"Renamed folder"}]),
+        json!([{"op":"folder.delete","id":FOLDER_A}]),
+        json!([{"op":"retire"}]),
+    ] {
+        let retired = operations[0]["op"] == "retire";
+        let changed = folder_edit(&store, operations);
+        assert_eq!(lifecycle(&store, CONTAINER), (!retired,changed.id));
+        assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0);
+        let before = layout_digests(&store);
+        let directory = tempfile::tempdir().unwrap();
+        let (_, proof) = store.plan_checkpoint(now_ms()+1, directory.path()).unwrap();
+        assert!(proof.passed);
+        assert_eq!(layout_digests(&store), before);
+        store.rebuild_claim_projections().unwrap();
+        assert_eq!(layout_digests(&store), before);
+        store.replay_replication_graph().unwrap();
+        assert_eq!(layout_digests(&store), before);
+    }
+}
+
+#[test]
+fn placement_migration_inactive_legacy_union_does_not_limit_version_two_folder_edits() {
+    let left = Store::open_memory("migration-union-left").unwrap();
+    let right = Store::open_memory("migration-union-right").unwrap();
+    folder_edit(&left, json!([{"op":"create","name":"Offline union"}]));
+    sync(&left, &right);
+    let per_writer = fractal_schema::arrangements::MAX_PLACEMENTS / 2 + 1;
+    for (store, start) in [(&left,0),(&right,per_writer)] {
+        let operations: Vec<_> = (start..start+per_writer).map(|index| json!({
+            "op":"subject.place","subject":format!("agent/migration-union/{index}"),
+            "folder":null,"key":"a0"
+        })).collect();
+        for batch in operations.chunks(fractal_schema::arrangements::MAX_OPERATIONS) {
+            folder_edit(store, json!(batch));
+        }
+    }
+    sync(&right, &left);
+    let retained: usize = left.readers.get().query_row(
+        "SELECT COUNT(*) FROM arrangement_registers WHERE subject=?1 AND register LIKE 'placement/%'",
+        [CONTAINER], |row| row.get(0),
+    ).unwrap();
+    assert!(retained > fractal_schema::arrangements::MAX_PLACEMENTS);
+    assert_eq!(left.edit_arrangement(&arrangement_input(json!([{"op":"rename","name":"Legacy limit"}])),
+        &BTreeMap::new()).unwrap_err().code, "arrangement-limit");
+    migrate_placements(&left);
+    folder_edit(&left, json!([{"op":"rename","name":"Migrated union"}]));
+    folder_edit(&left, json!([{"op":"folder.create","id":FOLDER_A,"name":"New folder","parent":null,"key":"a0"}]));
+    folder_edit(&left, json!([{"op":"folder.rename","id":FOLDER_A,"name":"Renamed folder"}]));
+    folder_edit(&left, json!([{"op":"folder.delete","id":FOLDER_A}]));
+    assert_eq!(left.ordered_membership_count(CONTAINER).unwrap(), 0);
+    let raw: usize = left.readers.get().query_row(
+        "SELECT COUNT(*) FROM ordered_membership_heads WHERE container=?1", [CONTAINER], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(raw, retained);
+    sync(&left, &right);
+    assert_eq!(layout_digests(&left), layout_digests(&right));
+    let before = layout_digests(&left);
+    left.rebuild_claim_projections().unwrap();
+    assert_eq!(layout_digests(&left), before);
+    let directory = tempfile::tempdir().unwrap();
+    let (_, proof) = left.plan_checkpoint(now_ms()+1, directory.path()).unwrap();
+    assert!(proof.passed);
+}
+
+#[test]
+fn placement_migration_mixed_rules_twenty_one_twenty_two_exchange_authority_but_refuse_comparison_and_verification() {
+    use smallclaims::store::checkpoint_agreement::{CheckpointContext, SealTerms, seal_difference};
+    let legacy = Store::open_memory("migration-rules21").unwrap();
+    let modern = Store::open_memory("migration-rules22").unwrap();
+    modern.graph.capture_divergences(true);
+    folder_edit(&legacy, json!([{"op":"create","name":"Mixed peers"}]));
+    let old_layout = canonical_hash(&(
+        "st3.shared-projections.slo-breach-episodes-declared-resource-edges-ordered-membership.v1", fractal_schema::registry().digest(),
+    )).unwrap();
+    let mut exchange = exchange_from(&legacy, &ReplicationInventory::default());
+    let fleet = exchange.fleet_id.clone();
+    assert_ne!(exchange.projection_registry_digest.as_ref(), Some(&old_layout));
+    exchange.projection_registry_digest = Some(old_layout.clone());
+    exchange.schema_digest = canonical_hash(&(&old_layout, &exchange.projection_versions)).unwrap();
+    receive_and_project(&modern, &legacy.origin, &exchange);
+    assert!(modern.arrangement(CONTAINER, u64::MAX).unwrap().is_some());
+    let mut summary = legacy.export_replication_summary(&fleet).unwrap();
+    summary.schema_digest = canonical_hash(&(&old_layout, &summary.projection_versions)).unwrap();
+    summary.projection_registry_digest = Some(old_layout);
+    summary.graph_digest = "different-rules21-projection".into();
+    summary.projection_digests.insert("arrangements".into(), "different-rules21-table".into());
+    let receipt = modern.receive_replication_exchange_asking(&legacy.origin, &fleet, &summary, true).unwrap();
+    assert_eq!(receipt.received, 0);
+    let status = modern.replication_status(true, Some(&fleet), std::slice::from_ref(&legacy.origin)).unwrap();
+    assert!(status.peers[0].projection_comparison_waiting);
+    assert!(status.peers[0].differing_tables.is_empty());
+    assert!(!status.peers[0].sync.as_ref().unwrap().diverged);
+    assert_eq!(status.unhealthy_projections, 0);
+    assert_eq!(status.authority_digest,
+        legacy.replication_status(true, Some(&fleet), &[]).unwrap().authority_digest);
+
+    migrate_placements(&modern);
+    let mut digest = Sha256::new();
+    digest.update(b"st3-checkpoint-rules-v1\0");
+    digest.update(25_u32.to_be_bytes());
+    digest.update(checkpoint_rules::rules_description().as_bytes());
+    let rules25 = hex::encode(digest.finalize());
+    assert_eq!(checkpoint_rules::RULES_VERSION, 26);
+    assert_ne!(rules25, checkpoint_rules::rules_digest());
+    let terms26 = SealTerms {
+        cut_unix_ms: now_ms(),
+        participants: BTreeSet::from([legacy.origin.clone(), modern.origin.clone()]),
+        sealed_digest: "a".repeat(64),
+        rules_digest: checkpoint_rules::rules_digest(),
+    };
+    let terms25 = SealTerms { rules_digest: rules25, ..terms26.clone() };
+    assert_eq!(seal_difference(&terms26, &terms25), "rules");
+    let directory = tempfile::tempdir().unwrap();
+    let context = CheckpointContext { now_unix_ms: now_ms(), configured_peers: vec![legacy.origin.clone()],
+        scratch: directory.path().to_owned(), reviewer: "person/ada".into() };
+    let before = modern.index().unwrap();
+    let mut actions = Vec::new();
+    // Mismatched rules must return before reading a seal row or running a proof.
+    modern.graph.verify_checkpoint("checkpoint/mixed-migration-rules", &terms25, 0, &context, &mut actions).unwrap();
+    assert!(actions.is_empty());
+    assert_eq!(modern.index().unwrap(), before);
+}
+
 #[test]
 fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
     use fractal_schema::lifecycle::VisibilityPolicy::{
@@ -1131,7 +1550,7 @@ fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
                 assert!(rows(&store).is_empty(), "{family}");
             }
             MissionDeclaration => {
-                store.retire_mission(member, "person/ada", "registry-mission-retired").unwrap();
+                store.retire_mission(member, "person/ada", "registry-mission-retired", None).unwrap();
                 assert!(rows(&store).is_empty(), "{family}");
             }
             Document => {

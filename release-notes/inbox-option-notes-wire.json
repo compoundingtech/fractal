@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Inbox sends the chosen answer's note and every note on other named options together. The send line lists the notes, stored answers preserve them, and the asking agent receives each note once. A named dismiss option carries its own note as the selected answer's text.",
+  "replay": {"status": "none", "detail": "No claim replay changes; existing answers remain readable."},
+  "schema": {"status": "changed", "detail": "Answer inputs and stored typed answers accept optional option_notes entries containing a named option id and nonblank text. No database or schema-version changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or digest changes; no coordinated upgrade required."},
+  "compatibility": {"status": "changed", "detail": "The TUI requires person-answer-option-notes version 1 before sending other-option notes, refusing and retaining drafts on older daemons. Answers without these notes omit the field. Summaries retain all notes for older tolerant readers; older strict schema validators may refuse extended answers. Generic delegated completion claims must include every option note in their summary and are explicitly refused otherwise."},
+  "downtime": {"status": "none", "detail": "No expected interruption or additional startup work."},
+  "manual": {"status": "none", "detail": "No configuration changes or re-pairing required."},
+  "recovery": {"status": "changed", "detail": "A refused Inbox answer retains its option binding and every note in the running TUI. Drafts are not persisted across TUI restarts."}
+}

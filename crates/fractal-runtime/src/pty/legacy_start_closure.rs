@@ -33,13 +33,14 @@ pub struct LegacyStartClosureEvidence {
 #[derive(Debug)]
 pub struct LegacyStartProofUnavailable {
     pub stage: &'static str,
-    pub pid: u32,
+    pub pid: Option<u32>,
+    pub unit: Option<String>,
     pub errno: Option<i32>,
 }
 
 impl std::fmt::Display for LegacyStartProofUnavailable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "legacy start proof unavailable at {} for pid {}", self.stage, self.pid)
+        write!(formatter, "legacy start proof unavailable at {} (pid {:?}, unit {:?})", self.stage, self.pid, self.unit)
     }
 }
 
@@ -116,7 +117,16 @@ fn require_complete_procfs() -> std::result::Result<(), ProcfsHidesProcesses> {
 fn process_proof_error(stage: &'static str, pid: u32, error: anyhow::Error) -> anyhow::Error {
     LegacyStartProofUnavailable {
         stage,
-        pid,
+        pid: Some(pid),
+        unit: None,
+        errno: error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error),
+    }.into()
+}
+
+#[cfg(target_os = "linux")]
+fn unit_proof_error(stage: &'static str, unit: &str, error: anyhow::Error) -> anyhow::Error {
+    LegacyStartProofUnavailable {
+        stage, pid: None, unit: Some(unit.into()),
         errno: error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error),
     }.into()
 }
@@ -188,12 +198,16 @@ impl PtyRuntime {
             if let Some(scope) = row.tags.get("st3.scope-unit") {
                 recorded_scopes.insert(scope.clone());
             }
-            let matching_units = matching_units(id, &manager_units()?)?;
+            ensure!(row.tags.get("st3.isolation").is_some_and(|mode| mode == "scope")
+                && !recorded_scopes.is_empty(), unit_proof_error(
+                    "scope-provenance", id, anyhow::anyhow!("legacy scope isolation is unproved")));
+            let units = manager_units().map_err(|error| unit_proof_error("manager-enumeration", "user-manager", error))?;
+            let matching_units = matching_units(id, &units)?;
             if !matching_units.is_empty() {
                 return Ok(None);
             }
             for scope in &recorded_scopes {
-                if !scope_not_loaded(scope)? {
+                if !scope_not_loaded(scope).map_err(|error| unit_proof_error("recorded-scope", scope, error))? {
                     return Ok(None);
                 }
             }
@@ -202,7 +216,7 @@ impl PtyRuntime {
             let runtime_root = self.root.canonicalize().context("resolve legacy PTY root")?;
             ensure!(std::fs::metadata(&runtime_root)?.uid() == owner_uid,
                 "legacy PTY root is owned by another host user");
-            let operation_pids = operation_processes(owner_uid, operation)?;
+            let operation_pids = operation_processes(owner_uid, operation, id, &recorded_scopes)?;
             let evidence = LegacyStartClosureEvidence {
                 version: 1,
                 runtime_id: id.into(),
@@ -261,17 +275,35 @@ fn manager_units() -> Result<Vec<ManagerUnit>> {
 #[cfg(target_os = "linux")]
 fn matching_units(id: &str, units: &[ManagerUnit]) -> Result<Vec<String>> {
     let safe = crate::isolate::sanitize(id);
-    let prefixes = [format!("st3-{safe}-"), format!("st3-work-{safe}-"),
-        format!("st3-pty-server-{safe}-")];
     let mut matching = BTreeSet::new();
     for unit in units {
         ensure!(!unit.unit.is_empty() && !unit.load.is_empty()
-            && !unit.active.is_empty() && !unit.sub.is_empty(), "incomplete manager unit");
-        if prefixes.iter().any(|prefix| unit.unit.starts_with(prefix)) {
+            && !unit.active.is_empty() && !unit.sub.is_empty(),
+            unit_proof_error("manager-unit", &unit.unit, anyhow::anyhow!("incomplete manager unit")));
+        if runtime_unit_matches(&unit.unit, &safe) {
             matching.insert(unit.unit.clone());
         }
     }
     Ok(matching.into_iter().collect())
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_unit_matches(unit: &str, safe: &str) -> bool {
+    if crate::priority::server_identity(unit) == Some(safe) {
+        return true;
+    }
+    ["st3-work", "st3"].iter().any(|product| {
+        crate::isolate::scope_identity(product, unit).is_some_and(|identity| {
+            if identity == safe { return true; }
+            // Operation-bound work scopes append a UUID to the runtime identity.
+            let Some(operation) = identity.strip_prefix(safe).and_then(|tail| tail.strip_prefix('-')) else {
+                return false;
+            };
+            operation.len() == 36 && operation.bytes().enumerate().all(|(i, byte)| {
+                if matches!(i, 8 | 13 | 18 | 23) { byte == b'-' } else { byte.is_ascii_hexdigit() }
+            })
+        })
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -292,15 +324,24 @@ fn scope_not_loaded(scope: &str) -> Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-fn operation_processes(owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
-    operation_processes_in(Path::new("/proc"), owner_uid, operation)
+fn operation_processes(owner_uid: u32, operation: &str, id: &str, scopes: &BTreeSet<String>) -> Result<Vec<u32>> {
+    operation_processes_in(Path::new("/proc"), owner_uid, operation, id, scopes)
 }
 
 #[cfg(target_os = "linux")]
-fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> Result<Vec<u32>> {
+fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str, id: &str, scopes: &BTreeSet<String>) -> Result<Vec<u32>> {
+    operation_processes_with_visibility(proc_root, owner_uid, operation, id, scopes, require_complete_procfs())
+}
+
+#[cfg(target_os = "linux")]
+fn operation_processes_with_visibility(
+    proc_root: &Path, owner_uid: u32, operation: &str, id: &str, scopes: &BTreeSet<String>,
+    visibility: std::result::Result<(), ProcfsHidesProcesses>,
+) -> Result<Vec<u32>> {
     use std::os::unix::fs::MetadataExt as _;
-    require_complete_procfs()?;
+    visibility?;
     let mut matching = BTreeSet::new();
+    let safe = crate::isolate::sanitize(id);
     for entry in std::fs::read_dir(proc_root).context("enumerate legacy operation processes")? {
         let entry = entry?;
         let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
@@ -311,26 +352,53 @@ fn operation_processes_in(proc_root: &Path, owner_uid: u32, operation: &str) -> 
         let directory = match File::open(entry.path()) {
             Ok(directory) => directory,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error).context("open proc process directory"),
+            Err(error) => return Err(process_proof_error("proc-directory", pid, error.into())),
         };
         let path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
         let status = match std::fs::read_to_string(path.join("status")) {
             Ok(status) => status,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error).context("read process ownership"),
+            Err(error) => return Err(process_proof_error("proc-status", pid, error.into())),
         };
-        let uids = status.lines().find_map(|line| line.strip_prefix("Uid:"))
-            .context("process ownership is missing")?.split_whitespace()
-            .map(str::parse::<u32>).collect::<std::result::Result<Vec<_>, _>>()?;
-        ensure!(uids.len() == 4, "process ownership is incomplete");
-        if !uids.contains(&owner_uid) && directory.metadata()?.uid() != owner_uid {
+        let owned = (|| -> Result<bool> {
+            let uids = status.lines().find_map(|line| line.strip_prefix("Uid:"))
+                .context("process ownership is missing")?.split_whitespace()
+                .map(str::parse::<u32>).collect::<std::result::Result<Vec<_>, _>>()?;
+            ensure!(uids.len() == 4, "process ownership is incomplete");
+            Ok(uids.contains(&owner_uid) || directory.metadata()?.uid() == owner_uid)
+        })().map_err(|error| process_proof_error("proc-status", pid, error))?;
+        if !owned {
             continue;
         }
+        if !candidate_process(&path, &safe, scopes, pid)? { continue; }
         if owner_process_has_operation_in_complete_procfs(&path, operation, pid)? {
             matching.insert(pid);
         }
     }
     Ok(matching.into_iter().collect())
+}
+
+#[cfg(target_os = "linux")]
+fn candidate_process(path: &Path, safe: &str, scopes: &BTreeSet<String>, pid: u32) -> Result<bool> {
+    let cgroup = match std::fs::read_to_string(path.join("cgroup")) {
+        Ok(cgroup) => cgroup,
+        Err(error) => {
+            if process_exited(path).map_err(|error| process_proof_error("proc-stat", pid, error))? {
+                return Ok(false);
+            }
+            return Err(process_proof_error("proc-cgroup", pid, error.into()));
+        }
+    };
+    // Scope isolation puts every launched producer and descendant in the work
+    // scope (or the server's dedicated scope); fork/exec cannot escape it.
+    // Before joining, the launcher holds the spawn lock we now own. Thus neither
+    // an unrelated login/service cgroup nor a recycled PID can belong to this
+    // start. Check every path component to include nested delegated cgroups.
+    ensure!(cgroup.lines().any(|line| line.starts_with("0::/")),
+        process_proof_error("proc-cgroup", pid, anyhow::anyhow!("missing unified process cgroup")));
+    Ok(cgroup.lines().filter_map(|line| line.strip_prefix("0::"))
+        .flat_map(|path| path.split('/'))
+        .any(|unit| scopes.contains(unit) || runtime_unit_matches(unit, safe)))
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -470,9 +538,92 @@ mod tests {
     #[test]
     fn complete_manager_parser_refuses_missing_fields_and_matches_all_runtime_units() {
         assert!(serde_json::from_str::<Vec<ManagerUnit>>(r#"[{"unit":"st3-work-1.scope"}]"#).is_err());
-        let units = ["st3-work-1.scope", "st3-pty-server-work-2.scope", "st3-work-work-3.scope", "unrelated.scope"]
-            .map(|unit| ManagerUnit { unit: unit.into(), load: "loaded".into(), active: "inactive".into(), sub: "dead".into() });
+        let units = [crate::scope_unit("st3", "work"), crate::server_unit("work", 2),
+            crate::scope_unit("st3-work", "work"), "unrelated.scope".into()]
+            .map(|unit| ManagerUnit { unit, load: "loaded".into(), active: "inactive".into(), sub: "dead".into() });
         assert_eq!(matching_units("work", &units).unwrap().len(), 3);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successor_seats_are_not_the_legacy_identity() {
+        let operation = "01234567-89ab-7cde-8fab-0123456789ab";
+        let units = [
+            crate::scope_unit("st3", &format!("repo.worker-2-{operation}")),
+            crate::server_unit("repo.worker-2", 42),
+        ].map(|unit| ManagerUnit { unit, load: "loaded".into(), active: "active".into(), sub: "running".into() });
+        assert!(matching_units("repo.worker", &units).unwrap().is_empty());
+        assert_eq!(matching_units("repo.worker-2", &units).unwrap().len(), 2);
+        assert!(runtime_unit_matches(&crate::scope_unit("st3", &format!("repo.worker-{operation}")), "repo.worker"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn server_prefixed_runtime_work_scope_is_still_a_candidate() {
+        let id = "pty-server-repo.worker";
+        let unit = crate::scope_unit("st3", id);
+        let units = [ManagerUnit { unit: unit.clone(), load: "loaded".into(),
+            active: "active".into(), sub: "running".into() }];
+        assert_eq!(matching_units(id, &units).unwrap(), vec![unit.clone()]);
+        let root = tempfile::tempdir().unwrap();
+        let process = root.path().join("123");
+        std::fs::create_dir(&process).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        std::fs::write(process.join("status"), format!("Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n")).unwrap();
+        std::fs::write(process.join("stat"), "123 (producer) S 1 2 3").unwrap();
+        std::fs::write(process.join("cgroup"), format!("0::/user.slice/{unit}\n")).unwrap();
+        std::fs::write(process.join("environ"), b"FRACTAL_START_OPERATION=op\0").unwrap();
+        let scopes = BTreeSet::from([crate::scope_unit("st3", id)]);
+        assert!(!scopes.contains(&unit));
+        let mut evidence = closed();
+        evidence.operation_pids = operation_processes_with_visibility(root.path(), uid, "op", id, &scopes, Ok(())).unwrap();
+        assert_eq!(evidence.operation_pids, vec![123]);
+        assert!(!positive(&evidence));
+        std::fs::remove_file(process.join("environ")).unwrap();
+        std::fs::create_dir(process.join("environ")).unwrap();
+        let error = operation_processes_with_visibility(root.path(), uid, "op", id, &scopes, Ok(())).unwrap_err();
+        let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
+        assert_eq!((refusal.stage, refusal.pid), ("proc-environ", Some(123)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_candidate_cgroups_require_readable_environments() {
+        let root = tempfile::tempdir().unwrap();
+        let process = root.path().join("123");
+        std::fs::create_dir(&process).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        std::fs::write(process.join("status"), format!("Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n")).unwrap();
+        std::fs::write(process.join("stat"), "123 (sshd-session) S 1 2 3").unwrap();
+        // A directory produces a deterministic unreadable-environ error even as root.
+        std::fs::create_dir(process.join("environ")).unwrap();
+        for unit in ["session-1.scope", "user@1000.service", "sd-pam.service",
+            "st3-pty-server-repo.worker-2-42.scope"] {
+            std::fs::write(process.join("cgroup"), format!("0::/user.slice/{unit}\n")).unwrap();
+            assert!(operation_processes_with_visibility(root.path(), uid, "op", "repo.worker", &BTreeSet::new(), Ok(())).unwrap().is_empty());
+        }
+        for unit in [crate::scope_unit("st3", "repo.worker"),
+            crate::server_unit("repo.worker", 42), "recorded.scope".into()] {
+            std::fs::write(process.join("cgroup"), format!("0::/user.slice/{unit}/nested\n")).unwrap();
+            let scopes = BTreeSet::from(["recorded.scope".into()]);
+            let error = operation_processes_with_visibility(root.path(), uid, "op", "repo.worker", &scopes, Ok(())).unwrap_err();
+            let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
+            assert_eq!(refusal.stage, "proc-environ");
+            assert_eq!(refusal.pid, Some(123));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hidden_procfs_refuses_before_scanning_candidates() {
+        let visibility = validate_procfs_mount(Ok(
+            "42 1 0:1 / /proc rw - proc proc rw,hidepid=invisible\n".into()), 42);
+        let root = tempfile::tempdir().unwrap();
+        let error = operation_processes_with_visibility(
+            root.path(), 1000, "op", "repo.worker", &BTreeSet::new(), visibility).unwrap_err();
+        let refusal = error.downcast_ref::<ProcfsHidesProcesses>().unwrap();
+        assert_eq!(refusal.detail, "procfs-hides-processes");
+        assert_eq!(refusal.mount_options.as_deref(), Some("rw;rw,hidepid=invisible"));
     }
 
     #[cfg(target_os = "linux")]
@@ -481,7 +632,7 @@ mod tests {
         let variable = "FRACTAL_START_OPERATION";
         let operation = "fractal-runtime-legacy-proof-native-test";
         if let Err(expected) = require_complete_procfs() {
-            let error = operation_processes(unsafe { libc::geteuid() }, operation).unwrap_err();
+            let error = operation_processes(unsafe { libc::geteuid() }, operation, "work", &BTreeSet::new()).unwrap_err();
             let refusal = error.downcast_ref::<ProcfsHidesProcesses>().unwrap();
             assert_eq!(refusal.detail, expected.detail);
             assert_eq!(refusal.mount_options, expected.mount_options);
@@ -495,9 +646,12 @@ mod tests {
         std::os::unix::fs::symlink(
             format!("/proc/{}", child.id()), proc_root.path().join(child.id().to_string()),
         ).unwrap();
+        let scopes = std::fs::read_to_string(format!("/proc/{}/cgroup", child.id())).unwrap()
+            .lines().filter_map(|line| line.strip_prefix("0::"))
+            .flat_map(|path| path.split('/')).map(str::to_owned).collect();
         let deadline = Instant::now() + Duration::from_secs(5);
         let result = loop {
-            match operation_processes_in(proc_root.path(), unsafe { libc::geteuid() }, operation) {
+            match operation_processes_in(proc_root.path(), unsafe { libc::geteuid() }, operation, "work", &scopes) {
                 Ok(pids) if !pids.contains(&child.id()) && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -593,7 +747,7 @@ mod tests {
                     .context("hidden procfs producer must return a typed refusal")?;
                 assert_eq!(refusal.detail, expected.detail);
                 assert_eq!(refusal.mount_options, expected.mount_options);
-                let enumeration = operation_processes(owner_uid, OPERATION).unwrap_err();
+                let enumeration = operation_processes(owner_uid, OPERATION, "work", &BTreeSet::new()).unwrap_err();
                 let enumeration = enumeration.downcast_ref::<ProcfsHidesProcesses>()
                     .context("hidden procfs enumeration must refuse, not return a partial inventory")?;
                 assert_eq!(enumeration.detail, refusal.detail);
@@ -630,12 +784,19 @@ mod tests {
             anyhow::ensure!(uids.contains(&owner_uid) || metadata_uid == owner_uid,
                 "positive owner-pid inclusion failed: {diagnostics}");
             anyhow::ensure!(matches!(state, "S" | "R"), "producer is not live: {diagnostics}");
-            let error = owner_process_has_operation(&path, OPERATION, pid)
+            let proc_root = tempfile::tempdir()?;
+            std::os::unix::fs::symlink(&path, proc_root.path().join(pid.to_string()))?;
+            let cgroup = std::fs::read_to_string(path.join("cgroup"))?;
+            assert!(operation_processes_in(proc_root.path(), owner_uid, OPERATION,
+                "unrelated.fixture", &BTreeSet::new())?.is_empty());
+            let scopes = cgroup.lines().filter_map(|line| line.strip_prefix("0::"))
+                .flat_map(|path| path.split('/')).map(str::to_owned).collect();
+            let error = operation_processes_in(proc_root.path(), owner_uid, OPERATION, "work", &scopes)
                 .err().with_context(|| format!("unreadable producer was incorrectly excluded: {diagnostics}"))?;
             let refusal = error.downcast_ref::<LegacyStartProofUnavailable>()
                 .with_context(|| format!("production helper returned an untyped refusal: {diagnostics}"))?;
             assert_eq!(refusal.stage, "proc-environ", "{diagnostics}");
-            assert_eq!(refusal.pid, pid, "{diagnostics}");
+            assert_eq!(refusal.pid, Some(pid), "{diagnostics}");
             assert_eq!(refusal.errno, Some(libc::EACCES), "{diagnostics}");
             anyhow::ensure!(errno == Some(libc::EACCES), "positive EACCES read failed: {diagnostics}");
             eprintln!("{TEST}: positive owner-pid inclusion and EACCES: {diagnostics}");
@@ -801,7 +962,7 @@ mod tests {
         let error = owner_process_has_operation_in_complete_procfs(proc.path(), "op", 123).unwrap_err();
         let refusal = error.downcast_ref::<LegacyStartProofUnavailable>().unwrap();
         assert_eq!(refusal.stage, "proc-environ");
-        assert_eq!(refusal.pid, 123);
+        assert_eq!(refusal.pid, Some(123));
         assert_eq!(refusal.errno, Some(libc::ENOENT));
         std::fs::write(proc.path().join("stat"), "123 (producer) Z 1 2 3").unwrap();
         assert!(!owner_process_has_operation_in_complete_procfs(proc.path(), "op", 123).unwrap());

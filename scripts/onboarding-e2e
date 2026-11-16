@@ -295,7 +295,11 @@ class Run:
 
     def require_initial_roster(self):
         # Health/socket startup is not roster readiness. No polling or implicit CLI wait.
-        r=self.execute("Initial history roster publication",shlex.join(["curl","--silent","--show-error","--fail","--unix-socket",f"/run/user/{self.m.uid}/st3.sock","http://localhost/v1/client/agents?history=true&min_cut=0&limit=200"]),timeout=15)
+        select_socket=f'socket=/run/user/{self.m.uid}/fractal.sock\n'
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+        select_socket+=f'if [ ! -e "$socket" ] && [ -e /run/user/{self.m.uid}/st3.sock ]; then socket=/run/user/{self.m.uid}/st3.sock; fi\n'
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+        r=self.execute("Initial history roster publication",select_socket+'curl --silent --show-error --fail --unix-socket "$socket" '+shlex.quote("http://localhost/v1/client/agents?history=true&min_cut=0&limit=200"),timeout=15)
         if r["exit"]: raise RuntimeError("initial roster publication failed")
         payload=json.loads(r["stdout"])
         if payload.get("snapshot",{}).get("store_index",-1)<0:

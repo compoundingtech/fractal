@@ -16,6 +16,7 @@ pub struct CardReads {
     owned: Option<BTreeMap<String, BTreeSet<String>>>,
     desired: HashMap<String, Option<DesiredRow>>,
     actual: HashMap<String, ActualState>,
+    pub(super) hide_reserved: bool,
 }
 
 /// A subject's folded actual state and its selected actual-state claim: the claim, its origin
@@ -82,7 +83,11 @@ fn json_list<'a>(subjects: impl IntoIterator<Item = &'a String>) -> Result<Strin
 
 impl CardReads {
     pub fn new(index: u64) -> Self {
-        Self { index, owned: None, desired: HashMap::new(), actual: HashMap::new() }
+        Self { index, owned: None, desired: HashMap::new(), actual: HashMap::new(), hide_reserved: false }
+    }
+
+    pub fn for_generic_reads(index: u64) -> Self {
+        Self { hide_reserved: true, ..Self::new(index) }
     }
 
     /// Read the declarations of `subjects` not read yet: one read of the set receipts, and one
@@ -108,7 +113,7 @@ impl CardReads {
             match owned.get(&subject).map(BTreeSet::len) {
                 Some(2..) => {
                     // As `owned_sets::owner` refuses it.
-                    return Err(anyhow::Error::new(St3Error::new(
+                    return Err(anyhow::Error::new(FractalError::new(
                         "owned-set-conflict",
                         format!("{subject} has conflicting set owners"),
                     )));
@@ -214,9 +219,13 @@ impl CardReads {
             let mut folded = HashSet::new();
             let mut again = BTreeSet::new();
             while let Some(row) = rows.next()? {
+                let kind: String = row.get(2)?;
+                if self.hide_reserved && fractal_schema::notice::is_reserved_kind(&kind) {
+                    continue;
+                }
                 let subject = row.get::<_, String>(0)?;
                 let item = (
-                    (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?),
+                    (row.get(1)?, kind, row.get(3)?, row.get(4)?, row.get(5)?),
                     (row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?),
                 );
                 match current.as_mut() {
@@ -442,15 +451,14 @@ impl Store {
         }
         // `has_unknown_claim_at` at a snapshot: an idempotency conflict, then an unknown kind.
         let mut conflicts = connection.prepare_cached(
-            "SELECT subjects.value,
-                    (SELECT operations.id FROM operations
-                     CROSS JOIN claims INDEXED BY claims_operation_index
-                       ON +operations.id=json_extract(claims.body, '$._operation.id')
-                     WHERE operations.state='conflict'
-                       AND json_extract(claims.body, '$._operation.id') IS NOT NULL
-                       AND claims.subject=subjects.value AND claims.store_index<=?2
-                     ORDER BY operations.id LIMIT 1)
-             FROM json_each(?1) subjects",
+            "SELECT subjects.value, operations.id, claims.kind
+             FROM json_each(?1) subjects CROSS JOIN operations
+             CROSS JOIN claims INDEXED BY claims_operation_index
+               ON +operations.id=json_extract(claims.body, '$._operation.id')
+             WHERE operations.state='conflict' AND claims.subject=subjects.value
+               AND json_extract(claims.body, '$._operation.id') IS NOT NULL
+               AND claims.store_index<=?2
+             ORDER BY operations.id",
         )?;
         let mut kinds = connection.prepare_cached(
             "SELECT DISTINCT claims.subject, claims.kind
@@ -470,17 +478,24 @@ impl Store {
             let list = json_list(&chunk)?;
             let mut conflict = HashMap::new();
             for row in conflicts.query_map(params![list, store_index], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
             })? {
-                let (subject, operation) = row?;
-                conflict.insert(subject, operation);
+                let (subject, operation, kind) = row?;
+                if !reads.hide_reserved || !fractal_schema::notice::is_reserved_kind(&kind) {
+                    conflict.entry(subject).or_insert(operation);
+                }
             }
             let mut subject_kinds = HashMap::<String, Vec<String>>::new();
+            let mut contaminated = HashSet::new();
             for row in kinds.query_map(params![list, store_index], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })? {
                 let (subject, kind) = row?;
-                subject_kinds.entry(subject).or_default().push(kind);
+                if !reads.hide_reserved || !fractal_schema::notice::is_reserved_kind(&kind) {
+                    subject_kinds.entry(subject).or_default().push(kind);
+                } else {
+                    contaminated.insert(subject);
+                }
             }
             let undeclared = chunk
                 .iter()
@@ -492,6 +507,21 @@ impl Store {
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                 })? {
                     let (subject, claim) = row?;
+                    let claim = if contaminated.contains(&subject) {
+                        let mut native = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf9e2da198b6b owner=fractal_store::store::card_fold TODO=trace-statement-and-value-representation */ &canonical_sql(
+                            "SELECT id,kind FROM claims INDEXED BY claims_subject_accepted_index
+                             WHERE subject=?1 AND store_index<=?2 ORDER BY CANONICAL_DESC(claims)",
+                        ))?;
+                        let mut rows = native.query(params![subject, store_index])?;
+                        let mut latest = None;
+                        while let Some(row) = rows.next()? {
+                            if !fractal_schema::notice::is_reserved_kind(&row.get::<_, String>(1)?) {
+                                latest = Some(row.get::<_, String>(0)?);
+                                break;
+                            }
+                        }
+                        latest
+                    } else { claim };
                     newest_claim.insert(subject, claim);
                 }
             }
@@ -520,7 +550,7 @@ impl Store {
                 } else {
                     newest_claim.remove(&subject).flatten().into_iter().collect()
                 };
-                let unknown_claim = match conflict.remove(&subject).flatten() {
+                let unknown_claim = match conflict.remove(&subject) {
                     Some(operation) => Some(format!("idempotency-conflict:{operation}")),
                     None => {
                         let mut kinds = subject_kinds.remove(&subject).unwrap_or_default();

@@ -65,6 +65,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -99,14 +121,18 @@ jobs:
             nix4-${{ github.job }}-${{ runner.os }}-
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -124,6 +150,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -228,3 +256,54 @@ jobs:
       contents: read
       issues: write
       actions: read
+    needs: [compat-archives-x86_64-unknown-linux-gnu]
+  compat-archives-x86_64-unknown-linux-gnu:
+    name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact-messaging: ${{ steps['identity-0'].outputs['artifact-name'] }}
+      artifact-id-messaging: ${{ steps.upload-0.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identify the pinned messaging archive
+        id: identity-0
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Restore messaging archive
+        id: archive-0
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Verify and prepare messaging archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-0.outputs.cache-hit }}
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''identity-0''].outputs.path }}"'
+      - name: Save verified messaging archive
+        if: steps.archive-0.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Share verified messaging archive
+        id: upload-0
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps['identity-0'].outputs['artifact-name'] }}
+          path: ${{ steps['identity-0'].outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'

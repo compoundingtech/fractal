@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
-import { ChromeControl } from '@fractal/ui/assistant-ui/shell'
+import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { AgentControl, AgentControlResult } from '../agents/agent-control-port.ts'
@@ -46,14 +46,22 @@ export const agentActions = (agent: { readonly state?: string; readonly activity
   ]
 }
 
-export const AgentActions = ({ agent }: { readonly agent: Pick<Agent, 'ref' | 'name' | 'state' | 'activity'> }): React.ReactNode => {
+/**
+ * The header's one overflow menu: what can be done to the agent now, then View KDL. The agent is optional because a
+ * conversation can outlive its roster row, and its declaration is still worth reading.
+ */
+export const ConversationOverflowMenu = ({ agent, onViewDeclaration }: {
+  readonly agent?: Pick<Agent, 'ref' | 'name' | 'state' | 'activity'> | undefined
+  readonly onViewDeclaration: () => void
+}): React.ReactNode => {
   const port = useDataSource().agentControls
-  const rows = agentActions(agent)
+  const rows = agent === undefined ? [] : agentActions(agent)
   const [confirming, setConfirming] = React.useState<AgentActionRow>()
   const [status, setStatus] = React.useState<string>()
   const [busy, setBusy] = React.useState(false)
   const run = (row: AgentActionRow) => {
     setConfirming(undefined)
+    if (agent === undefined) return
     if (row.key === 'copy') {
       void navigator.clipboard?.writeText(agent.ref).then(() => setStatus(`Copied ${agent.ref}`), () => setStatus(`Could not copy ${agent.ref}`))
       return
@@ -74,11 +82,12 @@ export const AgentActions = ({ agent }: { readonly agent: Pick<Agent, 'ref' | 'n
     <div {...stylex.props(styles.actions)}>
       {status ? <span role="status" {...stylex.props(styles.status)}>{status}</span> : null}
       <Aria.MenuTrigger>
-        <ChromeControl icon="person" label={`Actions for ${agent.name}`} isDisabled={busy} />
+        <ChromeControl icon="more" label="More actions" isDisabled={busy} />
         <Aria.Popover placement="bottom end" {...stylex.props(styles.popover)}>
           <Aria.Menu
-            aria-label={`Actions for ${agent.name}`}
+            aria-label="More actions"
             onAction={(key) => {
+              if (key === 'declaration') { onViewDeclaration(); return }
               const row = rows.find((each) => each.key === key)
               if (row === undefined) return
               if (row.confirm) setConfirming(row)
@@ -86,19 +95,24 @@ export const AgentActions = ({ agent }: { readonly agent: Pick<Agent, 'ref' | 'n
             }}
             {...stylex.props(styles.menu)}
           >
+            {/* Plain label spans keep RAC from generating aria-labelledby that overrides each full visible aria-label. */}
             {rows.map((row) => (
-              <Aria.MenuItem key={row.key} id={row.key} textValue={row.label} {...stylex.props(styles.menuItem)}>
-                <span {...stylex.props(styles.label)}>{row.label}</span>
-                <span {...stylex.props(styles.what)}>{row.what}</span>
+              <Aria.MenuItem key={row.key} id={row.key} textValue={row.label} aria-label={`${row.label}, ${row.what}`} {...stylex.props(styles.menuItem)}>
+                <span {...stylex.props(styles.label)}>{row.label}</span>{' '}
+                <Aria.Text slot="description" {...stylex.props(styles.what)}>{row.what}</Aria.Text>
               </Aria.MenuItem>
             ))}
+            <Aria.MenuItem id="declaration" textValue="View KDL" aria-label="View KDL, read its whole declaration" {...stylex.props(styles.menuItem, rows.length > 0 && styles.menuItemApart)}>
+              <span {...stylex.props(styles.label)}>View KDL</span>{' '}
+              <Aria.Text slot="description" {...stylex.props(styles.what)}>read its whole declaration</Aria.Text>
+            </Aria.MenuItem>
           </Aria.Menu>
         </Aria.Popover>
       </Aria.MenuTrigger>
       <Aria.ModalOverlay isDismissable isOpen={confirming !== undefined} onOpenChange={(open) => { if (!open) setConfirming(undefined) }} {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>
-          <Aria.Dialog role="alertdialog" aria-label={confirming === undefined ? 'Confirm' : `${confirming.label} ${agent.name}?`} {...stylex.props(styles.dialog)}>
-            {confirming === undefined ? null : (
+          <Aria.Dialog role="alertdialog" aria-label={confirming === undefined || agent === undefined ? 'Confirm' : `${confirming.label} ${agent.name}?`} {...stylex.props(styles.dialog)}>
+            {confirming === undefined || agent === undefined ? null : (
               <>
                 <strong>{confirming.label} {agent.name}?</strong>
                 <p {...stylex.props(styles.what)}>It will {confirming.what}.</p>
@@ -124,6 +138,7 @@ const styles = stylex.create({
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   menu: { padding: s.xs, outline: 'none', maxWidth: 360 },
   menuItem: { display: 'flex', flexDirection: 'column', gap: 2, padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 } },
+  menuItemApart: { marginTop: s.xs, borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.border, borderRadius: 0 },
   label: { color: c.fg },
   what: { margin: 0, color: c.fgMuted, fontSize: t.denseSize },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
@@ -131,3 +146,6 @@ const styles = stylex.create({
   dialog: { display: 'flex', flexDirection: 'column', gap: s.md, padding: s.lg, outline: 'none' },
   choices: { display: 'flex', justifyContent: 'flex-end', gap: s.md },
 })
+
+/** Rendered by the workspace until its call site goes with the tab shell; the actions live in the overflow menu now. */
+export const AgentActions = (_props: { readonly agent: Pick<Agent, 'ref' | 'name' | 'state' | 'activity'> }): React.ReactNode => null

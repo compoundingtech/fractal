@@ -12,7 +12,7 @@ For Fractal claims, missions, replication, runtime ownership, or recovery, start
 
 ## CLI actor contract
 
-`st actor-contract --json` prints the actor syntax of the binary that runs it. It
+`fractal actor-contract --json` prints the actor syntax of the binary that runs it. It
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
 commands. `aliases` lists other names under each canonical command. `contract_sha256` is
@@ -20,6 +20,19 @@ the SHA-256 of compact JSON for `contract`, not of the formatted output. The
 printer computes this digest; the checked-in snapshot omits it and the equality
 test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
+
+Operational reads accept optional leading `--as ACTOR` immediately after these
+leaf paths: `actor-contract`, `agents lane`,
+`agents rename-id proof verify`, `changes list`, `changes show`, `claims ls`, `conversations export`,
+`fleet anchor show`, `gate ci-passed`, `gate merged`,
+`missions blocked`, `missions waiting-on`,
+`missions rename-id proof verify`, `recorder report`,
+`subject history`, `terminals peek`, `trace show`, and `validate`.
+The CLI emits a stderr read-attribution record with the actor and canonical command
+path; stdout, queried subjects, filters, and daemon authorization are unchanged.
+An agent caller must supply its literal environment identity; a different explicit
+actor or an empty/conflicting agent identity fails before the read, including offline
+commands. Omitting `--as` preserves the existing read behavior.
 
 Version policy:
 
@@ -55,7 +68,7 @@ After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
 
 ```sh
-st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
 cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
@@ -67,7 +80,7 @@ if an alias changes. Supplement coverage also compares the reviewed setup/UI,
 note and changes paths, including every descendant, against the real clap
 inventory. Additions or removals require reviewing the identity handlers named
 beside `implicit_person`; mutation tests exercise added setup/UI descendants and
-a removed UI descendant. `st ui open` resolves the configured person before
+a removed UI descendant. `fractal ui open` resolves the configured person before
 queueing a request in that person's terminal UI request directory.
 This is freshness coverage, not proof of live runtime fallback or authority.
 Host, account, repository and harness policy remains in the
@@ -84,8 +97,16 @@ nix profile install .
 For local development, enter `nix develop`. The shell provides Rust, sccache,
 cargo-nextest, and mold on Linux. Cargo uses mold for Linux links and the system
 linker on macOS; dev and test builds keep line tables for workspace crates and
-omit dependency debug info. On both platforms the shell sets `RUSTC_WRAPPER` to
-sccache. Run tests with `cargo nextest run --workspace --locked`.
+omit dependency debug info. Both Rust shells provide sccache 0.19.0 (including
+client-side compilation) and default `RUSTC_WRAPPER` only when it is unset.
+An inherited wrapper, including an explicitly empty value, is preserved.
+`SCCACHE_CLIENT_SIDE`, `SCCACHE_SERVER_UDS`, and host cache settings pass through
+unchanged. GitHub Actions still defaults to the CI wrapper, except when a host
+client-side configuration is inherited. Run tests with
+`cargo nextest run --workspace --locked`. The shell's environment contract can
+be checked without building it: `python3 scripts/sccache-shell-env-test`.
+The `ci-script-tests` lane runs its `--offline` mode, evaluating the shared hook
+with fixture package paths and no flake inputs or network access.
 The default and perf shells can opt into an owner-provisioned read-only WebDAV
 cache with `ST_SCCACHE_READ_ENDPOINT` and `ST_SCCACHE_READ_SERVER_PORT`. Leave
 both unset for the existing cache behavior. The port must be separate from the
@@ -295,7 +316,7 @@ domain must belong to a zone in the configured Cloudflare account.
 
 Materialize the pinned `effect-utils` member before installing dependencies,
 as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
-Use the web shell's pnpm 12.15.0, not a separate global install:
+Use the web shell's pnpm 12.17.0, not a separate global install:
 
 ```sh
 mr apply --worktree-mode commit
@@ -464,19 +485,27 @@ registry/file inventory and deterministic newest-first ordering. A public build 
 entries and private source imports; the UI is not the privacy boundary. The emitted
 `changelog.v1.json` describes precisely the entries included in that build.
 
-The Changes disclosure lazily loads prose and acknowledges included IDs on opening. The
-device-local cursor is scoped by origin, product, and deployment channel; `live`, `main`,
-and `stable` do not share cursors. Seen IDs survive rollbacks and skipped builds. No version
-string or timestamp comparison decides whether a change is new. First visits show “Recent
-changes”; subsequent visits show “New since you last looked” followed by “Recent”.
-The Changes trigger is the `changelog` segment of the shared developer bar, next to the build
-version. When the bar overflows, the kit's +N control mirrors its unread dot.
-Its React Aria popover anchors to the visible bar with an 8px gap and restores focus
-on dismissal. It uses the shared light/dark theme, glass surface, and change-kind pills.
+Build identity and recent changes share one entry of the shared developer bar, the `build`
+segment. Its trigger shows the short build identity (revision, age, `*` for uncommitted
+changes) and, while this build lists an entry the device has not acknowledged, an unread dot;
+when the bar overflows, the kit's +N control mirrors that dot. Hovering or focusing the trigger
+shows the kit's identity tooltip and warms the changelog chunk; it never acknowledges.
+The trigger opens the kit's anchored native popover: one build line (full identity in a
+disclosure) above "What's new", which lazily loads prose. Escape closes it and returns focus to
+the trigger.
+
+Changes are acknowledged, and the dot clears in the same commit, when the first readable item
+(the first entry's title, or the empty notice) is wholly visible inside the open popover. The
+kit bounds the popover to the space beside the bar, so on short viewports that item can start
+below the fold; it is then acknowledged once scrolled into view. Loading and failed states
+acknowledge nothing. The device-local cursor is scoped by origin, product, and deployment
+channel; `live`, `main`, and `stable` do not share cursors. Seen IDs survive rollbacks and
+skipped builds. No version string or timestamp comparison decides whether a change is new.
+First visits show “Recent changes”; subsequent visits show “New since you last looked” followed
+by “Recent”, diffed against the cursor as it was when the popover opened.
 The contract and compiler do not depend on a status-bar package or disclosure slot.
 The button names unread changes directly for assistive technology; its dot is decorative.
-Popover dimensions and spacing use composition tokens. Story fixtures are synthetic, and
-already-open story disclosures seed the acknowledged cursor while retaining the opening baseline.
+Popover dimensions and spacing use composition tokens; story fixtures are synthetic.
 
 The `fractal-changelog` PR check requires a newly added entry for product UI source changes
 under `apps/fractal-web` or `packages/fractal-ui`. The `no-changelog` label explicitly opts
@@ -502,7 +531,7 @@ wording consistent when both describe the same change.
 | `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
+The `fractal-tui` package is a library embedded in `fractal`; it has no standalone executable. Its existing
 Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

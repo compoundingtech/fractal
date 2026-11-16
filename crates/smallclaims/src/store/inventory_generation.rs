@@ -54,6 +54,17 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
                  WHERE retired.writer=OLD.writer AND retired.sequence=OLD.sequence AND retired.envelope_hash={old_retired}))"
         ),
     )?;
+    // Envelope rows have no AUTOINCREMENT, so deleting the newest row lets the next insert reuse
+    // its rowid. A snapshot finds additions by `rowid > max_envelope_rowid` and would never list
+    // that envelope, so deleting the tail counts even when the identity stays listed. A trim
+    // rarely deletes the newest row: only an old envelope a peer sent late sits there.
+    create(
+        connection,
+        "replica_envelopes_inventory_DELETE_TAIL",
+        "replica_envelopes",
+        "DELETE",
+        "WHEN OLD.rowid > COALESCE((SELECT MAX(rowid) FROM replica_envelopes), 0)",
+    )?;
     create(
         connection,
         "retired_envelopes_inventory_INSERT_v2",

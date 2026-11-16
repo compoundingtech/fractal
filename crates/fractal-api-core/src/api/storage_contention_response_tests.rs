@@ -2,7 +2,7 @@
 fn admitted_contention_is_pending_not_a_peer_error_and_other_faults_stay_errors() {
     for code in ["database-busy", "database-locked"] {
         assert_eq!(super::admitted_projection_result(Err(anyhow::Error::new(
-            super::St3Error::new(code, "fixture contention")))).unwrap(), None);
+            super::FractalError::new(code, "fixture contention")))).unwrap(), None);
         assert_eq!(super::client_error_code(Some(code)), code);
     }
     assert!(super::admitted_projection_result(Err(anyhow::anyhow!("other fault"))).is_err());
@@ -70,7 +70,7 @@ fn private_projection_context_stays_out_of_client_details() {
 }
 #[test]
 fn expired_idempotency_response_is_a_terminal_client_error() {
-    let error = super::ApiError::bad(super::St3Error::new(
+    let error = super::ApiError::bad(super::FractalError::new(
         "idempotency-key-expired",
         "already committed",
     ));
@@ -88,16 +88,16 @@ fn expired_idempotency_response_is_a_terminal_client_error() {
 #[test]
 fn typed_sqlite_contention_is_a_service_failure_not_input_validation() {
     for code in ["database-busy", "database-locked"] {
-        let response = super::ApiError::bad(super::St3Error::new(code, "storage contention"));
+        let response = super::ApiError::bad(super::FractalError::new(code, "storage contention"));
         assert_eq!(response.status, super::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.code, code);
     }
-    assert_eq!(super::ApiError::bad(super::St3Error::new("internal", "other fault")).status, super::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(super::ApiError::bad(super::FractalError::new("internal", "other fault")).status, super::StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[test]
 fn diagnostic_rate_limit_keeps_its_public_retryable_code() {
-    let response = super::ApiError::bad(super::St3Error::new("client-diagnostics-rate-limit", "slow down"));
+    let response = super::ApiError::bad(super::FractalError::new("client-diagnostics-rate-limit", "slow down"));
     assert_eq!(response.status, super::StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(super::client_error_code(Some(&response.code)), "rate-limited");
     assert!(super::client_error_retryable(response.status, Some("rate-limited")));

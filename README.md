@@ -42,7 +42,9 @@ setup still need a manual rehearsal; native builds do not establish that evidenc
 server. If no browser opener is available, it prints the URL instead.
 
 The legacy executable names `st` and `st3` emit a deprecation warning on stderr,
-including in JSON mode, and will be removed on 2026-11-16. Use `fractal` instead.
+including in JSON mode. Use `fractal` instead. The names are removed once every host
+has adopted `fractal` and an audit finds no remaining caller of `st` or `st3`; no
+calendar date removes them.
 Scripts that need the old names temporarily can set `FRACTAL_SUPPRESS_DEPRECATION=1`
 to suppress this warning; stdout and exit status are unchanged.
 Shell-completion callbacks stay silent. Managed background services and internal

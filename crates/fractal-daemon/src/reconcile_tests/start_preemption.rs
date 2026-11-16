@@ -196,6 +196,7 @@ let operation = fixture.assert_open();
 assert!(fixture.runtime.snapshot_ptys().unwrap().is_empty());
 let state = fixture.root.path().join("state");
 let app = crate::api::router(crate::api::AppState {
+    browser_pairing_login: None,
     seat_admission: Default::default(),
     owning_person: None,
     store: fixture.store.clone(),
@@ -203,6 +204,7 @@ let app = crate::api::router(crate::api::AppState {
     event_notify: tokio::sync::watch::channel(0).0,
     node: "node".into(),
     pty_root: state.join("pty"),
+    api_socket: state.join("api.sock"),
     state_dir: state,
     pty_binary: fixture.real_pty.clone(),
     fleet_id: None,

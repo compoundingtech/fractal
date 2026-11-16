@@ -78,8 +78,8 @@ const BASELINE_RUNS: usize = 5;
 /// The daemon's CPU, in cores, may differ from the baseline by this much whatever the ratio.
 const CPU_SLACK: f64 = 0.05;
 
-/// The daemon's average CPU over the run may not pass this many cores: `load_max_cores` in
-/// `slo/targets.toml`, built into st3, the bound under this synthetic load rather than the
+/// The daemon's average CPU over the run may not pass this many cores: the `cpu` objective's
+/// `load-max-cores` in `slo/objectives.kdl`, built into st3, the bound under this synthetic load rather than the
 /// member's production target. A missing file fails the build and an invalid one fails the run;
 /// there is no default.
 fn cpu_budget() -> f64 {
@@ -348,7 +348,7 @@ struct PathReport {
     p99_ms: f64,
     max_ms: f64,
     budget_ms: f64,
-    /// The path's p99 target in `slo/targets.toml`, when it has one. It describes; the run's
+    /// The path's p99 target in `slo/objectives.kdl`, when it has one. It describes; the run's
     /// gates are `budget_ms` and main's baseline, not this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     descriptive_target_ms: Option<f64>,
@@ -439,7 +439,7 @@ const HOG_MEASURES: &[&str] = &["person-read", "person-read-fresh", "write-ack",
 /// Runs the daemon twice on the same generated store, once alone and once beside a CPU and disk
 /// hog at the priority seats get by default, with the load average held above the core count.
 /// It reports person-read, person-read-fresh, write-ack and message send against the targets in
-/// `slo/targets.toml` (what `GET /v1/client/request-latency` reports) for each run.
+/// `slo/objectives.kdl` (what `GET /v1/client/request-latency` reports) for each run.
 ///
 /// ```sh
 /// ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out TMPDIR=/var/tmp cargo test --release \
@@ -1273,7 +1273,7 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
     ] {
         let target = targets
             .for_path(path)
-            .unwrap_or_else(|| panic!("{path} has no target in slo/targets.toml"));
+            .unwrap_or_else(|| panic!("{path} has no target in slo/objectives.kdl"));
         assert_eq!(descriptive_target(name), Some(target.target(false)), "{name}");
     }
     for name in ["claim", "replication exchange", LONG_POLL] {
@@ -1479,7 +1479,7 @@ fn print(report: &Report) {
             name, path.count, path.p50_ms, path.p99_ms, path.max_ms, path.budget_ms, target
         );
     }
-    println!("target: slo/targets.toml's p99, described and never gated");
+    println!("target: slo/objectives.kdl's p99, described and never gated");
     if !report.targets.is_empty() {
         println!("{:<20} {:>7} {:>8} {:>8} {:>8} {:>8}", "target", "n", "p50 ms", "p99 ms", "max ms", "target");
         for (name, target) in &report.targets {
@@ -1859,12 +1859,14 @@ fn run(
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: NODE.into(),
+        api_socket: root.join("state").join("api.sock"),
         state_dir: root.join("state"),
         pty_root: root.join("pty"),
         pty_binary: pty.clone(),
@@ -2947,7 +2949,7 @@ fn runtime_of(seat: &str) -> String {
     format!("load-{}-runtime", seat.rsplit('/').next().unwrap_or(seat))
 }
 
-/// The path in `slo/targets.toml` a request stands for, when it stands for one. Lease renewal
+/// The path in `slo/objectives.kdl` a request stands for, when it stands for one. Lease renewal
 /// calls the store directly; it is timed as the work action it is.
 fn target_path(name: &str) -> Option<String> {
     match name {
@@ -3002,7 +3004,7 @@ fn target_rows(timings: &BTreeMap<String, Vec<Duration>>) -> BTreeMap<String, Ta
         .collect()
 }
 
-/// A request's descriptive p99 target from `slo/targets.toml`, served on its owner.
+/// A request's descriptive p99 target from `slo/objectives.kdl`, served on its owner.
 fn descriptive_target(name: &str) -> Option<Duration> {
     let path = target_path(name)?;
     Some(fractal_daemon::slo::targets().for_path(&path)?.target(false))

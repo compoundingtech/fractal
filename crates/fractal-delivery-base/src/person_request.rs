@@ -13,8 +13,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub use crate::model::AnswerInput;
-use crate::model::St3Error;
+pub use crate::model::{AnswerInput, OptionNote};
+use crate::model::FractalError;
 
 pub const REQUEST_VERSION: u32 = 1;
 const MAX_ANSWERS: usize = 5;
@@ -22,7 +22,10 @@ const MAX_REASONS: usize = 8;
 const MAX_SUBJECTS: usize = 12;
 const MAX_CONDITIONS: usize = 6;
 const MAX_LINE: usize = 600;
-const MAX_TEXT: usize = 8_000;
+/// The longest text an update asks to have spoken; the notice `speech` field has the same limit.
+const MAX_SPEECH: usize = 300;
+/// The longest answer text a person may give, in characters.
+pub const MAX_TEXT: usize = 8_000;
 const SUBJECT_KINDS: &[&str] = &[
     "pull_request",
     "issue",
@@ -84,6 +87,9 @@ pub struct StructuredRequest {
     pub about: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// An update's words to speak aloud, set only when the person asked to be told the outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
     /// Absent means the asker makes no recommendation.
@@ -136,15 +142,15 @@ pub struct AnswerOption {
     pub conditions: Vec<String>,
 }
 
-fn invalid(message: impl Into<String>) -> St3Error {
-    St3Error::new("invalid-person-request", message.into())
+fn invalid(message: impl Into<String>) -> FractalError {
+    FractalError::new("invalid-person-request", message.into())
 }
 
-fn invalid_answer(message: impl Into<String>) -> St3Error {
-    St3Error::new("invalid-person-answer", message.into())
+fn invalid_answer(message: impl Into<String>) -> FractalError {
+    FractalError::new("invalid-person-answer", message.into())
 }
 
-fn line(name: &str, value: &str) -> Result<(), St3Error> {
+fn line(name: &str, value: &str) -> Result<(), FractalError> {
     if value.trim().is_empty() {
         return Err(invalid(format!("{name} must not be empty")));
     }
@@ -182,7 +188,7 @@ pub fn client_view(request: &Value) -> Value {
 
 impl StructuredRequest {
     /// Parses and checks a request, returning its canonical JSON for the ask claim.
-    pub fn parse(value: &Value) -> Result<(Self, Value), St3Error> {
+    pub fn parse(value: &Value) -> Result<(Self, Value), FractalError> {
         let request: Self = serde_json::from_value(value.clone())
             .map_err(|error| invalid(format!("the request is malformed: {error}")))?;
         request.validate()?;
@@ -191,7 +197,7 @@ impl StructuredRequest {
         Ok((request, canonical))
     }
 
-    pub fn validate(&self) -> Result<(), St3Error> {
+    pub fn validate(&self) -> Result<(), FractalError> {
         if self.version != REQUEST_VERSION {
             return Err(invalid(format!(
                 "this daemon reads request version {REQUEST_VERSION}"
@@ -207,11 +213,24 @@ impl StructuredRequest {
                 "about (the run, step or message where the person asked)",
                 self.about.as_deref().unwrap_or_default(),
             )?;
+            if let Some(speech) = &self.speech {
+                if speech.trim().is_empty() {
+                    return Err(invalid("speech must not be empty"));
+                }
+                if speech.chars().count() > MAX_SPEECH {
+                    return Err(invalid(format!(
+                        "speech must be at most {MAX_SPEECH} characters"
+                    )));
+                }
+            }
         } else {
             line("question", self.question.as_deref().unwrap_or_default())?;
             line("why_person", self.why_person.as_deref().unwrap_or_default())?;
             if self.about.is_some() {
                 return Err(invalid("only an update names what it is about"));
+            }
+            if self.speech.is_some() {
+                return Err(invalid("only an update carries speech"));
             }
         }
         if let Some(summary) = &self.summary {
@@ -368,7 +387,36 @@ impl StructuredRequest {
     /// Resolves a submitted answer to the typed answer the done claim records. A feedback
     /// request also accepts a bare summary as its text, so a client that only sends text can
     /// still answer it.
-    pub fn answer(&self, input: Option<&AnswerInput>, summary: &str) -> Result<Value, St3Error> {
+    pub fn answer(&self, input: Option<&AnswerInput>, summary: &str) -> Result<Value, FractalError> {
+        let mut option_notes = Vec::new();
+        if let Some(input) = input {
+            for note in &input.option_notes {
+                if !self.answers.iter().any(|option| option.id == note.id) {
+                    return Err(invalid_answer(format!(
+                        "option note `{}` must name one of this request's answers",
+                        note.id
+                    )));
+                }
+                if input.id.as_deref() == Some(note.id.as_str()) {
+                    return Err(invalid_answer(
+                        "the chosen answer's note belongs in text, not option_notes",
+                    ));
+                }
+                if option_notes.iter().any(|prior: &OptionNote| prior.id == note.id) {
+                    return Err(invalid_answer(format!(
+                        "option note `{}` must appear only once",
+                        note.id
+                    )));
+                }
+                let text = note.text.trim();
+                if text.is_empty() || text.chars().count() > MAX_TEXT {
+                    return Err(invalid_answer(format!(
+                        "option note text must be nonblank and at most {MAX_TEXT} characters"
+                    )));
+                }
+                option_notes.push(OptionNote { id: note.id.clone(), text: text.to_owned() });
+            }
+        }
         if self.request_type == RequestType::Update {
             // Opening an update or pressing read clears it; any summary is only history.
             if input.is_some_and(|input| {
@@ -387,6 +435,9 @@ impl StructuredRequest {
             && !self.answers.iter().any(|option| option.id == DISMISS)
         {
             let mut answer = json!({"type": self.request_type.as_str(), "outcome": "dismissed"});
+            if !option_notes.is_empty() {
+                answer["option_notes"] = json!(option_notes);
+            }
             if let Some(text) = input
                 .and_then(|input| input.text.as_deref())
                 .map(str::trim)
@@ -405,14 +456,11 @@ impl StructuredRequest {
         let input = match input {
             Some(input) => input,
             None if self.request_type == RequestType::Feedback && !summary.trim().is_empty() => {
-                fallback = AnswerInput {
-                    id: None,
-                    text: Some(summary.to_owned()),
-                };
+                fallback = AnswerInput { id: None, text: Some(summary.to_owned()), option_notes: Vec::new() };
                 &fallback
             }
             None => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "answer-required",
                     format!(
                         "this {} needs one of its named answers: {}",
@@ -433,6 +481,9 @@ impl StructuredRequest {
             )));
         }
         let mut answer = json!({"type": self.request_type.as_str()});
+        if !option_notes.is_empty() {
+            answer["option_notes"] = json!(option_notes);
+        }
         match (self.request_type, input.id.as_deref()) {
             (RequestType::Update, _) => unreachable!("an update returns above"),
             (RequestType::Feedback, Some(_)) => {
@@ -446,7 +497,7 @@ impl StructuredRequest {
             }
             (RequestType::Choice, None) => {
                 if !self.custom {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "answer-required",
                         format!(
                             "this choice needs one of its options: {}",
@@ -460,7 +511,7 @@ impl StructuredRequest {
                 return Ok(answer);
             }
             (RequestType::Decision, None) => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "answer-required",
                     format!(
                         "this decision needs one of its named answers: {}",
@@ -505,8 +556,8 @@ impl StructuredRequest {
 
     /// Checks that `id` can stand in for the person at the deadline: one of this request's
     /// named answers that needs no words of theirs.
-    pub fn check_default(&self, id: &str) -> Result<(), St3Error> {
-        let invalid_default = |message: String| St3Error::new("invalid-default-answer", message);
+    pub fn check_default(&self, id: &str) -> Result<(), FractalError> {
+        let invalid_default = |message: String| FractalError::new("invalid-default-answer", message);
         if matches!(self.request_type, RequestType::Feedback | RequestType::Update) {
             return Err(invalid_default(format!(
                 "a {} has no named answers to default to",
@@ -537,10 +588,7 @@ impl StructuredRequest {
     pub fn at_deadline(&self, default: Option<&str>) -> Option<Value> {
         let id = default?;
         self.check_default(id).ok()?;
-        let input = AnswerInput {
-            id: Some(id.to_owned()),
-            text: None,
-        };
+        let input = AnswerInput { id: Some(id.to_owned()), text: None, option_notes: Vec::new() };
         self.answer(Some(&input), "").ok()
     }
 
@@ -571,19 +619,34 @@ pub fn deadline_summary(answer: Option<&Value>) -> String {
 
 /// The human-readable history line for a typed answer.
 pub fn answer_summary(answer: &Value) -> String {
-    if answer["outcome"] == "dismissed" {
-        return match answer["text"].as_str() {
+    let mut summary = if answer["outcome"] == "dismissed" {
+        match answer["text"].as_str() {
             Some(text) => format!("Dismissed without an answer: {text}"),
             None => "Dismissed without an answer".to_owned(),
-        };
-    }
-    let text = answer["text"].as_str();
-    match (answer["label"].as_str(), text) {
-        (Some(label), Some(text)) => format!("{label}: {text}"),
-        (Some(label), None) => label.to_owned(),
-        (None, Some(text)) => text.to_owned(),
-        (None, None) if answer["outcome"] == "read" => "Read".into(),
-        (None, None) => String::new(),
+        }
+    } else {
+        match (answer["label"].as_str(), answer["text"].as_str()) {
+            (Some(label), Some(text)) => format!("{label}: {text}"),
+            (Some(label), None) => label.to_owned(),
+            (None, Some(text)) => text.to_owned(),
+            (None, None) if answer["outcome"] == "read" => "Read".into(),
+            (None, None) => String::new(),
+        }
+    };
+    append_option_notes_summary(&mut summary, answer);
+    summary
+}
+
+/// Keeps notes visible in text-only answer history, including a person's supplied summary.
+pub fn append_option_notes_summary(summary: &mut String, answer: &Value) {
+    use std::fmt::Write as _;
+
+    if let Some(notes) = answer["option_notes"].as_array() {
+        for note in notes {
+            if let (Some(id), Some(text)) = (note["id"].as_str(), note["text"].as_str()) {
+                let _ = write!(summary, "\nNote on {id} (not selected): {text}");
+            }
+        }
     }
 }
 
@@ -613,10 +676,7 @@ mod tests {
         assert_eq!(canonical["subjects"][0]["revision"], "abc123");
         let accept = request
             .answer(
-                Some(&AnswerInput {
-                    id: Some("land".into()),
-                    text: None,
-                }),
+                Some(&AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
                 "",
             )
             .unwrap();
@@ -625,10 +685,7 @@ mod tests {
             json!({"type": "decision", "outcome": "accept", "id": "land", "label": "Land the gateway"})
         );
         assert_eq!(answer_summary(&accept), "Land the gateway");
-        let changes = AnswerInput {
-            id: Some("revise-auth".into()),
-            text: None,
-        };
+        let changes = AnswerInput { id: Some("revise-auth".into()), text: None, option_notes: Vec::new() };
         assert_eq!(
             request.answer(Some(&changes), "").unwrap_err().code,
             "invalid-person-answer"
@@ -648,10 +705,7 @@ mod tests {
             request.answer(None, "yes").unwrap_err().code,
             "answer-required"
         );
-        let unknown = AnswerInput {
-            id: Some("yes".into()),
-            text: None,
-        };
+        let unknown = AnswerInput { id: Some("yes".into()), text: None, option_notes: Vec::new() };
         assert_eq!(
             request.answer(Some(&unknown), "").unwrap_err().code,
             "invalid-person-answer"
@@ -673,7 +727,7 @@ mod tests {
             answer,
             json!({"type": "decision", "outcome": "decline", "id": "keep-open", "label": "Keep it open"})
         );
-        let chosen = AnswerInput { id: Some("keep-open".into()), text: None };
+        let chosen = AnswerInput { id: Some("keep-open".into()), text: None, option_notes: Vec::new() };
         assert_eq!(answer, request.answer(Some(&chosen), "").unwrap());
         assert_eq!(
             deadline_summary(Some(&answer)),
@@ -701,10 +755,7 @@ mod tests {
                 }
             }
             let (request, _) = StructuredRequest::parse(&value).unwrap();
-            let dismiss = AnswerInput {
-                id: Some("dismiss".into()),
-                text: None,
-            };
+            let dismiss = AnswerInput { id: Some("dismiss".into()), text: None, option_notes: Vec::new() };
             let answer = request.answer(Some(&dismiss), "").unwrap();
             assert_eq!(answer, json!({"type": kind, "outcome": "dismissed"}));
             assert_eq!(answer_summary(&answer), "Dismissed without an answer");
@@ -727,10 +778,7 @@ mod tests {
         let (request, _) = StructuredRequest::parse(&own).unwrap();
         let answer = request
             .answer(
-                Some(&AnswerInput {
-                    id: Some("dismiss".into()),
-                    text: None,
-                }),
+                Some(&AnswerInput { id: Some("dismiss".into()), text: None, option_notes: Vec::new() }),
                 "",
             )
             .unwrap();
@@ -787,20 +835,11 @@ mod tests {
         let read = json!({"type": "update", "outcome": "read"});
         assert_eq!(request.answer(None, "").unwrap(), read);
         assert_eq!(answer_summary(&read), "Read");
-        let pressed = AnswerInput {
-            id: Some("read".into()),
-            text: None,
-        };
+        let pressed = AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() };
         assert_eq!(request.answer(Some(&pressed), "").unwrap(), read);
         for input in [
-            AnswerInput {
-                id: Some("yes".into()),
-                text: None,
-            },
-            AnswerInput {
-                id: None,
-                text: Some("Thanks, now do the next one".into()),
-            },
+            AnswerInput { id: Some("yes".into()), text: None, option_notes: Vec::new() },
+            AnswerInput { id: None, text: Some("Thanks, now do the next one".into()), option_notes: Vec::new() },
         ] {
             assert_eq!(
                 request.answer(Some(&input), "").unwrap_err().code,
@@ -837,6 +876,37 @@ mod tests {
     }
 
     #[test]
+    fn only_an_update_carries_speech_of_one_to_three_hundred_characters() {
+        let update = |speech: &str| json!({
+            "version": 1, "type": "update", "about": "mission-run/example/report/1",
+            "speech": speech,
+        });
+        let longest = "a".repeat(MAX_SPEECH);
+        let (request, canonical) = StructuredRequest::parse(&update(&longest)).unwrap();
+        assert_eq!(request.speech.as_deref(), Some(longest.as_str()));
+        assert_eq!(canonical, update(&longest));
+        let (silent, canonical) = StructuredRequest::parse(&json!({
+            "version": 1, "type": "update", "about": "mission-run/example/report/1",
+        })).unwrap();
+        assert_eq!(silent.speech, None);
+        assert!(canonical.get("speech").is_none());
+        let mut speech_on_decision = decision();
+        speech_on_decision["speech"] = json!("Decide now.");
+        for request in [
+            update(""),
+            update("   "),
+            update(&"a".repeat(MAX_SPEECH + 1)),
+            speech_on_decision,
+        ] {
+            assert_eq!(
+                StructuredRequest::parse(&request).unwrap_err().code,
+                "invalid-person-request",
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
     fn choice_takes_an_option_or_allowed_custom_text_and_feedback_takes_text() {
         let choice = json!({
             "version": 1, "type": "choice", "question": "How should an oversized tree load?",
@@ -849,20 +919,14 @@ mod tests {
         let (request, _) = StructuredRequest::parse(&choice).unwrap();
         let selected = request
             .answer(
-                Some(&AnswerInput {
-                    id: Some("paged".into()),
-                    text: None,
-                }),
+                Some(&AnswerInput { id: Some("paged".into()), text: None, option_notes: Vec::new() }),
                 "",
             )
             .unwrap();
         assert_eq!(selected["outcome"], "selected");
         let custom = request
             .answer(
-                Some(&AnswerInput {
-                    id: None,
-                    text: Some("Page it, but warn".into()),
-                }),
+                Some(&AnswerInput { id: None, text: Some("Page it, but warn".into()), option_notes: Vec::new() }),
                 "",
             )
             .unwrap();
@@ -885,7 +949,8 @@ mod tests {
                 .answer(
                     Some(&AnswerInput {
                         id: Some("ok".into()),
-                        text: None
+                        text: None,
+                        option_notes: Vec::new(),
                     }),
                     ""
                 )
@@ -893,5 +958,104 @@ mod tests {
                 .code,
             "invalid-person-answer"
         );
+    }
+    #[test]
+    fn option_notes_preserve_other_options_on_named_custom_and_dismissed_answers() {
+        let (request, _) = StructuredRequest::parse(&decision()).unwrap();
+        for id in ["land", "dismiss"] {
+            let input = AnswerInput {
+                id: Some(id.into()),
+                text: Some(" Chosen answer note. ".into()),
+                option_notes: vec![OptionNote {
+                    id: "keep-open".into(),
+                    text: " Keep this alternative available. ".into(),
+                }],
+            };
+            let answer = request.answer(Some(&input), "").unwrap();
+            assert_eq!(answer["text"], "Chosen answer note.");
+            assert_eq!(answer["option_notes"], json!([
+                {"id": "keep-open", "text": "Keep this alternative available."}
+            ]));
+        }
+        let mut choice = decision();
+        choice["type"] = json!("choice");
+        choice["custom"] = json!(true);
+        for answer in choice["answers"].as_array_mut().unwrap() {
+            answer.as_object_mut().unwrap().remove("outcome");
+        }
+        let (request, _) = StructuredRequest::parse(&choice).unwrap();
+        let input = AnswerInput {
+            id: None,
+            text: Some("Another approach.".into()),
+            option_notes: vec![OptionNote { id: "land".into(), text: "Not yet.".into() }],
+        };
+        let answer = request.answer(Some(&input), "").unwrap();
+        assert_eq!(answer["outcome"], "custom");
+        assert_eq!(answer["option_notes"], json!([{"id": "land", "text": "Not yet."}]));
+    }
+
+    #[test]
+    fn option_notes_refuse_unknown_duplicate_chosen_blank_and_oversized_notes() {
+        let (request, _) = StructuredRequest::parse(&decision()).unwrap();
+        for notes in [
+            vec![("missing", "Not offered.".to_owned())],
+            vec![("land", "Use text instead.".to_owned())],
+            vec![("keep-open", "First".to_owned()), ("keep-open", "Second".to_owned())],
+            vec![("keep-open", " \n\t ".to_owned())],
+            vec![("keep-open", "é".repeat(MAX_TEXT + 1))],
+        ] {
+            let input = AnswerInput {
+                id: Some("land".into()),
+                text: None,
+                option_notes: notes.into_iter().map(|(id, text)| OptionNote {
+                    id: id.into(), text,
+                }).collect(),
+            };
+            assert_eq!(request.answer(Some(&input), "").unwrap_err().code, "invalid-person-answer");
+        }
+        let input = AnswerInput {
+            id: Some("land".into()),
+            text: None,
+            option_notes: vec![OptionNote { id: "keep-open".into(), text: "é".repeat(MAX_TEXT) }],
+        };
+        assert_eq!(request.answer(Some(&input), "").unwrap()["option_notes"][0]["text"],
+            "é".repeat(MAX_TEXT));
+    }
+
+    #[test]
+    fn option_notes_are_refused_without_named_options_even_when_dismissed() {
+        for request in [
+            json!({"version": 1, "type": "feedback", "question": "What should change?",
+                "why_person": "It needs your words."}),
+            json!({"version": 1, "type": "update", "about": "mission-run/example/report/1"}),
+        ] {
+            let (request, _) = StructuredRequest::parse(&request).unwrap();
+            for id in [None, Some("dismiss".to_owned()), Some("read".to_owned())] {
+                let input = AnswerInput {
+                    id,
+                    text: None,
+                    option_notes: vec![OptionNote { id: "land".into(), text: "Not yet.".into() }],
+                };
+                assert_eq!(request.answer(Some(&input), "").unwrap_err().code,
+                    "invalid-person-answer");
+            }
+        }
+    }
+
+    #[test]
+    fn answer_input_option_notes_round_trip_and_empty_lists_keep_the_old_shape() {
+        let old = json!({"id": "land", "text": "Ship it."});
+        let input: AnswerInput = serde_json::from_value(old.clone()).unwrap();
+        assert!(input.option_notes.is_empty());
+        assert_eq!(serde_json::to_value(&input).unwrap(), old);
+        let explicit_empty: AnswerInput = serde_json::from_value(json!({
+            "id": "land", "text": "Ship it.", "option_notes": []
+        })).unwrap();
+        assert_eq!(serde_json::to_value(explicit_empty).unwrap(), old);
+        let notes = json!({"id": "land", "option_notes": [
+            {"id": "keep-open", "text": "Not this time."}
+        ]});
+        let input: AnswerInput = serde_json::from_value(notes.clone()).unwrap();
+        assert_eq!(serde_json::to_value(input).unwrap(), notes);
     }
 }

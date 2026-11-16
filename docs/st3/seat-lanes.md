@@ -6,6 +6,147 @@ built: a command raises its seat's lane for its own run. A host's build slots go
 built there in the trailing seven days runs in a lane and the host has run a day that way without a
 guard trip.
 
+## Durable host holds
+
+A host hold closes admission for named resource-lane operations without acquiring a membership
+or reserving CPU, memory, or executor capacity. The execution host stores the authenticated
+owner, reason, affected operations, revision, originating run and receipt durably. A terminal
+run, owner crash, daemon restart, or answered ask does not resolve quarantine.
+
+Connect to the target host's daemon and use:
+
+```sh
+fractal hosts hold host-a --operation activation --reason "Investigate failed activation" --as person/operator
+fractal hosts ls
+fractal hosts release host-a host-hold/ID --expected-revision 1 --resolution "Repaired and verified" --as person/operator
+fractal hosts recover host-a host-hold/ID --expected-revision 1 --reason "Terminal owner; repair verified" --as person/operator
+```
+
+Repeat `--operation` to cover several native lane operation names, or use `--operation '*'` for
+all resource admission. Only the target host accepts mutations, and only the authenticated
+hold owner can release the revision they read. A stale revision or different owner is refused.
+The configured owning person authenticates trusted-local operator requests; bound agent/run
+credentials authenticate program requests. Naming an actor in JSON does not confer authority.
+Active holds appear in attention/now and `hosts ls`; their origin run and receipt remain links,
+not lifecycle owners. Released records remain durable for inspection. Resolution commits the
+host predicate transition and wakes queued admission; there is no retry timer or polling lock.
+
+Ordinary release requires the authenticated hold owner, including while its run is
+live. `hosts recover` is a distinct recovery action available only to the execution
+host's configured owning person through the local operator API; bound agents and
+runs cannot borrow that person's identity. Recovery requires the exact observed
+revision and a reason, and only applies to a run-owned hold whose owning mission
+run (directly or through the owner's declaration) is positively terminal. A missing
+or nonterminal run retains custody; other owners must use ordinary release.
+Recovery preserves the original owner and records a separate `host-hold.recovered`
+history fact with the acting operator, original owner, reason and revisions.
+Ordinary release records `host-hold.released`. Neither terminal runs nor answered
+asks automatically resolve a hold.
+
+## Resource lane telemetry
+
+The host authority uses `crate::otel::LaneTelemetry` for finite resource memberships. This observer
+does not grant admission, reconstruct membership state, expire holds, or infer retirement from a
+payload exit. Construct one observer after telemetry initialization and publish authoritative
+`snapshot(lane, occupancy, queued, holds)` counts after reconciliation and on each transition.
+Occupancy includes admitted, launching, running, and retiring generations until confirmed tree
+retirement. Publish zero queue and hold counts too. Lane names are bounded configured policy names;
+never pass run, membership, invocation, or hold identifiers as lane names.
+
+`phase(Admission, identity, links)` opens at queue entry and finishes at the admission/preparation
+decision. `phase(Execution, ...)` opens **only at confirmed payload release** and finishes when
+execution ends. `phase(Release, ...)` measures retirement request through confirmed retirement.
+Finish each guard with the authoritative `LaneOutcome`. Dropping an unfinished guard records
+`uncertain`; it never frees capacity. The host persists wall-clock lifecycle events independently.
+These guards use monotonic elapsed time within one daemon incarnation, not restart-reset budgets.
+
+The store retains phase guards by membership across queue reevaluations. It captures the initial
+request's active trace context once and reuses that link for execution and release; run/step/attempt
+attributes remain the durable correlation references. On recovery, only live segments are recreated.
+`rebase(persisted_age, true)` reports `st.resource.clock_uncertain` and prior elapsed age explicitly,
+then continues with a monotonic clock. It does not issue a fresh timeout budget or replay completed
+histogram samples. `retirementRequestedAt` is persisted before OS teardown, so restart can recover
+the release age too; an absent historical boundary remains explicitly uncertain. `succeeded` means
+the phase boundary was observed, not that an independently journaled payload command succeeded.
+
+Each confirmed finite execution root gets its own execution guard and native generation correlation,
+including concurrent roots within one admitted membership. Its clock opens from the runtime's
+persisted `payload_released_at_unix_ms` gate receipt, never preparation or launch intent. The separate
+host `Clocks` owner enforces queue/payload elapsed time even when all exporters are disabled.
+`resource_execution_elapsed(membership, owner, runtime_id, now_ms)` returns no elapsed time before
+release, a monotonic elapsed value while running, and the persisted end-minus-release duration after
+end. Backwards-time reconstruction that cannot establish elapsed payload age is an explicit error,
+not a fresh timeout budget. Exporter callbacks and span drops do not own these execution clocks.
+
+The existing OTLP exporter emits fresh INTERNAL root spans `st.resource.admission`,
+`st.resource.execution`, and `st.resource.release`, linked to the run/attempt contexts supplied by
+the caller. Each span has a concise `span.label`, run/step/integer-attempt identity, lane,
+membership, execution generation, optional invocation, and terminal `st.resource.outcome`.
+Structured `resource.lane.phase` start/end logs carry the same identity and explicit trace ID.
+Traces, metrics, and logs respect their existing independent exporter switches; there is no new
+exporter stack or private metrics accumulator presented as exported telemetry.
+
+| OTel metric | Unit | Meaning |
+| --- | --- | --- |
+| `st.resource.occupancy` | `{item}` | Authoritative admitted/unretired memberships |
+| `st.resource.queue` | `{item}` | Requests awaiting admission |
+| `st.resource.holds` | `{item}` | Durable holds affecting the lane |
+| `st.resource.wait.duration` | `s` | Queue and admission/preparation duration, excluding payload time |
+| `st.resource.execution.duration` | `s` | Confirmed payload release through execution end |
+| `st.resource.release.duration` | `s` | Retirement request through retirement/uncertain observation |
+| `st.resource.hold.duration` | `s` | Persisted hold age supplied at authenticated resolution |
+
+Counts are SDK observable gauges over the latest host snapshot, including zeros; durations are SDK
+histograms. All have only `st.resource.lane` as a metric dimension, plus bounded
+`st.resource.outcome` on phase durations. Host identity belongs to exporter resource attributes.
+Unbounded execution identifiers remain exclusively on traces/logs. Call
+`hold_resolved(lane, persisted_age)` when a durable hold is resolved; a daemon restart must not
+reset that age or clear the hold. An unresolved hold contributes to `st.resource.holds`, not a
+fabricated completed hold-duration sample.
+
+
+## Finite exec resource lanes
+
+A step with exactly one `exec` declaration may bind that execution to a named host-local resource
+lane. This is the data DSL counterpart of `resources.lane(name, options)` in a program:
+
+```kdl
+step "verify" timeout="20m" {
+  agentless
+  lane "verification" host="worker" max-members=1 coverage="logical" admission-timeout="30m" {
+    capacity cores=4 memory="8G"
+  }
+  exec "verify" {
+    host "worker"
+    command "run-verification"
+  }
+}
+```
+
+The lane name and explicit `host` bind one native admission policy; the exec's actual host must
+match. `max-members` defaults to one; `coverage` defaults to `logical`; `capacity` and
+`admission-timeout` are optional. The spellings map to the program API's `maxMembers`, `coverage`,
+`capacity`, and `admissionTimeout`. Capacity describes each admitted independent root's footprint;
+the shared containment slice accommodates all configured members. Required `enforced` coverage
+refuses unsupported hosts rather than silently launching without enforcement.
+
+Both surfaces use the same host-writer membership transaction, durable host holds, shared seat
+fit inventory, reactive lane wake dependency, fenced payload gate, and exact-generation retirement.
+No graph claim is a permit. `admission-timeout` bounds waiting/preparation separately from the step's
+`timeout`, which starts at confirmed payload release. Cancellation withdraws a queued request or
+retires its exact admitted generation; natural process exit does not free room while descendants
+remain. Child runs started through a program lane inherit its native membership for their actual
+exec roots rather than reserving resources for a process-free child run.
+Only steps that own lane-bound exec payload members defer their execution interval until payload
+release. An inherited membership does not delay a program step, an after-run wait, or an agentless
+gate with no such payload: these enter `working` and consume their normal step timeout.
+
+A step's existing direct `capacity` remains an assigned agent's scoped raise, not an independent
+execution reservation. To add only executor exclusivity beside a seat, omit capacity inside the
+resource lane; physical containment, not environment text, determines any resource inheritance.
+Omitting `lane` leaves stored step JSON and definition hashes unchanged, and old published history
+continues to deserialize without a resource lane.
+
 ## What a seat lane is
 
 A seat lane is a CPU and memory cap around one seat: its harness and every process the harness
@@ -67,8 +208,9 @@ host that runs the step's mission run checks the fit for a seat on that host; a 
 has its lane raised when it holds the step, without the wait. An older member runs a step that
 declares capacity in its seat's own lane, and an older run owner does not hold it for room.
 
-The declaration is `capacity`, not `lane`: the mission's named `lane "NAME" { entries … }` block is
-a merge lane (see [lanes.md](lanes.md)) and keeps that one meaning.
+An assigned seat's declaration is `capacity`, not `lane`. At mission scope, the named
+`lane "NAME" { entries … }` block remains a merge lane (see [lanes.md](lanes.md)); only a step's
+`lane` block declares the finite execution resource policy above.
 
 ## Linux mechanism
 
@@ -126,7 +268,7 @@ lane (an `app-lanes-<seat>.slice` directly in `app-lanes.slice`), and that slice
 holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. In place,
 the check runs with `BUILDS_SLICE_ACTIVE=1`, so a cargo front door that reads only that variable keeps
 its cargo in the cap. Outside every cap, a caller that names a seat (`ST_AGENT`, as a unit the
-seat started without `--slice` does) asks the daemon for the seat's slice (`st agents lane AGENT`,
+seat started without `--slice` does) asks the daemon for the seat's slice (`fractal agents lane AGENT`,
 the reconciler's own name for it) and, when the kernel shows that slice in `app-lanes.slice` with
 both limits, starts the check in a scope there, with `BUILDS_SLICE_ACTIVE=1` and
 `FRACTAL_LANE_SLICE`. Otherwise it starts the check in `builds.slice` as before, and a seat's run says
@@ -151,8 +293,17 @@ empties on its own. The lane outlives it until the seat stops for good (above).
 
 ## The host guard
 
-The kernel OOM-kills inside a lane on purpose. A host guard that counts every `oom_kill` in the user
-slice would read that as a fault, so it counts only the kills outside lanes:
+The kernel OOM-kills inside a lane on purpose. `scripts/fractal-test` names such a kill, which
+otherwise leaves only a bare exit: before a check that builds, it reads the `oom_kill` count in
+`memory.events` of each memory limit the check runs under (its own cap, else the seat's lane it runs
+in, and builds.slice, where the host's sccache server compiles), and a check that fails while one grew
+says `killed by the lane's memory limit (SLICE): N OOM kills at memory.max X while it ran`. Only the
+innermost limit that counted kills is named, since a kill counts in every cgroup above it too. A
+limit is shared with what else runs under it (builds.slice with every run's compiles, a lane with the
+run's other checks and the seat's harness), so a kill it names may be theirs.
+
+A host guard that counts every `oom_kill` in the user slice would read a lane's kills as a fault, so
+it counts only the kills outside lanes:
 
 ```
 oom_kill(user.slice/user-UID.slice/memory.events)
@@ -249,27 +400,37 @@ limit shrinks what `nproc` reports. From that room, admission takes:
   seen running (for up to ten minutes): the lane caps it, so its size is firm;
 - what the seats outside lanes hold that the kernel cannot take back, the anonymous and kernel memory
   of each seat scope in the user manager's `app.slice`. Nothing caps such a seat, so a reservation
-  could not bound it; page cache is left out, since pressure reclaims it.
+  could not bound it; page cache is left out, since pressure reclaims it;
+- the room kept for one burst (below, "Bursts"): what a burst raises the host's smallest live laned
+  seat by (one that runs or was admitted to start, since only such a seat's run asks for a burst),
+  the seat starting among them. A burst raises a seat to the burst lane (8 cores/24G, `build` in
+  `.st/lane-bursts.json`, which `scripts/fractal-test` asks for; a test holds the two together), so
+  on a host of 8G seats it keeps 16G. While a burst is held its raise already counts in its seat's
+  lane, so the reserve keeps only what is left of it. A host whose room for lanes could never hold
+  the burst lane keeps none, since every burst there is refused. Starts may not use it; bursts may. Without it,
+  seats that start while no run builds would take the room every later burst needs, and each run
+  would wait out its `--queue-limit`.
 
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start
-claim), and its reason shows where admission reasons show (`st agents show`'s `ADMISSION` line, the
+claim), and its reason shows where admission reasons show (`fractal agents show`'s `ADMISSION` line, the
 list, the tree and `agents start`), naming the host's free room:
 
 ```
-lane 8 cores/30.0G does not fit: 28.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G)
+lane 8 cores/30.0G does not fit: 12.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G, kept for a burst 16.0G)
 ```
 
 Seats wait in order: a smaller lane that would fit does not pass the first seat in line ("waits
 behind …, first in line for room"), so a large lane is not starved. A lane larger than the host can
-ever give waits out of line and holds no one back. A seat leaves the line when it is no longer tried
+ever give, or than it gives beside the burst reserve ("does not fit beside the … this host keeps from
+starts for a burst"), waits out of line and holds no one back. A seat leaves the line when it is no longer tried
 for a start: suspended, stopped, no longer owned, or not tried for six minutes (a crash loop, a
 workspace error). Room is held only for a seat that starts, after any envelope admission also lets it.
 A waiting seat is tried again every 30 seconds, since what seats outside lanes hold changes without a
 claim. A seat without a lane is not held.
 
 To start a waiting seat now despite its fit, for the day a stale measurement holds a seat that must
-run: `st agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
+run: `fractal agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
 asked (`--as`, a person or an agent acting for one) and why (`ignore_fit` and `reason` on its
 `runtime.action.requested` claim); the daemon logs both when the seat starts, and its lane then holds
 room like any other start.
@@ -298,34 +459,58 @@ burst that can never fit), and then holds the burst while its standard input sta
 a 90-second lease every 30 seconds. It gives the burst back when its input closes: when the run that
 started it ends, however it ends. A holder killed outright stops renewing, and the daemon drops the
 burst when its lease lapses; each such drop is counted (`bursts dropped by lease` in
-`st doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
+`fractal doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
 only the seat's own host answers. While that daemon cannot be reached (a restart), the holder waits
 for it as it waits for room, saying so, rather than answering: the run that asked bounds the wait.
 
 The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
-beside the other lanes and what seats outside lanes hold. Bursts wait in the order they asked, so a
+beside the other lanes and what seats outside lanes hold, the room admission keeps from starts for a
+burst included (`fractal doctor --performance` shows it on its `LANE BURSTS` line, as admission last judged
+it for a seat's start, naming that seat). Bursts wait in the order they asked, so a
 small one does not pass the first in line; one larger than the host can ever give is refused at
 once. A seat that has waited 15 minutes or more to start, first in line for room, is served before
 more bursts: a new burst waits behind it, so a stream of bursts cannot keep it from starting. It
 does so only while that seat would fit once every step's raise and burst on the host were given
-back; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
+back, beside the burst reserve; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
 waiting burst's reason starts `burst lane`. While held, admission counts the seat at the raised
 lane. Released, its cores come back at once and its memory once the lane holds less than it
-will allow, as a step's lowering does. Bursts live in the daemon's memory: after a daemon restart
-the slice is still raised and counts, as any raise does, and the holder's next renewal holds it
-again.
+will allow, as a step's lowering does. Bursts live in the daemon's memory, and a slice outlives a
+daemon restart. Before it judges any room, a new daemon reads each laned seat's slice once: one raised
+above the seat's own (a burst's, or a step's the daemon has not judged yet) counts as held at once
+(in other lanes' room and the burst reserve, so no start or other burst gets that room) and stays
+raised for one burst lease (90 s) after the daemon started. The holder renews at a third of the lease
+the daemon names and says it holds the burst. A renewal that meets a missing socket waits for the
+daemon to come back (up to the client's daemon wait, 30 s by default), and one that fails is tried
+again after 5 s rather than a whole renewal later, so a restarted daemon hears it well inside the
+lease. A daemon with no record of it restores the grant when it
+is such a found raise (or the daemon has not read the slices yet) and the slice still holds the burst
+lane. A burst that lapsed while the daemon ran is asked anew. A raise no holder renews
+within that lease goes back to what the seat's steps hold. Once granted, a holder answered anything but
+`granted` (a renewal that reached a daemon that could not restore it, or a lease that lapsed) prints
+`lost` and why, gives the burst back and exits non-zero, rather than letting its run go on in a lane
+it no longer holds.
 
 A burst is tied to the command, not to a step, so a seat in `work wait` holds only its base and
 its steps. A seat without a lane, or a host with lanes off, holds no burst: the holder answers
 `none`.
 
-`scripts/fractal-test` asks for one before it takes a pool tree (a tree held while its run waits
-for room is a tree nobody can use), sized by `.st/lane-bursts.json` for a run that builds (any
-check in `BUILDS`); a run that builds nothing asks for none. It waits up to `--queue-limit`, prints
+`scripts/fractal-test` asks for one at the pool tree, sized by `.st/lane-bursts.json` for a run
+that builds (any check in `BUILDS`); a run that builds nothing asks for none. A run asks only once
+it could take a free tree (first in the tree order, or past the fallback for a tree the run ahead
+left), and takes the tree only once the burst is granted. It holds no tree while the burst waits,
+so the run behind may take that tree after the fallback, and a burst granted while no tree is free
+is given back and asked again when one is: no run holds a burst without a tree or a tree without
+its burst. The tree is cleared of orphans only as the granted run takes it, so one given back while the ask waits has
+nothing in it signalled. Once its burst is granted a run takes a free tree at once, even if the build slots
+have filled during the ask: its build then waits for a slot in the tree. A run that hands over to main's newer copy while it waits, or before a top-up round, keeps its burst, or its ask and
+its place in the host's order: the holder is the run's child, and the exec keeps it and its pipes,
+so the newer copy holds the same burst or reads the answer to the same ask. A run with no pool tree asks before its checks. Either way, a branch that does not merge with the base is refused before any ask. It waits up to
+`--queue-limit` for each ask (a burst given back and asked again starts a new one), prints
 each reason, and records `burst` (the size held, or none and why) and `burst_wait_s` in the run's
 `runs.jsonl` line, which `scripts/fractal-test-report` shows as its own line beside the tree and
-slot waits. A fractal or daemon without bursts holds none, says so, and the checks run in the lane
+slot waits. A burst its holder says was lost while the run held it fails the run with a `lane-burst
+LOST` row that says why: from then on its checks ran in the seat's own lane. A fractal or daemon without bursts holds none, says so, and the checks run in the lane
 as it is. Its compiles still go to the host's sccache server in `builds.slice` (above): the burst
 bounds the rest of the run.
 
@@ -361,3 +546,77 @@ lane. The tests:
   relaunch of a live declaration keeps it.
 
 Mission-level and step-level declarations (built), bursts and admission are step 2.
+
+## Inactive host-envelope declaration
+
+`host_envelope_file` in `config.toml` selects a JSON host envelope for the explicit
+`Config::read_host_envelope` reader. Without the key, that reader checks
+`host-envelope.json` under Fractal's product config directory when it exists.
+A missing explicit file, malformed declaration, unknown schema version, or host
+differing from the configured `node` returns a typed error to that reader's caller.
+Daemon startup and `Config::validate` do not read or validate the inactive file.
+This changes no lane admission, cgroups, limits, or external admission.
+
+The typed contract lives in `fractal_runtime::host_envelope`; the checked-in
+[JSON Schema](../../fixtures/host-envelope.schema.json) describes version 1.
+Regenerate with `cargo run -p fractal-runtime --example host_envelope_schema`.
+Every resource is either `{"coverage":"enforced","value":...}` or
+`{"coverage":"not-enforced","reason":"..."}`. These are declared coverage,
+not proof of installed limits. Reasons must be nonempty. All resource fields,
+including each slice's `io`, are required; unmeasured resources explicitly declare
+`not-enforced` with reason `not measured`.
+`darwin-advisory` requires all resources to be `not-enforced`.
+
+Host fields are `schema_version`, `host`, `platform`, `mem_available_floor`,
+`slice_psi` (memory and CPU), and `slices`. PSI values name `window` (`avg10`,
+`avg60`, `avg300`), `percent`, and `target_slice`, referring to a declared
+user-manager slice unit. Each slice names `memory.max`, `memory.high`, `cpu.max`,
+`cpu.weight`, `io`, `swap.max`, and `tasks.max` (nested objects, not dotted JSON keys).
+The `cpu` object requires independent coverage for both `max` and `weight`: cgroup
+v2 applies the hard quota and proportional scheduler share simultaneously.
+Enforced `max` values contain `{quota_micros, period_micros}`; enforced `weight`
+values are integers 1..10000. Both may be enforced, neither may be enforced on
+`darwin-advisory`, and neither may be omitted. A scheduler share is not a hard cap.
+IO values contain a `weight` in 1..10000; max quota, period, and task counts are
+positive integers. Memory and swap values use the shared
+binary SIZE parser: byte counts or whole numbers ending in K, M, G, T, fitting
+u64 bytes; `"0"` expresses zero swap. JSON Schema checks structural constraints;
+the Rust reader additionally checks SIZE overflow, slice uniqueness, PSI references,
+and that enforced `memory.high` does not exceed enforced `memory.max`.
+
+All example thresholds and capacities in the generic-host fixtures are test data,
+not production defaults. Host values require an operator decision; activation
+requires separate host acceptance and rollout approval. This contract defines no
+IO start rule, and remote-only work is not charged local envelope capacity by it.
+
+CPU fixture coverage follows measured max and non-default weights independently.
+A default scheduler weight is declared `not-enforced` with reason `default weight`;
+inactive units and absent controllers retain their observed reasons. This fixture
+policy distinguishes an explicitly configured share from a default share; it does
+not imply that the kernel ignores default scheduler weights.
+
+
+## Finite execution custody
+
+The native finite-execution backend generalizes the existing Linux lane hierarchy
+without enabling the jobs scheduler. Host-owned memberships bind a named immutable
+policy, an authority epoch, and exact run/step/attempt identity. Holds close admission
+without occupying capacity; FIFO membership admission accounts independent roots
+once alongside seats, scoped raises and bursts.
+
+Admission, payload release, execution end and retirement have separate persisted
+timestamps. In-boot elapsed clocks are monotonic; uncertain recovered clocks do not
+grant a fresh execution budget. A process-generation record references membership
+identity before the payload gate opens. Cancellation and natural parent exit retain
+custody until the native runtime proves whole-tree retirement; failed cleanup and
+unknown authority survivors do not free capacity.
+
+The telemetry adapter records queue, execution and release phases, correlated
+membership/generation identities, occupancy and hold observations. These observations
+do not grant launch authority. Required Linux enforcement is checked before release;
+Darwin remains explicit about logical-only coverage and uncertain escaped descendants.
+
+Known-live linked children remain `retiring` while cancellation completes, retaining
+custody and a reactive child-state dependency. A missing child record or unprovable
+process cleanup remains `uncertain`; neither condition releases a successor early.
+

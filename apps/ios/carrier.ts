@@ -21,6 +21,10 @@ export type FabricSnapshot = {
   tried: number;
 };
 
+/** Offline reconnect also retries a failed or refused Fabric route, even without a collections feed. */
+export const shouldRetryFabric = (choice: CarrierChoice, phase: FabricPhase): boolean =>
+  choice === 'fabric' && (phase === 'failed' || phase === 'refused');
+
 export type Route =
   | { kind: 'none'; fellBack: false; why: '' }
   | { kind: 'tailnet' | 'lan' | 'https'; fellBack: boolean; why: string }

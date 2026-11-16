@@ -442,6 +442,173 @@ sys.exit(log.main(sys.argv[1:]))
         self.assertEqual((code, result['added'], result['gc_pending']), (0, 1, 0), result)
         self.assertEqual([line.split()[:2] for line in self.lines(path)][-1], ['record', passed], 'it counts again, after the gc line')
 
+    def pull_in_process(self, *extra):
+        self.now += 120
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = log.main(['pull', '--repo', str(self.host), '--publish', '--signer', json.dumps(self.signer),
+                             '--log-keys', str(self.log_keys), '--now', str(self.now), *extra])
+        return code, json.loads(out.getvalue()) if out.getvalue().strip() else None, err.getvalue()
+
+    def test_twenty_thousand_expired_names_bound_verification_and_keep_a_fresh_published_head(self):
+        record = self.record()
+        before = self.pull('--publish')[1]['head']
+        fresh = self.record(seconds=10)
+        fresh_ref = self.f.ref_of[fresh]
+        names = [f'refs/notes/evidence/{n:040x}/{record}' for n in range(20_000)]
+        # The scale fixture isolates expiry scheduling; the real-record tests below exercise acceptance. Rejection must not
+        # repeatedly occupy the front of the expiry queue or let the next pull accumulate more verification work.
+        for repo, prefix in ((self.remote, None), (self.host, log.SEEN)):
+            commands = ''.join(f'update {log.local(name, prefix) if prefix else name} {record}\n' for name in names)
+            log.git(str(repo), 'update-ref', '--stdin', stdin=commands.encode())
+        log.write_pending(str(self.host), {name: NOW - 25 * 3600 for name in names})
+        previous = set()
+        accept = log.accept
+        for added in (1, 0):
+            attempted, all_attempted = [], []
+
+            def reject(repo, module, keys, revocations, name, oid):
+                all_attempted.append(name)
+                if name == fresh_ref:
+                    return accept(repo, module, keys, revocations, name, oid)
+                attempted.append(name)
+                self.assertLessEqual(len(attempted), 500, 'mass expiry exceeded one pull\'s verification bound')
+                return [], 'untrusted'
+
+            with mock.patch.object(log, 'accept', side_effect=reject):
+                code, result, error = self.pull_in_process()
+            self.assertEqual(code, 0, error)
+            self.assertEqual((len(attempted), result['added'], result['gc_pending']), (500, added, 20_000))
+            commits = self.host_git('rev-list', '--reverse', f'{before}..{result["head"]}').splitlines()
+            self.assertEqual(len(commits), 2 if added else 1)
+            if added:
+                self.assertEqual(all_attempted[0], fresh_ref, 'new signing results must precede expired names')
+                self.assertEqual(self.lines(f'trees/{self.tree[:2]}/{self.tree}', at=commits[0])[-1].split()[1], fresh,
+                                 'the first checkpoint must already contain the fresh signing result')
+                self.assertIn(f'as_of={log.iso(self.now)} added=1', self.host_git('show', '-s', '--format=%s', commits[0]))
+            self.assertFalse(previous.intersection(attempted), 'rejected old names must not starve the remaining backlog')
+            previous.update(attempted)
+            self.assertEqual(self.remote_head(), result['head'])
+            shown = self.host_git('-c', f'gpg.ssh.allowedSignersFile={self.log_keys}', 'show', '-s', '--format=%G? %s', result['head'])
+            self.assertEqual(shown, f'G evidence-log v1 as_of={log.iso(self.now)} added=0 gc=0 missing=0')
+            before = result['head']
+
+    def test_expired_signed_records_drain_in_bounded_batches_without_another_gc(self):
+        records = {self.record(seconds=n) for n in (0, 10, 20)}
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        accepted = set()
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True):
+            for remaining in (2, 1, 0):
+                with mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+                    code, result, error = self.pull_in_process()
+                self.assertEqual((code, result['added'], result['gc_pending']), (0, 1, remaining), error)
+                self.assertEqual(verify.call_count, 1)
+                accepted.add(verify.call_args.args[-1])
+                self.assertEqual(self.remote_head(), result['head'])
+                self.assertEqual(result['as_of'], log.iso(self.now))
+        self.assertEqual(accepted, records)
+        self.assertEqual(log.pending(str(self.host)), {})
+
+    def test_a_kill_before_the_expiry_checkpoint_does_not_release_another_batch(self):
+        records = {self.record(seconds=n) for n in (0, 10)}
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        held = (self.host / log.PENDING).read_bytes()
+        before = self.remote_head()
+        self.now += 25 * 3600
+        driver = self.f.root / 'killed-expiry.py'
+        driver.write_text(f'''import importlib.machinery, importlib.util, os, signal, sys
+loader = importlib.machinery.SourceFileLoader('log', {str(LOG)!r})
+log = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(log)
+log.TOMBSTONE_RELEASE_REFS = 1
+accept = log.accept
+def killed(*args):
+    accept(*args)
+    os.kill(os.getpid(), signal.SIGKILL)
+log.accept = killed
+sys.exit(log.main(sys.argv[1:]))
+''')
+        done = subprocess.run([sys.executable, str(driver), 'pull', '--repo', str(self.host), '--publish',
+                               '--signer', json.dumps(self.signer), '--log-keys', str(self.log_keys), '--now', str(self.now)],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, -signal.SIGKILL, done.stderr)
+        self.assertEqual((self.host / log.PENDING).read_bytes(), held, 'uncheckpointed names must remain held')
+        self.assertEqual(self.remote_head(), before)
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True), mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual((code, result['added'], result['gc_pending'], verify.call_count), (0, 1, 1, 1), error)
+
+    def test_expiry_replay_after_copying_but_before_releasing_pending_does_not_verify_again(self):
+        records = {self.record(seconds=n) for n in (0, 10)}
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        write = log.write_pending
+
+        def interrupted(repo, value):
+            if len(value) == 1:
+                raise log.Refused('interrupted before releasing a checkpointed pending name')
+            return write(repo, value)
+
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True), mock.patch.object(log, 'write_pending', side_effect=interrupted):
+            code, _, error = self.pull_in_process()
+        self.assertEqual(code, 1, error)
+        self.assertEqual(len(log.pending(str(self.host))), 2)
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True), mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual((code, result['added'], result['gc_pending'], verify.call_count), (0, 0, 1, 0), error)
+
+    def test_expiry_rechecks_a_retired_copy_left_by_an_interrupted_gc(self):
+        record = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan([record])), mode='gc')[0], 0)
+        # A kill after GC publishes its line but before it drops copies leaves this state. The old marker does not mean
+        # the record is still active in the log; expiry must check it and append it after the GC line.
+        log.git(str(self.host), 'update-ref', log.local(self.f.ref_of[record], log.COPY), record)
+        self.now += 25 * 3600
+        with mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual((code, result['added'], result['gc_pending'], verify.call_count), (0, 1, 0, 1), error)
+        lines = self.lines(f'trees/{self.tree[:2]}/{self.tree}')
+        self.assertEqual([line.split()[0] for line in lines], ['record', 'gc', 'record'])
+
+    def test_expiry_prunes_absent_names_and_rechecks_the_oldest_before_unexpired_names(self):
+        records = [self.record(seconds=n) for n in (0, 10, 20, 30)]
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan(records)), mode='gc')[0], 0)
+        self.now += 25 * 3600
+        names = [self.f.ref_of[record] for record in records]
+        log.write_pending(str(self.host), dict(zip(names, (self.now - 26 * 3600, self.now - 25 * 3600,
+                                                         self.now, self.now - 30 * 3600))))
+        log.git(str(self.remote), 'update-ref', '-d', names[-1])
+        with mock.patch.object(log, 'TOMBSTONE_RELEASE_REFS', 1, create=True):
+            for expected, remaining in zip(names[:2], (2, 1)):
+                with mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+                    code, result, error = self.pull_in_process('--restore')
+                self.assertEqual((code, result['added'], result['gc_pending']), (0, 1, remaining), error)
+                self.assertEqual(verify.call_args.args[-2], expected)
+                self.assertEqual(verify.call_count, 1)
+                self.assertNotIn(names[-1], log.pending(str(self.host)))
+        self.assertEqual(set(log.pending(str(self.host))), {names[2]})
+        self.assertNotIn(names[-1], self.remote_refs(), 'expiry never restores a confirmed GC deletion')
+
+    def test_failed_fresh_publication_keeps_expiry_pending_and_never_starts_its_batch(self):
+        old = self.record()
+        self.assertEqual(self.pull('--publish')[0], 0)
+        self.assertEqual(self.pull('--publish', '--plan', str(self.gc_plan([old])), mode='gc')[0], 0)
+        fresh = self.record(seconds=10)
+        self.now += 25 * 3600
+        held = (self.host / log.PENDING).read_bytes()
+        with mock.patch.object(log, 'publish', return_value=False), mock.patch.object(log, 'accept', wraps=log.accept) as verify:
+            code, result, error = self.pull_in_process()
+        self.assertEqual(code, 1, error)
+        self.assertEqual([call.args[-1] for call in verify.call_args_list], [fresh])
+        self.assertEqual((self.host / log.PENDING).read_bytes(), held)
+        self.assertEqual(result['gc_pending'], 1)
+
     def test_gc_publishes_its_lines_at_once_and_a_plan_without_its_deletions_is_refused(self):
         passed = self.record()
         self.assertEqual(self.pull()[0], 0)

@@ -2,7 +2,8 @@
 """A Claude seat on a machine with no st2: no `st2` on PATH and no st2 state directory.
 
 One isolated daemon (private HOME, XDG dirs, PATH and sockets) runs one Claude seat whose
-`claude` is ./claude, a stand-in that drives the real hook, status-line and channel contracts.
+`claude` is ./claude, a stand-in selected through a private managed runtime profile that drives
+the real hook, status-line and channel contracts.
 The eval checks, from outside the seat, that st3 alone:
 - publishes harness.observed working and idle from the seat's hooks;
 - binds Claude's native session, so the client API timeline shows the native transcript;
@@ -59,6 +60,10 @@ class Node:
         stub = root / "bin/claude"
         stub.write_text(f'#!/bin/sh\nexec "{python}" "{root / "bin/claude.py"}" "$@"\n')
         stub.chmod(0o755)
+        runtime_profile = root / "runtime-profile.json"
+        runtime_profile.write_text(json.dumps({
+            "personas": {"launch": {"generalist": {"harnessBin": str(root / "bin")}}},
+        }))
         self.path = isolated_path(root / "bin")
         shell = shutil.which("bash", path=self.path)
         if not shell:
@@ -74,6 +79,8 @@ class Node:
                     "XDG_DATA_HOME": str(root / "home/.local/share"),
                     "XDG_RUNTIME_DIR": str(root / "run"), "ST3_ENDPOINT": str(self.endpoint),
                     "ST3_DAEMON_WAIT": "0"}
+        self.env["AGENT_RUNTIME_PROFILE"] = str(runtime_profile)
+        self.env["AGENT_PERSONA"] = "generalist"
         # The daemon rebuilds PATH from a login shell; pin it to the isolated one.
         profile = f"export PATH={shlex.quote(self.path)}\n"
         for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshenv"):

@@ -22,7 +22,14 @@ pub struct Controller {
 pub struct LaneHost {
     pub room: fractal_runtime::Capacity,
     pub outside: fn() -> Option<u64>,
+    /// The lane a burst raises a seat to: admission keeps room for one such raise from starts
+    /// ([`BURST_LANE`]; none keeps none).
+    pub burst_lane: Option<fractal_runtime::Capacity>,
 }
+
+/// The lane a run's burst raises its seat to: `build` in .st/lane-bursts.json, which
+/// scripts/fractal-test asks for (docs/st3/seat-lanes.md, "Bursts").
+pub const BURST_LANE: fractal_runtime::Capacity = fractal_runtime::Capacity { cores: 8, memory: 24 << 30 };
 
 impl<R: RuntimeControl> Reconciler<R> {
     /// Configure observation without reading the state file on the async startup path.

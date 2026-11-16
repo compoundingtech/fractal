@@ -63,7 +63,7 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   }
   // Only a definitive typed refusal can be restaged. Unknown delivery is never a fresh user edit.
   // edit.ts prepareRetry drops the old request and drain recomputes intent after refresh.
-  const retry = snapshot.refusal?.reason._tag === 'Known' && snapshot.retryEdit !== undefined && snapshot.restoreUnavailable !== true
+  const retry = (snapshot.refusal?.reason._tag === 'Known' || snapshot.refusal?.retryableLoad === true) && snapshot.retryEdit !== undefined && snapshot.restoreUnavailable !== true
     ? () => { void snapshot.retryEdit?.() } : undefined
   const targets = new Map<string, string>()
   const attempted = new Set([...(snapshot.pendingTargets ?? []), ...(snapshot.refusal?.targets ?? [])])
@@ -112,11 +112,12 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
       // Search reveals descendants temporarily, without changing the saved working layout.
       if (query.trim() !== '') return
       const ids = registry.get(collapseAtom).filter(folder => folder !== id)
-      // Parent seats default collapsed; store an explicit expanded override separately.
+      // Parent seats store an explicit override either way: an expanded marker, or the plain id below, which a seat with
+      // further missions needs because it starts open and a collapse must stick.
       if (currentRoster.current.some(seat => seat.id === id)) {
         const marker = `wf/expanded/${id}`
         const next = ids.filter(value => value !== marker)
-        setCollapsedIds(collapsed ? next : [...next, marker])
+        setCollapsedIds(collapsed ? [...next, id] : [...next, marker])
         return
       }
       setCollapsedIds(collapsed ? [...ids, id] : ids)

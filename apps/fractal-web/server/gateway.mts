@@ -8,6 +8,7 @@ import type { Tracer } from 'effect'
 import { BoundaryError, reject } from './boundary.mts'
 import { spanOptions, traceHeaders } from './tracing.mts'
 import { encodingQualities } from './static.mts'
+import { browserAuthorization } from './browserCookie.mts'
 
 const responseCodings = ['br', 'gzip', 'identity'] as const
 
@@ -23,13 +24,34 @@ export const cleanHeaders = (headers: IncomingHttpHeaders, upgrade = false): Out
   if (upgrade) { result.connection = 'Upgrade'; result.upgrade = 'websocket' }
   return result
 }
-export const clientRoute = (url: string): boolean => {
-  const path = url.split('?')[0] ?? ''
-  if (path !== '/v1/client' && !path.startsWith('/v1/client/')) return false
+/**
+ * The browser cannot send SDK feature headers on a WebSocket, and the generated SDK does not ask for
+ * message participants, so the gateway adds it to every client read: a mail header then names its
+ * `author` (`daemon/runtime` for a wake) on replace pages and live deltas alike, and never flips between them.
+ * Old daemons ignore an unknown feature.
+ */
+export const participantsFeature = 'conversation-message-participants.v1'
+export const withClientFeatures = (requested: string | readonly string[] | undefined): string => {
+  const list: string = typeof requested === 'string' ? requested : requested === undefined ? 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1' : requested.join(',')
+  const features = list.split(',').map(feature => feature.trim()).filter(feature => feature !== '')
+  return (features.includes(participantsFeature) ? features : [...features, participantsFeature]).join(', ')
+}
+/** Decode once; reject paths whose interpretation could change in another router. */
+export const browserPath = (url: string): string | undefined => {
   try {
-    const decoded = decodeURIComponent(path)
-    return !decoded.includes('\\') && !decoded.includes('\0') && !decoded.split('/').includes('..')
-  } catch { return false }
+    const decoded = decodeURIComponent(url.split('?')[0] ?? '')
+    if (!decoded.startsWith('/') || decoded.includes('//') || /[\\%\x00-\x1f\x7f?#]/.test(decoded)) return undefined
+    const segments = decoded.split('/')
+    if (segments.some(segment => segment === '.' || segment === '..')) return undefined
+    const normalized = `/${segments.filter(segment => segment !== '').join('/')}`
+    return decoded === normalized || decoded === `${normalized}/` ? normalized : undefined
+  } catch { return undefined }
+}
+export const clientRoute = (url: string): boolean => {
+  const path = browserPath(url)
+  if (path === undefined || (path !== '/v1/client' && !path.startsWith('/v1/client/'))) return false
+  // Only the publisher's cookie-only wrapper may begin or complete browser/device pairing.
+  return !/^\/v1\/client\/pairings?(?:\/|$)/i.test(path)
 }
 /** Remove propagation-only query fields without rewriting application query bytes. */
 export const withoutTraceQuery = (url: string | undefined): string | undefined => {
@@ -38,9 +60,16 @@ export const withoutTraceQuery = (url: string | undefined): string | undefined =
   if (queryStart === -1) return url
   const fields = url.slice(queryStart + 1).split('&').filter((field) => {
     const key = new URLSearchParams(field).keys().next().value
-    return key !== 'traceparent' && key !== 'tracestate'
+    return key !== 'traceparent' && key !== 'tracestate' && key !== 'client'
   })
   return url.slice(0, queryStart) + (fields.length === 0 ? '' : `?${fields.join('&')}`)
+}
+/** Display metadata only. Browser WebSocket cannot send headers; never use this as authority. */
+export const upgradeClientHeaders = (req: Pick<IncomingMessage, 'headers' | 'url'>): OutgoingHttpHeaders => {
+  if (req.headers['x-st3-client'] !== undefined) return {}
+  const clients = new URL(req.url ?? '/', 'http://gateway').searchParams.getAll('client')
+  const client = clients.length === 1 ? clients[0] : undefined
+  return client !== undefined && /^[\x20-\x7e]{1,120}$/.test(client) ? { 'x-st3-client': client } : {}
 }
 const unavailable = (cause?: unknown) => new BoundaryError({ status: 502, code: 'client-gateway-unavailable', message: 'Client gateway unavailable\n', cause })
 const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPath: string; host: string; authorization: string; timeoutMs: number }) => Effect.gen(function* () {
@@ -72,7 +101,8 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
         settled = true; cleanup(); resume(Effect.succeed(reply?.statusCode ?? 502))
       }
       const upstream = request({ socketPath, path: req.url, method: req.method, headers: {
-        ...cleanHeaders(req.headers), host, authorization, ...traceHeaders(span),
+        ...cleanHeaders(req.headers), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
+        'x-st3-features': withClientFeatures(req.headers['x-st3-features']),
       }, agent: false }, (incoming) => {
         reply = incoming
         const headers = cleanHeaders(incoming.headers)
@@ -133,10 +163,11 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
       const clientClosed = () => fail()
       const cleanup = () => { socket.off('error', error); socket.off('close', clientClosed) }
       const upstream = request({ socketPath, path: withoutTraceQuery(req.url), method: req.method, headers: {
-        ...cleanHeaders(req.headers, true), host, authorization, ...traceHeaders(span),
+        ...cleanHeaders(req.headers, true), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
+        ...upgradeClientHeaders(req),
         // Browser WebSocket cannot send SDK headers, including on the early socket.
         // Old daemons ignore this additive feature; readers still detect optional blocks.
-        'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1',
+        'x-st3-features': withClientFeatures(undefined),
       }, agent: false })
       socket.once('error', error); socket.once('close', clientClosed)
       upstream.on('error', error)

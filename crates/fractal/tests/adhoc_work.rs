@@ -79,12 +79,14 @@ impl Daemon {
     }
     async fn start(&mut self) {
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: "example".into(),
+            api_socket: self.root.join("api.sock"),
             state_dir: self.root.clone(),
             pty_root: self.root.join("pty"),
             pty_binary: "pty".into(),

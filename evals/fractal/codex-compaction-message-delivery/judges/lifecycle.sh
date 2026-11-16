@@ -18,7 +18,7 @@ jq -e '
 agent="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/compact.codex"
 for stage in anchor steer post_compact; do
   subject="$(jq -er --arg stage "$stage" '.messages[$stage]' controller-state.json)"
-  st3 trace show "$subject" --json --limit 100 \
+  fractal trace show "$subject" --json --limit 100 \
     | jq -se '
         map(.kind) as $kinds
         | ($kinds | index("message.staged")) != null
@@ -27,7 +27,7 @@ for stage in anchor steer post_compact; do
       ' >/dev/null
 done
 
-st3 trace show "$agent" --json --limit 500 \
+fractal trace show "$agent" --json --limit 500 \
   | jq -se '
       any(
         .kind == "harness.usage"
@@ -36,7 +36,7 @@ st3 trace show "$agent" --json --limit 500 \
       )
     ' >/dev/null
 
-input_count="$(st3 trace show "$agent" --json --limit 500 \
+input_count="$(fractal trace show "$agent" --json --limit 500 \
   | jq -s '[.[] | select(.kind == "terminal.input.requested")] | length')"
 test "$input_count" -eq 1
 

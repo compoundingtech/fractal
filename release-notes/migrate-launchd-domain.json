@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Discover and journal the loaded legacy daemon's launchd domain for host migration",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "changed", "detail": "Host cutover journals now record launchd_domain. Old macOS journals missing it fail closed with manual recovery guidance; Linux recovery is unchanged."},
+  "rules": {"status": "changed", "detail": "New macOS cutovers require one loaded recognized legacy daemon across gui/<uid> and user/<uid>, and refuse split-domain jobs."},
+  "compatibility": {"status": "changed", "detail": "The mover supports a pre-staged user-domain daemon and reports its domain. Home Manager, CLI staging, fresh installation and app-installer domain handling are unchanged."},
+  "downtime": {"status": "none", "detail": "Existing bounded host-swap downtime and API commit fence are unchanged."},
+  "manual": {"status": "changed", "detail": "Dry run reports launchd_domain. Resolve missing, duplicate or split-domain ownership before migration; no override bypasses discovery."},
+  "recovery": {"status": "changed", "detail": "Rollback and committed recovery bind to the journal's validated domain before inspection, even after login-session changes. Preserve journals without launchd_domain and follow their manual GUI-host recovery diagnostic."}
+}

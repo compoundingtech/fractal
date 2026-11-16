@@ -1,7 +1,7 @@
 //! Completed response-envelope timings. Action buckets are subsets of route totals.
 //!
-//! Each path also keeps rolling 1-minute, 5-minute and 1-hour windows, and each target in
-//! `slo/targets.toml` keeps the same windows over all its paths.
+//! Each path also keeps rolling 1-minute, 5-minute and 1-hour windows, and each latency objective
+//! in `slo/objectives.kdl` keeps the same windows over all its paths.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -246,7 +246,7 @@ pub struct Meter {
     work_stages: BTreeMap<WorkStage, Sample>,
     /// Windows by path: `GET /route`, `stream COLLECTION`, or a long poll's route.
     paths: BTreeMap<String, smallclaims::windows::Series>,
-    /// Windows by target position in `slo/targets.toml`: served here, then from another machine.
+    /// Windows by target position in `slo/objectives.kdl`: served here, then from another machine.
     targets: Vec<[smallclaims::windows::Series; 2]>,
     /// The member's CPU by closed minute: the daemon's and its replication workers'.
     cpu: smallclaims::windows::cpu_minutes::CpuMinutes,

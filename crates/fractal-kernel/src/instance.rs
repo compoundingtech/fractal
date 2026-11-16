@@ -16,6 +16,7 @@
 //!   bin/     the st3, st and pty the installer puts there
 //!   claude/  the instance's Claude account     (CLAUDE_CONFIG_DIR)
 //!   codex/   the instance's Codex account      (CODEX_HOME)
+//!   pi/      the instance's shared pi/omp profile (PI_CODING_AGENT_DIR)
 //!   work/    the default work root: workspaces of new agents, in work/agents/NAME
 //!   app/     where a macOS app bundle for the instance goes
 //! ```
@@ -140,6 +141,41 @@ impl Instance {
         self.root.join("codex")
     }
 
+    /// The shared pi/omp profile; HOME remains the login home for ordinary shell tools.
+    pub fn pi_agent_dir(&self) -> PathBuf {
+        self.root.join("pi")
+    }
+
+    /// HOME-shaped view for discovery only, never exported as a process HOME.
+    pub fn native_session_home(&self) -> PathBuf {
+        self.state_home().join("native-sessions")
+    }
+
+    /// Keep readers on the same provider directories as launched harnesses without copying data.
+    pub fn prepare_native_session_home(&self) -> Result<PathBuf> {
+        let home = self.native_session_home();
+        std::fs::create_dir_all(home.join(".omp"))?;
+        for (alias, target) in [
+            (home.join(".claude"), self.claude_config_dir()),
+            (home.join(".codex"), self.codex_home()),
+            // Both tools share PI_CODING_AGENT_DIR. Expose this profile once, as omp.
+            (home.join(".omp/agent"), self.pi_agent_dir()),
+        ] {
+            if let Err(error) = std::os::unix::fs::symlink(&target, &alias) {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error).with_context(|| format!("create native session alias {}", alias.display()));
+                }
+                anyhow::ensure!(
+                    std::fs::read_link(&alias)
+                        .with_context(|| format!("read native session alias {}", alias.display()))? == target,
+                    "native session alias {} does not point to its selected instance directory",
+                    alias.display()
+                );
+            }
+        }
+        Ok(home)
+    }
+
     /// The instance's default work root: where its agents work, beside the rest of the instance.
     pub fn work_dir(&self) -> PathBuf {
         // Workspaces are a separate migration; do not move them with config/state.
@@ -183,6 +219,7 @@ impl Instance {
             ("XDG_RUNTIME_DIR", self.run_dir()),
             ("CLAUDE_CONFIG_DIR", self.claude_config_dir()),
             ("CODEX_HOME", self.codex_home()),
+            ("PI_CODING_AGENT_DIR", self.pi_agent_dir()),
         ]
     }
 }
@@ -198,6 +235,14 @@ pub fn current() -> Option<Instance> {
     match Instance::new(&home, &name) {
         Ok(instance) => Some(instance),
         Err(error) => fail(&format!("{ENV}={name}: {error:#}")),
+    }
+}
+
+/// Select the discovery root without ever falling back to the login home inside an instance.
+pub fn native_session_home() -> Result<Option<PathBuf>> {
+    match current() {
+        Some(instance) => instance.prepare_native_session_home().map(Some),
+        None => Ok(env::var_os("HOME").map(PathBuf::from)),
     }
 }
 
@@ -378,6 +423,7 @@ mod tests {
             one.bin_dir(),
             one.claude_config_dir(),
             one.codex_home(),
+            one.pi_agent_dir(),
             one.work_dir(),
             one.app_dir(),
         ] {
@@ -387,6 +433,8 @@ mod tests {
         for (variable, value) in one.environment() {
             assert!(value.starts_with(one.root()), "{variable}");
         }
+        assert!(one.native_session_home().starts_with(one.state_home()));
+        assert!(!one.environment().iter().any(|(variable, _)| *variable == "HOME"));
     }
 
     #[test]
@@ -441,9 +489,15 @@ mod tests {
     #[test]
     fn the_socket_path_stays_within_the_unix_limit_for_the_longest_name() {
         let longest = Instance::new(Path::new("/home/example/a-very-long-directory-name-here"), &"x".repeat(LONGEST_NAME)).unwrap();
-        let socket = longest.run_dir().join("st3-client.sock");
-        // sun_path holds 104 bytes on macOS, counting the terminating NUL, even below a long HOME.
-        assert!(socket.as_os_str().len() < 104, "{}", socket.display());
+        let socket = longest.run_dir().join("fractal-client.sock");
+        // The legacy name preserves the original macOS budget for existing instances.
+        let legacy = socket.with_file_name("st3-client.sock");
+        assert!(legacy.as_os_str().len() < 104, "{}", legacy.display());
+        let binding = crate::config::socket_binding_path(&socket);
+        assert!(fractal_socket_discovery::unix_socket_path_fits(&binding), "{}", binding.display());
+        if !fractal_socket_discovery::unix_socket_path_fits(&socket) {
+            assert_eq!(binding.as_ref(), legacy);
+        }
     }
 
     #[test]

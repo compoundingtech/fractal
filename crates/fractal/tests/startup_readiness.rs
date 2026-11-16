@@ -36,6 +36,67 @@ fn command(root: &Path) -> Command {
 }
 
 #[test]
+fn up_starts_the_escalation_capable_wal_recycler() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for directory in ["home/.config/st3", "run", "state"] {
+        std::fs::create_dir_all(root.path().join(directory)).unwrap();
+    }
+    std::fs::write(root.path().join("home/.config/st3/config.toml"), format!(
+        "node = \"studio\"\nstate_dir = {:?}\nsocket = {:?}\nclient_gateway_socket = {:?}\npty_root = {:?}\n",
+        root.path().join("state"), root.path().join("run/api.sock"),
+        root.path().join("run/client.sock"), root.path().join("pty")
+    )).unwrap();
+    let mut daemon = Daemon(
+        command(root.path())
+            .args(["up", "--web-listen", "off"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stderr = daemon.0.stderr.take().unwrap();
+    let (observed, checkpoint) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        let mut startup_log = String::new();
+        let mut published = false;
+        for line in std::io::BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            if !published {
+                if let Some(report) = line.strip_prefix("fractal: WAL checkpoint ") {
+                    let _ = observed.send(Ok(serde_json::from_str::<Value>(report).unwrap()));
+                    published = true;
+                } else {
+                    startup_log.push_str(&line);
+                    startup_log.push('\n');
+                }
+            }
+        }
+        if !published {
+            let _ = observed.send(Err(startup_log));
+        }
+    });
+    // Await the worker's first completed recycle, not a guessed startup delay. The watchdog
+    // bounds a missing startup call; it is not used to manufacture overlapping WAL activity.
+    let checkpoint = checkpoint.recv_timeout(Duration::from_secs(30))
+        .expect("up did not publish a completed WAL recycle")
+        .expect("daemon exited before a WAL recycle");
+    assert!(daemon.0.try_wait().unwrap().is_none(), "{checkpoint}");
+    // This structured event is published only after the startup worker calls Store::recycle_wal,
+    // the entry point that includes escalation. Its threshold/restart behavior has a separate
+    // deterministic Store-level regression; this test protects the real `up` launch wiring.
+    assert!(matches!(checkpoint["report"]["outcome"].as_str(), Some("empty" | "recycled" | "deferred")), "{checkpoint}");
+    assert!(checkpoint["report"]["frames"].as_i64().is_some_and(|frames| frames >= 0), "{checkpoint}");
+    assert_eq!(checkpoint["retained"]["error_outcomes"], 0, "{checkpoint}");
+    daemon.0.kill().unwrap();
+    daemon.0.wait().unwrap();
+    reader.join().unwrap();
+}
+
+#[test]
 fn private_runtime_socket_refuses_shared_gateway_before_creating_state() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -403,7 +464,7 @@ fn a_plain_client_finds_a_daemon_started_with_socket_elsewhere_past_a_dead_defau
     }
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
-    for directory in ["home/.config/st3", "run", "state"] {
+    for directory in ["home/.config/st3", "run", "state", "roster"] {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
     // The config names no socket: the daemon gets `--socket` in its state directory, as a
@@ -423,26 +484,33 @@ fn a_plain_client_finds_a_daemon_started_with_socket_elsewhere_past_a_dead_defau
             .args(["up", "--socket"])
             .arg(&socket)
             .args(["--web-listen", "off"])
+            // A daemon serves before its first agents roster is published; hold that moment.
+            .env("ST3_TEST_AGENT_ROSTER_BARRIER", root.join("roster"))
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .spawn()
             .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(60);
-    while fractal_daemon::startup::read(&socket).is_none_or(|readiness| readiness.status != "serving") {
+    while fractal_daemon::startup::read(&socket).is_none_or(|readiness| readiness.status != "serving")
+        || !root.join("roster/entered").exists()
+    {
         assert!(daemon.0.try_wait().unwrap().is_none(), "daemon exited: {}", std::fs::read_to_string(&log_path).unwrap());
         assert!(Instant::now() < deadline, "daemon did not serve: {}", std::fs::read_to_string(&log_path).unwrap());
         std::thread::sleep(Duration::from_millis(20));
     }
-    let plain = command(root)
-        .env_remove("ST3_ENDPOINT")
-        .env("ST3_DAEMON_WAIT", "0")
-        .args(["agents", "ls"])
-        .output()
-        .unwrap();
+    // Discovery is asked of a read the daemon answers once it serves. The agents roster is
+    // published after that (#5004): this client reaches the daemon and reads that it is not ready.
+    let plain = |args: &[&str]| command(root).env_remove("ST3_ENDPOINT").env("ST3_DAEMON_WAIT", "0").args(args).output().unwrap();
+    let roster = plain(&["agents", "ls"]);
+    assert!(!roster.status.success());
+    assert!(String::from_utf8_lossy(&roster.stderr).contains("agent-roster-not-ready"), "{roster:?}");
+    let documents = plain(&["documents", "ls"]);
     assert!(
-        plain.status.success(),
+        documents.status.success(),
         "a client with no endpoint did not find the daemon: {}",
-        String::from_utf8_lossy(&plain.stderr)
+        String::from_utf8_lossy(&documents.stderr)
     );
+    assert_eq!(String::from_utf8_lossy(&documents.stdout), "No documents.\n");
+    std::fs::write(root.join("roster/release"), b"").unwrap();
 }

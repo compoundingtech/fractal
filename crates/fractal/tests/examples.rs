@@ -609,7 +609,7 @@ fn native_session_import_eval_uses_raw_ptys_and_all_five_drivers() {
     }
     for required in [
         "exact_session == true",
-        "st3 import run",
+        "fractal import run",
         "raw process",
         "owner_run_id == null",
         "managed_process_has_native_id",

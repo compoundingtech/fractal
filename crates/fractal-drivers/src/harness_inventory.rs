@@ -48,7 +48,7 @@ pub fn observation(frame: &Value, driver: &str, native_session: Option<&str>, ru
     if driver != "omp" || frame["type"] != "inventory" { return Ok(None) }
     let bound = native_session.context("inventory has no authenticated native session")?;
     anyhow::ensure!(frame["session_id"].as_str() == Some(bound), "inventory native session was superseded");
-    let workspace = frame["workspace"].as_str().filter(|path| {
+    let mut workspace = frame["workspace"].as_str().filter(|path| {
         !path.is_empty() && path.len() <= 4096 && !path.contains('\0') && std::path::Path::new(path).is_absolute()
     }).map(str::to_owned);
     let workspace_identity: Option<WorkspaceIdentity> = serde_json::from_value(
@@ -57,6 +57,21 @@ pub fn observation(frame: &Value, driver: &str, native_session: Option<&str>, ru
         [&identity.device, &identity.inode].iter().all(|value|
             !value.is_empty() && value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit())
                 && value.parse::<u64>().is_ok())), "invalid native workspace identity");
+    if let (Some(root), Some(identity)) = (&workspace, &workspace_identity) {
+        use std::os::unix::fs::MetadataExt as _;
+        // Resolve legitimate native aliases (notably macOS /tmp) once, at admission.
+        // Identity comes from the harness's held cwd, never from the resolved pathname.
+        // Readers must still open every canonical component with O_NOFOLLOW and recheck it.
+        let canonical = std::fs::canonicalize(root).context("resolve native workspace")?;
+        let metadata = canonical.metadata().context("identify native workspace")?;
+        anyhow::ensure!(metadata.is_dir()
+            && identity.device.parse::<u64>().ok() == Some(metadata.dev())
+            && identity.inode.parse::<u64>().ok() == Some(metadata.ino()),
+            "native workspace identity changed during admission");
+        let canonical = canonical.to_str().context("native workspace path is not UTF-8")?;
+        anyhow::ensure!(canonical.len() <= 4096, "native workspace path bound exceeded");
+        workspace = Some(canonical.to_owned());
+    }
     let dynamic_commands: Availability = serde_json::from_value(frame["dynamic_commands"].clone())?;
     anyhow::ensure!(frame["commands"].as_array().is_some_and(|commands| commands.len() <= MAX_COMMANDS),
         "inventory command bound exceeded");

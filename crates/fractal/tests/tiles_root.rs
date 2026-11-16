@@ -1168,11 +1168,13 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
         let _context = runtime.enter();
         fractal_daemon::api::spawn_tile_endpoints_from(
             fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 store: store.clone(),
                 notify: std::sync::Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "example".into(),
+                api_socket: state_dir.path().join("api.sock"),
                 state_dir: state_dir.path().to_path_buf(),
                 pty_root: state_dir.path().join("pty"),
                 pty_binary: "pty".into(),

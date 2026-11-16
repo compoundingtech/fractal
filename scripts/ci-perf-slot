@@ -47,7 +47,7 @@ Measuring a change (docs/ci.md, "Performance gate")
   Run the load test above on your branch alone: the slot makes sure nothing else of ours is
   measuring at the same time. Its report is a table of each request's p50/p99/max against its
   budget, and the daemon's CPU in cores. The budgets that apply are the absolute p99 budget of
-  every request and the 2-core CPU ceiling (slo/targets.toml); locally there is no baseline, so
+  every request and the 2-core CPU ceiling (slo/objectives.kdl); locally there is no baseline, so
   those are the whole gate. CI adds the relative gate, twice the worst of main's last five
   reports, when you dispatch Performance on your branch. A run that misses a budget fails; do not retry it into
   passing, find the cause.
@@ -171,11 +171,30 @@ def branch_of(cwd):
     return '%s@%s' % (branch, sha) if branch else 'unknown branch'
 
 
+def join_line(directory, who):
+    """Join the line with a ticket named for when it asked, locked before it enters the line: a
+    scan (another waiter's, or a status read) takes an unlocked ticket for a gone waiter's and
+    removes it, and a waiter whose ticket is gone is never shown in line and never first. The lock
+    is the inode's, so it moves into the line with the rename. Returns the ticket and its fd."""
+    name = '%020d-%d-%s' % (time.time_ns(), os.getpid(), who)
+    joining = directory / ('.joining-' + name)
+    fd = open_shared(joining)
+    try:
+        if not lock(fd):
+            raise OSError('another process holds the new ticket %s' % joining)
+        ticket = directory / 'line' / name
+        os.rename(joining, ticket)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            joining.unlink()
+        os.close(fd)
+        raise
+    return ticket, fd
+
+
 def acquire(directory, who):
     """Wait in line, oldest first, then hold the slot's flock. Returns the held fd."""
-    ticket = directory / 'line' / ('%020d-%d-%s' % (time.time_ns(), os.getpid(), who))
-    ticket_fd = open_shared(ticket)
-    lock(ticket_fd)
+    ticket, ticket_fd = join_line(directory, who)
     slot_fd = open_shared(directory / 'slot.lock')
     last, announced = None, 0.0
     try:
@@ -271,25 +290,20 @@ def run(args):
     cwd = os.getcwd()
     purpose = args.purpose or branch_of(cwd)
     slot_fd = acquire(directory, purpose.replace('/', '_').replace('-', '_')[:60])
+    since = time.time()
     gate_read, gate_write = os.pipe()
     result_read, result_write = os.pipe()
     # Install handlers BEFORE the holder record is published and before fork: a signal once the record shows the slot held
     # reaches the watchdog, which stops the run and drops the record. Before, Ctrl-C in that window raised KeyboardInterrupt
     # and left the record behind (2026-11-01, two merge groups failed on it).
-    def stop(received, _frame):
-        with contextlib.suppress(BrokenPipeError):
-            os.write(gate_write, bytes([received]))
+    # The signal's number goes to the watchdog from the C handler itself, through the wakeup fd: a Python handler runs only
+    # between bytecodes, so one that wrote it never ran while this process was blocked reading the result, as a signal that
+    # landed just before that read left it, and the run went on to its end (2026-11-06, a merge group). The Python handlers
+    # only replace the default actions.
+    os.set_blocking(gate_write, False)
+    signal.set_wakeup_fd(gate_write, warn_on_full_buffer=False)
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(number, stop)
-    since = time.time()
-    gate_read, gate_write = os.pipe()
-    result_read, result_write = os.pipe()
-    # Install handlers BEFORE fork, so early cancellation cannot orphan a run.
-    def stop(received, _frame):
-        with contextlib.suppress(BrokenPipeError):
-            os.write(gate_write, bytes([received]))
-    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(number, stop)
+        signal.signal(number, lambda *_: None)
     # Publishing holder.json makes this run observable (and cancellable). Queue
     # cancellation before publishing, even if the watchdog has not forked yet.
     holder = {'pid': os.getpid(), 'user': os.environ.get('USER') or str(os.getuid()), 'for': purpose,
@@ -304,6 +318,8 @@ def run(args):
     owner = os.getpid()
     guard = os.fork()
     if guard == 0:
+        # The watchdog's own signals must not write into the gate, nor into whatever later reuses its number.
+        signal.set_wakeup_fd(-1)
         os.close(gate_write)
         os.close(result_read)
         try:
@@ -319,6 +335,7 @@ def run(args):
         os.waitpid(guard, 0)
         return int(status) if status else 1
     finally:
+        signal.set_wakeup_fd(-1)
         os.close(result_read)
         os.close(gate_write)
 
