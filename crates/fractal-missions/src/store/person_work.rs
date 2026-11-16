@@ -7,6 +7,8 @@ pub use fractal_delivery::store::person_work::*;
 pub use fractal_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod revision_provenance_tests;
+mod continuity;
+pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
 /// A person may replace a deadline resolution for seven days after it was recorded.
 pub const PERSON_OVERRIDE_WINDOW_MS: u128 = 7 * 24 * 60 * 60 * 1_000;
@@ -566,11 +568,23 @@ impl PersonWorkStore for Store {
                     "cannot ask from step `{origin_subject}`: status `{}`, claimant `{}`, expected incarnation `{}`, given `{}`; only its live claimant can block this step. Refresh `work ls` and use its current claim and incarnation, or omit --step for an independent ask",
                     origin.status, origin.claimant.as_deref().unwrap_or("<none>"), origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));
             }
+            let binding = continuity::ask_binding_tx(tx, &origin, input, &structured).map_err(internal)?;
+            if let Some(answered) = continuity::equivalent_answer_tx(tx, &origin, &binding).map_err(internal)? {
+                let fields = &answered.body["fields"];
+                append_claim_tx(tx, &self.origin, &origin_subject, "step-run.carried", Some(&input.actor),
+                    &json!({"fields":{"source_step_run":fields["origin_step"],
+                        "source_attempt":fields["origin_attempt"],"attempt":origin.attempt,
+                        "status":origin.status,"worker_reported":origin.worker_reported},
+                        "evidence":[answered.id]}), &[answered.id.clone()], None).map_err(claim_append_error)?;
+                return step(tx, &answered.subject).map_err(internal)?
+                    .ok_or_else(|| FractalError::new("missing-step-run", "the original answered ask is no longer retained"));
+            }
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
                 &with_priority(with_deadline(with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
                     "origin_step": origin_subject, "origin_attempt": origin.attempt,
+                    "continuity": binding,
                     "person": input.person, "title": input.title, "reason": input.reason,
                     "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;

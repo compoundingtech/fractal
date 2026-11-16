@@ -142,9 +142,9 @@ fractal work revise mission-run/garden/readme/one missions/readme-v2.kdl \
 fractal work revision generations mission-run/garden/readme/one
 ```
 
-Unreviewed direct revision keeps the run's identity and creates a new generation; changed work and its dependents may need to run again. Publishing a new mission revision instead supersedes already-active stale runs by default, but existing human-only review and when-idle policies take precedence. A person-approved proposal creates a fresh linked run at the exact approved revision; a when-idle source holds new work in the existing `revision-draining` phase while holders finish current work. Preflight the fresh replacement before cancellation: leave an incompatible source active with a visible `supersession_fault`, or finish ordinary source cleanup before its linked replacement starts. All replacement steps and programs restart without successful-step or journal adoption, so effects must be idempotent. Inspect `supersedes` and `superseded_by` with `fractal missions show`. Republishing the same revision does nothing; an explicit same-revision retry after publication remains on that revision until a later new revision is published.
+Direct revision keeps the run's identity and creates a new generation; changed work and its dependents run again. Publication automatically supersedes only unprotected runs without completed work or person responses. Otherwise use the existing exact-preview revision approval path. When-idle timing waits for current holders but cannot discard their completed evidence. Admission preflights the replacement before cancellation and preserves confirmed cleanup barriers; incompatible sources remain active with `supersession_fault`. Compatible completed steps and bound person answers retain references to original evidence rather than restarting unchanged work. Program journals are not adopted. Inspect `supersedes` and `superseded_by` with `fractal missions show`; republishing the same revision does nothing.
 
-## Retry a failed run from the top
+## Retry a failed run
 
 After a run has failed and become terminal, retry it against the latest published mission revision:
 
@@ -160,9 +160,9 @@ fractal missions retry mission-run/garden/readme/one \
   --same-revision --reason 'Repeat the same plan.' --as person/example
 ```
 
-Copy the new run ID from the result and inspect it with `fractal missions show`. Its `retry_of` points to the source; the source's `retried_by` lists its retries. Retry does not change the source's status, generation, or history and does not carry completed steps forward.
+Inspect the returned run with `fractal missions show`. Its `retry_of` and the source's `retried_by` retain both executions. Retry leaves source history unchanged and carries matching completed work by reference. Changed step/dependency contracts, resolved inputs, authority, effects, or withdrawn answers refuse adoption.
 
-The new run reuses the exact resolved inputs and workspace. Latest-revision retry refuses if those inputs no longer fit, naming both revisions and the reason; it never silently selects the source revision. All steps and the program restart from the top, so write idempotent work that handles existing files and external effects safely. A person or the owning agent needs ordinary run-start authority.
+Inputs retain their exact resolution. A schedule or subscription run resolves workspace from its current launching declaration; explicit and historical unbound workspaces stay explicit. Incompatible inputs refuse with both revisions and the reason. Unfinished work restarts, so external effects must still be idempotent. For an already-superseded source use `fractal missions run continuity preview RUN`, then `recover RUN --preview-hash HASH --as ACTOR`; named legacy unbound steps require explicit person confirmation with `--confirm-legacy-step STEP`. Preview writes nothing and stale recovery snapshots refuse.
 
 ## Queue follow-on work
 

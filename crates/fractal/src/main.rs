@@ -91,6 +91,7 @@ mod follow_tests;
 mod presentation;
 mod actor_contract;
 mod inspection_actor;
+mod continuity_cli;
 mod pairing_qr;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
@@ -1378,6 +1379,11 @@ enum MissionViewCommand {
     /// Uses the latest published revision unless --same-revision is set. The source run
     /// and its history remain unchanged; incompatible latest inputs are refused.
     Retry(MissionRunRetryArgs),
+    /// Preview or recover continuity evidence for mission runs.
+    Run {
+        #[command(subcommand)]
+        command: continuity_cli::RunCommand,
+    },
     /// Cancel one exact running mission and stop its owned work and runtimes.
     Cancel(MissionCancelArgs),
     /// Change who a running run tells when it fails, is cancelled or stalls, or clear it.
@@ -6663,6 +6669,7 @@ fn guard_mutating_cli_actor(
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retry(args) => Some(args.actor.as_str()),
+            MissionViewCommand::Run { command } => command.actor(),
             MissionViewCommand::Check(args) => args.actor.as_deref(),
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
