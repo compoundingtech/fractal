@@ -10,6 +10,7 @@ public struct TrayMenuBarLabel: View {
   let hasUnreadThreads: Bool
   @Environment(\.displayScale) private var scale
 
+  /// Unread is an independent caller-supplied signal, never inferred from open asks.
   public init(model: AttentionModel, hasUnreadThreads: Bool = false) {
     self.model = model
     self.hasUnreadThreads = hasUnreadThreads
