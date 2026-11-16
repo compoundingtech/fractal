@@ -329,7 +329,8 @@ export const EmptyStart: Story = {
   play: async context => {
     await AllStates.play?.(context)
     const details = await alertDetails(context.canvasElement)
-    await details.findByText('Ask Worker tests about this item without answering it.')
+    const agentName = await details.findByText('Worker tests', { selector: 'span' })
+    await expect(agentName.closest('p')).toHaveTextContent(/^Ask Worker tests about this item without answering it\.$/)
     await expect(details.getByRole('button', { name: 'Start thread' })).toBeTruthy()
   },
 }

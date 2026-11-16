@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { FractalClient } from '@fractal/client'
 import { Attention, decodeUnknownSync } from '@fractal/client/schema/read'
+import { Agent, decodeUnknownSync as decodeNative } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 import { act } from 'react'
@@ -85,7 +86,10 @@ it.each([
   const registry = AtomRegistry.make()
   const answer = vi.fn(async () => ({ _tag: 'Sent' as const }))
   const source = { ...fixtureSource({ world: {
-    now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents: [], missions: [], attention: [ask],
+    now: Date.parse('2026-11-01T11:05:00Z'), events: [], missions: [], attention: [ask],
+    // The roster serves the seat's declared name.
+    agents: [decodeNative(Agent)({ kind: 'agent', id: 'agent/example/atlas', name: 'atlas', host_id: 'host/example', runtime_ids: [], reachability: 'reachable',
+      state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })],
     conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }), threads: gatewayThreads(client, registry), alertActions: { act: answer } }
   const host = document.createElement('div')

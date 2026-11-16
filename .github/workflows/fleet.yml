@@ -4613,6 +4613,7 @@ jobs:
               "apps/fractal-web/src/conversation/todos/fixtures.ts",
               "apps/fractal-web/src/conversation/todos/model.ts",
               "apps/fractal-web/src/conversation/vocabulary.ts",
+              "apps/fractal-web/src/data/agentName.ts",
               "apps/fractal-web/src/data/arrangements.ts",
               "apps/fractal-web/src/data/asking.ts",
               "apps/fractal-web/src/data/attachmentSchema.ts",

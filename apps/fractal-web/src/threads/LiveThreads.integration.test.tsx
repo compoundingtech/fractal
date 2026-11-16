@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { FractalClient } from '@fractal/client'
 import { Attention, decodeUnknownSync } from '@fractal/client/schema/read'
-import type { Attention as AttentionRow, Mission, TerminalScreen } from '@fractal/client/schema'
+import { Agent as AgentRow, decodeUnknownSync as decodeNative, type Attention as AttentionRow, type Mission, type TerminalScreen } from '@fractal/client/schema'
 import type { DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -22,6 +22,9 @@ vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const base = fixture.capabilities
 const agent = 'agent/example/atlas'
+/** A roster row for `id`, as Fractal serves it with its effective `name`. */
+const seat = (id: string, name: string) => decodeNative(AgentRow)({ kind: 'agent', id, name, host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable',
+  state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })
 const row = (id: string, title: string, state = 'open') => ({
   id, agent_id: agent, title, title_revision: 'claim/title', revision: 'claim/current', state, message_count: 1, unread: false,
 })
@@ -40,9 +43,10 @@ const live: FeedSyncObservation = { status: { _tag: 'Live', since: 0 }, observed
 
 type Reply = (url: URL, init: RequestInit | undefined) => Response | Promise<Response>
 
-/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, and `unreachable` fails every request, capabilities included. */
-async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation }: {
+/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, `unreachable` fails every request, capabilities included, and `agents` is the roster. */
+async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation, agents = [] }: {
   readonly actions?: readonly string[]; readonly reply: Reply; readonly capabilities?: () => Response | undefined; readonly unreachable?: () => boolean; readonly conversation?: ConversationPage
+  readonly agents?: readonly AgentRow[]
 }) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
@@ -65,7 +69,7 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
   const gateway = Atom.make<FeedSyncObservation>(live).pipe(Atom.keepAlive)
   const threads = gatewayThreads(client, registry)
   const source = { ...fixtureSource({ world: {
-    now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents: [], missions: [], attention: [ask],
+    now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents, missions: [], attention: [ask],
     conversations: conversation === undefined ? {} : { [agent]: conversation }, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }), threads, sync: {
     gateway,
@@ -271,16 +275,16 @@ it.each(['recovers through Retry', 'closes while stale'] as const)('marks an Inb
   } finally { silence.mockRestore(); await view.dispose() }
 })
 
-it('names an agent by its short name, never its id, while the roster has no row for it', async () => {
+it('names an agent the roster has no row for as an agent, never by its id', async () => {
   // The mounted roster holds no agents, so every agent read is unavailable.
   const view = await mount(<LiveInboxThreads alert={ask} />, { actions: ['thread.start'], reply: () => page([]) })
   try {
-    await vi.waitFor(() => expect(view.host.textContent).toContain('Ask atlas about this item without answering it.'))
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Ask an agent about this item without answering it.'))
     await act(async () => view.button('Start thread')?.click())
-    expect(view.host.textContent).toContain('To atlas')
+    expect(view.host.textContent).toContain('To an agent')
     expect(view.host.textContent).not.toContain(agent)
     // The exact id stays available as the name's title.
-    expect([...view.host.querySelectorAll('[title]')].map(each => [each.textContent, each.getAttribute('title')])).toContainEqual(['atlas', agent])
+    expect([...view.host.querySelectorAll('[title]')].map(each => [each.textContent, each.getAttribute('title')])).toContainEqual(['an agent', agent])
   } finally { await view.dispose() }
 })
 
@@ -448,6 +452,7 @@ it('titles a first send from its first line when a sibling thread already uses t
       }
       return url.pathname.endsWith('/threads') && url.searchParams.get('recently_closed') !== 'true' ? page([row('thread/one', 'Release checklist')]) : page([])
     },
+    agents: [seat(agent, 'atlas')],
   })
   try {
     await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
@@ -477,6 +482,78 @@ it('replaces the composer with a read-only note and keeps lifecycle changes to o
     expect(closed?.querySelector('strong')).toBeNull()
     expect(view.host.textContent).toContain('Read-only on this device. Reply from a device with control access.')
     expect(view.host.querySelector('textarea')).toBeNull()
+  } finally { await view.dispose() }
+})
+
+it('names thread senders without their ids: an unobserved agent as An agent, Fractal machinery as Fractal', async () => {
+  const reconciler = 'agent/st3/reconciler'
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.closed', id: 'event/closed', actor_id: reconciler, accepted_at_unix_ms: Date.parse('2026-11-01T11:04:30Z') },
+      { kind: 'message', id: 'message/daemon', actor_id: 'daemon/runtime', content: 'Delivery retried.', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z'), thread_quote_id: null },
+      { kind: 'message', id: 'message/reconciler', actor_id: reconciler, content: 'Reconciled the mission run.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:30Z'), thread_quote_id: null },
+      { kind: 'message', id: 'message/first', actor_id: 'agent/build-host-a/worker-tests', content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Delivery retried.'))
+    const senders = [...view.host.querySelectorAll('ol > li > div > strong')].map(each => [each.textContent, each.getAttribute('title')])
+    expect(senders).toEqual([
+      ['An agent', 'agent/build-host-a/worker-tests'],
+      ['Fractal', reconciler],
+      ['Fractal', 'daemon/runtime'],
+    ])
+    expect(view.host.querySelector('[data-thread-event="thread.closed"]')?.textContent).toMatch(/^Fractal closed the thread/)
+    expect(view.host.textContent).not.toMatch(/build-host-a|reconciler|daemon\//)
+  } finally { await view.dispose() }
+})
+
+it('names another person in a thread by their handle, never as an agent', async () => {
+  const robin = 'person/robin'
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    actions: ['thread.reply'],
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.reopened', id: 'event/reopened', actor_id: robin, accepted_at_unix_ms: Date.parse('2026-11-01T11:04:30Z') },
+      { kind: 'message', id: 'message/robin', actor_id: robin, content: 'The rollback step is covered.', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The rollback step is covered.'))
+    const sender = view.host.querySelector('ol > li > div > strong')
+    expect(sender?.textContent).toBe('robin')
+    expect(sender?.getAttribute('title')).toBe(robin)
+    expect(view.host.querySelector('[data-thread-event="thread.reopened"]')?.textContent).toMatch(/^robin reopened the thread/)
+    expect(view.button('Reply')?.getAttribute('aria-label')).toBe('Reply to robin')
+    expect(view.host.textContent).not.toMatch(/an agent/i)
+  } finally { await view.dispose() }
+})
+
+it.each([
+  // A served name is shown as declared, a slug included.
+  { id: agent, name: 'atlas', shown: 'atlas', hidden: 'example/atlas' },
+  // The roster names the reconciler like any seat; it still reads as Fractal, as in the terminal app.
+  { id: 'agent/st3/reconciler', name: 'Reconciler', shown: 'Fractal', hidden: 'Reconciler' },
+  // The daemon labels a seat that declares no name by its id without agent/; that is no name, opaque ids included.
+  { id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests', shown: 'An agent', hidden: 'worker-tests' },
+  { id: 'agent/example/d415892ea7a1dab11e6ba7ed22a8eb13', name: 'example/d415892ea7a1dab11e6ba7ed22a8eb13', shown: 'An agent', hidden: 'd415892e' },
+])('names an observed thread agent $name as $shown in the thread origin and as its sender, with the id only as the title', async ({ id, name, shown, hidden }) => {
+  const inSentence = shown === 'An agent' ? 'an agent' : shown
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    agents: [seat(id, name)],
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.renamed', id: 'event/renamed', actor_id: id, previous_title: 'Checklist', title: 'Release checklist', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z') },
+      { kind: 'message', id: 'message/first', actor_id: id, content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: { ...row('thread/one', 'Release checklist'), agent_id: id } }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('[data-thread-origin]')?.textContent).toBe(`With ${inSentence}`))
+    expect(view.host.querySelector('[data-thread-origin] [title]')?.getAttribute('title')).toBe(id)
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The checklist is complete.'))
+    const sender = view.host.querySelector('ol > li > div > strong')
+    expect(sender?.textContent).toBe(shown)
+    expect(sender?.getAttribute('title')).toBe(id)
+    expect(view.host.querySelector('[data-thread-event="thread.renamed"]')?.textContent).toMatch(new RegExp(`^${shown} renamed it to`))
+    expect(view.host.textContent).not.toContain(hidden)
   } finally { await view.dispose() }
 })
 

@@ -5191,7 +5191,7 @@ jobs:
         run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
-      - name: Run fleet compatibility against the pinned older st3
+      - name: Run fleet compatibility and the pinned v20/v22 thread storage floors
         shell: bash
         run: nix develop -c bash scripts/ci-linux fleet-compat
       - name: Save Nix outputs to the local Nix cache
@@ -5845,6 +5845,7 @@ jobs:
               "apps/fractal-web/src/conversation/todos/fixtures.ts",
               "apps/fractal-web/src/conversation/todos/model.ts",
               "apps/fractal-web/src/conversation/vocabulary.ts",
+              "apps/fractal-web/src/data/agentName.ts",
               "apps/fractal-web/src/data/arrangements.ts",
               "apps/fractal-web/src/data/asking.ts",
               "apps/fractal-web/src/data/attachmentSchema.ts",

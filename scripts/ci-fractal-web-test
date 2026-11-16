@@ -182,6 +182,7 @@ print("passed: raw terminal runtime dependencies select kit lanes, unit tests do
 # state cell, transcript and workspace stories.
 # Some are declared ahead of the web changes that add them, so those changes select kit plays without touching CI paths.
 bundled_app_kit_inputs = (
+    "apps/fractal-web/src/data/agentName.ts",
     "apps/fractal-web/src/conversation/alerts/PromptAlert.tsx",
     "apps/fractal-web/src/conversation/alerts/alertAnswers.ts",
     "apps/fractal-web/src/conversation/alerts/alertChoices.ts",
