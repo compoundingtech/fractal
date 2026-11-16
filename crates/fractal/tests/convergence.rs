@@ -2153,10 +2153,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v34 adds durable timed seat-message requests and terminal receipts.
-/// Non-trimming seeds must still trim on every modern node after excusing the old build
-/// and advancing to the next cut.
-const NEVER_TRIMS: &[u64] = &[179];
+/// Corpus v34 claim fields shift the shared RNG schedule, so quiesce leaves seed 1
+/// unexcused during the initial run. Non-trimming seeds must still trim on every
+/// modern node after excusing the old build and advancing to the next cut.
+const NEVER_TRIMS: &[u64] = &[1, 179];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 

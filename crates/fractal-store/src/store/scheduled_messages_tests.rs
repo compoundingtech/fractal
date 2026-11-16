@@ -175,8 +175,8 @@ fn scheduled_reply_settles_graph_or_stream_parent_only_when_delivered() {
             owner.append_claim(&parent).unwrap();
         }
         let mut reply = input("timed-answer");
-        // Bare references have the same meaning as on immediate acceptance.
-        reply.fields.insert("in_reply_to".into(), json!("00000000000000d1"));
+        // Store-level scheduling receives canonical subject references from ingress.
+        reply.fields.insert("in_reply_to".into(), json!(parent.subject));
         let scheduled = owner.schedule_message(&reply, AT, "timed-answer").unwrap();
         assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "sent");
         assert!(!owner.reconcile_scheduled_messages_at(AT - 1).unwrap().changed);

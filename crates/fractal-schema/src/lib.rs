@@ -5406,6 +5406,10 @@ mod tests {
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
+        for kind in scheduled_messages::KINDS {
+            current.claims.remove(kind).unwrap();
+        }
+        current.subjects.remove("message-schedule").unwrap();
         for kind in attention_controls::KINDS {
             current.claims.remove(kind).unwrap();
         }
@@ -5644,6 +5648,7 @@ mod tests {
                 "lane.left",
                 "lane.marked",
                 "lane.moved",
+                "message-schedule.cancelled",
                 "message.closed",
                 "message.read",
                 "planning-session.candidate-submitted",

@@ -129,6 +129,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_stream_lifecycle",
         // A seat's host's closes as it relayed them: never replicated, outside every digest.
         "local_relayed_message_closes",
+        // Member-local due-work and delivery-settlement queues, rebuilt from schedule claims.
+        "local_scheduled_message_pending",
+        "local_scheduled_message_settlement",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",
