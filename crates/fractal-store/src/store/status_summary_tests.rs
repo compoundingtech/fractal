@@ -536,7 +536,7 @@ fn generic_visibility_probes_reserved_kinds_without_reading_runtime_history() {
             assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
             // Either existing subject/kind covering index can win a prefix probe.
             assert_eq!(plan.iter().filter(|line| line.contains(
-                "COVERING INDEX claims_subject_kind")).count(), 4, "{plan:?}");
+                "COVERING INDEX claims_subject_kind")).count(), 5, "{plan:?}");
         }
     }
     let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
@@ -567,6 +567,7 @@ fn generic_visibility_reserved_kind_probes_match_namespace_and_snapshot_boundari
         "attention.notice", "attention.notice-", "attention.notice-source",
         "custom.attention-", "custom.attention/", "custom.attentionX",
         "attention.notice.", "attention.notice/", "attention.noticeX", "runtime.observed",
+        "thread.", "thread.created", "thread-", "thread/", "threadX",
     ];
     let store = seat_with(kinds.len());
     let names = kinds.iter().enumerate().map(|(index, _)| format!("agent/kind-{index}"))
@@ -581,7 +582,9 @@ fn generic_visibility_reserved_kind_probes_match_namespace_and_snapshot_boundari
     }
     for cut in 0..=kinds.len() as u64 {
         let expected = kinds.iter().enumerate()
-            .filter(|&(index, kind)| index as u64 >= cut || !fractal_schema::notice::is_reserved_kind(kind))
+            .filter(|&(index, kind)| index as u64 >= cut
+                || !(fractal_schema::notice::is_reserved_kind(kind)
+                    || fractal_schema::threads::is_reserved_kind(kind)))
             .map(|(index, _)| format!("agent/kind-{index}"))
             .collect::<BTreeSet<_>>();
         assert_eq!(store.generic_status_subject_names_at(names.clone(), cut).unwrap(),
@@ -589,6 +592,7 @@ fn generic_visibility_reserved_kind_probes_match_namespace_and_snapshot_boundari
     }
     let roots = BTreeSet::from([
         "custom/attention".to_owned(), "custom/attention/source/x".to_owned(),
+        "thread/hidden".to_owned(),
     ]);
     assert!(store.generic_status_subject_names_at(roots, 0).unwrap().is_empty());
 }

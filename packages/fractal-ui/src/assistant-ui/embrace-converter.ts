@@ -137,7 +137,8 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       diagnostics.push('semantic-row-as-text')
       return {
         ...common, role: 'system',
-        content: [{ type: 'text', text: `Run ${item.status}${item.detail ? ` · ${item.detail}` : ''}` }],
+        // A detail that only repeats the status ("Run running · running") says nothing more.
+        content: [{ type: 'text', text: `Run ${item.status}${item.detail && item.detail !== item.status ? ` · ${item.detail}` : ''}` }],
       }
     case 'Usage':
       diagnostics.push('semantic-row-as-text')
