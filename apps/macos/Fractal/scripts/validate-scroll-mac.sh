@@ -21,7 +21,8 @@ case "$mode" in
     /usr/bin/swift build --product TrayGallery 2>&1 | tee "$out/build-gallery.txt"
     /usr/bin/swift test 2>&1 | tee "$out/tests.txt"
     .build/debug/TrayGallery "$out" --scroll-probe 2>&1 | tee "$out/probe.txt"
-    echo 'PASS requires four probe PASS lines (inline/pinned × 300/400 pt), stable offset and zero section writes.'
+    .build/debug/TrayGallery "$out" --navigation-probe 2>&1 | tee "$out/navigation-probe.txt"
+    echo 'PASS requires four scroll probe PASS lines (light/dark × 300/400 pt) and all navigation/anchor assertions.'
     ;;
   trace)
     pid=${2:?Usage: bash scripts/validate-scroll-mac.sh trace EXISTING_TRAY_PID}
