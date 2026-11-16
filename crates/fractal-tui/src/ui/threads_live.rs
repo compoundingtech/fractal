@@ -421,6 +421,8 @@ impl Earlier {
             None => Ok(fractal_client::ThreadTimelinePage {
                 items: Vec::new(),
                 next_cursor: None,
+                previous_cursor: None,
+                anchor: None,
             }),
         }
     }

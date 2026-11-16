@@ -44,6 +44,8 @@ export type ActionCommon = {
   | "message.send"
   | "message.read"
   | "thread.read"
+  | "thread.mark-unread"
+  | "thread.clear-unread"
   | "message.close"
   | "launch.create"
   | "launch.revise"
@@ -4634,6 +4636,11 @@ export type TerminalScreen = {
   truncated: boolean;
 };
 
+export type ThreadClearUnreadParameters = {
+  observed_marks: Array<string>;
+  target_id: string;
+};
+
 export type ThreadClosedEvent = {
   accepted_at_unix_ms: number;
   actor_id: Id;
@@ -4650,6 +4657,8 @@ export type ThreadCollectionContext = ({
   mission_id: Id;
 } | {
   recently_closed: true;
+} | {
+  marked_unread: true;
 });
 
 export type ThreadInboxOrigin = {
@@ -4674,7 +4683,17 @@ export type ThreadListQuery = ({
   cursor?: string;
   limit?: number;
   recently_closed: true;
+} | {
+  cursor?: string;
+  limit?: number;
+  marked_unread: true;
 });
+
+export type ThreadMarkUnreadParameters = {
+  anchor_message_id: string;
+  observed_marks: Array<string>;
+  target_id: string;
+};
 
 export type ThreadMessageEvent = {
   accepted_at_unix_ms: number;
@@ -4738,6 +4757,7 @@ export type ThreadSummary = {
   title: string;
   title_revision: Revision;
   unread?: boolean;
+  unread_reminder?: (ThreadUnreadReminder | null);
 };
 
 export type ThreadSummaryPage = {
@@ -4749,11 +4769,28 @@ export type ThreadTargetParameters = {
   target_id: Id;
 };
 
+export type ThreadTimelineAnchor = {
+  message_id: Id;
+  state: "current" | "unavailable" | "pending";
+};
+
 export type ThreadTimelineEvent = (ThreadRenamedEvent | ThreadClosedEvent | ThreadReopenedEvent | ThreadMessageEvent);
 
 export type ThreadTimelinePage = {
+  anchor?: ThreadTimelineAnchor;
   items: Array<ThreadTimelineEvent>;
   next_cursor: (string | null);
+  previous_cursor?: string;
+};
+
+export type ThreadUnreadMark = {
+  anchor_message_id: Id;
+  mark_id: string;
+};
+
+export type ThreadUnreadReminder = {
+  anchor_message_id: Id;
+  marks: Array<ThreadUnreadMark>;
 };
 
 export type TimelineAskAnswer = {
@@ -5694,7 +5731,9 @@ export type ActionRequest =
   rows: number;
   terminal_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'terminal_sequence'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.clear-unread'; parameters: ThreadClearUnreadParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.close'; parameters: ThreadTargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.mark-unread'; parameters: ThreadMarkUnreadParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.read'; parameters: ThreadReadParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.rename'; parameters: ThreadRenameParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.reopen'; parameters: ThreadTargetParameters; fence: Fence }) |

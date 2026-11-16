@@ -8,7 +8,7 @@ use metadata_snapshot::MetadataSnapshot;
 
 pub(super) fn install_indexes(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
-         /* sqlite-large-value: allow-for-now lv-h60845d471cc3 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+         /* sqlite-large-value: allow-for-now lv-h94fc80261c45 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
 ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
 WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
@@ -25,6 +25,9 @@ WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_operational_episode_index
 ON claims(json_extract(body,'$.fields.episode'))
 WHERE kind IN ('operational.failure','operational.recovered');
+CREATE INDEX IF NOT EXISTS claims_thread_unread_owner_time_index
+ON claims(actor, length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, subject)
+WHERE kind='thread.unread-marked';
 CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
 ON claims(actor, store_index DESC)
 WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
@@ -39,7 +42,7 @@ pub use inbox_source::InboxOrigin;
 
 #[path = "thread_message_window.rs"]
 mod message_window;
-pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mark_read, mixed_message_content, mixed_timeline};
+pub use message_window::{ThreadMessage, TimelineAnchor, TimelineAnchorState, TimelineItem, TimelinePage, mark_read, mixed_message_content, mixed_timeline};
 
 pub enum Edit<'a> {
     Create {
@@ -626,7 +629,6 @@ pub enum ThreadContext<'a> {
     Inbox { source: &'a str, episode: &'a str },
     Mission(&'a str),
     RecentlyClosed,
-    // COMPILE-ONLY CONTRACT STUB.
     MarkedUnread,
 }
 
@@ -672,9 +674,7 @@ pub fn list_context(
                 None,
             ),
             ThreadContext::RecentlyClosed => return recently_closed(&connection, &person, cursor, limit),
-            ThreadContext::MarkedUnread => return Err(FractalError::new(
-                "unread-store-not-linked", "compile-only stub: root unread store patch is not linked",
-            )),
+            ThreadContext::MarkedUnread => return marked_unread(&connection, &person, cursor, limit),
         };
         let scope = if index == "claims_thread_conversation_index" {
             canonical_hash(&("thread.conversation.v1", &person, &key))
@@ -915,6 +915,121 @@ fn scoped_cursor<'a>(
         .transpose()
 }
 
+fn marked_candidate_sql(has_cursor: bool) -> String {
+    let unrepaired = UNREPAIRED_CLAIM.replace("claims.", "earlier.");
+    // JSON=JSON keeps the expression index's affinity, unlike JSON=TEXT-column.
+    let base=format!("SELECT claims.subject,claims.accepted_at_unix_ms
+        FROM claims INDEXED BY claims_thread_unread_owner_time_index
+        JOIN operations ON operations.id=json_extract(claims.body,'$._operation.id')
+          AND operations.state='active' AND operations.request_digest=json_extract(claims.body,'$._operation.request_digest')
+        WHERE claims.actor=?1 AND claims.kind='thread.unread-marked' AND {UNREPAIRED_CLAIM}
+          AND claims.id=(SELECT earlier.id FROM claims earlier INDEXED BY claims_operation_index
+            WHERE json_extract(earlier.body,'$._operation.id')=json_extract(claims.body,'$._operation.id')
+              AND json_extract(earlier.body,'$._operation.id') IS NOT NULL
+              AND json_extract(earlier.body,'$._operation.request_digest')=operations.request_digest
+              AND {unrepaired}
+            ORDER BY length(earlier.accepted_at_unix_ms),earlier.accepted_at_unix_ms,earlier.id LIMIT 1)");
+    if !has_cursor {
+        return format!(
+            "{base} ORDER BY length(claims.accepted_at_unix_ms) DESC,claims.accepted_at_unix_ms DESC,claims.subject LIMIT ?4"
+        );
+    }
+    // Do not ORDER BY a constant expression prefix: SQLite otherwise sorts the
+    // entire qualifying branch instead of stopping at the index's bounded LIMIT.
+    let ranges = [
+        (
+            "length(claims.accepted_at_unix_ms)<length(?2)",
+            "length(claims.accepted_at_unix_ms) DESC,claims.accepted_at_unix_ms DESC,claims.subject",
+        ),
+        (
+            "length(claims.accepted_at_unix_ms)=length(?2) AND claims.accepted_at_unix_ms<?2",
+            "claims.accepted_at_unix_ms DESC,claims.subject",
+        ),
+        (
+            "length(claims.accepted_at_unix_ms)=length(?2) AND claims.accepted_at_unix_ms=?2 AND claims.subject>?3",
+            "claims.subject",
+        ),
+    ];
+    let arms = ranges
+        .into_iter()
+        .map(|(range, order)| {
+            format!("SELECT * FROM ({base} AND {range} ORDER BY {order} LIMIT ?4)")
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "SELECT * FROM ({arms}) ORDER BY length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC,subject LIMIT ?4"
+    )
+}
+
+/// Scan owner reminder-operation headers, never an ordinary/recent thread page.
+/// A bounded candidate page may be empty and still carries its continuation.
+fn marked_unread(
+    connection: &Connection,
+    person: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<SummaryPage, FractalError> {
+    let scope = canonical_hash(&("thread.marked-unread.v1", person)).map_err(internal)?;
+    let boundary = scoped_cursor(cursor, &scope)?
+        .map(|marker| {
+            let (time, thread) = marker.split_once(':').ok_or_else(invalid_context_cursor)?;
+            let time = time.parse::<u128>().map_err(|_| invalid_context_cursor())?;
+            if !thread.starts_with("thread/") || thread.len() > 512 {
+                return Err(invalid_context_cursor());
+            }
+            Ok((time.to_string(), thread))
+        })
+        .transpose()?;
+    let sql = marked_candidate_sql(boundary.is_some());
+    let scan_limit = limit * 4;
+    let mut statement=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h73dc5806dc06 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
+    let mut rows = statement
+        .query(params![
+            person,
+            boundary.as_ref().map(|(time, _)| time),
+            boundary.as_ref().map(|(_, thread)| thread),
+            scan_limit + 1
+        ])
+        .map_err(internal)?;
+    let mut items = Vec::new();
+    let mut last = None;
+    let mut seen = BTreeSet::new();
+    for position in 0..=scan_limit {
+        let Some(row) = rows.next().map_err(internal)? else {
+            return Ok(SummaryPage {
+                items,
+                next_cursor: None,
+            });
+        };
+        if position == scan_limit || items.len() == limit {
+            break;
+        }
+        let subject: String = row.get(0).map_err(internal)?;
+        let time: String = row.get(1).map_err(internal)?;
+        last = Some(format!("{scope}:{time}:{subject}"));
+        if seen.contains(&subject) {
+            continue;
+        }
+        let projected =
+            match super::thread_reading::reminder_with_time_conn(connection, person, &subject) {
+                Ok(value) => value,
+                Err(error) if error.code == "thread-unavailable" => continue,
+                Err(error) => return Err(error),
+            };
+        if let Some((_, current_time)) = projected
+            && current_time.to_string() == time
+        {
+            seen.insert(subject.clone());
+            items.push(summary_conn(connection, person, &subject, None)?);
+        }
+    }
+    Ok(SummaryPage {
+        items,
+        next_cursor: last,
+    })
+}
+
 /// Newest close first. Seek only owner close events and recheck the current state, because an
 /// earlier close can have been superseded. Keep the candidate scan bounded even during churn.
 fn recently_closed(
@@ -1035,7 +1150,7 @@ pub fn history(
                AND {UNREPAIRED_CLAIM} {bound}
              ORDER BY CANONICAL_DESC(claims) LIMIT ?4"
         ));
-        let mut statement = connection.prepare_cached( /* sqlite-large-value: allow-for-now lv-h73dc5806dc06 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
+        let mut statement = connection.prepare_cached( /* sqlite-large-value: allow-for-now lv-h5182398e3ef3 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
         let rows = statement.query_map(params![subject, before, at, limit + 1], |row| {
             Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
         }).map_err(internal)?;
@@ -1254,4 +1369,125 @@ pub fn start_from_inbox_as(
             Ok((created, true))
         })
         .map_err(internal)?
+}
+
+#[cfg(test)]
+mod marked_read_helper_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn read_helpers_marked_cursor_seeks_past_newer_owner_history() {
+        let store = Store::open_memory("marked-range").unwrap();
+        store.configure_thread_write_rollout([]);
+        store.append_claim(&ClaimInput{subject:"daemon/marked-range".into(),kind:"daemon.started".into(),actor:None,
+            fields:serde_json::from_value(json!({"status":"running","features":{"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION}})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
+        let person = "person/example";
+        let agent = "agent/example";
+        for (thread, message) in [("thread/old", "message/old"), ("thread/new", "message/new")] {
+            apply(
+                &store,
+                person,
+                thread,
+                thread,
+                Edit::Create {
+                    agent,
+                    title: "Range",
+                },
+            )
+            .unwrap();
+            thread_delivery::append_reply(&store,&ClaimInput{subject:message.into(),kind:"message.sent".into(),actor:Some(agent.into()),
+                fields:serde_json::from_value(json!({"from":agent,"to":person,"status":"sent","content":"Range","thread_id":thread})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:Some(message.into())},PersonAuthority::TrustedLocal,None).unwrap();
+        }
+        let base = store
+            .claims_page(None, None, 0, None, false, 100)
+            .unwrap()
+            .claims
+            .iter()
+            .map(|claim| claim.accepted_at_unix_ms)
+            .max()
+            .unwrap()
+            + 100;
+        store.set_write_clock_at(base + 10).unwrap();
+        thread_reading::apply_as(
+            &store,
+            PersonAuthority::TrustedLocal,
+            person,
+            "thread/old",
+            "old",
+            thread_reading::Edit::Mark {
+                anchor_message: "message/old",
+                observed_marks: &[],
+            },
+        )
+        .unwrap();
+        let append_newer = |n: u64| {
+            store
+                .set_write_clock_at(base + 100 + u128::from(n) * 10)
+                .unwrap();
+            thread_reading::apply_as(
+                &store,
+                PersonAuthority::TrustedLocal,
+                person,
+                "thread/new",
+                &format!("new-{n}"),
+                thread_reading::Edit::Mark {
+                    anchor_message: "message/new",
+                    observed_marks: &[],
+                },
+            )
+            .unwrap();
+        };
+        for n in 0..64 {
+            append_newer(n);
+        }
+        let scope = canonical_hash(&("thread.marked-unread.v1", person)).unwrap();
+        let cursor = format!("{scope}:{}:thread/z-boundary", base + 50);
+        let measure = || {
+            let connection = store.readers.get();
+            let steps = Arc::new(AtomicUsize::new(0));
+            let count = steps.clone();
+            connection.progress_handler(
+                1,
+                Some(move || {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            let page = marked_unread(&connection, person, Some(&cursor), 1).unwrap();
+            connection.progress_handler(0, None::<fn() -> bool>);
+            assert_eq!(page.items[0].id, "thread/old");
+            steps.load(Ordering::Relaxed)
+        };
+        let before = measure();
+        for n in 64..256 {
+            append_newer(n);
+        }
+        let after = measure();
+        eprintln!("marked deep-cursor VM steps {before} -> {after}");
+        assert!(
+            after <= before * 2 + 500,
+            "owner-time cursor must seek, not rescan newer history"
+        );
+        let connection = store.readers.get();
+        let plan = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                marked_candidate_sql(true)
+            ))
+            .unwrap()
+            .query_map(
+                params![person, (base + 50).to_string(), "thread/z-boundary", 5],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("; ");
+        eprintln!("marked cursor plan: {plan}");
+        assert!(
+            plan.contains("claims_thread_unread_owner_time_index") && plan.contains('<'),
+            "{plan}"
+        );
+    }
 }

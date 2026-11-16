@@ -1571,7 +1571,9 @@ public struct ActionRequest: Codable, Sendable {
     public static func terminalEnd(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .terminalEnd, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func terminalInput(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalInputParameters) throws -> Self { try .init(id: id, type: .terminalInput, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func terminalResize(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalResizeParameters) throws -> Self { try .init(id: id, type: .terminalResize, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadClearUnread(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadClearUnreadParameters) throws -> Self { try .init(id: id, type: .threadClearUnread, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadClose, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadMarkUnread(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadMarkUnreadParameters) throws -> Self { try .init(id: id, type: .threadMarkUnread, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadRead(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReadParameters) throws -> Self { try .init(id: id, type: .threadRead, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) throws -> Self { try .init(id: id, type: .threadRename, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadReopen, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1652,6 +1654,27 @@ public struct PersonAnswer: Codable, Sendable {
     }
 }
 public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor, resolvedBy: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", resolvedBy = "resolved_by", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
+public struct ThreadMarkUnreadParameters: Codable, Sendable {
+    public let targetID, anchorMessageID: String
+    /// Captured opaque stable mark operation IDs, never claim IDs.
+    public let observedMarks: [String]
+    public init(targetID: String, anchorMessageID: String, observedMarks: [String]) {
+        self.targetID = targetID
+        self.anchorMessageID = anchorMessageID
+        self.observedMarks = observedMarks
+    }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", anchorMessageID = "anchor_message_id", observedMarks = "observed_marks" }
+}
+public struct ThreadClearUnreadParameters: Codable, Sendable {
+    public let targetID: String
+    /// Captured opaque stable mark operation IDs, never claim IDs.
+    public let observedMarks: [String]
+    public init(targetID: String, observedMarks: [String]) {
+        self.targetID = targetID
+        self.observedMarks = observedMarks
+    }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", observedMarks = "observed_marks" }
+}
 public struct ThreadReadParameters: Codable, Sendable {
     public let targetID: String
     public let throughMessageID: String?
@@ -1714,13 +1737,24 @@ public enum TerminalInputMode: String, Codable, Sendable { case line, raw, key }
 public struct TerminalInputParameters: Codable, Sendable { public var terminalID: String; public var mode: TerminalInputMode; public var value: String; public init(terminalID: String, mode: TerminalInputMode, value: String) { self.terminalID = terminalID; self.mode = mode; self.value = value }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", mode, value } }
 public struct TerminalResizeParameters: Codable, Sendable { public var terminalID: String; public var rows: UInt16; public var columns: UInt16; public init(terminalID: String, rows: UInt16, columns: UInt16) { self.terminalID = terminalID; self.rows = rows; self.columns = columns }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", rows, columns } }
 public struct TerminalAttachment: Codable, Sendable { public let attachmentID: String; public let terminalID: String; public let runtimeIncarnation: String; public let ownerHostID: String; public let streamURL: String; public let streamCapability: String?; public let state: String; public let expiresAt: String; public let reusable: Bool?; public let ttlS: UInt64?; public let retryHint: String?; enum CodingKeys: String, CodingKey { case attachmentID = "attachment_id", terminalID = "terminal_id", runtimeIncarnation = "runtime_incarnation", ownerHostID = "owner_host_id", streamURL = "stream_url", streamCapability = "stream_capability", state, expiresAt = "expires_at", reusable, ttlS = "ttl_s", retryHint = "retry_hint" } }
+public struct ThreadUnreadMark: Codable, Sendable {
+    /// Opaque stable signed operation ID, never a claim ID.
+    public let markID, anchorMessageID: String
+    enum CodingKeys: String, CodingKey { case markID = "mark_id", anchorMessageID = "anchor_message_id" }
+}
+public struct ThreadUnreadReminder: Codable, Sendable {
+    public let marks: [ThreadUnreadMark]
+    public let anchorMessageID: String
+    enum CodingKeys: String, CodingKey { case marks, anchorMessageID = "anchor_message_id" }
+}
 public enum ThreadState: String, Codable, Sendable { case open, closed }
 public struct ThreadSummary: Codable, Sendable {
     public let id, agentID, title, titleRevision, revision: String
     public let state: ThreadState
     public let messageCount: UInt64?
     public let unread: Bool?
-    enum CodingKeys: String, CodingKey { case id, agentID = "agent_id", title, titleRevision = "title_revision", revision, state, messageCount = "message_count", unread }
+    public let unreadReminder: ThreadUnreadReminder?
+    enum CodingKeys: String, CodingKey { case id, agentID = "agent_id", title, titleRevision = "title_revision", revision, state, messageCount = "message_count", unread, unreadReminder = "unread_reminder" }
 }
 public struct ThreadSummaryPage: Codable, Sendable {
     public let items: [ThreadSummary]
@@ -1739,10 +1773,18 @@ public struct ThreadTimelineEvent: Codable, Sendable {
         case kind, id, actorID = "actor_id", acceptedAtUnixMS = "accepted_at_unix_ms", previousTitle = "previous_title", title, content, threadQuoteID = "thread_quote_id"
     }
 }
+public struct ThreadTimelineAnchor: Codable, Sendable {
+    public enum State: String, Codable, Sendable { case current, unavailable, pending }
+    public let messageID: String
+    public let state: State
+    enum CodingKeys: String, CodingKey { case messageID = "message_id", state }
+}
 public struct ThreadTimelinePage: Codable, Sendable {
     public let items: [ThreadTimelineEvent]
     public let nextCursor: String?
-    enum CodingKeys: String, CodingKey { case items, nextCursor = "next_cursor" }
+    public let previousCursor: String?
+    public let anchor: ThreadTimelineAnchor?
+    enum CodingKeys: String, CodingKey { case items, nextCursor = "next_cursor", previousCursor = "previous_cursor", anchor }
 }
 /// A bounded thread window. Snapshot rows replace the window and changes apply by canonical ID.
 public struct ThreadCollectionFrame<Row: Decodable & Sendable>: Decodable, Sendable {
@@ -1762,7 +1804,7 @@ public struct ThreadCollectionStreamError: Decodable, Error, Sendable {
     public let retryable: Bool?
 }
 public enum ThreadListScope: Sendable {
-    case agent(String), inbox(source: String, episode: String), mission(String), recentlyClosed
+    case agent(String), inbox(source: String, episode: String), mission(String), recentlyClosed, markedUnread
 }
 public struct ThreadStartOrigin: Codable, Sendable {
     public let sourceID, episode: String

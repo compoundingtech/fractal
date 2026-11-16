@@ -4057,6 +4057,10 @@ pub enum ActionType {
     MessageRead,
     #[serde(rename = "thread.read")]
     ThreadRead,
+    #[serde(rename = "thread.mark-unread")]
+    ThreadMarkUnread,
+    #[serde(rename = "thread.clear-unread")]
+    ThreadClearUnread,
     #[serde(rename = "message.close")]
     MessageClose,
     #[serde(rename = "launch.create")]
@@ -4915,6 +4919,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn thread_clear_unread(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadClearUnreadParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadClearUnread,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn thread_close(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -4924,6 +4942,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::ThreadClose,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_mark_unread(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadMarkUnreadParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadMarkUnread,
             idempotency_key,
             fence,
             &parameters,
@@ -5168,6 +5200,21 @@ pub struct ThreadReadParameters {
     pub target_id: String,
     pub through_message_id: Option<String>,
     pub seen_message_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadMarkUnreadParameters {
+    pub target_id: String,
+    pub anchor_message_id: String,
+    /// Captured opaque stable mark operation IDs, never claim IDs.
+    pub observed_marks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadClearUnreadParameters {
+    pub target_id: String,
+    /// Captured opaque stable mark operation IDs, never claim IDs.
+    pub observed_marks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -5627,6 +5674,19 @@ pub enum ThreadState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadUnreadMark {
+    /// Opaque stable signed operation ID, never a claim ID.
+    pub mark_id: String,
+    pub anchor_message_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadUnreadReminder {
+    pub marks: Vec<ThreadUnreadMark>,
+    pub anchor_message_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ThreadSummary {
     pub id: String,
     pub agent_id: String,
@@ -5638,6 +5698,8 @@ pub struct ThreadSummary {
     pub message_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unread: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_reminder: Option<ThreadUnreadReminder>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -5675,9 +5737,27 @@ pub enum ThreadTimelineChange {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTimelineAnchor {
+    pub message_id: String,
+    pub state: ThreadTimelineAnchorState,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadTimelineAnchorState {
+    Current,
+    Unavailable,
+    Pending,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ThreadTimelinePage {
     pub items: Vec<ThreadTimelineEvent>,
     pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<ThreadTimelineAnchor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5686,6 +5766,7 @@ pub enum ThreadListScope<'a> {
     Inbox { source: &'a str, episode: &'a str },
     Mission(&'a str),
     RecentlyClosed,
+    MarkedUnread,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
