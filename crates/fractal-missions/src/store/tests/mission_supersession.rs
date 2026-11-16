@@ -874,7 +874,7 @@ fn workspace_request(workspace: &str, key: &str) -> MissionRunRequest {
 }
 
 fn workspace_schedule(root: &str) -> String {
-    format!("version 2\nschedule \"workspace\" {{ every \"1h\"; work {{ mission \"retry-work\"; workspace {root:?} }} }}\n")
+    format!("version 2\nschedule \"workspace\" {{ every \"1h\"; anchor \"2026-01-01T00:00:00Z\"; work {{ mission \"retry-work\"; workspace {root:?} }} }}\n")
 }
 
 #[test]

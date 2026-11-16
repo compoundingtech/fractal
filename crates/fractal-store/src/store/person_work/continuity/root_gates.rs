@@ -70,10 +70,12 @@ pub(super) fn root_reference_matches_tx(connection: &Connection, run: &MissionRu
 
 /// Confirming an old question cannot override changed contracts, inputs, or authority.
 pub fn eligible_root_gate_requests_tx(connection: &Connection, source: &MissionRunView, target: &MissionRunView, confirmed_request_ids: &BTreeSet<String>) -> Result<Vec<ClaimRecord>> {
+    let requests = root_gate_evidence_tx(connection, source)?;
+    if requests.is_empty() { return Ok(Vec::new()); }
     if continuity_context_binding_tx(connection,&source.subject,&source.generation,None)?
         != continuity_context_binding_tx(connection,&target.subject,&target.generation,None)? { return Ok(Vec::new()); }
     let mut eligible = Vec::new();
-    for request in root_gate_evidence_tx(connection, source)? {
+    for request in requests {
         let Some(answer) = crate::store::human_review_answer_tx(connection,&request.id)? else { continue; };
         if answer.body["fields"]["verdict"] != "pass" { continue; }
         let fields = serde_json::from_value::<BTreeMap<String,Value>>(request.body["fields"].clone())?;

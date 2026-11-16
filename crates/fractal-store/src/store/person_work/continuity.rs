@@ -77,7 +77,7 @@ pub fn continuity_step_binding_tx(connection: &Connection, step: &StepRunView) -
 fn continuity_context_binding_tx(connection: &Connection, run_id: &str, generation: &str, path: Option<&str>) -> Result<(String, String, String)> {
     let mission = crate::store::pinned_generation_mission_tx(connection, generation)?
         .ok_or_else(|| anyhow::anyhow!("missing pinned mission for ask continuity"))?;
-    let run = crate::store::mission_run_header_tx(connection, run_id)?;
+    let run = crate::store::mission_run_header_tx(connection, run_id.trim_start_matches("mission-run/"))?;
     let hashes = crate::store::step_hashes(&mission);
     let dependencies = crate::store::flattened_dependencies(&mission);
     let mut pending: Vec<String> = path.map_or_else(|| hashes.keys().cloned().collect(), |path| vec![path.to_owned()]);
@@ -103,14 +103,16 @@ fn continuity_context_binding_tx(connection: &Connection, run_id: &str, generati
             "requester":run.requester}))?))
 }
 
-pub fn ask_binding_tx(connection: &Connection, step: &StepRunView, input: &PersonAskRequest, request: &Value) -> Result<AskContinuityBinding> {
+/// Synthetic asks have durable request identity, but no originating declared step to bind.
+pub fn ask_binding_tx(connection: &Connection, step: &StepRunView, input: &PersonAskRequest, request: &Value) -> Result<Option<AskContinuityBinding>> {
+    if super::request(connection, &step.subject)?.is_some() { return Ok(None); }
     let (contract_hash, input_digest, authority_digest) = continuity_step_binding_tx(connection, step)?;
-    Ok(AskContinuityBinding {
+    Ok(Some(AskContinuityBinding {
         version: 1, step: step.step.clone(), contract_hash, input_digest, authority_digest,
         asker: input.actor.clone(), person: input.person.clone(), title: input.title.clone(),
         question: input.reason.clone(), request: request.clone(), deadline_ms: input.deadline_ms,
         default_answer: input.default_answer.clone(),
-    })
+    }))
 }
 
 pub fn direct_person_binding_tx(connection: &Connection, step: &StepRunView, actor: &str) -> Result<AskContinuityBinding> {

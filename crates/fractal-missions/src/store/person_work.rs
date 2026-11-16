@@ -571,8 +571,12 @@ impl PersonWorkStore for Store {
                     "cannot ask from step `{origin_subject}`: status `{}`, claimant `{}`, expected incarnation `{}`, given `{}`; only its live claimant can block this step. Refresh `work ls` and use its current claim and incarnation, or omit --step for an independent ask",
                     origin.status, origin.claimant.as_deref().unwrap_or("<none>"), origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));
             }
-            let binding = continuity::ask_binding_tx(tx, &origin, input, &structured).map_err(internal)?;
-            if let Some(answered) = continuity::equivalent_answer_tx(tx, &origin, &binding).map_err(internal)? {
+            let binding = if super::adhoc_work::is_adhoc(tx, &origin.run).map_err(internal)? {
+                None
+            } else {
+                continuity::ask_binding_tx(tx, &origin, input, &structured).map_err(internal)?
+            };
+            if let Some(answered) = binding.as_ref().map(|binding| continuity::equivalent_answer_tx(tx, &origin, binding)).transpose().map_err(internal)?.flatten() {
                 let fields = &answered.body["fields"];
                 append_claim_tx(tx, &self.origin, &origin_subject, "step-run.carried", Some(&input.actor),
                     &json!({"fields":{"source_step_run":fields["origin_step"],

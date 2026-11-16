@@ -5,13 +5,20 @@ pub(super) fn gate_binding_tx(connection: &Connection, run: &MissionRunView, own
     let (contract_hash, input_digest, authority_digest) = continuity_context_binding_tx(
         connection, &run.subject, &run.generation, target.map(|step| step.step.as_str()),
     )?;
+    // Match the human review reader's semantics for schema-valid legacy requests.
+    let strings = |name: &str| {
+        fields.get(name).and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
     Ok(AskContinuityBinding {
         version: 1, step: target.map_or_else(|| "$run".into(), |step| step.step.clone()),
         contract_hash, input_digest, authority_digest, asker: "daemon/runtime".into(),
-        person: fields["reviewer"].as_str().unwrap_or_default().into(),
-        title: String::new(), question: fields["question"].as_str().unwrap_or_default().into(),
-        request: json!({"kind":"human-gate","mode":fields["mode"],
-            "decisions":fields["decisions"],"review_targets":fields["review_targets"]}),
+        person: fields.get("reviewer").and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("human gate continuity requires a reviewer"))?.into(),
+        title: String::new(), question: fields.get("question").and_then(Value::as_str).unwrap_or("Approve this work?").into(),
+        request: json!({"kind":"human-gate","mode":fields.get("mode").and_then(Value::as_str).unwrap_or("approve"),
+            "decisions":strings("decisions"),"review_targets":strings("review_targets")}),
         deadline_ms: None, default_answer: None,
     })
 }

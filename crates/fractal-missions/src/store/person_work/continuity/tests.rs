@@ -9,7 +9,7 @@ fn publish(store: &Store, source: &str, key: &str) {
 }
 
 fn setup(store: &Store) {
-    publish(store, "version 2\nagent \"worker\" { workspace \".\"; command \"true\"; restart always; }\nmission \"answer\" state=\"ready\" { concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/worker\"; } }", "setup");
+    publish(store, "version 2\nagent \"worker\" { workspace \".\"; command \"true\"; restart always; }\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/worker\"; } }", "setup");
 }
 
 fn ask(store: &Store, key: &str) -> (StepRunView, StepRunView) {
@@ -94,7 +94,7 @@ fn changed_authority_refuses_answer_reuse() {
     setup(&store);
     let (_, first) = ask(&store, "first");
     answer(&store, &first);
-    publish(&store, "version 2\nmission \"answer\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" { concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/worker\"; } }", "authority-change");
+    publish(&store, "version 2\nmission \"answer\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"work\" { assigned-to \"agent/worker\"; } }", "authority-change");
     assert_ne!(ask(&store, "changed").1.subject, first.subject);
 }
 
@@ -110,6 +110,58 @@ fn legacy_missing_binding_is_not_automatically_reused() {
         Ok(())
     }).unwrap().unwrap();
     assert_ne!(ask(&store, "legacy").1.subject, first.subject);
+}
+
+#[test]
+fn independent_asks_keep_key_identity_without_native_cross_key_carry() {
+    let store = Store::open_memory("controller").unwrap();
+    setup(&store);
+    let mut input = PersonAskRequest {
+        legacy_request: None, person: "person/test".into(), title: "Approve".into(), reason: "Proceed?".into(),
+        actor: "agent/worker".into(), step: None, new_run: None, incarnation: None,
+        request: None, deadline_ms: None, default_answer: None, priority: None, idempotency_key: "independent-first".into(),
+    };
+    let first = store.ask_person(&input).unwrap();
+    answer(&store, &first);
+    assert_eq!(store.ask_person(&input).unwrap().subject, first.subject);
+    let reader = store.readers.get();
+    let original = request(&reader, &first.subject).unwrap().unwrap();
+    assert!(original.body["fields"]["continuity"].is_null());
+    assert!(continuity::ask_binding_tx(&reader, &first, &input, &Value::Null).unwrap().is_none());
+    drop(reader);
+    input.idempotency_key = "independent-second".into();
+    let second = store.ask_person(&input).unwrap();
+    assert_ne!(first.subject, second.subject);
+    assert_eq!(second.status, "ready");
+    assert!(second.person_answers.is_empty());
+}
+
+#[test]
+fn spontaneous_work_asks_do_not_gain_native_binding_or_cross_key_carry() {
+    use crate::store::adhoc_work::AdhocWorkStore;
+    let store = Store::open_memory("controller").unwrap();
+    setup(&store);
+    let origin = store.start_work(&crate::model::WorkStartRequest {
+        actor: "agent/worker".into(), title: "Independent work".into(), idempotency_key: "work".into(),
+    }).unwrap();
+    let mut original = None;
+    for key in ["first", "second"] {
+        store.work_action(&origin.subject, "claim", &WorkRequest {
+            wait_ms: None, actor: Some("agent/worker".into()), incarnation: Some(key.into()),
+            summary: None, reason: None, evidence: Vec::new(), idempotency_key: format!("claim-{key}"),
+        }).unwrap();
+        let input = PersonAskRequest {
+            legacy_request: None, person: "person/test".into(), title: "Approve".into(), reason: "Proceed?".into(),
+            actor: "agent/worker".into(), step: Some(origin.subject.clone()), new_run: None, incarnation: Some(key.into()),
+            request: None, deadline_ms: None, default_answer: None, priority: None, idempotency_key: key.into(),
+        };
+        let ask = store.ask_person(&input).unwrap();
+        assert_eq!(store.ask_person(&input).unwrap().subject, ask.subject);
+        assert!(request(&store.readers.get(), &ask.subject).unwrap().unwrap().body["fields"]["continuity"].is_null());
+        if let Some(original) = original.as_ref() { assert_ne!(&ask.subject, original); }
+        answer(&store, &ask);
+        original = Some(ask.subject);
+    }
 }
 
 #[test]
@@ -168,7 +220,7 @@ fn answered_ask_same_input_retry_and_prose_revision_reuse_one_original_answer_ac
 fn changed_transitive_effect_contract_refuses_answer_reuse() {
     let store = Store::open_memory("controller").unwrap();
     setup(&store);
-    let source = "version 2\nmission \"answer\" state=\"ready\" { concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"prepare\" { goal \"Original effect.\"; } step \"work\" { assigned-to \"agent/worker\"; depends-on { step \"prepare\" completed; } } }";
+    let source = "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; step \"prepare\" { goal \"Original effect.\"; } step \"work\" { assigned-to \"agent/worker\"; depends-on { step \"prepare\" completed; } } }";
     publish(&store, source, "dependency");
     let (_, first) = ask(&store, "first");
     answer(&store, &first);
@@ -179,7 +231,7 @@ fn changed_transitive_effect_contract_refuses_answer_reuse() {
 #[test]
 fn authored_person_step_response_is_bound_and_carried_by_reference() {
     let store = Store::open_memory("controller").unwrap();
-    publish(&store, "version 2\nmission \"answer\" state=\"ready\" { concurrent-runs; step \"work\" { assigned-to \"person/test\"; goal \"Approve authored work.\"; } }", "authored");
+    publish(&store, "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; step \"work\" { assigned-to \"person/test\"; goal \"Approve authored work.\"; } }", "authored");
     let run = store.create_mission_run(&crate::model::MissionRunRequest {
         mission: "answer".into(), revision: None, workspace: ".".into(), requester: Some("person/test".into()),
         mode: Some("run".into()), inputs: BTreeMap::new(), idempotency_key: "authored-run".into(),
@@ -258,7 +310,7 @@ fn legacy_run_human_gate_requires_confirmation_and_reuses_original_approval_by_r
     let path = directory.path().join("claims.sqlite3");
     let store = Store::open(&path, "controller").unwrap();
     setup(&store);
-    let definition = "version 2\nmission \"answer\" state=\"ready\" { concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; gate \"approval\" type=\"human\" { reviewer \"person/test\"; question \"Approve this effect?\"; } step \"work\" { assigned-to \"agent/worker\"; } }";
+    let definition = "version 2\nmission \"answer\" state=\"ready\" { goal \"Approve the work.\"; concurrent-runs; input \"head\" kind=\"text\"; input \"context\" kind=\"text\"; gate \"approval\" type=\"human\" { reviewer \"person/test\"; question \"Approve this effect?\"; } step \"work\" { assigned-to \"agent/worker\"; } }";
     publish(&store, definition, "root-gate");
     let source = gate_run(&store, "root-source");
     let mut fields = gate_fields(&source.steps[0]);
@@ -302,4 +354,49 @@ fn legacy_run_human_gate_requires_confirmation_and_reuses_original_approval_by_r
     publish(&store,&definition.replace("person/test","person/other"),"changed-root-authority");
     let changed_authority = gate_run(&store,"changed-root-authority");
     assert!(continuity::eligible_root_gate_requests_tx(&store.readers.get(),&source,&changed_authority,&confirmed).unwrap().is_empty());
+}
+
+#[test]
+fn legacy_root_gate_omitted_optional_fields_keep_reader_defaults_and_confirmation_lineage() {
+    let store = Store::open_memory("controller").unwrap();
+    setup(&store);
+    let source = gate_run(&store, "optional-source");
+    let fields = BTreeMap::from([
+        ("owner".into(), json!(source.subject)),
+        ("reviewer".into(), json!("person/test")),
+    ]);
+    let (implicit, _) = store.human_gate_continuity(&source, &source.subject, &fields).unwrap();
+    let mut explicit = fields.clone();
+    explicit.extend([
+        ("mode".into(), json!("approve")), ("question".into(), json!("Approve this work?")),
+        ("decisions".into(), json!([])), ("review_targets".into(), json!([])),
+    ]);
+    let (defaults, _) = store.human_gate_continuity(&source, &source.subject, &explicit).unwrap();
+    assert_eq!(implicit, defaults);
+    let request = store.connection.batched(|tx| -> Result<ClaimRecord> {
+        let request = append_claim_tx(tx, &store.origin, "gate-operation/legacy-optional", "gate.requested", None,
+            &json!({"fields":fields}), &[], None)?;
+        append_claim_tx(tx, &store.origin, &request.subject, "gate.result", Some("person/test"),
+            &json!({"fields":{"request":request.id,"verdict":"pass"}}), std::slice::from_ref(&request.id), None)?;
+        Ok(request)
+    }).unwrap().unwrap();
+    let target = gate_run(&store, "optional-target");
+    assert!(continuity::eligible_root_gate_requests_tx(
+        &store.readers.get(), &source, &target, &BTreeSet::new(),
+    ).unwrap().is_empty());
+    let confirmed = BTreeSet::from([request.id.clone()]);
+    assert_eq!(store.connection.batched(|tx| {
+        continuity::carry_root_gate_answers_tx(tx, &store.origin, &source, &target, "person/test", &confirmed)
+    }).unwrap().unwrap(), vec![request.id.clone()]);
+    let onward = gate_run(&store, "optional-onward");
+    assert_eq!(store.connection.batched(|tx| {
+        continuity::carry_root_gate_answers_tx(tx, &store.origin, &target, &onward, "daemon/runtime", &BTreeSet::new())
+    }).unwrap().unwrap(), vec![request.id.clone()]);
+    explicit.insert("owner".into(), json!(onward.subject));
+    assert_eq!(store.human_gate_continuity(&onward, &onward.subject, &explicit).unwrap().1.unwrap().id, request.id);
+    let reader = store.readers.get();
+    for kind in ["gate.requested", "gate.result"] {
+        let count: u64 = reader.query_row("SELECT count(*) FROM claims WHERE kind=?1", [kind], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
 }
