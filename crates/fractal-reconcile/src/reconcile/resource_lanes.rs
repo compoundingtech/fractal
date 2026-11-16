@@ -347,9 +347,11 @@ mod tests {
         use fractal_runtime::{DiskRequest, IoClass, RequestClass};
         let store = Arc::new(Store::open_memory("node").unwrap());
         store.start_resource_authority("node", "epoch").unwrap();
-        let mut policy = fractal_runtime::host::FinitePolicy::default();
-        policy.disk_floor_bytes = 10;
-        policy.disk_floors.insert(PathBuf::from("/mount"), 40);
+        let policy = fractal_runtime::host::FinitePolicy {
+            disk_floor_bytes: 10,
+            disk_floors: std::collections::BTreeMap::from([(PathBuf::from("/mount"), 40)]),
+            ..Default::default()
+        };
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
             .with_finite_resources(Some(policy))
             .with_disk_probe(vec![], Arc::new(|_| Ok(crate::disk::DiskSpace { filesystem: 7, available: 100, total: 200 })));

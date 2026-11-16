@@ -3757,7 +3757,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
-        ("resources", include_str!("resources_cli.rs")),
+        ("resources", /* sqlite-large-value: allow-for-now lv-h588676c0bda2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("resources_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
         ("source", SOURCE_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),

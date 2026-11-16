@@ -356,6 +356,32 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn resource_write_exception_keeps_native_attribution_and_ancestry_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let step = state.store.start_program_step_for_tests();
+        let credential = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+        let binding = BoundRun(state.store.run_binding(&credential).unwrap());
+        let request = |path: &str, actor: &str, unverifiable: bool| {
+            let mut request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json").extension(binding.clone());
+            if unverifiable { request = request.extension(HarnessAncestry::Unavailable); }
+            request.body(Body::from(json!({"actor": actor}).to_string())).unwrap()
+        };
+        let _accepted = super::super::write_principal::bind_request(&state,
+            request("/v1/internal/resources/exec", &binding.0.run, false)).await.unwrap();
+        for (path, actor, unverifiable) in [
+            ("/v1/internal/resources/exec", "person/other", false),
+            ("/v1/internal/resources/child/other", binding.0.run.as_str(), false),
+            ("/v1/internal/resources/exec", binding.0.run.as_str(), true),
+        ] {
+            let error = super::super::write_principal::bind_request(&state,
+                request(path, actor, unverifiable)).await.unwrap_err();
+            assert_eq!(error.code, "foreign-agent-actor", "{path}: {error:?}");
+        }
+    }
+
 
     async fn bound_request(state: &AppState, agent: Option<&str>, credential: Option<&str>, method: &str, path: &str, body: Value) -> (axum::http::StatusCode, Value) {
         use tower::ServiceExt;
@@ -424,7 +450,7 @@ mod tests {
             for (method, suffix) in [("GET",""),("POST","/wait?after=0"),("POST","/cancel")] {
                 let (status, body) = bound_request(&state,bound_agent,run_credential,method,&format!("/v1/internal/resources/{other}{suffix}"),Value::Null).await;
                 assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{body}");
-                assert_eq!(body["code"],"resource-exec-owner");
+                assert_eq!(body["code"],"resource-exec-owner", "{method} {suffix}: {body}");
                 let (status, body) = bound_request(&state,bound_agent,run_credential,method,&format!("/v1/internal/resources/{own}{suffix}"),Value::Null).await;
                 assert_eq!(status,StatusCode::OK,"{body}");
                 assert!(!body.to_string().contains("must-not-export"));
