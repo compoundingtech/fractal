@@ -30,8 +30,13 @@ pub fn spawn_reconciler(store: std::sync::Arc<super::Store>, state_dir: PathBuf)
 /// Whether a delivered message or pending schedule still names this body. Failed reads
 /// cannot establish that a body is orphaned.
 pub fn body_is_named(store: &super::Store, file: &BodyFile) -> bool {
+    // Check the pin first: delivery may atomically replace it with the mailbox claim
+    // between these reads, but must never make a durable body look orphaned.
+    if body_is_pending(store, file) {
+        return true;
+    }
     match store.message(&format!("message/{}", file.id)) {
-        Ok(None) => body_is_pending(store, file),
+        Ok(None) => false,
         Ok(Some(_)) | Err(_) => true,
     }
 }

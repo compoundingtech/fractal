@@ -236,3 +236,83 @@ fn cancelled_scheduled_reply_does_not_settle_parent() {
     owner.reconcile_scheduled_messages_at(AT).unwrap();
     assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "sent");
 }
+
+#[test]
+fn scheduled_reply_settlement_resumes_after_reopening_graph_and_stream_parents() {
+    for stream in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        let member = key();
+        let (anchor, _, mut seeds) = fleet(&[("alder", &member)]);
+        let owner = Arc::new(Store::open(&database, "alder").unwrap());
+        owner.bind_fleet(crate::store::fleet_admission_tests::FLEET).unwrap();
+        owner.pin_fleet_anchor(anchor.public()).unwrap();
+        owner.set_member_key(Some(member.clone())).unwrap();
+        sync(&seeds.pop().unwrap(), &owner);
+        let intent = crate::parse_intent(&format!(
+            "version 2\nnotice-owner {{ member \"alder\"; member-key \"{}\"; always-on }}\nagent \"example/target\" {{ command \"true\"; workspace \"/tmp\"; }}",
+            member.public()), "alder").unwrap();
+        let expected = intent.subjects.keys().map(|subject| (subject.clone(), vec![])).collect();
+        owner.apply_as(&intent, &expected, "recovery-setup", Some("person/example")).unwrap();
+        let shard = stream.then(|| messages_shard::open(&owner, root.path()).unwrap());
+        let mut parent = input("00000000000000e1");
+        parent.actor = Some(TARGET.into());
+        parent.fields.insert("from".into(), json!(TARGET));
+        parent.fields.insert("to".into(), json!(SENDER));
+        if let Some(shard) = &shard {
+            shard.append_claim(&parent).unwrap();
+        } else {
+            owner.append_claim(&parent).unwrap();
+        }
+        let mut reply = input("resumable-answer");
+        reply.fields.insert("in_reply_to".into(), json!(parent.subject));
+        let scheduled = owner.schedule_message(&reply, AT, "resumable-answer").unwrap();
+        // Stop at the real commit boundary, as a process exiting before settlement would.
+        assert!(owner.deliver_scheduled_messages_at(AT).unwrap().changed);
+        assert_eq!(owner.scheduled_message(&scheduled.id).unwrap().unwrap().state, "delivered");
+        assert_eq!(owner.message(&parent.subject).unwrap().unwrap().status, "sent");
+        drop(shard);
+        drop(owner);
+
+        let owner = Arc::new(Store::open(&database, "alder").unwrap());
+        owner.set_member_key(Some(member.clone())).unwrap();
+        let _shard = stream.then(|| messages_shard::open(&owner, root.path()).unwrap());
+        assert!(owner.reconcile_scheduled_messages_at(AT + 1).unwrap().changed);
+        let settled = owner.message(&parent.subject).unwrap().unwrap();
+        assert_eq!(settled.status, "closed");
+        assert_eq!(settled.created_index >= messages_shard::STREAM_INDEX_BASE, stream);
+        assert_eq!(owner.scheduled_message(&scheduled.id).unwrap().unwrap().state, "delivered");
+        assert!(!owner.reconcile_scheduled_messages_at(AT + 2).unwrap().changed);
+        assert_eq!(sent(&owner), if stream { 1 } else { 2 });
+    }
+}
+
+#[test]
+fn scheduled_reply_settlement_failure_keeps_work_without_starving_other_replies() {
+    let (owner, _) = setup();
+    for key in ["blocked", "other"] {
+        let mut parent = input(&format!("parent-{key}"));
+        parent.actor = Some(TARGET.into());
+        parent.fields.insert("from".into(), json!(TARGET));
+        parent.fields.insert("to".into(), json!(SENDER));
+        owner.append_claim(&parent).unwrap();
+        let mut reply = input(key);
+        reply.fields.insert("in_reply_to".into(), json!(parent.subject));
+        owner.schedule_message(&reply, AT, key).unwrap();
+    }
+    owner.connection.batched(|tx| tx.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h273eff4d77da owner=fractal_store::store::scheduled_messages_tests TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER refuse_scheduled_parent_read BEFORE INSERT ON claims
+         WHEN NEW.subject='message/parent-blocked' AND NEW.kind='message.read'
+         BEGIN SELECT RAISE(ABORT,'deferred parent settlement'); END;"
+    )).unwrap().unwrap();
+    assert!(owner.reconcile_scheduled_messages_at(AT).is_err());
+    assert_eq!(owner.message("message/parent-other").unwrap().unwrap().status, "closed");
+    assert_eq!(owner.message("message/parent-blocked").unwrap().unwrap().status, "delivered");
+    assert_eq!(owner.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_scheduled_message_settlement", [], |row| row.get::<_, usize>(0)).unwrap(), 1);
+    owner.connection.batched(|tx| tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h86ef498ab507 owner=fractal_store::store::scheduled_messages_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER refuse_scheduled_parent_read"))
+        .unwrap().unwrap();
+    assert!(owner.reconcile_scheduled_messages_at(AT + 1).unwrap().changed);
+    assert_eq!(owner.message("message/parent-blocked").unwrap().unwrap().status, "closed");
+    assert!(!owner.reconcile_scheduled_messages_at(AT + 2).unwrap().changed);
+}

@@ -100,7 +100,7 @@ approval; do not replace a TODO with a permanent exemption.
 
 ### Timed seat-message delivery
 
-`fractal_store::store::scheduled_messages` owns `lv-h16d5941a8dee`: the pending
+`fractal_store::store::scheduled_messages` owns `lv-hc2885f850ea8`: the pending
 fold stores only a SHA-256-derived schedule subject and integer UTC deadline,
 with `(at, subject)` seek ordering. It does not index arbitrary caller keys or
 copy message payloads into the pending table. Terminal delivery/cancellation
@@ -115,6 +115,22 @@ These are representation debts, not a size proof. The module maintainer owns
 reference conversion and keyed reclamation, which must preserve immutable-key
 comparison, owner/declaration evidence, cancellation serialization, and the
 transactional native message insertion plus delivered receipt.
+The same schema site declares the durable settlement queue, keyed only by the
+schedule subject. A delivered receipt enqueues settlement in the insertion
+transaction; a one-time backfill covers existing receipts. Reconciliation reads
+only outstanding queue rows, validates the selected owner's fence and canonical
+receipt, and resolves the native reply through `lv-h15ce98ffd285`. That reader
+still materializes existing claim fields and evidence; it is not a byte bound.
+Successful settlement removes one queue key through `lv-h534a5d6a7569`; failures
+retain it while other queued replies are attempted. Parent lifecycle writes use
+the existing graph or stream writer and must remain replay-safe across restart.
+`fractal_store::store::scheduled_messages_tests` owns `lv-h273eff4d77da` and
+`lv-h86ef498ab507`: their fixed trigger installation/removal deliberately refuses
+one parent's read to exercise retained work and independent reply progress.
+These fixture statements grant no production size exemption. Reference conversion
+must preserve the native reply's evidence, and queue reclamation must not erase
+an uncompleted settlement after a committed delivery.
+
 
 
 ### GitHub event observation fold inventory

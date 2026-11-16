@@ -37,11 +37,20 @@ pub struct ScheduledMessagePass {
 }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h16d5941a8dee owner=fractal_store::store::scheduled_messages TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_message_schedule_due
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc2885f850ea8 owner=fractal_store::store::scheduled_messages TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_message_schedule_due
         ON claims(CAST(json_extract(body,'$.fields.at_unix_ms') AS INTEGER),subject)
         WHERE kind='message-schedule.requested';
         CREATE TABLE IF NOT EXISTS local_scheduled_message_pending(subject TEXT PRIMARY KEY,at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS local_scheduled_message_due ON local_scheduled_message_pending(at,subject);
+        CREATE TABLE IF NOT EXISTS local_scheduled_message_settlement(subject TEXT PRIMARY KEY);
+        CREATE TRIGGER IF NOT EXISTS scheduled_message_settlement_insert AFTER INSERT ON claims
+        WHEN NEW.kind='message-schedule.delivered' BEGIN
+            INSERT OR IGNORE INTO local_scheduled_message_settlement VALUES(NEW.subject);
+        END;
+        INSERT OR IGNORE INTO local_scheduled_message_settlement
+        SELECT DISTINCT subject FROM claims WHERE kind='message-schedule.delivered'
+            AND NOT EXISTS(SELECT 1 FROM meta WHERE key='scheduled-message-settlement-v1');
+        INSERT OR IGNORE INTO meta VALUES('scheduled-message-settlement-v1','1');
         CREATE TRIGGER IF NOT EXISTS scheduled_message_pending_insert AFTER INSERT ON claims
         WHEN NEW.kind='message-schedule.requested' BEGIN
             INSERT OR IGNORE INTO local_scheduled_message_pending VALUES(NEW.subject,CAST(json_extract(NEW.body,'$.fields.at_unix_ms') AS INTEGER));
@@ -316,8 +325,15 @@ impl Store {
     }
 
     pub fn reconcile_scheduled_messages_at(&self, now: u128) -> Result<ScheduledMessagePass> {
-        let mut replies = Vec::new();
-        let pass = self.connection.batched(|tx| -> Result<ScheduledMessagePass> {
+        let mut pass = self.deliver_scheduled_messages_at(now)?;
+        pass.changed |= self.settle_scheduled_message_replies()?;
+        Ok(pass)
+    }
+
+    // Separate commit boundary: a restart can resume the durable settlement queue without
+    // repeating delivery. Stream lifecycle writes still use the stream's native writer.
+    pub(super) fn deliver_scheduled_messages_at(&self, now: u128) -> Result<ScheduledMessagePass> {
+        self.connection.batched(|tx| -> Result<ScheduledMessagePass> {
             let mut pass = ScheduledMessagePass::default();
             let clock = i64::try_from(now).unwrap_or(i64::MAX);
             pass.next_deadline = tx.query_row("SELECT MIN(at) FROM local_scheduled_message_pending WHERE at>?1",
@@ -356,13 +372,9 @@ impl Store {
                 // Graph-native insertion is intentional: a cross-file shard write cannot
                 // atomically serialize with cancel and the delivered receipt.
                 if !message_sent::message_sent_tx(tx, &input.subject)? {
-                    let reply = append_claim_tx(tx, &self.origin, &input.subject, &input.kind,
+                    append_claim_tx(tx, &self.origin, &input.subject, &input.kind,
                         input.actor.as_deref(), &json!({"fields":input.fields,"evidence":input.evidence}),
                         &[], None)?;
-                    if let Some(parent) = input.fields.get("in_reply_to").and_then(Value::as_str) {
-                        replies.push((parent.to_owned(), field(&request,"from")?.to_owned(),
-                            to.to_owned(), input.subject.clone(), reply.id));
-                    }
                 }
                 append(tx, &self.origin, &id, DELIVERED, RUNTIME,
                     json!({"request":request.id,"message":input.subject,"owner_claim":owner_claim}),
@@ -371,13 +383,57 @@ impl Store {
                 pass.changed = true;
             }
             Ok(pass)
+        }).map_err(anyhow::Error::msg)?
+    }
+
+    fn settle_scheduled_message_replies(&self) -> Result<bool> {
+        let jobs = self.connection.batched(|tx| -> Result<Vec<(String, ClaimRecord)>> {
+            // Replication also reconstructs the queue, but only the selected, fenced owner
+            // may resume its deliveries' outstanding side effects.
+            if owner_writer(tx, &self.origin).is_err() { return Ok(Vec::new()); }
+            let ids = tx.prepare_cached("SELECT subject FROM local_scheduled_message_settlement ORDER BY subject")?
+                .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut jobs = Vec::new();
+            for id in ids {
+                let Some(request) = requested(tx, &id)? else { continue };
+                if conflicting_request(tx, &request)? { continue; }
+                let Some(receipt) = terminal(tx, &request)? else { continue };
+                if receipt.kind != DELIVERED { continue; }
+                let Some(reply) = tx.query_row(
+                    /* sqlite-large-value: allow-for-now lv-h15ce98ffd285 owner=fractal_store::store::scheduled_messages TODO=trace-statement-and-value-representation */ &canonical_sql(&format!("SELECT {CLAIM_COLUMNS} FROM claims
+                        WHERE subject=?1 AND kind='message.sent' ORDER BY CANONICAL_ASC(claims) LIMIT 1")),
+                    [message_id(&id)], claim_from_row).optional()? else { continue };
+                jobs.push((id, reply));
+            }
+            Ok(jobs)
         }).map_err(anyhow::Error::msg)??;
-        // Like immediate acceptance, insertion and its receipt commit before parent settlement.
-        // In particular, a stream parent's lifecycle uses the shard's own writer.
-        for (parent, from, to, reply, claim) in replies {
-            self.settle_answered_message(&parent, &from, &to, &reply, &claim)
-                .map_err(anyhow::Error::new)?;
+        let mut changed = false;
+        let mut first_error = None;
+        for (id, reply) in jobs {
+            let fields = &reply.body["fields"];
+            let settled = if let Some(parent) = fields["in_reply_to"].as_str() {
+                self.settle_answered_message(parent,
+                    fields["from"].as_str().context("scheduled reply missing sender")?,
+                    fields["to"].as_str().context("scheduled reply missing recipient")?,
+                    &reply.subject, &reply.id).map_err(anyhow::Error::new)
+            } else {
+                Ok(())
+            };
+            match settled {
+                Ok(()) => {
+                    self.connection.batched(|tx| tx.execute(
+                        /* sqlite-large-value: allow-for-now lv-h534a5d6a7569 owner=fractal_store::store::scheduled_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_scheduled_message_settlement WHERE subject=?1", [&id]))
+                        .map_err(anyhow::Error::msg)??;
+                    changed = true;
+                }
+                Err(error) => {
+                    // Keep this job durable and attempt the others; one parent's refusal
+                    // must not discard or starve the remaining delivered replies.
+                    if first_error.is_none() { first_error = Some(error); }
+                }
+            }
         }
-        Ok(pass)
+        if let Some(error) = first_error { return Err(error); }
+        Ok(changed)
     }
 }
