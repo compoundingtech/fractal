@@ -10,7 +10,7 @@ import {
 } from './renders.ts'
 
 const meta = {
-  title: 'AttentionTray/Panel',
+  title: 'Fractal/Panel',
   component: RenderedPanel,
   args: { scenario: 'busy' },
   argTypes: {
@@ -22,7 +22,7 @@ const meta = {
     docs: {
       description: {
         component:
-          'The panel the running tray ships, in every fixture scenario. Each image is a real window-server capture (Liquid Glass, the status item) when TrayGallery --capture has one, else the flat cacheDisplay render, labelled as such. Appearance follows macOS; override it in the toolbar.',
+          'The panel Fractal ships, in every fixture scenario. Each image is a real window-server capture (Liquid Glass, the status item) when FractalMacGallery --capture has one, else the flat cacheDisplay render, labelled as such. Appearance follows macOS; override it in the toolbar.',
       },
     },
   },
@@ -31,7 +31,7 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-/** One story per gallery scenario; the description is the manifest's, so it tracks TrayGallery. */
+/** One story per gallery scenario; the description is the manifest's, so it tracks FractalMacGallery. */
 const scenarioStory = ({ scenario }: { scenario: ScenarioId }): Story => {
   const description = scenarioById(scenario)?.description
   return {

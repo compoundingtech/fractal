@@ -1,5 +1,5 @@
 /**
- * Attention tray V2, kept as history: the open variant dimensions Johannes picked from, each
+ * Fractal V2, kept as history: the open variant dimensions, each
  * option rendered one change at a time from the V2 design. The variant code is gone; the images
  * are frozen in `renders/v2/` and never regenerated. V3 shipped the picks; V4 ships now.
  */
@@ -140,14 +140,14 @@ const HistoryView = () =>
   )
 
 const meta = {
-  title: 'AttentionTray/V2',
+  title: 'Fractal/V2',
   component: HistoryView,
   parameters: {
     controls: { disable: true },
     docs: {
       description: {
         component:
-          'History: the V2 exploration Johannes picked L1 A3 H3 S2 M3 from. Each option is a frozen flat render of the V2 design with one dimension changed; nothing here is regenerated. V3 shipped the picks; AttentionTray/V4 shows what ships now.',
+          'History: the V2 exploration Johannes picked L1 A3 H3 S2 M3 from. Each option is a frozen flat render of the V2 design with one dimension changed; nothing here is regenerated. V3 shipped the picks; Fractal/V4 shows what ships now.',
       },
     },
   },

@@ -1,9 +1,14 @@
 {
+  "$genie": {
+    "source": "package.json.genie.ts",
+    "warning": "DO NOT EDIT - changes will be overwritten"
+  },
   "name": "fractal-workspace",
   "private": true,
   "workspaces": [
     "apps/fractal-web",
     "apps/ios",
+    "apps/macos/Fractal/design",
     "clients/typescript/fractal-client",
     "clients/typescript/fractal-declarations",
     "clients/typescript/fractal-scenarios",
@@ -12,9 +17,5 @@
     "packages/fractal-sdk",
     "packages/fractal-ui"
   ],
-  "packageManager": "pnpm@12.17.0",
-  "$genie": {
-    "source": "package.json.genie.ts",
-    "warning": "DO NOT EDIT - changes will be overwritten"
-  }
+  "packageManager": "pnpm@12.17.0"
 }

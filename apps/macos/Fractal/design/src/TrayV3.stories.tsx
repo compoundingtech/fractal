@@ -1,6 +1,6 @@
 /**
- * Attention tray V3, as history: what #9344 shipped before the native round replaced it with V4
- * (AttentionTray/V4). Johannes picked L1 A3 H3 S2 M3 from the V2 exploration (AttentionTray/V2);
+ * Fractal V3, as history: what #9344 shipped before the native round replaced it with V4
+ * (Fractal/V4). The V2 picks were L1 A3 H3 S2 M3 (Fractal/V2);
  * with K1–K13 they were locked. The images are the frozen V3 renders; its views are gone.
  */
 import type { Meta, StoryObj } from '@storybook/react'
@@ -154,7 +154,7 @@ const LockedView = () => (
 )
 
 const meta = {
-  title: 'AttentionTray/V3',
+  title: 'Fractal/V3',
   component: LockedView,
   parameters: {
     controls: { disable: true },

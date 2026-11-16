@@ -4,7 +4,7 @@ import { MenuBarItem, menuBarStateIds } from './MenuBarItem.tsx'
 import { appearances, menuBarStates } from './renders.ts'
 
 const meta = {
-  title: 'AttentionTray/MenuBar',
+  title: 'Fractal/MenuBar',
   component: MenuBarItem,
   args: { state: 'urgent' },
   argTypes: {
