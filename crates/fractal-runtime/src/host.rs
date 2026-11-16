@@ -1,6 +1,27 @@
 //! What this host is, and what it can give its seats' lanes (docs/st3/seat-lanes.md).
 use crate::lane::{Capacity, GIB};
 
+/// Finite work shares the native lane accountant; this policy adds mount/IO fit limits.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct FinitePolicy {
+    pub disk_floor_bytes: u64,
+    /// Paths identify mounts; requests on the same filesystem use its configured floor.
+    pub disk_floors: std::collections::BTreeMap<std::path::PathBuf, u64>,
+    /// None permits unrestricted heavy IO; constrained hosts default to one slot.
+    pub heavy_io_slots: Option<u32>,
+}
+
+impl Default for FinitePolicy {
+    fn default() -> Self {
+        Self {
+            disk_floor_bytes: 2 << 30,
+            disk_floors: std::collections::BTreeMap::new(),
+            heavy_io_slots: Some(1),
+        }
+    }
+}
+
 /// The host's online CPUs and installed memory: the machine, not the caller's own quota, which a
 /// lane or a cgroup limit would shrink.
 pub fn size() -> Option<Capacity> {
@@ -30,6 +51,16 @@ pub fn outside_lane_memory() -> Option<HostMemoryObservation> {
         &crate::lane::app_slice_cgroup()?.join(crate::lane::LANES_SLICE).join("memory.stat"),
     )?;
     outside_memory(&meminfo, arcstats.as_deref(), lane_stat.as_deref(), pressure.as_deref())
+}
+
+/// ARC credit applied by the same native outside-memory formula, for read-only diagnostics.
+pub fn arc_credit_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let arcstats = optional_stat(std::path::Path::new("/proc/spl/kstat/zfs/arcstats"))?;
+    let pressure = std::fs::read_to_string("/proc/pressure/memory").ok();
+    let without_arc = outside_memory(&meminfo, None, None, pressure.as_deref())?;
+    let with_arc = outside_memory(&meminfo, arcstats.as_deref(), None, pressure.as_deref())?;
+    Some(without_arc.outside_bytes.saturating_sub(with_arc.outside_bytes))
 }
 
 fn optional_stat(path: &std::path::Path) -> Option<Option<String>> {

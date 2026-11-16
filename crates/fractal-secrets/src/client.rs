@@ -1534,6 +1534,10 @@ async fn unix_request(
 }
 
 fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
+    if path.starts_with("/v1/internal/resources/") && path.split('?').next().is_some_and(|path| path.ends_with("/wait")) {
+        // This is a reactive subscription, cancelled by its caller, not a finite HTTP read.
+        return Duration::MAX;
+    }
     if path.starts_with("/v1/internal/replication/export")
         || path.starts_with("/v1/internal/replication/receive")
         || path.starts_with("/v1/internal/replication/checkpoint")

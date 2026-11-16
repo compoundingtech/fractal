@@ -155,6 +155,18 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         let mut lane_node = text("lane", &lane.name);
         property(&mut lane_node, "host", lane.host.as_str());
         property(&mut lane_node, "max-members", i128::from(lane.max_members));
+        property(&mut lane_node, "class", match lane.class {
+            fractal_runtime::RequestClass::Landing => "landing",
+            fractal_runtime::RequestClass::Check => "check",
+            fractal_runtime::RequestClass::Agent => "agent",
+        });
+        if let Some(disk) = &lane.disk {
+            property(&mut lane_node, "disk", fractal_runtime::show_lane_memory(disk.bytes));
+            property(&mut lane_node, "disk-path", disk.path.as_str());
+        }
+        if lane.io.is_some() {
+            property(&mut lane_node, "io", "heavy");
+        }
         property(&mut lane_node, "coverage", match lane.coverage {
             crate::model::ResourceLaneCoverage::Logical => "logical",
             crate::model::ResourceLaneCoverage::Enforced => "enforced",
@@ -484,7 +496,7 @@ mod tests {
             goal "Verify."
             step "verify" timeout="30s" {
                 agentless
-                lane "verification" host="node" max-members=2 coverage="logical" admission-timeout="2m" {
+                lane "verification" host="node" max-members=2 coverage="logical" admission-timeout="2m" class="check" disk="15G" disk-path="/workspace" io="heavy" {
                     capacity cores=2 memory="4G"
                 }
                 exec "verify" { command "echo secret"; }
@@ -498,6 +510,9 @@ mod tests {
         assert_eq!(lane.max_members, 2);
         assert_eq!(lane.capacity, Some(fractal_runtime::Capacity { cores: 2, memory: 4 * 1024 * 1024 * 1024 }));
         assert_eq!(lane.admission_timeout_ms, Some(120_000));
+        assert_eq!(lane.class, fractal_runtime::RequestClass::Check);
+        assert_eq!(lane.disk, Some(fractal_runtime::DiskRequest { bytes: 15 << 30, path: "/workspace".into() }));
+        assert_eq!(lane.io, Some(fractal_runtime::IoClass::Heavy));
         assert_eq!(step.timeout_ms, Some(30_000));
         assert!(step.capacity.is_none());
         let rendered = render_mission_kdl(&mission).unwrap();
@@ -515,6 +530,10 @@ mod tests {
         assert_eq!(rendered_lane.get("max-members").unwrap().as_integer(), Some(2));
         assert_eq!(rendered_lane.get("coverage").unwrap().as_string(), Some("logical"));
         assert_eq!(rendered_lane.get("admission-timeout").unwrap().as_string(), Some("120000ms"));
+        assert_eq!(rendered_lane.get("class").unwrap().as_string(), Some("check"));
+        assert_eq!(rendered_lane.get("disk").unwrap().as_string(), Some("15G"));
+        assert_eq!(rendered_lane.get("disk-path").unwrap().as_string(), Some("/workspace"));
+        assert_eq!(rendered_lane.get("io").unwrap().as_string(), Some("heavy"));
         let rendered_capacity = rendered_lane.children().unwrap().get("capacity").unwrap();
         assert_eq!(rendered_capacity.get("cores").unwrap().as_integer(), Some(2));
         assert_eq!(rendered_capacity.get("memory").unwrap().as_string(), Some("4G"));
@@ -535,6 +554,14 @@ mod tests {
         }"#);
         assert_eq!(assigned.steps["verify"].capacity.unwrap().memory, Some(8 * 1024 * 1024 * 1024));
         assert!(assigned.steps["verify"].resource_lane.as_ref().unwrap().capacity.is_none());
+        assert_eq!(assigned.steps["verify"].resource_lane.as_ref().unwrap().class, fractal_runtime::RequestClass::Agent);
+        let stored_lane = serde_json::to_value(assigned.steps["verify"].resource_lane.as_ref().unwrap()).unwrap();
+        for field in ["class", "disk", "io"] {
+            assert!(stored_lane.get(field).is_none(), "default fields must preserve historical lane bytes");
+        }
+        let historical_lane: crate::model::ResourceLaneSpec = serde_json::from_value(stored_lane.clone()).unwrap();
+        assert_eq!(historical_lane.class, fractal_runtime::RequestClass::Agent);
+        assert_eq!(serde_json::to_value(historical_lane).unwrap(), stored_lane);
     }
 
     #[test]
@@ -544,6 +571,12 @@ mod tests {
             r#"lane "verify" host="node" max-members=0; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" max-members=1.5; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" coverage="advisory"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" class="urgent"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" io="light"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" disk="15G"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" disk-path="/workspace"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" disk="0" disk-path="/workspace"; exec "check" { command "true"; }"#,
+            r#"lane "verify" host="node" disk="15G" disk-path=""; exec "check" { command "true"; }"#,
             r#"lane "verify" "extra" host="node"; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node" { capacity cores=2; capacity cores=3; }; exec "check" { command "true"; }"#,
             r#"lane "verify" host="node";"#,

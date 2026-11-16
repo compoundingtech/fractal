@@ -40,6 +40,25 @@ static ENFORCED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "camelCase")]
+pub enum RequestClass { Landing, Check, #[default] Agent }
+
+impl RequestClass {
+    pub const fn is_agent(&self) -> bool { matches!(self, Self::Agent) }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiskRequest {
+    pub bytes: u64,
+    pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum IoClass { Heavy }
+
 /// A seat lane's size: how many cores of CPU time and how many bytes of memory it may use.
 #[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct Capacity {
