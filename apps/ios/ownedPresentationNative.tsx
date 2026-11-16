@@ -2,6 +2,16 @@ import { Component } from 'react';
 import { ActionSheetIOS, Alert, Modal, type AlertButton, type ModalProps } from 'react-native';
 import { ownedPresentations } from './ownedPresentation';
 
+type AlertPressArgs = Parameters<NonNullable<AlertButton['onPress']>>;
+const releasingButton = (button: AlertButton, release: () => void): AlertButton => {
+  // React Native declares a union of string and login/password callbacks. Forward
+  // its native argument unchanged; the wrapper must accept both callback shapes.
+  const onPress = button.onPress as ((...args: AlertPressArgs) => void) | undefined;
+  return { ...button, onPress: (...args: AlertPressArgs) => {
+    try { onPress?.(...args); } finally { release(); }
+  } };
+};
+
 export const showOwnedActionSheet: typeof ActionSheetIOS.showActionSheetWithOptions = (options, callback) => {
   const release = ownedPresentations.acquire();
   try {
@@ -21,20 +31,17 @@ export const OwnedAlert: Pick<typeof Alert, 'alert' | 'prompt'> = {
     const release = ownedPresentations.acquire();
     const choices: AlertButton[] = buttons?.length ? buttons : [{ text: 'OK' }];
     try {
-      Alert.alert(title, message, choices.map(button => ({
-        ...button, onPress: (value?: string) => { try { button.onPress?.(value); } finally { release(); } },
-      })), { ...options, onDismiss: () => { try { options?.onDismiss?.(); } finally { release(); } } });
+      Alert.alert(title, message, choices.map(button => releasingButton(button, release)),
+        { ...options, onDismiss: () => { try { options?.onDismiss?.(); } finally { release(); } } });
     } catch (error) { release(); throw error; }
   },
   prompt: (title, message, callbackOrButtons, type, defaultValue, keyboardType) => {
     const release = ownedPresentations.acquire();
     const buttons: AlertButton[] = typeof callbackOrButtons === 'function'
-      ? [{ text: 'Cancel', style: 'cancel' }, { text: 'OK', onPress: value => callbackOrButtons(value ?? '') }]
+      ? [{ text: 'Cancel', style: 'cancel' }, { text: 'OK', onPress: callbackOrButtons }]
       : callbackOrButtons?.length ? callbackOrButtons : [{ text: 'Cancel', style: 'cancel' }, { text: 'OK' }];
     try {
-      Alert.prompt(title, message, buttons.map(button => ({
-        ...button, onPress: (value?: string) => { try { button.onPress?.(value); } finally { release(); } },
-      })), type, defaultValue, keyboardType);
+      Alert.prompt(title, message, buttons.map(button => releasingButton(button, release)), type, defaultValue, keyboardType);
     } catch (error) { release(); throw error; }
   },
 };
