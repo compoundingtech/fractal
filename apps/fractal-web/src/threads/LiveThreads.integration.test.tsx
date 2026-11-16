@@ -63,6 +63,11 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
         ...actions.map(id => ({ id, version: 0, state: 'granted' })),
       ] },
     })
+    // Every first send is previewed by exact key; unless a test says otherwise the item's original agent receives it.
+    if (url.pathname === '/v1/client/threads/start-context') return Response.json({ ...base, value: {
+      kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'),
+      start_recipient: { agent_id: agent, basis: { _tag: 'original' } },
+    } })
     return reply(url, init)
   } })
   const registry = AtomRegistry.make()

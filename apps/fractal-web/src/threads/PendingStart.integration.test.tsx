@@ -50,6 +50,8 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
   const attention = Atom.keepAlive(Atom.make<Feed<readonly Attention[]>>(observed({ value: [initial] })))
   const writes: PostedStart[] = []
   let loseFirst!: () => void
+  // The exact-key preview's recipient: it moves on with the source, while the unconfirmed first send keeps its own.
+  let previewRecipient = originalAgent
   const client = new FractalClient({ baseUrl: 'http://gateway.test', fetchImpl: async (input, init) => {
     const url = new URL(String(input))
     if (url.pathname.endsWith('/capabilities')) return Response.json({ ...base, value: {
@@ -59,6 +61,10 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
         { id: 'thread.start', version: 0, state: 'granted' },
         { id: 'thread.reply', version: 0, state: 'granted' },
       ],
+    } })
+    if (url.pathname === '/v1/client/threads/start-context') return Response.json({ ...base, value: {
+      kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'),
+      start_recipient: { agent_id: previewRecipient, basis: { _tag: 'original' } },
     } })
     if (url.pathname.endsWith('/actions')) {
       const action = JSON.parse(String(init?.body)) as PostedStart
@@ -111,7 +117,9 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
     })
     await act(async () => [...host.querySelectorAll('button')].find(row => row.getAttribute('aria-label') === 'Send')?.click())
     await vi.waitFor(() => expect(writes).toHaveLength(1))
-    expect(button('Retry thread start')?.disabled).toBe(true)
+    // While its own send is in flight the draft stays in its editor; only an unconfirmed send becomes a retained start.
+    expect(button('Retry thread start')).toBeUndefined()
+    expect(host.querySelector('textarea')?.value).toBe(content)
     await act(async () => loseFirst())
     await vi.waitFor(() => expect(button('Retry thread start')?.disabled, host.textContent ?? '').toBe(false))
     expect(host.querySelectorAll('[data-thread-panel]')).toHaveLength(1)
@@ -120,6 +128,7 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
       ...(change === 'episode' ? { episode: 'claim/replacement', revision: 'claim/replacement' } : {}),
       ...(change === 'closed' ? { state: 'resolved' } : {}),
     })
+    previewRecipient = 'agent/example/replacement'
     await act(async () => registry.set(attention, observed({ value: change === 'removed' ? [] : [replacement] })))
     await act(async () => root.render(null))
     await render()

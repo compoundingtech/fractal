@@ -18,7 +18,8 @@ import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/compositi
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThreadEditor } from './ThreadEditor.tsx'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
-import { upgradeThreadEndpoint, type RetainedThreadStart, type ThreadObservation, type ThreadSource, type ThreadRefusal } from './threadSource.ts'
+import { upgradeThreadEndpoint, type RetainedThreadStart, type ThreadObservation, type ThreadSendResult, type ThreadSource, type ThreadRefusal } from './threadSource.ts'
+import type { ThreadStartContext, ThreadStartRecipient } from './threadStartContext.stub.ts'
 import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
 import { useForegroundVisibility } from './useForegroundVisibility.ts'
 import { awayVisit, enterUnreadVisit, holdUnreadVisit, planUnreadView, type UnreadVisit } from './unreadVisit.ts'
@@ -179,8 +180,9 @@ function ThreadListPage({ source, query, exclude, opensInTab = false, framed = t
 export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonly alert: Attention }) {
   const source = useDataSource().threads
   if (source === undefined || alert.episode === undefined) return null
-  const agent = alert.conversation_id?.startsWith('agent/') === true ? alert.conversation_id : undefined
-  return <InboxThreadsContent key={JSON.stringify([alert.source_id, alert.episode])} source={source} agent={agent}
+  // Only a source without the exact-key preview (a local fixture) names the item's listed agent as its recipient.
+  const listedAgent = alert.conversation_id?.startsWith('agent/') === true ? alert.conversation_id : undefined
+  return <InboxThreadsContent key={JSON.stringify([alert.source_id, alert.episode])} source={source} listedAgent={listedAgent}
     originSource={alert.source_id} episode={alert.episode} title={alert.title}
     canStart={alert.state === 'open'} onOpenThread={onOpenThread} />
 }
@@ -191,9 +193,34 @@ function AgentName({ id }: { readonly id: string }) {
   return <span title={id}>{nameInSentence(agentDisplayName({ id, name: agent._tag === 'Observed' ? agent.value?.name : undefined }))}</span>
 }
 
-function InboxThreadsContent({ source, agent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
+/**
+ * Who a first send on this item goes to, exactly as Fractal's start preview names it. A recipient without a basis
+ * comes only from a source that has no preview at all; production reads always carry one.
+ */
+type StartRecipientView =
+  | { readonly _tag: 'Ready'; readonly recipient: ThreadStartRecipient | { readonly agent_id: string; readonly basis?: undefined } }
+  | { readonly _tag: 'Loading' }
+  /** The item's agent was retired and no new recipient is configured: there is no default to offer. */
+  | { readonly _tag: 'Retired'; readonly explanation?: string | undefined }
+  | { readonly _tag: 'Unassigned' }
+  | { readonly _tag: 'Unavailable'; readonly feed: Extract<Feed<never>, { readonly _tag: 'Unavailable' }> }
+
+const startRecipientView = (feed: Feed<ThreadStartContext> | undefined, listedAgent: string | undefined): StartRecipientView => {
+  if (feed === undefined) return listedAgent === undefined ? { _tag: 'Unassigned' } : { _tag: 'Ready', recipient: { agent_id: listedAgent } }
+  if (feed._tag === 'Waiting') return { _tag: 'Loading' }
+  if (feed._tag === 'Observed') return { _tag: 'Ready', recipient: feed.value.start_recipient }
+  if (feed.code === 'recipient-retired') return { _tag: 'Retired', explanation: feed.explanation }
+  if (feed.code === 'thread-responsibility-unassigned') return { _tag: 'Unassigned' }
+  return { _tag: 'Unavailable', feed }
+}
+
+const idleStartContext = Atom.make<Feed<ThreadStartContext>>(waiting)
+const retiredNote = 'This item’s agent was retired and Fractal has no new recipient configured, so no thread can start here.'
+const noRecipientSend = 'There is no recipient for this thread right now, so nothing was sent.'
+
+function InboxThreadsContent({ source, listedAgent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
-  readonly agent: string | undefined
+  readonly listedAgent: string | undefined
   readonly originSource: string
   readonly episode: string
   readonly title: string
@@ -204,15 +231,25 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
     .filter(start => start.parameters.origin.episode === episode)
   const query = React.useMemo(() => ({ origin_source: originSource, origin_episode: episode }), [originSource, episode])
   const list = useAtomValue(source.list(query))
+  // The exact source/episode preview is read only where a first send could be offered.
+  const startContext = source.startContext
+  const preview = useAtomValue(startContext !== undefined && read && actions.has('thread.start') && canStart ? startContext(originSource, episode) : idleStartContext)
+  const recipient = startRecipientView(startContext === undefined ? undefined : preview, listedAgent)
   const narrow = React.useContext(NarrowLayoutContext)
   const [threadReadsStale, reportStale] = useStaleThreadReads()
   // A stale read keeps what it last showed; Retry reads every thread projection on this item again.
   const readsStale = (list._tag === 'Observed' && list.freshness === 'stale') || threadReadsStale
   const paused = useUpdatesPaused(readsStale)
+  // One destination for this item's first send: a refusal and its draft stay put while the recipient is read again.
   const draftKey = `inbox:${JSON.stringify([originSource, episode])}`
   const draft = useAtomValue(source.draft(draftKey))
   const gatewayLive = useGatewayLive()
   const [starting, setStarting] = React.useState(false)
+  // The recipient the person last saw when opening the draft or pressing Send; a different one is called out.
+  const [reviewed, setReviewed] = React.useState<string>()
+  // While the editor's own first send is in flight the editor stays mounted, so a refusal lands beside its draft;
+  // only a send Fractal has not confirmed becomes a retained start with its own Retry.
+  const [editorSending, setEditorSending] = React.useState(false)
   const [titleInput, setTitleInput] = React.useState<string>()
   const [focused, setFocused] = React.useState<string>()
   const headingId = React.useId()
@@ -231,8 +268,9 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   // Only a complete first page states how many threads this item has.
   const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
   // A start waits for the list: while it loads the sibling titles are unknown, and a refused or failed list is not offered one.
-  const offerStart = retained.length === 0 && actions.has('thread.start') && canStart && list._tag === 'Observed'
-  if (count === 0 && focused === undefined && retained.length === 0 && !offerStart) return null
+  const pending = editorSending ? retained.filter(start => start.draftKey !== draftKey) : retained
+  const offerStart = pending.length === 0 && actions.has('thread.start') && canStart && list._tag === 'Observed'
+  if (count === 0 && focused === undefined && pending.length === 0 && !offerStart) return null
   const askTitle = threadTitleFromAsk(title)
   // Two threads named after the same ask cannot be told apart, so a second one is named after its first line.
   const firstLine = draft.content.trim().split('\n', 1)[0] ?? ''
@@ -240,33 +278,84 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
     ? threadTitleFromAsk(firstLine) : askTitle
   const startTitle = threadTitleFromAsk(titleInput?.trim() || suggested)
   const saved = draft.content.trim() !== ''
+  const ready = recipient._tag === 'Ready' ? recipient.recipient : undefined
+  const changed = ready !== undefined && reviewed !== undefined && reviewed !== ready.agent_id
+  const status = recipient._tag === 'Ready' ? null : <StartRecipientStatus recipient={recipient} onRetry={() => source.reloadStartContext?.(originSource, episode)} />
+  // Sending names the recipient on screen at that moment; a recipient Fractal no longer selects is refused and read again.
+  const send = async (content: string): Promise<ThreadSendResult> => {
+    if (ready === undefined) return { _tag: 'Refused', detail: noRecipientSend }
+    setReviewed(ready.agent_id)
+    setEditorSending(true)
+    try {
+      return await source.start(draftKey, { agent_id: ready.agent_id, origin: { source_id: originSource, episode }, title: startTitle, content })
+    } finally {
+      setEditorSending(false)
+    }
+  }
   return <StaleThreadReads.Provider value={reportStale}><section aria-labelledby={headingId} {...stylex.props(styles.inbox)}>
     <div {...stylex.props(styles.headingRow)}>
       <h3 id={headingId} aria-label={countedName('Threads', count, paused)} {...stylex.props(styles.inboxHeading)}><CountedLabel label="Threads" count={count} paused={paused} /></h3>
       {readsStale ? <ActionButton aria-label="Retry: Updates paused" onPress={source.reload}>Retry</ActionButton> : null}
       {/* The start control keeps one place at the end of the heading, however many threads open below it. */}
-      {!offerStart || agent === undefined || starting ? null : <div ref={startArea} {...stylex.props(styles.startArea)}>
-        <ActionButton variant="outline" onPress={() => setStarting(true)}>{saved ? 'Continue draft' : <><Icon name="plus" size={12} />Start thread</>}</ActionButton>
+      {!offerStart || ready === undefined || starting ? null : <div ref={startArea} {...stylex.props(styles.startArea)}>
+        <ActionButton variant="outline" onPress={() => { setReviewed(ready.agent_id); setStarting(true) }}>{saved ? 'Continue draft' : <><Icon name="plus" size={12} />Start thread</>}</ActionButton>
       </div>}
     </div>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    {retained.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
+    {pending.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
     {/* A draft opens at the top of the list, where its thread lands once sent. */}
-    {!offerStart ? null : agent === undefined
-      ? <p {...stylex.props(styles.note)}>No responsible agent is configured for this Inbox item.</p>
-      : starting ? <ThreadPanel thread={{ title: startTitle, state: 'open' }} initiallyExpanded onHideDraft={() => { restoreStart.current = true; setStarting(false) }}>
+    {!offerStart ? null : starting
+      ? <ThreadPanel thread={{ title: startTitle, state: 'open' }} initiallyExpanded onHideDraft={() => { restoreStart.current = true; setStarting(false) }}>
         <TextField value={titleInput ?? suggested} onChange={setTitleInput} {...stylex.props(styles.titleField)}>
           <Label>Thread title</Label>
           <Input {...stylex.props(styles.titleInput, narrow && styles.titleInputTouch)} />
         </TextField>
-        <p {...stylex.props(styles.note)}>To <AgentName id={agent} /></p>
-        <ThreadEditor source={source} destination={draftKey} label={startTitle} inputRef={startInput} gatewayLive={gatewayLive}
-          send={content => source.start(draftKey, { agent_id: agent, origin: { source_id: originSource, episode }, title: startTitle, content })}
-          onSent={id => { setFocused(id); setStarting(false); setTitleInput(undefined) }} />
+        {ready === undefined ? status : <>
+          {changed ? <p role="status" data-start-recipient-changed="" {...stylex.props(styles.recipientChanged)}>
+            The recipient changed to <AgentName id={ready.agent_id} />. Nothing has been sent; review the recipient and send again.
+          </p> : null}
+          <StartRecipient recipient={ready} lead="to" />
+        </>}
+        {/* The editor stays mounted while the recipient is read again, so its draft and refusal stay on screen. */}
+        <ThreadEditor source={source} destination={draftKey} label={startTitle} inputRef={startInput} gatewayLive={gatewayLive} send={send}
+          onSent={id => { setFocused(id); setStarting(false); setTitleInput(undefined); setReviewed(undefined) }} />
       </ThreadPanel>
-      : count === 0 && focused === undefined ? <p {...stylex.props(styles.note)}>Ask <AgentName id={agent} /> about this item without answering it.</p> : null}
+      : ready === undefined ? status
+      : count === 0 && focused === undefined ? <StartRecipient recipient={ready} lead="ask" /> : null}
     <ThreadListPage source={source} query={query} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
   </section></StaleThreadReads.Provider>
+}
+
+/**
+ * The exact first-send recipient. A fallback names its new recipient as new, and the retired original agent
+ * beside it: the retirement is Fractal's recorded `agent.retired` claim, never an offline or stopped runtime.
+ */
+function StartRecipient({ recipient, lead }: {
+  readonly recipient: Extract<StartRecipientView, { readonly _tag: 'Ready' }>['recipient']
+  readonly lead: 'to' | 'ask'
+}) {
+  const fallback = recipient.basis?._tag === 'fallback' ? recipient.basis : undefined
+  return <div data-start-recipient={recipient.basis?._tag ?? 'listed'} {...stylex.props(styles.recipient)}>
+    <p {...stylex.props(styles.recipientLine)}>
+      <span>{lead === 'to' ? <>To <AgentName id={recipient.agent_id} /></> : <>Ask <AgentName id={recipient.agent_id} /> about this item without answering it.</>}</span>
+      {fallback === undefined ? null : <span data-start-recipient-new="" {...stylex.props(styles.recipientBadge)}>New recipient</span>}
+    </p>
+    {fallback === undefined ? null : <p {...stylex.props(styles.note)}>
+      Originally for <AgentName id={fallback.original_agent_id} />, who was retired.
+    </p>}
+  </div>
+}
+
+/** No recipient to show: loading, a refusal without a default, or a failed preview with Retry. */
+function StartRecipientStatus({ recipient, onRetry }: { readonly recipient: Exclude<StartRecipientView, { readonly _tag: 'Ready' }>; readonly onRetry: () => void }) {
+  switch (recipient._tag) {
+    case 'Loading': return <SystemNotice kind="loading" scope="inline" title="Loading the recipient" />
+    case 'Retired': return <SystemNotice kind="error" scope="inline" title={retiredNote} data-start-recipient="retired"
+      {...(recipient.explanation === undefined ? {} : { explanation: recipient.explanation })} />
+    case 'Unassigned': return <p {...stylex.props(styles.note)}>No responsible agent is configured for this Inbox item.</p>
+    // Reading again cannot qualify a source Fractal does not know for this person.
+    case 'Unavailable': return <ReadStatus feed={recipient.feed} subject="recipient" {...(recipient.feed.code === 'not-found' ? {} : { onRetry })} />
+  }
 }
 
 /** Pending first sends survive the Inbox source that originally hosted their editor. */
@@ -660,7 +749,7 @@ const accessFailed = (failure: Feed<never> | undefined): failure is Extract<Feed
 /** Loading is only loading; a refusal says what Fractal refused, and only a failed read offers Retry. */
 function ReadStatus({ feed, subject, onRetry }: {
   readonly feed: Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>
-  readonly subject: 'threads' | 'thread' | 'messages'
+  readonly subject: 'threads' | 'thread' | 'messages' | 'recipient'
   readonly onRetry?: (() => void) | undefined
 }) {
   if (feed._tag === 'Waiting') return <SystemNotice kind="loading" scope="inline" title={`Loading ${subject}`} />
@@ -709,4 +798,12 @@ const styles = stylex.create({
   quote: { margin: 0, paddingInlineStart: s.sm, borderInlineStartWidth: 2, borderInlineStartStyle: 'solid', borderInlineStartColor: c.border,
     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   note: { margin: 0, color: c.fgMuted, fontSize: t.metaSize },
+  recipient: { display: 'flex', flexDirection: 'column', gap: s.xs, minWidth: 0 },
+  // The recipient's name wraps under its lead on a narrow pane; the badge stays whole.
+  recipientLine: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', columnGap: s.sm, rowGap: s.xs, margin: 0, minWidth: 0, color: c.fgMuted, fontSize: t.metaSize, overflowWrap: 'anywhere' },
+  recipientBadge: { flexShrink: 0, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.borderStrong, borderRadius: r.sm,
+    color: c.fgSoft, fontSize: t.metaSize, fontWeight: 600, whiteSpace: 'nowrap' },
+  // A changed recipient is the one thing to review before sending again: the attention rule marks it without colouring the words.
+  recipientChanged: { margin: 0, paddingInlineStart: s.sm, borderInlineStartWidth: 2, borderInlineStartStyle: 'solid', borderInlineStartColor: c.attention,
+    color: c.fg, fontSize: t.metaSize, overflowWrap: 'anywhere' },
 })

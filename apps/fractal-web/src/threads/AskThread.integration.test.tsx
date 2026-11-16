@@ -69,6 +69,12 @@ it.each([
         ...(browserGrant ? [{ id: 'thread-browser-send', version: 1, state: 'granted' }] : []),
       ] },
     })
+    // The exact-key preview names the first-send recipient; an unassigned source keeps its operational refusal.
+    if (url.pathname === '/v1/client/threads/start-context') return responsible
+      ? Response.json({ ...base, value: { kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'),
+        start_recipient: { agent_id: 'agent/example/atlas', basis: { _tag: 'original' } } } })
+      : Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/start-context',
+        code: 'thread-responsibility-unassigned', message: 'No responsible agent.', retryable: false, details: {} }, { status: 409 })
     if (url.pathname.endsWith('/actions')) {
       const action = JSON.parse(String(init?.body))
       writes.push(action)

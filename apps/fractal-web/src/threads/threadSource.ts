@@ -8,6 +8,7 @@ import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
 import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
+import { readThreadStartContext, type ThreadStartContext } from './threadStartContext.stub.ts'
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
 
@@ -76,6 +77,9 @@ export interface ThreadSource {
   readonly detail: (threadId: string) => Atom.Atom<Feed<ThreadObservation>>
   readonly timeline: (threadId: string, cursor?: string) => Atom.Atom<Feed<ThreadTimelinePage>>
   readonly draft: (destination: string) => Atom.Writable<ThreadDraft>
+  /** Exact opening preview only; never a source-discovery list or send authorization. */
+  readonly startContext?: (sourceId: string, episode: string) => Atom.Atom<Feed<ThreadStartContext>>
+  readonly reloadStartContext?: (sourceId: string, episode: string) => void
   readonly start: (draftKey: string, parameters: Omit<ThreadStartParameters, 'target_id' | 'signature'>) => Promise<ThreadSendResult>
   readonly pendingStarts?: (sourceId?: string) => Atom.Atom<readonly RetainedThreadStart[]>
   readonly retryStart?: (draftKey: string) => Promise<ThreadSendResult>
@@ -208,6 +212,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       readonly onFailure?: (error: unknown) => void
       /** How a failed read reads; one thread's own reads name that thread when it is refused. */
       readonly refused?: (error: unknown) => Feed<never>
+      readonly resetOnReload?: boolean
       readonly updates?: (update: (change: (value: T) => T) => void) => () => void
     },
   ): Atom.Atom<Feed<T>> {
@@ -215,6 +220,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     return Atom.make(get => {
       const demand = get(access)
       get(revision)
+      if (settings?.resetOnReload) previous = waiting
       if (!demand.read) return previous = waiting
       // A new read of a refused projection is loading again, not still refused.
       if (previous._tag === 'Unavailable') previous = waiting
@@ -350,6 +356,31 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       return Native.decodeUnknownSync(Native.ThreadTimelinePage)(value)
     }, { refused: refusedThread, ...(follow === undefined ? {} : { follow }) })
   })
+  const startContextKey = (sourceId: string, episode: string) => JSON.stringify([sourceId, episode])
+  const readStartContext = Atom.family((key: string) => {
+    const [sourceId, episode] = JSON.parse(key) as [string, string]
+    return reader(signal => readThreadStartContext(client, sourceId, episode, signal), {
+      resetOnReload: true,
+      refused: error => {
+        const failure = refused(error)
+        if (failure._tag !== 'Unavailable' || failure.reason !== 'failed') return failure
+        const explanation = error instanceof ClientError ? error.response.message.trim() : ''
+        return { ...failure, detail: 'Fractal could not load the first-send recipient.',
+          ...(explanation === '' ? {} : { explanation }) }
+      },
+    })
+  })
+  const reloadStartContext = (sourceId: string, episode: string): Promise<void> => {
+    const atom = readStartContext(startContextKey(sourceId, episode))
+    registry.refresh(atom)
+    // Keep this exact read alive even if a composer was unmounted during the send.
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const stop = registry.subscribe(atom, feed => {
+      if (feed._tag === 'Waiting' && registry.get(access).read) return
+      queueMicrotask(() => { stop(); resolve() })
+    }, { immediate: true })
+    return promise
+  }
   const soughtPages = Atom.family((_threadId: string) => Atom.make<{
     readonly page: ThreadTimelinePage
     readonly actor: string | undefined
@@ -448,6 +479,11 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         // refused action, with Fractal's own reason under it.
         const error = outcome.error
         if (error instanceof ClientError && error.status < 500) {
+          if (kind === 'thread.start' && start !== undefined && error.status === 404 && error.response.code === 'not-found') {
+            // A changed recipient appends nothing. Refresh the proof for explicit
+            // reconfirmation; never rewrite or resend this frozen Start packet.
+            await reloadStartContext(start.origin.source_id, start.origin.episode)
+          }
           const explanation = error.response.message.trim()
           return { _tag: 'Refused', detail: refusedAction[kind], ...(explanation === '' ? {} : { explanation }) }
         }
@@ -551,6 +587,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     },
     list: query => readList(JSON.stringify(query)),
     detail: readDetail,
+    startContext: (sourceId, episode) => readStartContext(startContextKey(sourceId, episode)),
+    reloadStartContext: (sourceId, episode) => { void reloadStartContext(sourceId, episode) },
     timeline: (threadId, cursor) => cursor === undefined ? firstTimeline(threadId) : readTimeline(pageKey(threadId, cursor)),
     draft: drafts,
     start: (draftKey, parameters) => send(draftKey, parameters),

@@ -627,6 +627,25 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
+## First-Start recipient preview
+
+Before sending a new Inbox discussion, the web composer reads the exact
+`source_id` and `episode` through `/v1/client/threads/start-context` and displays
+the daemon-selected recipient. A terminal-retirement fallback is labeled as a
+new recipient, with the original agent retained beside it. Runtime offline
+status never selects a fallback. An unconfigured fallback displays the
+`recipient-retired` refusal without choosing a default agent.
+
+If Start returns a recipient-mismatch 404, the composer reads that exact context
+again and requires another explicit send; it never silently resends or routes
+back to a retired-recipient thread. Unconfirmed Starts keep their original
+intent and identifiers. Replies continue to use the existing thread's stored
+participants, regardless of later routing policy.
+
+The hand-written `threadStartContext.stub.ts` isolates the r2 recipient/context
+decoder and authenticated read adapter until the shared Phase B client
+generation replaces them; generated client artifacts are not hand-edited.
+
 ## Fractal web threads connected preview
 
 `node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,
