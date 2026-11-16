@@ -275,9 +275,10 @@ mod tests {
         assert_eq!(state.store.resource_membership_record(&lane.id,&lane.owner).unwrap().blocked_by,Some(BlockedBy::Hold));
         state.notify.notified().await;
         let wake = state.notify.notified(); tokio::pin!(wake); wake.as_mut().enable();
-        host_holds::release(State(state.clone()), None, Json(ReleaseHostHold {
+        let Json(released) = host_holds::release(State(state.clone()), None, Json(ReleaseHostHold {
             actor:hold.owner, host:hold.host, id:hold.id, expected_revision:hold.revision, resolution:"ready".into(),
         })).await.unwrap();
+        assert_eq!(released.revision, hold.revision + 1);
         assert!(std::future::poll_fn(|context| std::task::Poll::Ready(Future::poll(wake.as_mut(),context).is_ready())).await);
         assert!(matches!(state.store.request_resource_membership(&lane,fit(),11).unwrap(), Admission::Admitted(_)));
     }
@@ -334,6 +335,28 @@ mod tests {
         assert!(!allows_bound_request(&axum::http::Method::HEAD, "/v1/internal/resources"));
     }
 
+    #[test]
+    fn bound_resource_exception_matches_only_registered_methods_and_paths() {
+        use axum::http::Method;
+        for (path, allowed) in [
+            ("/v1/internal/resources", Some(Method::GET)),
+            ("/v1/internal/resources/exec", Some(Method::POST)),
+            ("/v1/internal/resources/owned", Some(Method::GET)),
+            ("/v1/internal/resources/owned/wait", Some(Method::POST)),
+            ("/v1/internal/resources/owned/cancel", Some(Method::POST)),
+            ("/v1/internal/resources/", None),
+            ("/v1/internal/resources/owned/", None),
+            ("/v1/internal/resources/owned/cancel/extra", None),
+            ("/v1/internal/resources/owned/other", None),
+            ("/v1/internal/resources-extra", None),
+            ("/v1/internal/unrelated", None),
+        ] {
+            for method in [Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::HEAD, Method::OPTIONS] {
+                assert_eq!(allows_bound_request(&method, path), allowed.as_ref() == Some(&method), "{method} {path}");
+            }
+        }
+    }
+
     async fn bound_request(state: &AppState, agent: Option<&str>, credential: Option<&str>, method: &str, path: &str, body: Value) -> (axum::http::StatusCode, Value) {
         use tower::ServiceExt;
         let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
@@ -343,7 +366,10 @@ mod tests {
         let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap())
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(!envelope.to_string().contains("must-not-export"), "the entire wire response must redact launch credentials");
+        let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+        (status, value)
     }
 
     #[tokio::test]

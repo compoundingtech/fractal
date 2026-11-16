@@ -3689,6 +3689,12 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
             .is_some_and(|command| command.is_hide_set()),
         "the expert ST3 channel lifecycle must remain callable but hidden"
     );
+    assert!(
+        command
+            .find_subcommand("resource-payload")
+            .is_some_and(|command| command.is_hide_set()),
+        "the admitted shell payload entry point must remain callable but hidden"
+    );
 
     for legacy in [
         "claude",
@@ -3751,6 +3757,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("resources", include_str!("resources_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
         ("source", SOURCE_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
@@ -3805,11 +3812,19 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         "EvalArgs",
         "GraphArgs",
     ] {
-        assert!(
-            !cli_source.contains(&format!("struct {command_type}"))
-                && !cli_source.contains(&format!("enum {command_type}")),
-            "legacy CLI type {command_type} remains compiled"
-        );
+        for (name, source) in std::iter::once(("main", main_source))
+            .chain(command_files.iter().copied())
+        {
+            // Only the native finite-shell command owns this new ExecArgs type.
+            // The removed top-level exec handler/type stays forbidden everywhere else;
+            // every other legacy type and every legacy handler is still scanned here.
+            let native_exec_args = name == "resources" && command_type == "ExecArgs";
+            assert!(
+                (native_exec_args || !source.contains(&format!("struct {command_type}")))
+                    && !source.contains(&format!("enum {command_type}")),
+                "legacy CLI type {command_type} remains compiled in {name}"
+            );
+        }
     }
 
     let server_source = /* sqlite-large-value: allow-for-now lv-h62a14b16df0b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../fractal-api-core/src/api.rs");

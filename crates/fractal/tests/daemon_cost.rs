@@ -192,6 +192,26 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
     ),
     (
+        "GET /v1/internal/resources",
+        "host-local operator inventory combines shell command history, native memberships, holds and the in-memory accountant, absent from generated claim-history cost stores; shell_resources::tests::durable_commands_are_queryable_without_becoming_second_admission_authority and api::resources ownership tests cover the transport/store boundary; populated host-local inventory and retained command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/exec",
+        "requires a real native invocation/attempt or local operator and connected-host resource authority, absent from generated cost stores; queues one host-local command without granting membership or releasing a payload; api::resources submission and nested-custody tests cover ownership and admission boundaries; command bytes, native owner validation and queue-write cost are not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/{id}",
+        "requires a durable host-local shell execution, absent from generated cost stores; reads the execution by primary key, then scans its host's memberships and operator holds for inspection; api::resources ownership tests cover disclosure, but host-local membership/hold history and command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/wait",
+        "event-driven long-poll over one host-local shell execution, not a finite JSON cost sample; each wake rereads the command by primary key and rechecks native ownership; api::resources::tests::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials covers wakeup ordering and disclosure; command-body and wakeup cost are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/cancel",
+        "requires a durable host-local shell execution and its authenticated owner or local operator, absent from generated cost stores; reads by primary key and sets only the queue row's cancel flag, leaving whole-tree retirement to the existing host authority; shell_resources::tests::cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot covers durable cancellation; command-body rewrite cost is not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
     ),
