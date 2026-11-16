@@ -3870,7 +3870,15 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 assert_eq!(target.steps[0].status, "completed");
                 let references = store.claims_for(&target.steps[0].subject, Some("step-run.carried")).unwrap();
                 assert_eq!(references.len(), 1, "every sample must adopt original evidence into a fresh successor");
-                assert_eq!(references[0].body["fields"]["source_step_run"], fixture.items["continuity_step"]);
+                let mut source = references[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                let mut seen = std::collections::BTreeSet::from([target.steps[0].subject.clone()]);
+                while source != fixture.items["continuity_step"] {
+                    assert!(seen.insert(source.clone()), "carried evidence must have an acyclic original reference");
+                    assert!(store.claims_for(&source, Some("work.submitted")).unwrap().is_empty());
+                    let previous = store.claims_for(&source, Some("step-run.carried")).unwrap();
+                    assert_eq!(previous.len(), 1, "every intermediate must reference its authentic source");
+                    source = previous[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                }
                 assert!(store.claims_for(&target.steps[0].subject, Some("work.submitted")).unwrap().is_empty());
             }
             if attempt > 0 {
