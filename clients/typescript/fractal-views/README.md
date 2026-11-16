@@ -133,3 +133,14 @@ with `null` meaning the end. The host supplies its canonical fractional-key
 function. Equal concurrent keys or an exhausted bounded gap can be rebalanced in
 one atomic edit while retaining the observed order. A missing anchor or invalid
 collection produces a refusal without an edit.
+
+`quickAccessWrite.ts` is the internal delivery engine for one immutable compound
+edit. It retains the original gateway, request bodies, identities and fences in
+memory after an unconfirmed response. An explicit identical check is required;
+reads never settle ambiguous writes. Only a matching completed action receipt
+settles a replayed stage. A safe canonical `arrangement-exists` response, including on an explicit
+create check, starts validation of the exact live owner/v2 identity. This satisfies
+the shared-container precondition without proving that our CREATE was applied. A failed adoption read retains
+validation; explicit recovery repeats only GET, then sends the original membership.
+Unknown or replay-unsafe errors never start adoption. Incompatible validation
+stays locked with an explicit reason; it never recreates the reserved identity. This commit adds no followed UI or public editing controller.

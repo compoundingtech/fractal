@@ -1026,7 +1026,7 @@ mod tests {
         };
         let action = json!({
             "api_version":CLIENT_API_VERSION,"id":"action/mark-reminder","type":"thread.mark-unread",
-            "idempotency_key":"mark-reminder",
+            "idempotency_key":"mark-reminder-fixture-0001",
             "fence":{"snapshot_id":new_client_snapshot(&state).id},
             "parameters":{"target_id":thread,"anchor_message_id":message,"observed_marks":[]},
         });
@@ -1049,7 +1049,7 @@ mod tests {
         assert_eq!(state.store.claims_for(message, Some("message.read")).unwrap().len(), 0);
         local_post(&state, "/v1/client/actions", json!({
             "api_version":CLIENT_API_VERSION,"id":"action/clear-reminder","type":"thread.clear-unread",
-            "idempotency_key":"clear-reminder",
+            "idempotency_key":"clear-reminder-fixture-0001",
             "fence":{"snapshot_id":new_client_snapshot(&state).id},
             "parameters":{"target_id":thread,"observed_marks":[reminder["marks"][0]["mark_id"]]},
         })).await;
@@ -1277,7 +1277,7 @@ mod tests {
                     json!({
                         "id":"thread/fixture", "agent_id":"agent/example", "title":"Review",
                         "title_revision": created.id, "revision": observed_revision, "state":"open",
-                        "message_count": 0, "unread": false
+                        "message_count": 0, "unread": false, "unread_reminder": null
                     })
                 );
             } else {
