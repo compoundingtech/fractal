@@ -813,7 +813,7 @@ with tempfile.TemporaryDirectory() as scratch:
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
     assert covered.returncode == 0 and "10 repository files, 0 outside" in covered.stdout, covered
     threads_pairing = graph(*[f"./../../{path}" for path in threads_pairing_closure])
-    assert threads_pairing.returncode == 0 and "9 repository files, 0 outside" in threads_pairing.stdout, threads_pairing
+    assert threads_pairing.returncode == 0 and f"{len(threads_pairing_closure)} repository files, 0 outside" in threads_pairing.stdout, threads_pairing
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):
