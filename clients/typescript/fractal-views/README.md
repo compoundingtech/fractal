@@ -117,3 +117,19 @@ entries. Signing tests verify `fixtures/clients/device-signing-v1.json`. Fixture
 shared, never copied into this package. CI also typechecks and tests the phone against
 the package. The root frozen install covers every workspace package; `bash scripts/ci-typescript-client`
 runs the combined checks.
+
+### Quick access
+
+`quickAccess.ts` selects the discovered person's reserved Pins arrangement and
+projects its server-ordered memberships as navigation shortcuts. Supported stable
+destinations are agents, missions, documents, glasses, and resources. An agent
+shortcut addresses the agent, so opening it follows the current session. Document
+shortcuts address their name rather than an immutable version. Inbox items and
+session/PTY identities are not shortcut targets. Missing local inventory does not
+remove a membership or prove that opening its stable destination will fail.
+
+`planQuickAccessPlace` plans an insertion or reorder before an observed member,
+with `null` meaning the end. The host supplies its canonical fractional-key
+function. Equal concurrent keys or an exhausted bounded gap can be rebalanced in
+one atomic edit while retaining the observed order. A missing anchor or invalid
+collection produces a refusal without an edit.
