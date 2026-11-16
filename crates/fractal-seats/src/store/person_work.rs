@@ -961,6 +961,50 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     }
 
     #[test]
+    fn historical_owner_uses_selected_concurrent_declaration_not_last_claim() {
+        let (store, origin, mut input) = fixture();
+        let parsed = crate::graph::parse_internal_intent(
+            r#"version 2
+agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "alder",
+        ).unwrap();
+        let mut owned = parsed.subjects[&input.actor].clone();
+        owned.owner_run = Some(origin.run.clone());
+        owned.owner_generation = Some(origin.generation.clone());
+        let mut unowned = owned.clone();
+        unowned.owner_run = None;
+        unowned.owner_generation = None;
+        let mut candidates = [owned, unowned];
+        candidates.sort_by_key(fractal_store::store::desired_revision);
+        candidates.reverse();
+        let expected = candidates[0].owner_run.clone()
+            .map(|run| (run, candidates[0].owner_generation.clone()));
+        let predecessor = current_desired_row(&store.readers.get(), &input.actor).unwrap().unwrap().claim_id;
+        let mut declarations = Vec::new();
+        for candidate in candidates {
+            declarations.push(store.connection.batched(|tx| append_claim_tx(
+                tx, "alder", &input.actor, "intent.desired", None,
+                &serde_json::to_value(candidate).unwrap(), std::slice::from_ref(&predecessor), None,
+            )).unwrap().unwrap());
+        }
+        assert!(canonical::claim_key(&store.readers.get(), &declarations[0].id).unwrap()
+            < canonical::claim_key(&store.readers.get(), &declarations[1].id).unwrap());
+        assert_ne!(current_desired_row(&store.readers.get(), &input.actor).unwrap().unwrap().claim_id,
+            declarations[1].id);
+        input.step = None;
+        let ask = store.ask_person(&input).unwrap();
+        for replay in [false, true] {
+            if replay { store.replay_replication_graph().unwrap(); }
+            let mut retained = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+            let fields = retained.body["fields"].as_object_mut().unwrap();
+            fields.remove("owner_run");
+            fields.remove("owner_generation");
+            assert_eq!(fractal_store::store::person_work::episode_owner(
+                &store.readers.get(), &retained,
+            ).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn new_run_person_ask_is_durable_and_bound_to_requester() {
         let (store, origin, mut input) = fixture();
         store

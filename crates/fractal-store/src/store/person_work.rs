@@ -611,21 +611,25 @@ pub fn episode_owner(connection: &Connection, ask: &ClaimRecord) -> Result<Optio
         return Ok(None);
     }
     let ask_key = canonical::claim_key(connection, &ask.id)?;
-    let mut declarations = connection.prepare_cached(&canonical_sql(
-        "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-         FROM claims WHERE subject=?1 AND kind='intent.desired' ORDER BY CANONICAL_ASC(claims)",
-    ))?;
-    let mut owner = None;
-    for declaration in declarations.query_map([requester], claim_from_row)? {
+    let mut declarations = connection.prepare_cached(&canonical_sql(&format!(
+        "SELECT id,body,predecessors FROM claims
+         WHERE subject=?1 AND kind='intent.desired' AND {UNREPAIRED_CLAIM}
+           AND NOT EXISTS (SELECT 1 FROM replica_records
+             WHERE replica_records.claim_id=claims.id AND replica_records.state='repaired')
+         ORDER BY CANONICAL_ASC(claims)",
+    )))?;
+    let mut rows = Vec::new();
+    for declaration in declarations.query_map([requester], |row| Ok((
+        row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+    )))? {
         let declaration = declaration?;
-        if canonical::claim_key(connection, &declaration.id)? > ask_key {
+        if canonical::claim_key(connection, &declaration.0)? > ask_key {
             break;
         }
-        owner = declaration.body["owner_run"].as_str().map(|run| (
-            run.to_owned(), declaration.body["owner_generation"].as_str().map(str::to_owned),
-        ));
+        rows.push(declaration);
     }
-    Ok(owner)
+    Ok(select_desired_row(rows)?.and_then(|desired|
+        desired.owner_run.map(|run| (run, desired.owner_generation))))
 }
 
 pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Result<bool> {
