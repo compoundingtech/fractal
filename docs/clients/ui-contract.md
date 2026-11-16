@@ -2,13 +2,15 @@
 
 For package choices and a runnable client, see [Build your own client](build-your-own.md).
 
-What every Fractal client shows and does. Three clients implement it: the terminal UI
-(`crates/fractal-tui/src/ui`), the iOS app (`apps/ios`, the Expo way) and the web app, Fractal
-(`apps/fractal-web`). Each part of the contract has one lead:
+What every Fractal client shows and does: the terminal UI (`crates/fractal-tui/src/ui`),
+the iOS app (`apps/ios`, the Expo way), the web app (`apps/fractal-web`) and the Mac app.
+Each part of the contract has one lead:
 
 - **Screens and navigation:** the terminal UI is the reference.
 - **The conversation view:** the web app leads (see
   [Who leads the conversation](#who-leads-the-conversation)).
+- **Threads:** the Mac app leads placement and the full lifecycle composer; every client
+  follows the shared [threads presentation and read model](#threads).
 - **Mission, agent and attention state:** Fractal computes it once and serves it as
   [presentation projections](#presentation-projections). Clients read the projections and keep
   no derivation of their own.
@@ -646,6 +648,95 @@ was installed on the audit host, so each was checked by its answer to the query.
 Typing and key-to-redraw were not measured here. `st ui --slo` printed no samples for the
 isolated instance after a clean quit, because the counters are written hourly. The terminal-UI
 change measures them before and after with an image on screen.
+
+## Threads
+
+The Mac app is the reference for thread placement and the full lifecycle composer.
+TUI, iOS, web and Mac share the presentation and read model below. Thread identity,
+links and authority follow the [thread contract](../st3/thread-contract.md).
+
+### Words and presentation
+
+- **Words:** Thread, Open, Closed, Start thread, Reply, Quote, Rename, Close thread,
+  Reopen, New, Mark as unread, Mark as read, Mark all read. Navigation says **View
+  thread**, or uses a chevron; **Open** names the status, not navigation. The header
+  says **with &lt;agent&gt;**, using the agent's display name.
+- **Status:** beside the title, Open is a green-dot chip; Closed is a grey hollow-ring
+  chip. TUI uses the equivalent `● Open` / `○ Closed` tokens. Text and shape carry
+  the distinction without colour.
+- **Unread:** a row has a dot, bold title and an accent unread-message count pill.
+  Keep total message counts separate from unread counts. Put a red **New** separator
+  immediately before the first unread message; neither lifecycle events nor loading
+  placeholders count as unread messages.
+- **Quotes:** one line above the reply body, with a left rule:
+  **↳ Sender · excerpt**. Use the original sender's display name (**You** for the
+  person), truncate the excerpt, and retain the quoted message target.
+- **Lifecycle:** muted, glyph-led actor–verb–object lines with relative time:
+  `✎ You renamed “old” → “new” · 48m`, `⊘ You closed the thread · 12m`,
+  `↺ You reopened the thread · 2m`. Agent and other actor names use their display
+  names. Rename retains both titles. These are events, not messages or unread replies.
+- **Closed threads:** show **Closed · replying keeps it closed** with **Reopen**.
+  Person and agent replies are allowed and leave the thread closed. Only an explicit
+  Reopen changes its lifecycle. Closing a thread does not answer a linked ask.
+
+### State copy
+
+| State | What every client shows and does |
+|---|---|
+| Loading | **Loading…**; never claim an empty list before it loads. |
+| Updates paused | **Updates paused** with **Retry** and the last observation age. Keep readable history and the draft; disable Send until reconnected, without silently queuing it. |
+| Unconfirmed change | **Not confirmed by Fractal** on the dimmed message, with **Retry** and **Edit**. Never resend automatically or claim acceptance. |
+| Refused | **Threads are unavailable on this connection.** with **Retry**. Clear the protected body and composer; do not expose raw refusal strings or retain readable content after revocation. |
+| Empty | **No threads yet** with **Start thread**. |
+| Missing thread | **Fractal has no thread at this link.** |
+| Unsupported connection | **This connection does not support threads.** |
+
+### Read position
+
+- Read progress belongs to the person and thread, not the device or a linked ask.
+  Viewing advances it through the newest message actually shown, not unseen history
+  or a background fetch. Opening an unread thread lands at its first unread message.
+- **Mark as unread** on a message moves the read position to immediately before that
+  message. On a row it moves before the thread's first message. Restore the New
+  separator, dot, bold title and count at that boundary on every client.
+- An explicit mark-unread survives leaving the view; the same already-visible
+  messages must not immediately mark it read again. The next deliberate viewing
+  advances from the chosen boundary. Read changes never reopen a thread, create an
+  ask or answer one.
+- **Mark as read** reads through the newest known message in that thread.
+  **Mark all read** is available on every Threads list. Read positions and unread
+  hints, including linked-ask `thread_unread`, agree across clients after a rewind
+  as well as an advance; mark-unread is not a local-only override.
+
+| Client | Mark unread and read controls |
+|---|---|
+| Mac and web | Option-click a message marks unread from there; Option-click a row marks the whole thread unread. `⌥U` acts on the focused message or thread row. Message and row context menus offer **Mark as unread** and **Mark as read**; list header and menu offer **Mark all read**. |
+| TUI | `u` on the focused message marks unread from there; `U` on a thread header marks the whole thread unread. Expose **Mark as read** and **Mark all read** as named keyboard-accessible actions. |
+| iOS | Long-press a message → **Mark as unread**; leading swipe on a thread row → **Unread** / **Read**. The Threads list offers **Mark all read**. |
+
+### Notifications
+
+- Keep one notification per thread, keyed by thread identity. Each new agent message
+  replaces that thread's notification rather than adding another.
+- Offer inline **Reply** to the same thread. Replying to a closed thread keeps it
+  closed. Thread notifications never speak; lifecycle events do not notify.
+- The Mac menu-bar number counts asks only. Unread threads add a dot after that
+  number, never an extra ask or an increment to it.
+
+### Mac placement and composer
+
+- Home shows a **Threads** section below the inbox, at most three rows, unread first.
+  Hide the section when there are no threads. A dedicated **Threads** page shows
+  the full list, with Open and Recently closed groups and **Mark all read**.
+- Linked ask cards show one-line collapsed thread rows with title, status and unread
+  count. Each thread expands independently; opening it reaches the same history as
+  the Threads page. Answering the ask and replying to the thread are separate actions.
+- The composer stays with the active thread and supports Reply and Quote. Starting
+  from an ask creates a linked thread. **Start thread** is also available from the
+  Threads page. Drafts retain their explicit destination across navigation.
+- The `⋯` and context menus expose Rename, Close thread / Reopen, and Start thread.
+  The closed banner does not disable the reply composer. Return sends and
+  Shift-Return inserts a new line; a quote preview sits above the reply input.
 
 ## Presentation projections
 

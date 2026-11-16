@@ -40,10 +40,11 @@ conditional activation.
 
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
 threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
-from the agent joins closed history without reopening the thread, adding an alert or resurrecting
-the Inbox row. When admission sees a closed thread, the owning person must explicitly reopen it
-before sending a reply. A fresh linked ask can still show the closed thread. An authorized rename changes the shared title everywhere and
-preserves the thread, messages, links, unread state and current lifecycle.
+from the agent joins closed history without reopening the thread, adding an ask alert or
+resurrecting the Inbox row. Person replies are also allowed while closed and keep it closed.
+Only an explicit Reopen changes the lifecycle. A fresh linked ask can still show the closed
+thread. An authorized rename changes the shared title everywhere and preserves the thread,
+messages, links, unread state and current lifecycle.
 
 Show rename, close and reopen as events in the thread timeline with their actor and time.
 Project each event from its accepted lifecycle claim and reuse the operation identity to
@@ -67,10 +68,11 @@ Use the conversation composer with an explicit destination. When a thread is act
 composer sends into it without a separate reply mode. A quoted reply adds the message target.
 Agent conversation and thread drafts are separate and survive switching destinations.
 
-Track read progress per reader and thread against ordered messages. Moving a cursor forward can
-clear an unread reply on the existing Inbox row without creating an ask, changing the alert count
-or resolving an approval. Which visible interaction advances the read cursor should be tested
-with real UI visibility and reviewed before client implementations treat it as read.
+Track read progress per reader and thread against ordered messages. Viewing advances it through
+the newest shown message; Mark as unread moves it before the selected message, including
+backwards. Read changes do not create an ask, change the ask count or resolve an approval.
+The shared [threads presentation contract](../clients/ui-contract.md#threads) defines the
+visibility rule, per-platform controls, unread rendering, state copy and notification policy.
 
 ## Daemon boundary
 
@@ -122,8 +124,8 @@ the affected view rather than presenting the earlier local receipt as fleet-wide
 
 A revision check fences stale changes against the admitting member's known state. Concurrent
 changes accepted on different members reconcile by a deterministic claim projection. Close
-prevents outgoing replies on a member that knows the thread is closed. An independently
-admitted reply and close may both stand after exchange. Preserve accepted replies in history.
+does not prevent replies or implicitly reopen on a reply. Preserve accepted replies in history
+and retain the explicit lifecycle after exchange.
 The operation does not impose an atomic order across disconnected members. The
 [existing replication rules](replication.md) define the underlying
 convergence and retry behavior.
