@@ -229,6 +229,7 @@ pub struct Attention {
     /// theirs. It stays open meanwhile, and its deadline does not move.
     #[serde(skip)]
     pub snoozed_until: Option<chrono::DateTime<chrono::FixedOffset>>,
+    pub snoozed_indefinitely: bool,
     /// The asking claim of an ask (st's `episode`): a closed row is matched by it to the
     /// auto-resolved row it became. None where st names none.
     #[serde(skip)]
@@ -251,9 +252,9 @@ impl Attention {
         }
     }
 
-    /// Whether its person put it off past `now`: it stays off Home and out of triage until then.
+    /// Whether its person put it off past `now` or until manual return: keep it out of Home and triage.
     pub fn snoozed(&self, now: chrono::DateTime<chrono::FixedOffset>) -> bool {
-        self.snoozed_until.is_some_and(|until| until > now)
+        self.snoozed_indefinitely || self.snoozed_until.is_some_and(|until| until > now)
     }
 }
 
