@@ -14,7 +14,7 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
     case refuse(String)
   }
 
-  private let page: AttentionPage
+  private var page: AttentionPage
   private let slo: SloSnapshot
   /// Each row's steps, oldest first; a row without any reads as never measured.
   private let histories: [String: [Double?]]
@@ -28,6 +28,25 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   private let excerpts: [String: ConversationExcerpt]
   private let attachments: [String: Data]
   private var failure: String?
+  private var heldReads: Set<String> = []
+  private var pendingReads: [String: CheckedContinuation<Void, Never>] = [:]
+
+  func replaceRecords(_ records: [AttentionRecord]) {
+    page = AttentionPage(records: records, canAnswer: page.canAnswer, canControl: page.canControl)
+  }
+
+  /// Deterministic async arrivals for native geometry probes; no wall-clock races.
+  func hold(_ section: String) { heldReads.insert(section) }
+  func release(_ section: String) {
+    heldReads.remove(section)
+    pendingReads.removeValue(forKey: section)?.resume()
+  }
+
+  private func waitForRelease(_ section: String) async {
+    if heldReads.contains(section) {
+      await withCheckedContinuation { pendingReads[section] = $0 }
+    }
+  }
 
   init(
     page: AttentionPage, slo: SloSnapshot, histories: [String: [Double?]], availability: AvailabilitySnapshot,
@@ -56,7 +75,10 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   }
 
   func readAttention() async throws -> AttentionPage { try serve(page) }
-  func readSlo() async throws -> SloSnapshot { try serve(slo) }
+  func readSlo() async throws -> SloSnapshot {
+    await waitForRelease("slo")
+    return try serve(slo)
+  }
 
   func readSloHistory(_ request: SloHistoryRequest) async throws -> SloHistory {
     let steps = histories[request.id] ?? Array(repeating: nil, count: request.steps)
@@ -66,7 +88,10 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
         steps: steps))
   }
 
-  func readAvailability() async throws -> AvailabilitySnapshot { try serve(availability) }
+  func readAvailability() async throws -> AvailabilitySnapshot {
+    await waitForRelease("availability")
+    return try serve(availability)
+  }
 
   func submit(_ submission: WorkDoneSubmission) async throws {
     try await settle(submits[submission.attentionID])

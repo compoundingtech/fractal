@@ -353,6 +353,7 @@ private struct MoreRow: View {
     .buttonStyle(.panelRow)
     .help("Show the full inbox")
     .accessibilityLabel("\(count) more in the inbox")
+    .accessibilityIdentifier("inbox-more")
     .accessibilityHint("Opens the full inbox")
     .focusOnArrival(model.backFrom == .inbox)
   }
@@ -397,6 +398,7 @@ struct InboxRow: View {
     .buttonStyle(.panelRow)
     .help(help(write))
     .accessibilityLabel(accessibilityLabel(write))
+    .accessibilityIdentifier("inbox-row-\(record.id)")
     .accessibilityHint("Opens the ask")
     .focusOnArrival(model.backFrom == .attention(record.id))
     .modifier(MarksSeen(record: record, model: model))

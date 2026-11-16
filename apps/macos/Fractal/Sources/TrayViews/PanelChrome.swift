@@ -114,9 +114,10 @@ struct PanelPage<Header: View, Content: View, Footer: View>: View {
   }
 }
 
-/// Header, content, footer, top to bottom. The content is proposed exactly the height left
-/// after the chrome's ideal heights; the window's own proposal (a menu-bar window proposes its
-/// previous height) never reaches it.
+/// Header and footer stay pinned within the screen budget for the entire presentation.
+/// Content changes and navigation must not resize a menu-bar window: AppKit preserves its
+/// bottom-left origin on content resize, detaching its top from the menu-bar anchor.
+/// Unbounded snapshots still use their content's natural height.
 private struct PanelPageLayout: Layout {
   let available: CGFloat
   let scrollHeight: CGFloat
@@ -141,7 +142,8 @@ private struct PanelPageLayout: Layout {
     let header = subviews[0].sizeThatFits(ideal)
     let footer = subviews[2].sizeThatFits(ideal)
     let room = min(scrollHeight, max(0, available - header.height - footer.height))
-    return [header, subviews[1].sizeThatFits(ProposedViewSize(width: width, height: room)), footer]
+    let content = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: room))
+    return [header, CGSize(width: content.width, height: available.isFinite ? room : content.height), footer]
   }
 }
 
