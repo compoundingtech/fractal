@@ -157,7 +157,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         anyhow::ensure!(observation.status == "exited", "shell execution status is indeterminate; custody retained");
         let (stdout, stderr) = self.runtime.resource_exec_output(&execution.command.id, &generation.generation_id)?;
         execution.stdout = stdout; execution.stderr = stderr;
-        execution.exit_code = observation.exit_code.map(|code| i32::try_from(code)).transpose()?;
+        execution.exit_code = observation.exit_code.map(i32::try_from).transpose()?;
         execution.exit_signal = self.runtime.resource_exec_signal(&execution.command.id, &generation.generation_id)?;
         match fs::read(&result_path) {
             Ok(bytes) => {
