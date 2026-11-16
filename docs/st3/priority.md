@@ -39,7 +39,7 @@ the daemon's own value, which is 0 under `fractal service install`. A harness th
 priority further stays lower. The scope weights below divide the machine between cgroups; `nice`
 orders processes inside one, and a harness's work runs in a scope of its own.
 
-**Install-wide.** In `~/.config/st3/config.toml` (Home Manager: `services.smalltalk.seatPriority`):
+**Install-wide.** In `~/.config/st3/config.toml` (Home Manager: `services.fractal.seatPriority`):
 
 ```toml
 seat_priority = "normal"   # or "background", which is also what a missing key means
