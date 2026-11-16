@@ -184,7 +184,7 @@ const checklist: readonly Check[] = [
     item: 'Reduce Motion respected',
     verdict: 'pass',
     evidence:
-      'TrayPanel reads accessibilityReduceMotion: pages cross-fade in place instead of sliding.',
+      'TrayPanel reads accessibilityReduceMotion: the arriving page fades in place instead of sliding.',
   },
   {
     item: 'VoiceOver follows page changes; rows say what they show',

@@ -110,14 +110,14 @@ public enum AnswerState: Sendable, Equatable {
   public let configurationError: String?
   let adapter: (any AttentionAdapter)?
   let availabilityAdapter: (any AvailabilityAdapter)?
-  /// The page the panel shows; a page whose card left Fractal returns to its parent,
-  /// and closing the panel returns to the top level.
-  public internal(set) var route: PanelRoute = .home
-  /// The page the person last went back from, so the top level returns VoiceOver focus to the
+  /// The panel's pages, the top level first and the page it shows last; never empty. A page
+  /// whose card left Fractal is popped, and closing the panel returns to a fresh top level.
+  public internal(set) var navigationEntries = [PanelNavigationEntry(.home)]
+  /// The page the panel shows.
+  public var route: PanelRoute { navigationEntries[navigationEntries.count - 1].route }
+  /// The page the person last went back from, so the page below returns VoiceOver focus to the
   /// row or tile that opened it; nil once another page opens or the panel closes.
   public internal(set) var backFrom: PanelRoute?
-  /// The full inbox when it opened a card, so Back returns there; nil from the top level.
-  public internal(set) var pageParent: PanelRoute?
   /// Each open card's detail and its asker's conversation, read when its page opens and again
   /// on every refresh while it is open on screen; a failed read keeps the last one, marked stale.
   public internal(set) var contexts: [String: LiveSection<AttentionContext>] = [:]
@@ -320,11 +320,12 @@ public enum AnswerState: Sendable, Equatable {
       if case .sending = state { return true }
       return shown.contains(id)
     }
-    // A card answered, closed or snoozed elsewhere returns to the page that opened it.
-    if case .attention(let id) = route, !shown.contains(id) {
-      route = pageParent ?? .home
-      pageParent = nil
-    }
+    // A card answered, closed or snoozed elsewhere: its page closes, back to the page below.
+    let kept = navigationEntries.enumerated().filter { index, entry in
+      guard index > 0, case .attention(let id) = entry.route else { return true }
+      return shown.contains(id)
+    }.map(\.element)
+    if kept.count != navigationEntries.count { navigationEntries = kept }
   }
 
   /// Whether the person has typed or picked anything not yet sent, or is typing now: the

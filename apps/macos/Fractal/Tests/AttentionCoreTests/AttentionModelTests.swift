@@ -439,6 +439,55 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.answerDrafts[ask.id], AnswerDraft(words: "after the release"), "the draft waits for the page")
   }
 
+  func testNavigationStackReturnsToLivePagesAndOpensPoppedPagesFresh() async {
+    let model = AttentionModel(adapter: FakeAdapter(attention: [], slo: []))
+    let root = model.navigationEntries
+    XCTAssertEqual(root.map(\.route), [.home])
+
+    model.open(.inbox)
+    model.open(.attention("attention/1"))
+    let live = model.navigationEntries
+    XCTAssertEqual(live.map(\.route), [.home, .inbox, .attention("attention/1")])
+    XCTAssertEqual(model.route, .attention("attention/1"))
+
+    model.open(.attention("attention/1"))
+    XCTAssertEqual(model.navigationEntries, live, "opening the shown page changes nothing")
+
+    model.back()
+    XCTAssertEqual(model.navigationEntries, Array(live.prefix(2)), "Back returns to the same inbox entry")
+    XCTAssertEqual(model.backFrom, .attention("attention/1"))
+
+    model.open(.attention("attention/1"))
+    XCTAssertNotEqual(model.navigationEntries.last?.id, live[2].id, "a popped page opens fresh")
+    XCTAssertNil(model.backFrom)
+
+    model.open(.inbox)
+    XCTAssertEqual(model.navigationEntries, Array(live.prefix(2)), "a page still on the stack is returned to, not pushed")
+    model.open(.home)
+    XCTAssertEqual(model.navigationEntries, root, "the top level is always on the stack")
+
+    model.back()
+    XCTAssertEqual(model.navigationEntries, root, "Back at the top level does nothing")
+    XCTAssertNil(model.backFrom)
+  }
+
+  func testAClosedCardsPageReturnsToThePageThatOpenedIt() async {
+    let ask = Fixture.record(request: Fixture.decision())
+    let other = Fixture.record(id: "attention/other", request: Fixture.decision())
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: [ask, other], canAnswer: true)), .success(.init(records: [other], canAnswer: true))],
+      slo: [.success(slo), .success(slo)])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.inbox)
+    let inbox = model.navigationEntries
+    model.open(.attention(ask.id))
+
+    await model.refresh(now: now + 60)
+
+    XCTAssertEqual(model.navigationEntries, inbox, "the card left Fractal, so its page pops back to the same inbox")
+  }
+
   func testAnsweringOnAPageReturnsToTheTopLevelWithAReceipt() async {
     let ask = Fixture.record(request: Fixture.decision())
     let image = AttachmentRef(sha256: "abc", mediaType: "image/png", name: "shot.png", size: 3, message: "work/step-1")
