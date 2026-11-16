@@ -45,7 +45,6 @@ export const scenarioIds = [
   'speech-speaking',
   'speech-in-call',
   'speech-muted',
-  'variant-d1',
   'variant-d2',
   'notice-speaking',
   'notice-in-call',

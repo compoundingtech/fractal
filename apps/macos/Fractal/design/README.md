@@ -20,10 +20,11 @@ Appearance menu forces Light or Dark.
 - `AttentionTray/V4`: the shipped design, the native round (n1–n4): a Control Center module with
   tiles, one-line inbox rows and pages drilled into within the panel. `Overview` lists the round's
   decisions, the K decisions it keeps, the Control Center benchmark and V3's heights next to V4's;
-  `OpenVariants` the open questions with each option rendered (answer placement D1/D2, panel width
-  W1 320/W2 336/W3 360 pt, tiles T1 capsules/T2 Control Center grid, availability history H1 week
-  strips/H2 by hour/H3 last 24 hours; shipped D1 · W3 · T1 · H1); `TopLevel`, `AskPages` and
-  `TilePages` every scenario.
+  `SelectedDesign` renders D2 · W3 · T1: ask detail has a header, scrolling request and conversation,
+  then fixed answer controls; the panel is 360 pt wide with compact status capsules. Answer
+  submission and required-text validation are unchanged. The capped inbox and More row keep
+  the signal grid below it in view. Availability history retains its H1 week strips/H2 by hour/H3
+  last 24 hours picker (H1 default). `TopLevel`, `AskPages` and `TilePages` cover every scenario.
 - `AttentionTray/Panel`: the shipped design per scenario, plus `AllStates` (light and dark).
 - `AttentionTray/MenuBar`: the status item per state, plus `AllStates` (light and dark).
 - `AttentionTray/V3`: history. `Locked` lists Johannes' picks (L1 A3 H3 S2 M3) and K1–K13 as #9344

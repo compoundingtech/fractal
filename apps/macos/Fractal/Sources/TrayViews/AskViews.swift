@@ -66,6 +66,7 @@ struct AnswerForm: View {
           && !editing
       ) { pick(choice) }
       .disabled(sending || blockedByWords)
+      .accessibilityIdentifier("answer-choice-\(choice.id)")
       .help(
         [
           choice.kind == .nothing ? AnswerWords.nothing : choice.consequence,
@@ -87,9 +88,11 @@ struct AnswerForm: View {
       .textFieldStyle(.roundedBorder)
       .lineLimit(1...6)
       .focused($editing)
+      .accessibilityIdentifier("answer-words")
       .onSubmit(sendWords)
       Button("Send", action: sendWords)
         .disabled(sending || !AnswerChoice.canSend(effective, words: words))
+        .accessibilityIdentifier("answer-send")
         .help(effective.map { "Send as “\($0.label)”" } ?? "Write an answer first")
     }
   }
