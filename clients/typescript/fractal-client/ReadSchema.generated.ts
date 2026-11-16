@@ -1909,6 +1909,9 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "unsupported-capability",
   "peer-too-old",
   "validation-failed",
+  "unknown-objective",
+  "invalid-slo-series",
+  "unsupported-objective-series",
   "idempotency-conflict",
   "legacy-action-receipt-untrusted",
   "issuer-required",
@@ -4749,6 +4752,26 @@ export const SloList = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "SloList" }))()
 export type SloList = typeof SloList.Type
 export type SloListEncoded = typeof SloList.Encoded
+
+/** One half-open [start,end) Unix millisecond bucket; count includes zero for empty buckets. */
+export const SloSeriesBucket = /*#__PURE__*/ (() => Schema.Struct({
+  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "SloSeriesBucket", description: "One half-open [start,end) Unix millisecond bucket; count includes zero for empty buckets." }))()
+export type SloSeriesBucket = typeof SloSeriesBucket.Type
+export type SloSeriesBucketEncoded = typeof SloSeriesBucket.Encoded
+
+/** Declared count-objective events or closed interval samples by completion time, using evaluator selection, deduplication and exclusions; no percentiles. Half-open [from,to), at most 31 days and 1000 buckets, with the final bucket clipped to to. */
+export const SloSeries = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "buckets": Schema.Array(SloSeriesBucket).check(Schema.isMaxLength(1000)),
+  "from": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "id": Schema.String,
+  "to": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "SloSeries", description: "Declared count-objective events or closed interval samples by completion time, using evaluator selection, deduplication and exclusions; no percentiles. Half-open [from,to), at most 31 days and 1000 buckets, with the final bucket clipped to to." }))()
+export type SloSeries = typeof SloSeries.Type
+export type SloSeriesEncoded = typeof SloSeries.Encoded
 
 /** The UTF-8 text of one source file version, by sha256. Immutable. Requires read.declarations. */
 export const SourceBlob = /*#__PURE__*/ (() => Schema.Struct({
