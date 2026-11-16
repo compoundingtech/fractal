@@ -108,7 +108,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let held = self.held_lanes(agent, now)?;
         smallclaims::touched::note_read(|| "host-lane-memory".into());
-        let outside = (host.outside)().unwrap_or(0);
+        let outside = (host.outside)().map_or(0, |observation| observation.outside_bytes);
         let free = room.memory.saturating_sub(held).saturating_sub(outside);
         if lane.memory <= free {
             // Counted at once, so another step judged in this pass does not take the same room.

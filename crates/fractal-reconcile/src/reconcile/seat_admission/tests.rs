@@ -12,7 +12,10 @@ fn reconciler() -> Reconciler<FakeRuntime> {
 
 #[test]
 fn changed_host_memory_observation_wakes_waiters_without_an_envelope_file() {
-    fn outside() -> Option<u64> { Some(42) }
+    use fractal_runtime::host::HostMemoryObservation;
+    fn outside() -> Option<HostMemoryObservation> {
+        Some(HostMemoryObservation { outside_bytes: 42, psi_blocked: false })
+    }
     let mut reconciler = reconciler();
     reconciler.seat_admission.lanes = Some(LaneHost {
         room: fractal_runtime::Capacity { cores: 8, memory: 1024 }, outside, burst_lane: None,
@@ -23,10 +26,16 @@ fn changed_host_memory_observation_wakes_waiters_without_an_envelope_file() {
     events.borrow_and_update();
     reconciler.refresh_seat_admission_at(1001);
     assert!(!events.has_changed().unwrap(), "unchanged memory does not wake again");
-    *reconciler.seat_admission.outside_observation.lock().unwrap() = Some(Some(100));
+    *reconciler.seat_admission.outside_observation.lock().unwrap() =
+        Some(Some(HostMemoryObservation { outside_bytes: 100, psi_blocked: false }));
     reconciler.refresh_seat_admission_at(1002);
     assert!(events.has_changed().unwrap(), "changed outside bytes wake incremental fit evaluation");
-    assert_eq!(*reconciler.seat_admission.outside_observation.lock().unwrap(), Some(Some(42)));
+    assert_eq!(*reconciler.seat_admission.outside_observation.lock().unwrap(), Some(outside()));
+    events.borrow_and_update();
+    *reconciler.seat_admission.outside_observation.lock().unwrap() =
+        Some(Some(HostMemoryObservation { outside_bytes: 42, psi_blocked: true }));
+    reconciler.refresh_seat_admission_at(1003);
+    assert!(events.has_changed().unwrap(), "changed PSI attribution also wakes the same observation dependency");
 }
 
 #[test]

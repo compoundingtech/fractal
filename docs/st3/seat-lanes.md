@@ -96,10 +96,11 @@ exporter stack or private metrics accumulator presented as exported telemetry.
 | `st.resource.release.duration` | `s` | Retirement request through retirement/uncertain observation |
 | `st.resource.hold.duration` | `s` | Persisted hold age supplied at authenticated resolution |
 
-Counts are SDK observable gauges over the latest host snapshot, including zeros; durations are SDK
-histograms. All have only `st.resource.lane` as a metric dimension, plus bounded
-`st.resource.outcome` on phase durations. Host identity belongs to exporter resource attributes.
-Unbounded execution identifiers remain exclusively on traces/logs. Call
+Counts are SDK observable gauges over the latest host snapshot, including zeros, partitioned by
+`st.resource.host` and `st.resource.lane`. `st.resource.queue > 0` together with
+`st.resource.occupancy = 0` exposes a zero-holder queue for liveness alerting. Durations are SDK
+histograms with `st.resource.lane`, bounded `st.resource.outcome` and phase wait
+`st.resource.blocked_by` dimensions. Unbounded execution identifiers remain exclusively on traces/logs. Call
 `hold_resolved(lane, persisted_age)` when a durable hold is resolved; a daemon restart must not
 reset that age or clear the hold. An unresolved hold contributes to `st.resource.holds`, not a
 fabricated completed hold-duration sample.
@@ -399,12 +400,16 @@ limit shrinks what `nproc` reports. From that room, admission takes:
 - the lane of each of the host's other laned seats that runs, or was admitted to start and is not yet
   seen running (for up to ten minutes): the lane caps it, so its size is firm;
 - unreclaimable host memory outside lanes: `max(0, MemTotal - MemAvailable -
-  max(0, arc.size - arc.c_min) - live_lane_usage)`. Without ZFS the ARC term is zero.
-  `live_lane_usage` is `anon + kernel` from the hierarchical `app-lanes.slice/memory.stat`,
-  read once for seats and finite members. Services, builds and other unlaned consumers count
-  regardless of which system or user cgroup contains them; reclaimable page cache and ARC above
-  `c_min` do not count. The same `fractal_runtime::host` accountant serves seats, bursts and
-  finite resource lanes, whose declared held footprints are also subtracted from room;
+  reclaimable_arc - live_lane_usage)`. Eligible ARC is the lesser of `max(0, size - c_min)` and
+  the sum of `mru_evictable_data`, `mru_evictable_metadata`, `mfu_evictable_data` and
+  `mfu_evictable_metadata`. Credit applies only while memory PSI `full avg60 < 1%`; otherwise,
+  or with missing/malformed ARC or PSI counters, it is zero. This conservative bound deliberately
+  differs from treating every byte above `c_min` as reclaimable: a measured shape had 27.6 GiB
+  above minimum but only 7.3 GiB evictable. `live_lane_usage` is `anon + kernel` from hierarchical
+  `app-lanes.slice/memory.stat`, read once for seats and finite members. Services and other
+  unlaned consumers count regardless of cgroup placement; reclaimable page cache is not charged.
+  The same accountant serves seats, bursts and finite lanes; declared held footprints are
+  separately subtracted from room;
 - the room kept for one burst (below, "Bursts"): what a burst raises the host's smallest live laned
   seat by (one that runs or was admitted to start, since only such a seat's run asks for a burst),
   the seat starting among them. A burst raises a seat to the burst lane (8 cores/24G, `build` in
@@ -419,7 +424,7 @@ Finite execution lanes keep that burst reserve only while a laned seat is live (
 to start). A finite member cannot request a seat burst and does not seed the reserve itself.
 With no holders or granted bursts and no host hold, a finite FIFO head is admitted exactly when it
 fits room minus measured outside memory. Impossible finite footprints refuse with code `impossible`;
-wait attribution distinguishes holders, holds, outside bytes, reserve and FIFO.
+wait attribution distinguishes holders, holds, outside bytes, PSI withholding ARC credit, reserve and FIFO.
 
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start

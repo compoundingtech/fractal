@@ -153,7 +153,7 @@ fn publish_snapshot(connection: &rusqlite::Connection, telemetry: &LaneTelemetry
         rusqlite::params![host,lane], |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let holds = super::super::host_holds::blocking_tx(connection, host, lane)?.len();
-    telemetry.snapshot(lane, occupancy, queued, holds as u64);
+    telemetry.snapshot(host, lane, occupancy, queued, holds as u64);
     Ok(())
 }
 
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(member.blocked_by, None, "older persisted memberships omit attribution");
         member.blocked_by = Some(super::super::BlockedBy::Hold);
         observations.transition(&member, None, 100, false);
-        member.blocked_by = Some(super::super::BlockedBy::Outside);
+        member.blocked_by = Some(super::super::BlockedBy::Psi);
         observations.transition(&member, Some("queued"), 110, false);
         assert_eq!(observations.active.len(), 1);
         assert!(observations.active[&member.request.id].admission.is_some());
