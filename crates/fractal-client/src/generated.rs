@@ -6410,7 +6410,7 @@ pub struct AttentionSeenParameters {
     pub attention_id: String,
 }
 
-/// `until` null brings the row back now; it is always sent.
+/// `until` null brings the row back now unless `indefinite` is true; it is always sent.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionSnoozeParameters {
     pub attention_id: String,

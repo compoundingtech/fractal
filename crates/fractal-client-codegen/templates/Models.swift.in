@@ -2055,7 +2055,7 @@ public struct AttentionSeenParameters: Codable, Sendable {
     public init(attentionID: String) { self.attentionID = attentionID }
     enum CodingKeys: String, CodingKey { case attentionID = "attention_id" }
 }
-/// `until` nil brings the row back now; it is always sent, as null.
+/// `until` nil brings the row back now unless `indefinite` is true; nil is always sent as null.
 public struct AttentionSnoozeParameters: Codable, Sendable {
     public let attentionID: String
     public let until: String?
