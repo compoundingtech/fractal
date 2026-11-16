@@ -60,7 +60,7 @@ pub(super) fn continuity_carryable_steps_tx(
             || effects::step_has_unresolved_effect_tx(connection, &previous.subject).map_err(internal)?
             || !person_work::step_answers_eligible_tx(
                 connection, previous, successor, confirmed_legacy.contains(&previous.subject),
-            )?
+            ).map_err(internal)?
         {
             compatible.remove(&previous.step);
         }
@@ -374,7 +374,7 @@ pub(super) fn resolved_supersession_workspace(
     let desired: Value = serde_json::from_str(&body).map_err(internal)?;
     let (mission, root) = match kind.as_str() {
         "schedule" => {
-            let spec = crate::graph::schedule_spec(&desired).ok_or_else(unavailable)?;
+            let spec = crate::graph::schedule_spec(&desired, "local").ok_or_else(unavailable)?;
             if spec.stopped { return Err(unavailable()); }
             let work = spec.work.ok_or_else(unavailable)?;
             (work.mission, work.workspace)
