@@ -211,8 +211,10 @@ export type AttentionSeenParametersEncoded = typeof AttentionSeenParameters.Enco
 
 export const AttentionSnoozeParameters = /*#__PURE__*/ (() => Schema.Struct({
   "attention_id": AttentionControlId,
-  /** When the row comes back: a future instant, or null to bring it back now. A snooze never moves a deadline. */
-  "until": Schema.OptionFromNullOr(Timestamp).annotate({ description: "When the row comes back: a future instant, or null to bring it back now. A snooze never moves a deadline." })
+  /** True with until null snoozes until the person brings it back. Requires attention-snooze-indefinite version 1. Absent or false preserves timed snooze and bring-back behavior. */
+  "indefinite": optionalKey(Schema.Boolean).annotate({ description: "True with until null snoozes until the person brings it back. Requires attention-snooze-indefinite version 1. Absent or false preserves timed snooze and bring-back behavior." }),
+  /** When the row comes back: a future instant, or null to bring it back now unless indefinite is true. A snooze never moves a deadline. */
+  "until": Schema.OptionFromNullOr(Timestamp).annotate({ description: "When the row comes back: a future instant, or null to bring it back now unless indefinite is true. A snooze never moves a deadline." })
 }).annotate({ identifier: "AttentionSnoozeParameters" }))()
 export type AttentionSnoozeParameters = typeof AttentionSnoozeParameters.Type
 export type AttentionSnoozeParametersEncoded = typeof AttentionSnoozeParameters.Encoded

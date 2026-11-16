@@ -1227,6 +1227,7 @@ export type AttentionSeenParameters = {
 
 export type AttentionSnoozeParameters = {
   attention_id: AttentionControlId;
+  indefinite?: boolean;
   until: (Timestamp | null);
 };
 

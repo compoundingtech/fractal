@@ -3058,7 +3058,7 @@ async fn perform(
             let (action, idem) = crate::action_pair();
             let back = until.is_none();
             client
-                .attention_snooze(action, idem, fence, fractal_client::AttentionSnoozeParameters { attention_id: id, until })
+                .attention_snooze(action, idem, fence, fractal_client::AttentionSnoozeParameters { attention_id: id, until, indefinite: None })
                 .await?;
             Ok((if back { "Back in Inbox" } else { "Put off on every device" }.into(), None))
         }

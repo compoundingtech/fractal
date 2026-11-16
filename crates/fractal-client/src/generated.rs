@@ -6415,6 +6415,8 @@ pub struct AttentionSeenParameters {
 pub struct AttentionSnoozeParameters {
     pub attention_id: String,
     pub until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indefinite: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

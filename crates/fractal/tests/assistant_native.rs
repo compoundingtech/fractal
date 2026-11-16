@@ -728,7 +728,7 @@ async fn assistant_grants_cannot_use_attention_controls() {
         ("attention.seen", ActionRequest::attention_seen("action/assistant-seen", "native-test-assistant-seen", h.fence().await,
             AttentionSeenParameters { attention_id: id.clone() }).unwrap()),
         ("attention.snooze", ActionRequest::attention_snooze("action/assistant-snooze", "native-test-assistant-snooze", h.fence().await,
-            AttentionSnoozeParameters { attention_id: id.clone(), until: None }).unwrap()),
+            AttentionSnoozeParameters { attention_id: id.clone(), until: None, indefinite: None }).unwrap()),
         ("attention.dismiss", ActionRequest::attention_dismiss("action/assistant-dismiss", "native-test-assistant-dismiss", h.fence().await,
             AttentionDismissParameters { attention_id: id.clone(), text: None }).unwrap()),
     ];
