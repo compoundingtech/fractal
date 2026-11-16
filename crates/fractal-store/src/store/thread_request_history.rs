@@ -1,0 +1,323 @@
+//! Read-only related requests. An arrow explains history, never a dependency or an answer.
+//!
+//! Only runtime person asks and authored human-step episodes have retained payload readers.
+//! An authorized current origin of another source kind is explicitly marked
+//! `unsupported-source`; this does not claim that the source has no history. If current
+//! source authorization cannot be established, neither its identity nor that marker is
+//! returned. Existing transcript reads and all mutation admission remain unchanged.
+use super::*;
+use serde::{Deserialize, Serialize};
+
+const PAGE_LIMIT: usize = 50;
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SourceEpisode {
+    pub source_id: String,
+    pub episode: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "availability", rename_all = "kebab-case")]
+pub enum HistoricalPayload {
+    Available {
+        title: Option<String>,
+        text: String,
+        request: Option<Value>,
+        references: Vec<HistoricalReference>,
+        provenance: RequestProvenance,
+    },
+    Unavailable { reason: PayloadUnavailable },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PayloadUnavailable {
+    RetainedDefinitionUnavailable,
+    RetainedStepUnavailable,
+    OpeningUnavailable,
+    HistoricalInterpolationUnavailable,
+    BoundaryUnavailable,
+    PayloadUnavailable,
+    ReadBoundExceeded,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RequestProvenance {
+    RuntimeAsk { asking_claim_id: String },
+    AuthoredEpisode { mission_revision: String, opening_claim_id: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HistoricalReference {
+    pub target_id: String,
+    pub revision: Option<String>,
+    pub semantics: ReferenceSemantics,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReferenceSemantics { RetainedReference, LiveReference }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "availability", rename_all = "kebab-case")]
+pub enum EpisodeState {
+    Available { status: String, answers: Vec<Value> },
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestHistoryItem {
+    pub key: SourceEpisode,
+    pub payload: HistoricalPayload,
+    pub state: EpisodeState,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestHistoryRelation {
+    pub predecessor: SourceEpisode,
+    pub request: SourceEpisode,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceEpisodeGroup {
+    pub source_id: String,
+    pub episodes: Vec<SourceEpisode>,
+}
+
+/// Source support is disclosed only after current exact-source authorization. Unsupported
+/// origins do not produce invented person-step rows; clients may render “no request history
+/// for this source”. This marker grants no read or mutation authority for that source.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistorySourceSupport { PersonStep, UnsupportedSource }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestHistoryPage {
+    pub items: Vec<RequestHistoryItem>,
+    pub relations: Vec<RequestHistoryRelation>,
+    pub source_episodes: Vec<SourceEpisodeGroup>,
+    pub boundary_items: Vec<RequestHistoryItem>,
+    pub source_support: Option<HistorySourceSupport>,
+    pub next_cursor: Option<String>,
+    /// Completeness of the authorized selection and its retained evidence. Hidden endpoints
+    /// never contribute a count, cursor anchor, or an incompleteness indication.
+    pub complete: bool,
+}
+
+
+/// Compose one authorized bounded source reader with one bounded same-source episode reader.
+/// The missions crate supplies authored episode reconstruction without reversing crate edges.
+/// Callers authenticate/revalidate their current grant/session before this store projection.
+/// `read_source` must return only the requested exact key and current person's permitted row.
+/// `episode_keys` must authorize its seed before enumeration and bound retained lifecycle work.
+#[allow(clippy::too_many_arguments)]
+pub fn read_with(
+    store: &Store,
+    person: &str,
+    thread: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    mut read_source: impl FnMut(&Connection, &str, &SourceEpisode, u64)
+        -> Result<Option<RequestHistoryItem>, FractalError>,
+    mut episode_keys: impl FnMut(&Connection, &str, &SourceEpisode, u64)
+        -> Result<(Vec<SourceEpisode>, bool), FractalError>,
+) -> Result<RequestHistoryPage, FractalError> {
+    store.graph.read_snapshot(|cut| {
+        let connection = store.readers.get();
+        Ok(read_conn(store, &connection, person, thread, cursor, limit, cut,
+            &mut read_source, &mut episode_keys))
+    }).map_err(internal)?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_conn(
+    store: &Store,
+    conn: &Connection,
+    person: &str,
+    thread: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    cut: u64,
+    read_source: &mut impl FnMut(&Connection, &str, &SourceEpisode, u64)
+        -> Result<Option<RequestHistoryItem>, FractalError>,
+    episode_keys: &mut impl FnMut(&Connection, &str, &SourceEpisode, u64)
+        -> Result<(Vec<SourceEpisode>, bool), FractalError>,
+) -> Result<RequestHistoryPage, FractalError> {
+    let created = owned_creation(conn, thread, person, false)?.ok_or_else(unavailable)?;
+    let person = identities::resolve_reference_conn(conn, person)?;
+    let mut page = RequestHistoryPage {
+        items: Vec::new(), relations: Vec::new(), source_episodes: Vec::new(),
+        boundary_items: Vec::new(), source_support: None, next_cursor: None, complete: true,
+    };
+    let seed = origin_pair(&created).map(|(source_id, episode)| SourceEpisode {
+        source_id: source_id.into(), episode: episode.into(),
+    });
+    if let Some(seed) = &seed {
+        let runtime: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.person-asked')",
+            [&seed.source_id], |row| row.get(0),
+        ).map_err(internal)?;
+        if seed.source_id.starts_with("step-run/")
+            && (runtime || seed.episode.starts_with("run-generation/"))
+        {
+            if !person_work::authorize_retained_episode(conn, &person, seed)? {
+                return Err(unavailable());
+            }
+            page.source_support = Some(HistorySourceSupport::PersonStep);
+        } else {
+            // Non-person-step policy remains source-specific. Only the existing current
+            // resolver can establish permission; historical thread membership is not a grant.
+            inbox_source::resolve(store, conn, &person, &InboxOrigin {
+                source_id: seed.source_id.clone(), episode: seed.episode.clone(),
+            }, now_ms())?;
+            page.source_support = Some(HistorySourceSupport::UnsupportedSource);
+        }
+    }
+    let limit = limit.clamp(1, PAGE_LIMIT);
+    let scope = canonical_hash(&("thread.request-history.v1", &person, thread)).map_err(internal)?;
+    let after = scoped_cursor(cursor, &scope)?.map(|marker| {
+        if marker.len() > 2048 { return Err(invalid_context_cursor()); }
+        let mut parts = marker.splitn(3, ':');
+        let through = parts.next().and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(invalid_context_cursor)?;
+        if through != cut {
+            return Err(FractalError::new("stale-thread-cursor",
+                "the request history selection changed; refresh history"));
+        }
+        let selected_limit = parts.next().and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(invalid_context_cursor)?;
+        if selected_limit != limit { return Err(invalid_context_cursor()); }
+        let key: SourceEpisode = parts.next().and_then(|value| serde_json::from_str(value).ok())
+            .ok_or_else(invalid_context_cursor)?;
+        if !person_work::authorize_retained_episode(conn, &person, &key)? {
+            return Err(invalid_context_cursor());
+        }
+        Ok(key)
+    }).transpose()?;
+    // SQL source qualification precedes the visible keyset limit. A denied source cannot
+    // consume lookahead or change pagination metadata. Runtime exact IDs are canonical first
+    // asks, matching person_work::request; authored identity is generation-qualified.
+    let sql = canonical_sql(
+        "WITH members(source,episode) AS (
+           SELECT coalesce(json_extract(body,'$.fields.origin_source'),json_extract(body,'$.fields.origin_ask')),
+                  coalesce(json_extract(body,'$.fields.origin_episode'),json_extract(body,'$.fields.origin_ask_episode'))
+           FROM claims WHERE id=?1
+           UNION
+           SELECT json_extract(c.body,'$.fields.ask'),json_extract(c.body,'$.fields.ask_episode')
+           FROM claims c INDEXED BY claims_thread_history_link_index
+           JOIN operations o ON o.canonical_claim_id=c.id AND o.state='active'
+           WHERE c.kind='thread.ask-linked' AND json_extract(c.body,'$.fields.thread_id')=?2
+             AND c.store_index<=?3
+             AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=c.id)
+         )
+         SELECT DISTINCT m.source,m.episode FROM members m JOIN step_runs s ON s.subject=m.source
+         WHERE s.assignee=?4 AND m.source LIKE 'step-run/%'
+           AND ((EXISTS(SELECT 1 FROM claims asked WHERE asked.subject=m.source AND asked.kind='work.person-asked')
+             AND m.episode=(SELECT asked.id FROM claims asked WHERE asked.subject=m.source
+               AND asked.kind='work.person-asked' ORDER BY CANONICAL_ASC(asked) LIMIT 1))
+           OR (NOT EXISTS(SELECT 1 FROM claims asked WHERE asked.subject=m.source AND asked.kind='work.person-asked')
+             AND m.episode LIKE 'run-generation/'||s.generation_id||':%'))
+           AND (?5 IS NULL OR (m.source,m.episode)>(?5,?6))
+         ORDER BY m.source,m.episode LIMIT ?7"
+    );
+    let mut statement = conn.prepare_cached(&sql).map_err(internal)?;
+    let after = after.as_ref();
+    let mut members = statement.query_map(params![created.id, thread, cut, person,
+        after.map(|key| key.source_id.as_str()), after.map(|key| key.episode.as_str()), limit + 1],
+        |row| Ok(SourceEpisode { source_id: row.get(0)?, episode: row.get(1)? }))
+        .map_err(internal)?.collect::<rusqlite::Result<BTreeSet<_>>>().map_err(internal)?;
+
+    // Only a permitted seed can disclose the same source's other exact episodes. The source
+    // reader returns a bounded window, not a second event store or cross-thread traversal.
+    let mut groups_complete = true;
+    if let Some(seed) = &seed
+        && page.source_support.as_ref().is_some_and(|kind| matches!(kind, HistorySourceSupport::PersonStep))
+    {
+        let (keys, complete) = episode_keys(conn, &person, seed, cut)?;
+        groups_complete = complete;
+        for key in keys {
+            if key.source_id == seed.source_id
+                && after.is_none_or(|after| &key > after)
+                && person_work::authorize_retained_episode(conn, &person, &key)?
+            {
+                members.insert(key);
+            }
+        }
+    }
+    // Revalidate each selected exact key before any content, including lookahead. The reader
+    // must not return a different episode as a substitute.
+    for key in members {
+        if !person_work::authorize_retained_episode(conn, &person, &key)? { continue; }
+        if let Some(item) = read_source(conn, &person, &key, cut)?
+            && item.key == key
+        {
+            page.items.push(item);
+            if page.items.len() > limit { break; }
+        }
+    }
+    let has_more = page.items.len() > limit;
+    page.items.truncate(limit);
+    if has_more && let Some(last) = page.items.last() {
+        page.next_cursor = Some(format!("{scope}:{cut}:{limit}:{}",
+            serde_json::to_string(&last.key).map_err(internal)?));
+    }
+
+    let primary = page.items.iter().map(|item| item.key.clone()).collect::<BTreeSet<_>>();
+    for child in &primary {
+        let subject = thread_links::ask_link_subject(&child.source_id, &child.episode)?;
+        let selected = match latest_applied_claim(conn, &subject, "thread.ask-linked") {
+            Ok(selected) => selected,
+            Err(error) if error.code == "idempotency-conflict" => continue,
+            Err(error) => return Err(error),
+        };
+        let Some(link) = selected.filter(|link| link.store_index <= cut) else { continue; };
+        let fields = &link.body["fields"];
+        if fields["thread_id"] != thread || fields["ask"] != child.source_id
+            || fields["ask_episode"] != child.episode { continue; }
+        let (Some(source), Some(episode), Some(reason)) = (
+            fields["decision_predecessor"].as_str(), fields["decision_predecessor_episode"].as_str(),
+            fields["decision_reason"].as_str().filter(|reason| !reason.is_empty() && reason.len() <= 1024),
+        ) else { continue; };
+        let parent = SourceEpisode { source_id: source.into(), episode: episode.into() };
+        if !is_member(conn, &created, thread, &parent, cut)?
+            || !person_work::authorize_retained_episode(conn, &person, &parent)? { continue; }
+        if !primary.contains(&parent) && !page.boundary_items.iter().any(|item| item.key == parent) {
+            let Some(row) = read_source(conn, &person, &parent, cut)?.filter(|row| row.key == parent) else { continue; };
+            page.boundary_items.push(row);
+        }
+        page.relations.push(RequestHistoryRelation {
+            predecessor: parent, request: child.clone(), reason: reason.into(),
+        });
+    }
+    let mut groups = BTreeMap::<String, BTreeSet<SourceEpisode>>::new();
+    for item in page.items.iter().chain(&page.boundary_items) {
+        groups.entry(item.key.source_id.clone()).or_default().insert(item.key.clone());
+    }
+    page.source_episodes = groups.into_iter().filter(|(_, episodes)| episodes.len() > 1)
+        .map(|(source_id, episodes)| SourceEpisodeGroup { source_id, episodes: episodes.into_iter().collect() })
+        .collect();
+    page.complete = groups_complete && page.items.iter().chain(&page.boundary_items).all(|item| item.complete);
+    if serde_json::to_vec(&page).map_err(internal)?.len() > MAX_RESPONSE_BYTES {
+        return Err(FractalError::new("thread-history-budget-exceeded", "request history exceeds its response bound"));
+    }
+    Ok(page)
+}
+
+fn is_member(conn: &Connection, created: &ClaimRecord, thread: &str, key: &SourceEpisode, cut: u64)
+    -> Result<bool, FractalError>
+{
+    if origin_pair(created) == Some((key.source_id.as_str(), key.episode.as_str())) { return Ok(true); }
+    let subject = thread_links::ask_link_subject(&key.source_id, &key.episode)?;
+    match latest_applied_claim(conn, &subject, "thread.ask-linked") {
+        Ok(link) => Ok(link.is_some_and(|link| link.store_index <= cut
+            && link.body["fields"]["thread_id"] == thread
+            && link.body["fields"]["ask"] == key.source_id
+            && link.body["fields"]["ask_episode"] == key.episode)),
+        Err(error) if error.code == "idempotency-conflict" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
