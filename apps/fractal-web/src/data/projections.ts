@@ -7,6 +7,9 @@
  * them differently. Native actionable asks are the needs-you authority: a subject needs an
  * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
+import { optionalSource, type MarkdownInline } from '@fractal/client/markdown'
+import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
+
 import * as Fractal from '@fractal/client/schema/read'
 import { classifySubagentDriver } from '@fractal/client'
 import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/read'
@@ -18,6 +21,9 @@ import type { MissionView, ProposedMissionFields } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { isWaitingForAnswer } from './attention.ts'
 import type { Agent, Fleet, Host, Known } from './source.ts'
+
+/** A goal shows on one-line rows and hover facts: its words, without Markdown markers. */
+const plainOf = (goal: MarkdownInline | undefined): string | undefined => { const source = optionalSource(goal); return source === undefined ? undefined : markdownPlainText(source) }
 
 const isAgentId = Schema.is(Fractal.AgentId)
 
@@ -96,7 +102,7 @@ const lifecycleOf = (row: DecodedAgent): Agent['lifecycle'] => {
 
 const workFromLabel = (work: NonNullable<DecodedAgent['current_work']>[number]): NonNullable<Agent['currentWork']>[number] => ({
   id: work.id, missionId: work.mission_id, runId: work.mission_run_id,
-  path: work.path, title: Option.getOrUndefined(work.title), goal: Option.getOrUndefined(work.goal), state: leafText(work.state),
+  path: work.path, title: Option.getOrUndefined(work.title), goal: plainOf(Option.getOrUndefined(work.goal)), state: leafText(work.state),
 })
 
 const agentFromRow = (row: DecodedAgent): Agent => {
@@ -104,7 +110,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
   const harness = harnesses.find((candidate) => candidate === driver)
   const mission = row.current_work?.[0]?.mission_id
   const work = row.current_work?.[0]
-  const description = work === undefined ? undefined : Option.getOrUndefined(work.goal)
+  const description = work === undefined ? undefined : plainOf(Option.getOrUndefined(work.goal))
   const suspension = Option.getOrUndefined(row.suspension)
   const suspendedAt =
     row.state === 'suspended' && suspension !== undefined

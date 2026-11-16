@@ -1,4 +1,5 @@
 /** Sidebar tabs over the fleet-mid-refactor world: Agents, Alerts, Missions and Fleet in one row over a fixed-width sidebar, at 440 and 1440 in both themes, beside the records each marker counts. Leading strongest marker, counts dropping before any label truncates, keyboard selection and a bounded panel. */
+import { markdownSource } from '@fractal/client/markdown'
 import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
@@ -62,7 +63,7 @@ function useSidebar(): Sidebar {
         freshness: 'live', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, children: [], needsMe: marker !== undefined, ...(marker === undefined ? {} : { attention: marker }),
       }
     })
-    const alerts = cards.map((card): Item => ({ id: card.id, glyph: cardAttention(card) === 'question' ? '?' : '◆', title: card.title, attention: cardAttention(card), facts: card.detail }))
+    const alerts = cards.map((card): Item => ({ id: card.id, glyph: cardAttention(card) === 'question' ? '?' : '◆', title: card.title, attention: cardAttention(card), facts: markdownSource(card.detail) }))
     const missions = (details.loading ? [] : details.state.missions).map((mission): Item => {
       const marker = strongest(cards.filter(card => card.mission_id === mission.id))
       return { id: mission.id, glyph: mission.state === 'running' ? '●' : '○', title: mission.title, ...(marker === undefined ? {} : { attention: marker }), facts: mission.state }

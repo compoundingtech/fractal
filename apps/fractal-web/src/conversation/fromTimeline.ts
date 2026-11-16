@@ -1,6 +1,7 @@
 // Project decoded Fractal conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
+import { markdownBlock, optionalSource } from '@fractal/client/markdown'
 import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema/read'
 import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/read'
 import { DateTime, Option, Schema } from 'effect'
@@ -139,7 +140,7 @@ const unrecognizedOmpItem = (
   entry: Extract<Entry, { type: 'content' }>,
 ): ConversationItem | undefined => {
   if (entry.role !== 'system' || entry.body.media_type !== 'text/plain') return undefined
-  const text = entry.body.text ?? ''
+  const text = optionalSource(entry.body.text) ?? ''
   const marker =
     /^\[unrecognized omp (entry|content block|message role)(?: `([^`]+)`| '([^']+)'| without a type)\]\n/.exec(text)
   if (marker === null) return undefined
@@ -160,11 +161,11 @@ const unrecognizedOmpItem = (
  */
 const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): ConversationItem | undefined => {
   const prefix = '[reasoning]\n'
-  if (entry.role !== 'assistant' || !(entry.body.text ?? '').startsWith(prefix)) return undefined
+  if (entry.role !== 'assistant' || !(optionalSource(entry.body.text) ?? '').startsWith(prefix)) return undefined
   return {
     _tag: 'Reasoning',
     id: entry.id,
-    text: (entry.body.text ?? '').slice(prefix.length),
+    text: (optionalSource(entry.body.text) ?? '').slice(prefix.length),
     streaming: !entry.final,
     at: entryTimestamp(entry),
   }
@@ -226,12 +227,12 @@ const baseItemOf = ({
       const reasoning = parseNativeReasoning(entry)
       if (reasoning !== undefined) return reasoning
       const notice = entry.body.media_type === 'text/plain' && entry.role === 'system' && entry.final
-        ? q101OmpEnvelopeStopgap({ id: entry.id, role: entry.role, text: entry.body.text ?? '', at: entryTimestamp(entry) })
+        ? q101OmpEnvelopeStopgap({ id: entry.id, role: entry.role, text: optionalSource(entry.body.text) ?? '', at: entryTimestamp(entry) })
         : undefined
       if (notice !== undefined) return notice
       const event = contentEvent({
         id: entry.id,
-        text: entry.body.text ?? '',
+        text: optionalSource(entry.body.text) ?? '',
         mediaType: entry.body.media_type,
         at: entryTimestamp(entry),
       })
@@ -240,7 +241,7 @@ const baseItemOf = ({
         _tag: 'Text',
         id: entry.id,
         role: entry.role === 'tool' ? 'system' : entry.role,
-        text: entry.body.text ?? '',
+        text: optionalSource(entry.body.text) ?? '',
         attachments:
           entry.body.attachment_id !== undefined
             ? [{ id: entry.body.attachment_id, mediaType: entry.body.media_type }]
@@ -415,7 +416,7 @@ const systemRecordParts = <E extends Exclude<Entry, { type: 'truncation' }>>(ent
   })
   if (records.length === 0) return undefined
   const kept = blocks.filter(block => !records.some(record => record.block === block))
-  const text = entry.type === 'content' ? entry.body.text ?? '' : ''
+  const text = entry.type === 'content' ? optionalSource(entry.body.text) ?? '' : ''
   const sharedBodyIsRecord = records.some(({ block }) => bodyRepeatsRecord(block, text))
   return {
     records,
@@ -475,7 +476,7 @@ const classifyBlocks = (entry: Exclude<Entry, { type: 'truncation' }>): BlockCla
       : block.kind
     const marker = (reason: UnsupportedReason) => markers.push(unsupported(`${entry.id}#${block.id ?? index}`, harness, recordKind, reason, block, at))
     if (role === undefined || role === 'unsupported') { marker(role === undefined ? 'unknown-block-kind' : 'unrecognized-record'); continue }
-    const text = entry.type === 'content' ? entry.body.text ?? '' : ''
+    const text = entry.type === 'content' ? optionalSource(entry.body.text) ?? '' : ''
     const ctx = { id: entry.id, at, text, harness }
     const meaning = block.view !== undefined && isKnownView(block.view) ? viewMeaning(block.view, ctx) : undefined
     // A dropped view only hides its own internal record; visible content keeps its prose (visibility decides, not the label).
@@ -901,7 +902,7 @@ export class LiveTimeline {
       const header = key !== undefined ? mailboxHeaders.get(key)
         : previous?.type === 'message' && !isTurnHeader(previous) && mailboxPairKeys(previous).length === 0 ? previous : undefined
       if (header === undefined || bodies.has(header.body.message_id)) return
-      bodies.set(header.body.message_id, entry.body.text ?? '')
+      bodies.set(header.body.message_id, optionalSource(entry.body.text) ?? '')
       headerOf.set(entry.id, header)
       paired.add(header.id)
     })
@@ -978,10 +979,10 @@ export class LiveTimeline {
         !MAILBOX_CONTENT_ID.test(entry.id) && !pairs.headerOf.has(entry.id) &&
         (entry.role === 'user' || entry.role === 'system')
       ) {
-        const text = withoutShownDeliveries(entry.body.text ?? '', shownBodies)
-        if (text !== (entry.body.text ?? '')) {
+        const text = withoutShownDeliveries(optionalSource(entry.body.text) ?? '', shownBodies)
+        if (text !== (optionalSource(entry.body.text) ?? '')) {
           if (text.length > 0) {
-            const rest = { ...entry, body: { ...entry.body, text } }
+            const rest = { ...entry, body: { ...entry.body, text: markdownBlock(text) } }
             const classified = blockItems(rest)
             items.push(classified.native && !classified.fallback && classified.primary !== undefined ? classified.primary : itemOf({ entry: rest, sessionActive: true }))
           }
