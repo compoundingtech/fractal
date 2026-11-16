@@ -1178,7 +1178,18 @@ mission "native-exit-evidence" state="ready" {{
 
     #[test]
     fn one_shot_exit_evidence_survives_stop_and_explains_missing_mission_agent() {
-        let store = Arc::new(Store::open_memory("node").unwrap());
+        one_shot_retirement_explains_missing_mission_agent(true);
+    }
+
+    #[test]
+    fn one_shot_vanished_without_exit_evidence_explains_missing_mission_agent() {
+        one_shot_retirement_explains_missing_mission_agent(false);
+    }
+
+    fn one_shot_retirement_explains_missing_mission_agent(receipt: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let expected = if receipt { "code 23" } else { "vanished-without-exit-evidence" };
         apply_source(&store, r#"version 2
 agent "worker" { workspace "/tmp"; command "printf 'worker failed\n' >&2; exit 23"; one-shot }
 mission "exit-evidence" state="ready" {
@@ -1190,13 +1201,15 @@ mission "exit-evidence" state="ready" {
             .find(|subject| subject.subject == "agent/node.worker").unwrap();
         let member = subject.member.as_ref().unwrap();
         let runtime = Arc::new(FakeRuntime::default());
-        runtime.exit_evidence.lock().unwrap().insert(
-            (member.runtime_id.clone(), "worker-one".into()),
-            fractal_runtime::PtyExitEvidence {
-                incarnation: "worker-one".into(), exit_code: Some(23), signal: None,
-                output_tail: Some("worker failed".into()),
-            },
-        );
+        if receipt {
+            runtime.exit_evidence.lock().unwrap().insert(
+                (member.runtime_id.clone(), "worker-one".into()),
+                fractal_runtime::PtyExitEvidence {
+                    incarnation: "worker-one".into(), exit_code: Some(23), signal: None,
+                    output_tail: Some("worker failed".into()),
+                },
+            );
+        }
         let reconciler = Reconciler::new(
             store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
         );
@@ -1214,11 +1227,23 @@ mission "exit-evidence" state="ready" {
         ).unwrap());
         let actual = store.latest_actual_value(&subject.subject).unwrap().unwrap();
         assert_eq!(actual_field(&actual, "status").and_then(Value::as_str), Some("stopped"));
-        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), Some(23));
-        assert_eq!(actual_field(&actual, "exit_evidence").unwrap()["outputTail"], "worker failed");
+        assert_eq!(actual_field(&actual, "exit_code").and_then(Value::as_i64), receipt.then_some(23));
+        let evidence = actual_field(&actual, "exit_evidence").unwrap();
+        assert_eq!(evidence["incarnation"], "worker-one");
+        assert_eq!(evidence["lastObservedState"], "vanished");
+        assert!(evidence["observedAtUnixMs"].is_u64());
+        if receipt {
+            assert_eq!(evidence["outputTail"], "worker failed");
+        } else {
+            assert_eq!(evidence["exitStatus"], "unknown");
+            assert_eq!(evidence["reason"], expected);
+        }
+        let stop = store.desired_subjects().unwrap().into_iter()
+            .find(|item| item.subject == subject.subject).unwrap();
+        assert!(stop.desired["reason"].as_str().unwrap().contains(expected));
         let decision = store.latest_observation(&subject.subject, "runtime.reconcile-decision").unwrap().unwrap();
         let reason = decision.body["fields"]["reason"].as_str().unwrap();
-        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        assert!(reason.contains(expected), "{reason}");
         let run = store.create_mission_run(&crate::model::MissionRunRequest {
             mission: "exit-evidence".into(), revision: None, workspace: "/tmp".into(),
             requester: Some("person/test".into()), mode: Some("run".into()),
@@ -1231,13 +1256,13 @@ mission "exit-evidence" state="ready" {
         let step = &run.steps[0];
         assert_eq!(step.status, "blocked");
         let reason = step.blocked_reason.as_deref().unwrap();
-        assert!(reason.contains("code 23") && reason.contains("worker failed"), "{reason}");
+        assert!(reason.contains(expected), "{reason}");
         for kind in ["operational.failure", "mission-run.state"] {
             let claim = store.latest_claim(&run.subject, Some(kind)).unwrap()
                 .unwrap_or_else(|| panic!("missing {kind}: run={run:?}; faults={:?}",
                     store.observations_for(&run.subject, "reconcile.fault").unwrap()));
             let reason = claim.body["fields"]["reason"].as_str().unwrap();
-            assert!(reason.contains("code 23") && reason.contains("worker failed"), "{kind}: {reason}");
+            assert!(reason.contains(expected), "{kind}: {reason}");
         }
         let replica = Store::open_memory("replica").unwrap();
         replica.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
@@ -1308,7 +1333,7 @@ mission "retained-reason" state="ready" {
         let reconciler = Reconciler::new(store, runtime.clone(), "node".into(), Arc::new(Notify::new()));
         let mut fields = BTreeMap::from([("status".into(), Value::from("exited"))]);
         reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
-        assert!(fields.get("exit_evidence").is_none_or(Value::is_null));
+        assert_eq!(fields["exit_evidence"]["reason"], "exited-without-exit-evidence");
         runtime.exit_evidence.lock().unwrap().get_mut(&("worker".into(), "one".into())).unwrap().incarnation = "one".into();
         reconciler.retain_exit_evidence("agent/node.worker", "worker", true, Some("one"), &mut fields).unwrap();
         let reason = runtime_exit_reason(&serde_json::to_value(fields).unwrap()).unwrap();
