@@ -148,6 +148,9 @@ if (driver === "omp") {
     fs.rmSync(frames, { force: true });
     fs.rmSync(outgoing, { force: true });
     delete globalThis.__stOmpChannel;
+    for (const [key, value] of Object.entries({ BIN: recorder, IDENTITY: "eval.worker", RUNTIME_ID: "eval.worker", SESSION: "wrapper", SEQ: "1" })) {
+      process.env[prefix + key] = value;
+    }
     process.env.ST_SMOKE_READY_MAIL = "1";
     process.env.ST_SMOKE_PROTOCOL = lifecycle === "unsupported" ? "999" : "2";
     const activeEvents = new Map();
