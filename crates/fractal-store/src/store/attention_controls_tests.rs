@@ -155,11 +155,11 @@ fn fresh_projection_namespace_replays_legacy_claims_without_losing_seen_or_snooz
     record(&store, ROW, Control::Snooze(Some(9_000)), "old-timed");
     let expected = of(&store, ROW);
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute_batch("CREATE TABLE person_attention_controls(person TEXT, attention_id TEXT);
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h730df803c0cb owner=fractal_store::store::attention_controls_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE person_attention_controls(person TEXT, attention_id TEXT);
             INSERT INTO person_attention_controls VALUES('person/ada','legacy');
             DROP TABLE person_attention_controls_v2;
             DELETE FROM meta WHERE key='person_attention_controls_v2_ready';")?;
-        tx.execute_batch(SCHEMA)?;
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hb0a177e5e19f owner=fractal_store::store::attention_controls_tests TODO=trace-statement-and-value-representation */ SCHEMA)?;
         open(tx)?;
         let old_rows: i64 = tx.query_row("SELECT COUNT(*) FROM person_attention_controls", [], |row| row.get(0))?;
         assert_eq!(old_rows, 1, "the old projection is retained, never treated as authority");
@@ -173,7 +173,7 @@ fn new_writes_invalidate_the_legacy_ready_marker_for_downgrade_replay() {
     let store = Store::open_memory("controls-downgrade").unwrap();
     record(&store, ROW, Control::Snooze(Some(5_000)), "timed-before-upgrade");
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute_batch("CREATE TABLE person_attention_controls(person TEXT, attention_id TEXT, snoozed_until_ms INTEGER);
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h3e2ac7fecf56 owner=fractal_store::store::attention_controls_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE person_attention_controls(person TEXT, attention_id TEXT, snoozed_until_ms INTEGER);
             INSERT INTO person_attention_controls VALUES('person/ada','legacy',5000);
             INSERT INTO meta(key,value) VALUES('person_attention_controls_v1','1');")?;
         Ok(())
@@ -196,8 +196,8 @@ fn a_new_open_replays_legacy_writes_after_a_downgrade() {
     record(&store, ROW, Control::Snooze(Some(9_000)), "later-legacy-writer");
     store.connection.batched(|tx| -> Result<()> {
         // An old runtime writes the authoritative claim but knows only its old projection.
-        tx.execute("UPDATE person_attention_controls_v2 SET snoozed_until_ms=5000", [])?;
-        tx.execute("INSERT INTO meta(key,value) VALUES('person_attention_controls_v1','1')", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h8b4b1ff9d203 owner=fractal_store::store::attention_controls_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE person_attention_controls_v2 SET snoozed_until_ms=5000", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h74b667aefaca owner=fractal_store::store::attention_controls_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('person_attention_controls_v1','1')", [])?;
         open(tx)?;
         let legacy_ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='person_attention_controls_v1')", [], |row| row.get(0))?;
         assert!(!legacy_ready);
