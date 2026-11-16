@@ -6,18 +6,30 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
-    func testSloSeriesFixturePreservesZeroAndClippedBuckets() throws {
+    func testSeriesFixturePreservesZeroAndClippedBuckets() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
-        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/slo-series.json"))
-        let series = try JSONDecoder().decode(Envelope<SloSeries>.self, from: data).value
-        XCTAssertEqual(series.id, "objective/example")
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/series.json"))
+        let series = try JSONDecoder().decode(Envelope<Series>.self, from: data).value
+        XCTAssertNil(series.groupBy)
         XCTAssertEqual(series.from, 1767225600000)
         XCTAssertEqual(series.to, 1767225725000)
         XCTAssertEqual(series.bucketSeconds, 60)
         XCTAssertEqual(series.buckets.map(\.count), [2, 0, 1])
         XCTAssertEqual(series.buckets.last?.start, 1767225720000)
         XCTAssertEqual(series.buckets.last?.end, series.to)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(series)) as? NSDictionary, wire["value"] as? NSDictionary)
+    }
+
+    func testSeriesGroupedFixturePreservesJSONValues() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/series-grouped.json"))
+        let series = try JSONDecoder().decode(Envelope<Series>.self, from: data).value
+        XCTAssertEqual(series.groupBy, "category")
+        XCTAssertEqual(series.buckets.first?.groups?.count, 6)
+        XCTAssertEqual(series.buckets[1].groups?.count, 0)
         let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(series)) as? NSDictionary, wire["value"] as? NSDictionary)
     }

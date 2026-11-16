@@ -815,7 +815,7 @@ fn series_empty_edges_and_clipped_final_bucket() {
         claim(&store, name, MERGED, json!({"merged_at":at}));
     }
     let result = series(&store, THROUGHPUT, 1_000, 3_500, 1).unwrap();
-    assert_eq!(result, json!({"id":THROUGHPUT,"from":1000,"to":3500,"bucket_seconds":1,"buckets":[
+    assert_eq!(result, json!({"from":1000,"to":3500,"bucket_seconds":1,"buckets":[
         {"start":1000,"end":2000,"count":1},
         {"start":2000,"end":3000,"count":1},
         {"start":3000,"end":3500,"count":1}
@@ -826,7 +826,7 @@ fn series_empty_edges_and_clipped_final_bucket() {
 fn series_validates_range_caps_and_exact_objective_names() {
     let store = store_with(&count_declaration("", "1h", "min=1", ""));
     for (from, to, width) in [(0, 1, 0), (1, 1, 1), (2, 1, 1), (0, 31 * 86_400_000 + 1, 86400), (0, 1_000_001, 1)] {
-        assert_eq!(series(&store, THROUGHPUT, from, to, width).unwrap_err().code, "invalid-slo-series");
+        assert_eq!(series(&store, THROUGHPUT, from, to, width).unwrap_err().code, "invalid-series");
     }
     assert_eq!(series(&store, THROUGHPUT, 0, 1_000_000, 1).unwrap()["buckets"].as_array().unwrap().len(), 1000);
     assert!(series(&store, THROUGHPUT, 0, 31 * 86_400_000, 86400).is_ok());
@@ -922,3 +922,10 @@ fn series_interval_without_at_uses_original_acceptance_time() {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
     assert_eq!(series(&store, "ops/change-rollout", now - MINUTE, now + MINUTE, 120).unwrap()["buckets"][0]["count"], 1);
 }
+
+fn series(store: &Store, objective: &str, from: u64, to: u64, bucket_seconds: u64) -> Result<Value, FractalError> {
+    claim_series(store, Some(objective), &[], None, None, from, to, bucket_seconds)
+}
+
+#[path = "claim_series_tests.rs"]
+mod claim_series_tests;

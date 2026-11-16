@@ -123,10 +123,66 @@ struct Point<'a> {
     member: Option<&'a str>,
     class: Class,
 }
-/// Counts, not latency percentiles: events for a count and closed samples by completion time
-/// for an interval. Selection is the same fold as the objective rows, over indexed candidates.
-pub fn series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds: u64) -> Result<Value, FractalError> {
-    let invalid = || FractalError::new("invalid-slo-series", "require from < to, at most 31 days, positive bucket_seconds, and at most 1000 buckets");
+/// Bucket explicitly selected claims, or the events/closed samples of one declared objective.
+#[allow(clippy::too_many_arguments)]
+pub fn claim_series(
+    store: &Store,
+    objective: Option<&str>,
+    kinds: &[String],
+    subject_prefix: Option<&str>,
+    group_by: Option<&str>,
+    from: u64,
+    to: u64,
+    bucket_seconds: u64,
+) -> Result<Value, FractalError> {
+    let (width, bucket_count) = series_bounds(from, to, bucket_seconds)?;
+    if let Some(id) = objective {
+        if !kinds.is_empty() || subject_prefix.is_some() || group_by.is_some() {
+            return Err(FractalError::new("invalid-series", "objective cannot be combined with kind, subject_prefix or group_by"));
+        }
+        return objective_series(store, id, from, to, bucket_seconds, width, bucket_count);
+    }
+    if kinds.is_empty() || kinds.iter().any(String::is_empty) || group_by == Some("") {
+        return Err(FractalError::new("invalid-series", "require at least one nonempty kind, and a nonempty group_by when supplied"));
+    }
+    let claims = store.series_claims(kinds, subject_prefix, from, to).map_err(internal)?;
+    let mut counts = vec![0u64; bucket_count];
+    let mut groups = group_by.map(|_| vec![BTreeMap::<String, (Value, u64)>::new(); bucket_count]);
+    for claim in claims {
+        let fields = claim.body.get("fields").and_then(Value::as_object);
+        let at = ["at", "occurred_at_unix_ms", "occurred_at"].into_iter()
+            .find_map(|field| fields.and_then(|fields| fields.get(field)))
+            .map_or_else(|| u64::try_from(claim.accepted_at_unix_ms).ok(), time_ms);
+        let Some(at) = at.filter(|at| *at >= from && *at < to) else {
+            continue;
+        };
+        let index = ((at - from) / width) as usize;
+        counts[index] += 1;
+        if let (Some(field), Some(groups)) = (group_by, &mut groups) {
+            let value = fields.and_then(|fields| fields.get(field))
+                .map_or(Value::Null, smallclaims::hash::canonical_json_value);
+            let key = serde_json::to_string(&value).map_err(internal)?;
+            groups[index].entry(key).or_insert((value, 0)).1 += 1;
+        }
+    }
+    let buckets: Vec<Value> = counts.into_iter().enumerate().map(|(index, count)| {
+        let start = from + index as u64 * width;
+        let mut bucket = json!({"start": start, "end": start.saturating_add(width).min(to), "count": count});
+        if let Some(groups) = &mut groups {
+            bucket["groups"] = Value::Array(std::mem::take(&mut groups[index]).into_values()
+                .map(|(value, count)| json!({"value": value, "count": count})).collect());
+        }
+        bucket
+    }).collect();
+    let mut response = json!({"from": from, "to": to, "bucket_seconds": bucket_seconds, "buckets": buckets});
+    if let Some(field) = group_by {
+        response["group_by"] = json!(field);
+    }
+    Ok(response)
+}
+
+fn series_bounds(from: u64, to: u64, bucket_seconds: u64) -> Result<(u64, usize), FractalError> {
+    let invalid = || FractalError::new("invalid-series", "require from < to, at most 31 days, positive bucket_seconds, and at most 1000 buckets");
     let width = bucket_seconds.saturating_mul(1_000);
     if width == 0 {
         return Err(invalid());
@@ -136,6 +192,10 @@ pub fn series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds: u64) 
     if bucket_count > 1_000 {
         return Err(invalid());
     }
+    Ok((width, bucket_count as usize))
+}
+
+fn objective_series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds: u64, width: u64, bucket_count: usize) -> Result<Value, FractalError> {
     let declaration = store.declared_objectives().map_err(internal)?.into_iter().find(|declaration| declaration.name() == id);
     let unsupported = || FractalError::new("unsupported-objective-series", format!("`{id}` is not a declared count or interval objective"));
     let declaration = match declaration {
@@ -148,7 +208,7 @@ pub fn series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds: u64) 
         return Err(unsupported());
     }
     let mut tracked = Tracked::new(&declaration);
-    let mut counts = vec![0u64; bucket_count as usize];
+    let mut counts = vec![0u64; bucket_count];
     let mut tally = |at: u64| {
         if at >= from && at < to {
             counts[((at - from) / width) as usize] += 1;
@@ -187,7 +247,7 @@ pub fn series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds: u64) 
         let start = from + index as u64 * width;
         json!({"start": start, "end": start.saturating_add(width).min(to), "count": count})
     }).collect();
-    Ok(json!({"id": id, "from": from, "to": to, "bucket_seconds": bucket_seconds, "buckets": buckets}))
+    Ok(json!({"from": from, "to": to, "bucket_seconds": bucket_seconds, "buckets": buckets}))
 }
 
 

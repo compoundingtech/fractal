@@ -1284,29 +1284,36 @@ The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms,
 Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
 `sloHistory(id, { since_ms, until_ms, steps })`.
 
-`GET /v1/client/slo/series?id=…&from=…&to=…&bucket_seconds=…` returns
-`SloSeries { id, from, to, bucket_seconds, buckets: [{ start, end, count }] }` for
-one declared count or interval objective. All four query parameters are required.
-`id` is the exact declaration name, not a live-window or budget row id. `from` and
-`to` are unsigned Unix milliseconds defining a half-open `[from,to)` range with
-`from < to` and a span of at most 31 days. `bucket_seconds` is a positive integer;
-the ceiling of the span divided by that bucket duration must be at most 1000.
-Buckets are half-open, include zero counts, and the final bucket ends at `to`
-even when shorter than the requested duration.
+`GET /v1/client/series?objective=…&from=…&to=…&bucket_seconds=…` returns
+`Series { from, to, bucket_seconds, group_by?, buckets: [{ start, end, count, groups? }] }`.
+Select either one exact declared count/interval `objective` name or explicit
+repeatable `kind` parameters. Explicit kinds may additionally filter by
+`subject_prefix` and group by a payload field with `group_by`. An objective
+cannot be combined with kinds, a prefix or grouping.
 
-Count objectives count selected events; interval objectives count closed samples
-by completion time, with the same selection, deduplication and exclusions as the
-declared-objective evaluator. This is a count histogram, **not percentiles** or
-the remaining-budget readings of `slo.history`. Unknown names return
-`unknown-objective` (HTTP 404); non-declared or non-count/non-interval objectives
-return `unsupported-objective-series` (HTTP 422); invalid queries return
-`invalid-slo-series` (HTTP 422). The read requires `read.projections`.
+`from`, `to` and `bucket_seconds` are required. The unsigned Unix millisecond
+range is half-open `[from,to)`, with `from < to` and a span of at most 31 days.
+`bucket_seconds` is a positive integer; the ceiling of the span divided by that
+duration must be at most 1000. Buckets include zero counts and the final bucket
+ends at `to` even when shorter than the requested duration.
 
-Typed clients expose Rust `Client::slo_series(id, from, to, bucket_seconds)`,
-Swift `sloSeries(id:from:to:bucketSeconds:) async throws -> Envelope<SloSeries>`,
-and TypeScript `sloSeries(id, from, to, bucketSeconds, requestOptions?)` returning
-`Promise<EnvelopeOf<SloSeries>>`. See `fixtures/slo-series.json` for an empty
-middle bucket and a clipped final bucket.
+When grouped, the response echoes `group_by` and every bucket has
+`groups: [{ value, count }]`; empty buckets have `groups: []`. Group values
+preserve JSON types, including arrays and objects; a missing field groups under
+`null`. Ungrouped responses omit `group_by` and `groups`.
+
+Objective counts use evaluator selection, deduplication and exclusions.
+Intervals count closed samples by completion time. This is a count histogram,
+**not percentiles** or remaining-budget readings from `slo.history`.
+Unknown names return `unknown-objective` (HTTP 404); unsupported objectives return
+`unsupported-objective-series` (HTTP 422); invalid queries return `invalid-series`
+(HTTP 422). The read requires `read.projections`.
+
+Typed clients expose Rust `Client::series(&SeriesQuery)`,
+Swift `series(objective:kinds:subjectPrefix:groupBy:from:to:bucketSeconds:)`
+returning `Envelope<Series>`, and TypeScript `series(options, requestOptions?)`
+returning `Promise<EnvelopeOf<Series>>`. `fixtures/series.json` demonstrates
+ungrouped buckets; `fixtures/series-grouped.json` demonstrates typed group values.
 
 ### Documents
 

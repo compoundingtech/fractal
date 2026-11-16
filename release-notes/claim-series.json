@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Read per-bucket counts for declared count and interval objectives through the SLO series API, CLI, and typed clients",
+  "summary": "Read per-bucket counts for explicit claim selections or declared objectives, optionally group explicit claims by a field, through one series API, CLI, and typed clients",
   "replay": {
     "status": "changed",
     "detail": "A local derived timestamp index is backfilled once on store open and maintained with claim writes and projection flushes. Authoritative claim bodies and objective selection semantics are unchanged."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Adds GET /v1/slo/series and GET /v1/client/slo/series with required id, from, to and bucket_seconds parameters, plus fractal slo series and Rust, Swift and TypeScript client methods. Timestamps are Unix milliseconds. Existing SLO routes are unchanged."
+    "detail": "Adds GET /v1/series and GET /v1/client/series with required from, to and bucket_seconds parameters. Select objective=<id>, or repeat kind with optional subject_prefix and group_by. Adds fractal series and Rust, Swift and TypeScript client methods. Timestamps are Unix milliseconds. Existing SLO routes are unchanged."
   },
   "downtime": {
     "status": "none",

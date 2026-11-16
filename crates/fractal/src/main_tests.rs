@@ -1,14 +1,26 @@
 #[test]
-fn slo_series_requires_explicit_millisecond_bounds_and_defaults_to_daily_buckets() {
+fn series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets() {
     let cli = Cli::try_parse_from([
-        "fractal", "slo", "series", "factory/work-throughput", "--from", "1000", "--to", "4000",
+        "fractal", "series", "--objective", "factory/work-throughput", "--from", "1000", "--to", "4000",
     ]).unwrap();
-    let Command::Slo(SloArgs { command: Some(SloCommand::Series { id, from, to, bucket_seconds }) }) = cli.command else {
-        panic!("expected slo series");
-    };
-    assert_eq!((id.as_str(), from, to, bucket_seconds), ("factory/work-throughput", 1000, 4000, 86_400));
-    assert!(Cli::try_parse_from(["fractal", "slo", "series", "factory/work-throughput", "--from", "1000"]).is_err());
-    assert!(Cli::try_parse_from(["fractal", "slo", "series", "factory/work-throughput", "--to", "4000"]).is_err());
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!((args.objective.as_deref(), args.from, args.to, args.bucket_seconds), (Some("factory/work-throughput"), 1000, 4000, 86_400));
+    let cli = Cli::try_parse_from([
+        "fractal", "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+        "--subject-prefix", "custom/acme/inbox/", "--group-by", "type", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!(args.kind, ["custom.acme.arrived", "custom.acme.resolved"]);
+    assert_eq!(args.group_by.as_deref(), Some("type"));
+    for args in [
+        vec!["fractal", "series", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--group-by", "type", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--from", "1000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--to", "4000"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]

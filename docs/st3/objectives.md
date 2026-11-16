@@ -183,20 +183,40 @@ Each evaluation reads only the event claims newer than the last it read, and kee
 in the window and the label values read: an event before it is dropped from memory, and a claim
 timed before it is not kept, though its label value is.
 
-### Declared-objective bucket series
+### Claim bucket series
 
-The CLI is `fractal slo series ID --from <unix-ms> --to <unix-ms> [--bucket-seconds N]`,
-with a default bucket width of 86400 seconds; global `--json` prints the response as JSON.
+Use `fractal series --objective ID --from MS --to MS [--bucket-seconds N]`, or
+`fractal series --kind KIND [--kind KIND...] [--subject-prefix PREFIX] [--group-by FIELD]
+--from MS --to MS [--bucket-seconds N]`. The CLI defaults to 86400-second buckets;
+global `--json` prints the response as JSON.
 
-`GET /v1/slo/series` and `GET /v1/client/slo/series` require all four query parameters:
-`id` (the exact declared objective name, not a percentile or label row), `from` and `to`
-(unsigned Unix milliseconds), and `bucket_seconds` (positive integer seconds). The range is
-half-open `[from,to)`, with `from < to`, at most 31 days and at most 1000 buckets
+`GET /v1/series` and `GET /v1/client/series` require `from` and `to` (unsigned Unix
+milliseconds), `bucket_seconds` (positive integer seconds), and one selection mode:
+
+- One or more repeatable `kind=KIND` parameters select stored claims of those kinds.
+  Optional `subject_prefix=PREFIX` restricts subjects by a literal prefix. Each selected
+  stored claim counts once, including distinct claims for the same subject; repeating a kind
+  does not count a claim twice. The first present timestamp field in `at`,
+  `occurred_at_unix_ms`, `occurred_at` determines the claim's event time. A present but
+  unreadable timestamp excludes that claim, even if a lower-priority field is readable.
+- `objective=NAME` selects the exact declared count or interval name, not a percentile or
+  label row. It cannot be combined with `kind`, `subject_prefix` or `group_by`.
+
+The range is half-open `[from,to)`, with `from < to`, at most 31 days and at most 1000 buckets
 (`ceil((to-from)/(1000*bucket_seconds))`). Buckets begin at `from`; the last ends at `to`
 even when shorter than the requested width. Empty buckets have count zero.
 
-The response is `{id,from,to,bucket_seconds,buckets:[{start,end,count}]}`. These are **counts,
-not percentiles, rates, durations, budget readings or historical SLO verdicts**:
+The response is `{from,to,bucket_seconds,buckets:[{start,end,count}]}`. With explicit kinds,
+optional `group_by=FIELD` selects an exact top-level key in the original claim's `fields`
+object. The response then also carries `group_by`, and every bucket has
+`groups:[{value,count}]`, including an empty array for empty buckets. Values retain JSON types:
+the string `"1"` is different from the number `1`, and arrays and objects remain structured.
+A missing field joins the `null` group. Groups are ordered lexically by canonical JSON
+serialization, with recursively sorted object keys. Without `group_by`, neither `group_by`
+nor `groups` is emitted.
+
+These are **counts, not percentiles, rates, durations, budget readings or historical SLO
+verdicts**. In objective mode:
 
 - A count contributes one event per subject, at the earliest readable event's timestamp
   (claim id breaks ties), after the same `only` and `exclude` selection as the objective row.
@@ -208,24 +228,27 @@ not percentiles, rates, durations, budget readings or historical SLO verdicts**:
   excluded and unstarted subjects contribute nothing, including censored open samples that
   enter the live percentile. Pauses affect duration, not the completion bucket.
 
-The current declaration and all currently recorded context determine selection; this is not
-an as-of replay. Starts and other context may precede `from`, and later retries or expected-set
-changes can affect selection. Original numeric, RFC 3339 and JSON-encoded timestamps are
-preserved and decoded by the evaluator's shared timestamp reader.
+The current declaration and all currently recorded context determine objective selection;
+this is not an as-of replay. Starts and other context may precede `from`, and later retries or
+expected-set changes can affect selection. Original numeric, RFC 3339 and JSON-encoded
+timestamps are preserved and decoded by the shared timestamp reader.
 
-Unknown names return `unknown-objective` (404). Shipped/native objectives and declarations
-that are not readable declared counts or intervals return `unsupported-objective-series`
-(422). Invalid ranges or bucket sizes return `invalid-slo-series` (422).
+Unknown objective names return `unknown-objective` (404). Shipped/native objectives and
+declarations that are not readable declared counts or intervals return
+`unsupported-objective-series` (422). Invalid ranges, bucket sizes or selector combinations
+return `invalid-series` (422).
 
 A rebuildable local timestamp projection indexes acceptance time and every readable timestamp
 field by kind, field and unsigned timestamp. Its first startup backfills existing claims once;
 insert/update/delete triggers capture changes, and append/projection transactions drain only
 pending claims before publication, including replication. Each new claim parses its fields once;
 storage is one acceptance row plus one row per readable timestamp field. The claim body is never
-rewritten. A request seeks the bounded kind/field/time range, then reads only relevant kinds for
-the candidate subjects through the subject/kind index. Full candidate-subject history is necessary
-to retain pre-range starts and deduplicate retries; the range and bucket caps do not cap the number
-of events or the history of an individual subject. No series request bootstraps or scans the claim log.
+rewritten. Explicit-kind requests seek bounded timestamp candidates and fetch each candidate's
+claim by its primary key, never the rest of its subject's history. Objective requests seek the
+bounded kind/field/time range, then read only relevant kinds for candidate subjects through the
+subject/kind index. Full candidate-subject history is necessary for objective pre-range starts
+and retry deduplication. The range and bucket caps do not cap event density or an objective
+candidate's history. No series request bootstraps or scans the claim log.
 
 ### Fractal's own CI
 

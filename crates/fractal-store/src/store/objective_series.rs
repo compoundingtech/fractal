@@ -73,8 +73,29 @@ fn insert(tx: &Transaction<'_>, claim: &ClaimRecord, field: &str, at: u64) -> Re
 
 const CANDIDATES: &str = "SELECT DISTINCT subject FROM local_objective_times_v1 INDEXED BY local_objective_times_seek_v1 WHERE kind=?1 AND field=?2 AND at>=?3 AND at<?4 AND subject>=?5 AND subject<?6";
 const CONTEXT: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims INDEXED BY claims_subject_kind_index WHERE subject=?1 AND kind=?2 ORDER BY store_index";
+const RAW_CANDIDATES: &str = "SELECT store_index FROM local_objective_times_v1 INDEXED BY local_objective_times_seek_v1 WHERE kind=?1 AND field=?2 AND at>=?3 AND at<?4 AND (?5 IS NULL OR substr(subject,1,length(?5))=?5)";
+const CLAIM_AT_INDEX: &str = "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE store_index=?1";
 
 impl Store {
+    /// Seek timestamp candidates and fetch each physical claim once, without loading other
+    /// claims of its subject. The caller resolves timestamp precedence from the original body.
+    pub fn series_claims(&self, kinds: &[String], prefix: Option<&str>, from: u64, to: u64) -> Result<Vec<ClaimRecord>> {
+        let db = self.readers.get();
+        let tx = db.unchecked_transaction()?;
+        let mut indexes = BTreeSet::new();
+        let kinds: BTreeSet<&str> = kinds.iter().map(String::as_str).collect();
+        for kind in kinds {
+            for field in ["field:at", "field:occurred_at_unix_ms", "field:occurred_at", "accepted"] {
+                let mut statement = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3783e61dee21 owner=fractal_store::store::objective_series TODO=trace-statement-and-value-representation */ RAW_CANDIDATES)?;
+                for row in statement.query_map(params![kind, field, from.to_be_bytes().as_slice(), to.to_be_bytes().as_slice(), prefix], |row| row.get::<_, u64>(0))? {
+                    indexes.insert(row?);
+                }
+            }
+        }
+        let mut statement = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-ha6520970df6e owner=fractal_store::store::objective_series TODO=trace-statement-and-value-representation */ CLAIM_AT_INDEX)?;
+        indexes.into_iter().map(|index| statement.query_row(/* sqlite-large-value: allow-for-now lv-h09a0333577a9 owner=fractal_store::store::objective_series TODO=trace-statement-and-value-representation */ [index], claim_from_row).map_err(Into::into)).collect()
+    }
+
     /// Seek event timestamps, then load only matching subjects' relevant kinds. Full subject
     /// context is essential: starts, retries, cancellations and expect changes can lie outside
     /// the requested range. The evaluator, not this index, selects the resulting event/sample.
@@ -106,7 +127,12 @@ mod tests {
     fn timestamp_and_context_queries_seek_bounded_indexes() {
         let store = Store::open_memory("node").unwrap();
         let db = store.readers.get();
-        for (sql, expected) in [(CANDIDATES, "USING COVERING INDEX local_objective_times_seek_v1 (kind=? AND field=? AND at>? AND at<?)"), (CONTEXT, "USING INDEX claims_subject_kind_index (subject=? AND kind=?)")] {
+        for (sql, expected) in [
+            (CANDIDATES, "USING COVERING INDEX local_objective_times_seek_v1 (kind=? AND field=? AND at>? AND at<?)"),
+            (RAW_CANDIDATES, "USING COVERING INDEX local_objective_times_seek_v1 (kind=? AND field=? AND at>? AND at<?)"),
+            (CONTEXT, "USING INDEX claims_subject_kind_index (subject=? AND kind=?)"),
+            (CLAIM_AT_INDEX, "USING INTEGER PRIMARY KEY (rowid=?)"),
+        ] {
             let mut statement = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let nulls = vec![None::<String>; statement.parameter_count()];
             let plan = statement.query_map(rusqlite::params_from_iter(nulls), |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
@@ -126,7 +152,7 @@ mod tests {
     #[test]
     fn startup_backfills_old_claims_once_without_rewriting_timestamp_fields() {
         let store = Store::open_memory("node").unwrap();
-        let fields = json!({"numeric":1000,"text":"1000","rfc":"1970-01-01T00:00:01Z","encoded":"\"1970-01-01T00:00:01Z\"","bad":"yesterday","max":u64::MAX});
+        let fields = json!({"at":1000,"numeric":1000,"text":"1000","rfc":"1970-01-01T00:00:01Z","encoded":"\"1970-01-01T00:00:01Z\"","bad":"yesterday","max":u64::MAX});
         let claim = append(&store, fields);
         {
             let mut db = store.connection.write();
@@ -140,7 +166,7 @@ mod tests {
             open(&tx).unwrap();
             open(&tx).unwrap();
             let count: u64 = tx.query_row("SELECT COUNT(*) FROM local_objective_times_v1 WHERE store_index=?1", [claim.store_index], |row| row.get(0)).unwrap();
-            assert_eq!(count, 6, "acceptance plus five readable timestamp fields");
+            assert_eq!(count, 7, "acceptance plus six readable timestamp fields");
             let body: String = tx.query_row("SELECT body FROM claims WHERE store_index=?1", [claim.store_index], |row| row.get(0)).unwrap();
             assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), claim.body);
             tx.commit().unwrap();
@@ -150,6 +176,10 @@ mod tests {
             assert_eq!(claims.len(), 1, "{field}");
             assert_eq!(claims[0].body, claim.body);
         }
+        let raw = store.series_claims(&["custom.acme.event".into()], Some("custom/acme/"), 1000, 1001).unwrap();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].body, claim.body);
+        assert!(claim.accepted_at_unix_ms > 1001);
         let db = store.readers.get();
         let max: Vec<u8> = db.query_row("SELECT at FROM local_objective_times_v1 WHERE store_index=?1 AND field='field:max'", [claim.store_index], |row| row.get(0)).unwrap();
         assert_eq!(max, u64::MAX.to_be_bytes());

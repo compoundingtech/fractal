@@ -304,25 +304,31 @@ test('phone commands preserve typed bodies, full ids, reactive wait and normal e
     assert(calls.every(([, init]) => init.headers.Authorization === 'Bearer phone-credential'));
 });
 
-test('sloSeries preserves required query values, cancellation and clipped zero-count buckets', async () => {
-    const wire = require('../../../docs/st3/client-v0/fixtures/slo-series.json');
+test('series preserves required query values, cancellation and clipped zero-count buckets', async () => {
+    const wire = require('../../../docs/st3/client-v0/fixtures/series.json');
+    const groupedWire = require('../../../docs/st3/client-v0/fixtures/series-grouped.json');
     const calls = [];
     const controller = new AbortController();
     const client = new FractalClient({
         baseUrl: 'https://example.test',
         fetchImpl: async (url, init) => {
             calls.push([String(url), init]);
-            return response(String(url).endsWith('/capabilities') ? capabilityFixture : wire);
+            return response(String(url).endsWith('/capabilities') ? capabilityFixture : String(url).includes('group_by=') ? groupedWire : wire);
         },
     });
-    assert.deepEqual(await client.sloSeries(wire.value.id, wire.value.from, wire.value.to, wire.value.bucket_seconds, { signal: controller.signal }), wire);
+    assert.deepEqual(await client.series({ objective: 'objective/example', from: wire.value.from, to: wire.value.to, bucket_seconds: wire.value.bucket_seconds }, { signal: controller.signal }), wire);
     assert.equal(calls[0][0], 'https://example.test/v1/client/capabilities');
     const [url, init] = calls[1];
-    assert.equal(url, 'https://example.test/v1/client/slo/series?id=objective%2Fexample&from=1767225600000&to=1767225725000&bucket_seconds=60');
+    assert.equal(url, 'https://example.test/v1/client/series?objective=objective%2Fexample&from=1767225600000&to=1767225725000&bucket_seconds=60');
     assert.equal(init.method, 'GET');
     assert.equal(init.signal, controller.signal);
     assert.equal(wire.value.buckets[1].count, 0);
     assert.equal(wire.value.buckets.at(-1).end, wire.value.to);
+    assert.deepEqual(await client.series({ kind: ['event/example', 'event/other'], subject_prefix: 'agent/example/', group_by: 'category', from: groupedWire.value.from, to: groupedWire.value.to, bucket_seconds: 60 }), groupedWire);
+    const groupedURL = new URL(calls[2][0]);
+    assert.deepEqual(groupedURL.searchParams.getAll('kind'), ['event/example', 'event/other']);
+    assert.equal(groupedURL.searchParams.get('subject_prefix'), 'agent/example/');
+    assert.equal(groupedURL.searchParams.get('group_by'), 'category');
 });
 
 test('commands windows use existing snapshot and changes frames with resource discriminators', () => {
@@ -345,7 +351,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     const readArguments = (id, options) => {
         switch (id) {
             case 'slo.history': return ['objective/example', {}, options];
-            case 'slo.series': return ['objective/example', 0, 125000, 60, options];
+            case 'series.read': return [{ objective: 'objective/example', from: 0, to: 125000, bucket_seconds: 60 }, options];
             case 'attention-budget': return ['mission/example', undefined, undefined, options];
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
             case 'auto-resolved.list': return [options];
@@ -375,6 +381,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
         }
     };
     const readMethods = {
+        'series.read': 'series',
         'capabilities.get': 'capabilities',
         'harness-questions.list': 'harnessQuestions',
         'harness-questions.get': 'harnessQuestion',

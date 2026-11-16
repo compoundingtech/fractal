@@ -17,10 +17,10 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
-fn slo_series_fixture_preserves_zero_and_clipped_buckets() {
-    let raw: serde_json::Value = decode("slo-series.json");
-    let series: Envelope<SloSeries> = decode("slo-series.json");
-    assert_eq!(series.value.id, "objective/example");
+fn series_fixture_preserves_zero_and_clipped_buckets() {
+    let raw: serde_json::Value = decode("series.json");
+    let series: Envelope<Series> = decode("series.json");
+    assert!(series.value.group_by.is_none());
     assert_eq!(series.value.bucket_seconds, 60);
     assert_eq!(series.value.buckets.iter().map(|bucket| bucket.count).collect::<Vec<_>>(), vec![2, 0, 1]);
     assert_eq!(series.value.buckets.last().unwrap().end, series.value.to);
@@ -28,7 +28,7 @@ fn slo_series_fixture_preserves_zero_and_clipped_buckets() {
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
     let validator = jsonschema::validator_for(&serde_json::json!({
-        "$defs": schema["$defs"], "$ref": "#/$defs/SloSeries"
+        "$defs": schema["$defs"], "$ref": "#/$defs/Series"
     })).unwrap();
     assert!(validator.is_valid(&raw["value"]));
     for (pointer, invalid_value) in [
@@ -41,12 +41,35 @@ fn slo_series_fixture_preserves_zero_and_clipped_buckets() {
         *invalid.pointer_mut(pointer).unwrap() = invalid_value;
         assert!(!validator.is_valid(&invalid), "{pointer}");
     }
-    for field in ["id", "from", "to", "bucket_seconds", "buckets"] {
+    for field in ["from", "to", "bucket_seconds", "buckets"] {
         let mut invalid = raw["value"].clone();
         invalid.as_object_mut().unwrap().remove(field);
         assert!(!validator.is_valid(&invalid), "{field}");
-        assert!(serde_json::from_value::<SloSeries>(invalid).is_err(), "{field}");
+        assert!(serde_json::from_value::<Series>(invalid).is_err(), "{field}");
     }
+}
+
+#[test]
+fn series_grouped_fixture_preserves_json_values() {
+    let raw: serde_json::Value = decode("series-grouped.json");
+    let series: Envelope<Series> = decode("series-grouped.json");
+    assert_eq!(series.value.group_by.as_deref(), Some("category"));
+    let groups = series.value.buckets[0].groups.as_ref().unwrap();
+    assert_eq!(groups.len(), 6);
+    assert!(groups[0].value.is_null());
+    assert!(groups[1].value.is_string());
+    assert!(groups[2].value.is_number());
+    assert!(groups[3].value.is_boolean());
+    assert!(groups[4].value.is_array());
+    assert!(groups[5].value.is_object());
+    assert!(series.value.buckets[1].groups.as_ref().unwrap().is_empty());
+    assert_eq!(serde_json::to_value(&series.value).unwrap(), raw["value"]);
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/Series"
+    })).unwrap();
+    assert!(validator.is_valid(&raw["value"]));
 }
 
 #[test]

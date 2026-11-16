@@ -840,7 +840,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/usage", get(operations::get_usage))
         .route("/v1/slo", get(operations::get_slo))
         .route("/v1/slo/history", get(operations::get_slo_history))
-        .route("/v1/slo/series", get(operations::get_slo_series))
+        .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(records::get_claim))
         .route("/v1/reviews", get(records::list_reviews))
@@ -2180,7 +2180,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period"
-        | "invalid-slo-series" | "unsupported-objective-series" => "validation-failed".into(),
+        | "invalid-series" | "unsupported-objective-series" => "validation-failed".into(),
         "launch-review-not-authorized"
         | "wrong-message-recipient"
         | "lane-approval-denied"
@@ -11686,15 +11686,6 @@ pub struct SloHistoryQuery {
     pub until_ms: Option<u64>,
     /// How many equal steps to answer in; each holds its lowest reading.
     pub steps: Option<usize>,
-}
-
-/// A bounded half-open event-time period; timestamps are Unix milliseconds.
-#[derive(Deserialize)]
-pub struct SloSeriesQuery {
-    pub id: String,
-    pub from: u64,
-    pub to: u64,
-    pub bucket_seconds: u64,
 }
 
 fn default_claim_limit() -> usize {
