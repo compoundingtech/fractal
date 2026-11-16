@@ -389,5 +389,5 @@ let scenarios: [Scenario] = [
     prepare: menuBarModel(\.asks, failing: true)),
   Scenario(
     id: "unconfigured", title: "Not configured", description: "Started without its Fractal configuration."
-  ) { _ in AttentionModel(adapter: nil, configurationError: "FRACTAL_ENDPOINT is not set") },
+  ) { _ in AttentionModel(adapter: nil, configurationError: "FRACTAL_SOCKET is not set") },
 ]

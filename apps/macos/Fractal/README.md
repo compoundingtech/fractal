@@ -151,7 +151,7 @@ collection, but `FractalClient` has no typed attention or availability stream.
   after a minute, never while asleep. Reports and failures are logged once per
   change.
 - **Speech** (with `FRACTAL_SPEECH_SOCKET`): the tray decides what it asks the
-  local speech service (`flakes/speech-service`, wire v2) to say; the service
+  local speech service (dotfiles' `flakes/speech-service`, wire v2) to say; the service
   decides how, and holds the person's controls (mute, calls, Stop) for every
   caller, this tray and the person's `speak` alike.
   - **Delivery.** An item is delivered only if Fractal marks the ask `urgent`
