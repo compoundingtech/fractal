@@ -1,5 +1,5 @@
-import { createContext, useContext, useCallback, useRef, type ReactNode, type Ref } from 'react';
-import { quality } from './qualityNative';
+import { createContext, useContext, useCallback, useRef, useSyncExternalStore, type ReactNode, type Ref } from 'react';
+import { quality, localDrafts } from './qualityNative';
 import * as Clipboard from 'expo-clipboard';
 import { ActionSheetIOS, Linking, Pressable, StyleSheet, Text, TextInput, View, useColorScheme, type StyleProp, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import { fonts, inLight, lightTheme, systemColors, theme, type Theme } from './theme';
@@ -111,6 +111,12 @@ export function Legend({ entries }: { entries: ReadonlyArray<{ glyph: string; co
 
 export function Note({ children, tone = 'dim' }: { children: ReactNode; tone?: 'dim' | 'warning' | 'fault' }) {
   return <T style={styles.note} color={tone === 'warning' ? theme.waiting : tone === 'fault' ? theme.fault : theme.overlay0}>{children}</T>;
+}
+
+/** Recovery problems stay visible wherever a person is composing or reviewing saved drafts. */
+export function DraftRecoveryNote() {
+  const issue = useSyncExternalStore(localDrafts.subscribe, localDrafts.snapshot);
+  return issue ? <Note tone="warning">{issue}</Note> : null;
 }
 
 export function Button({ label, accessibilityLabel = label, hint, onPress, disabled = false, color = theme.accent, style }: { label: string; accessibilityLabel?: string; hint?: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {

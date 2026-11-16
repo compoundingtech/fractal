@@ -193,51 +193,20 @@ fn read_conn(
         }
         Ok(key)
     }).transpose()?;
-    // Page membership in bounded chunks, then use the shared qualifier before the visible
-    // limit. Denied openings cannot consume lookahead or alter pagination metadata.
-    let sql = canonical_sql(
-        "WITH members(source,episode) AS (
-           SELECT coalesce(json_extract(body,'$.fields.origin_source'),json_extract(body,'$.fields.origin_ask')),
-                  coalesce(json_extract(body,'$.fields.origin_episode'),json_extract(body,'$.fields.origin_ask_episode'))
-           FROM claims WHERE id=?1
-           UNION
-           SELECT json_extract(c.body,'$.fields.ask'),json_extract(c.body,'$.fields.ask_episode')
-           FROM claims c INDEXED BY claims_thread_history_link_index
-           JOIN operations o ON o.canonical_claim_id=c.id AND o.state='active'
-           WHERE c.kind='thread.ask-linked' AND json_extract(c.body,'$.fields.thread_id')=?2
-             AND c.store_index<=?3
-             AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=c.id)
-         )
-         SELECT DISTINCT m.source,m.episode FROM members m
-         WHERE m.source IS NOT NULL AND m.episode IS NOT NULL
-           AND (?4 IS NULL OR (m.source,m.episode)>(?4,?5))
-         ORDER BY m.source,m.episode LIMIT ?6"
-    );
-    let mut statement = conn.prepare_cached(&sql).map_err(internal)?;
+
     let after = after.as_ref();
     let mut anchor_is_member = match after {
         Some(key) => is_member(conn, &created, thread, key, cut)?,
         None => true,
     };
+    // The single origin is merged outside SQL: a UNION would materialize all links before
+    // applying the keyset bound. Authored episode enumeration below is separately bounded.
     let mut members = BTreeSet::new();
-    let mut scan_after = after.cloned();
-    let at = now_ms();
-    loop {
-        let candidates = statement.query_map(params![created.id, thread, cut,
-            scan_after.as_ref().map(|key| key.source_id.as_str()),
-            scan_after.as_ref().map(|key| key.episode.as_str()), 256],
-            |row| Ok(SourceEpisode { source_id: row.get(0)?, episode: row.get(1)? }))
-            .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
-        let exhausted = candidates.len() < 256;
-        scan_after = candidates.last().cloned();
-        let qualified = discussion_source::qualify_batch(conn, &person, &candidates, at)?;
-        for (key, source) in candidates.into_iter().zip(qualified) {
-            if source.is_some_and(|source| source.item().kind == "person-step") {
-                members.insert(key);
-                if members.len() > limit { break; }
-            }
-        }
-        if exhausted || members.len() > limit { break; }
+    if let Some(seed) = &seed
+        && matches!(page.source_support, Some(HistorySourceSupport::PersonStep))
+        && after.is_none_or(|after| seed > after)
+    {
+        members.insert(seed.clone());
     }
 
     // Only a permitted seed can disclose the same source's other exact episodes. The source
@@ -261,6 +230,40 @@ fn read_conn(
         }
     }
     if !anchor_is_member { return Err(invalid_context_cursor()); }
+    while members.len() > limit + 1 { members.pop_last(); }
+    // Seek directly after the visible anchor. Canonical link membership and exact-source
+    // authorization are checked BEFORE consuming visible lookahead, using the same
+    // is_member/latest_applied_claim selection as cursor and boundary validation. Replicated
+    // losing links and denied sources cannot change pagination metadata.
+    //
+    // Work is proportional to index rows between page anchors (including denied/losing
+    // rows), not to all earlier thread links. No UNION, DISTINCT, or sort materializes the
+    // entire thread. The ordered iterator stops once limit+1 visible keys are established.
+    let mut statement = conn.prepare_cached(
+        "SELECT json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')
+         FROM claims INDEXED BY claims_thread_history_link_index
+         WHERE kind='thread.ask-linked' AND json_extract(body, '$.fields.thread_id')=?1
+           AND (json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'))>(?2,?3)
+         ORDER BY json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')"
+    ).map_err(internal)?;
+    let mut rows = statement.query(params![thread,
+        after.map_or("", |key| key.source_id.as_str()),
+        after.map_or("", |key| key.episode.as_str())]).map_err(internal)?;
+    while let Some(row) = rows.next().map_err(internal)? {
+        let key = SourceEpisode { source_id: row.get(0).map_err(internal)?,
+            episode: row.get(1).map_err(internal)? };
+        if members.len() > limit && members.last().is_some_and(|last| &key >= last) {
+            break;
+        }
+        if members.contains(&key)
+            || discussion_source::qualify(conn, &person, &key, now_ms())?.is_none()
+            || !is_member(conn, &created, thread, &key, cut)?
+        {
+            continue;
+        }
+        members.insert(key);
+        if members.len() > limit + 1 { members.pop_last(); }
+    }
     // Revalidate each selected exact key before any content, including lookahead. The reader
     // must not return a different episode as a substitute.
     for key in members {

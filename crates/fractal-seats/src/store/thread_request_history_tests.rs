@@ -383,3 +383,168 @@ fn retained_runtime_start_rejects_reassigned_away_and_never_opened_episodes() {
     assert!(store.claims_for("thread/denied-retained-runtime", None).unwrap().is_empty());
     assert!(store.claims_for(&message.subject, None).unwrap().is_empty());
 }
+
+#[test]
+fn request_history_concurrent_cross_thread_attachments_have_one_canonical_membership() {
+    let (baseline, _, input) = fixture();
+    baseline.configure_thread_write_rollout([]);
+    let other = "thread/concurrent-history";
+    let mut expected = BTreeMap::new();
+    for (index, thread) in [THREAD, other].into_iter().enumerate() {
+        let seed = ask(&baseline, &input, &format!("concurrent-seed-{index}"));
+        start(&baseline, &seed, thread, AGENT);
+        let mut members = BTreeSet::from([seed]);
+        for member in 0..3 {
+            let child = ask(&baseline, &input, &format!("concurrent-member-{index}-{member}"));
+            attach_ask(&baseline, AGENT, AttachAsk {
+                thread, ask: &child.source_id, episode: &child.episode,
+                key: &format!("concurrent-link-{index}-{member}"), decision: None,
+            }).unwrap();
+            members.insert(child);
+        }
+        expected.insert(thread, members);
+    }
+    let shared = ask(&baseline, &input, "concurrent-unattached");
+    let left = Store::open_memory("birch").unwrap();
+    let right = Store::open_memory("cedar").unwrap();
+    let forward = Store::open_memory("dogwood").unwrap();
+    let reverse = Store::open_memory("elm").unwrap();
+    for replica in [&left, &right, &forward, &reverse] {
+        replica.configure_thread_write_rollout([]);
+        let exchange = baseline.export_replication_exchange_answering(
+            TEST_FLEET, &replica.replication_inventory().unwrap(), &[],
+        ).unwrap();
+        receive_exchange(replica, &exchange);
+    }
+    let (left_receipt, left_appended) = attach_ask(&left, AGENT, AttachAsk {
+        thread: THREAD, ask: &shared.source_id, episode: &shared.episode,
+        key: "concurrent-attach-left", decision: None,
+    }).unwrap();
+    let (right_receipt, right_appended) = attach_ask(&right, AGENT, AttachAsk {
+        thread: other, ask: &shared.source_id, episode: &shared.episode,
+        key: "concurrent-attach-right", decision: None,
+    }).unwrap();
+    assert!(left_appended && right_appended);
+    assert_ne!(left_receipt.id, right_receipt.id);
+    assert_eq!(left_receipt.subject, right_receipt.subject);
+    let left_exchange = left.export_replication_exchange_answering(
+        TEST_FLEET, &forward.replication_inventory().unwrap(), &[],
+    ).unwrap();
+    let right_exchange = right.export_replication_exchange_answering(
+        TEST_FLEET, &reverse.replication_inventory().unwrap(), &[],
+    ).unwrap();
+    receive_exchange(&forward, &left_exchange);
+    receive_exchange(&forward, &right_exchange);
+    receive_exchange(&reverse, &right_exchange);
+    receive_exchange(&reverse, &left_exchange);
+    receive_exchange(&left, &right_exchange);
+    receive_exchange(&right, &left_exchange);
+
+    let canonical = forward.latest_claim(&left_receipt.subject, Some("thread.ask-linked"))
+        .unwrap().unwrap();
+    let winner = canonical.body["fields"]["thread_id"].as_str().unwrap();
+    assert!([THREAD, other].contains(&winner));
+    expected.get_mut(winner).unwrap().insert(shared.clone());
+    for replica in [&left, &right, &forward, &reverse] {
+        assert_eq!(
+            replica.latest_claim(&left_receipt.subject, Some("thread.ask-linked"))
+                .unwrap().unwrap().id,
+            canonical.id,
+        );
+        for thread in [THREAD, other] {
+            let unpaged = thread_request_history(replica, PERSON, thread, None, 50).unwrap();
+            assert_eq!(keys(&unpaged), expected[thread]);
+            assert_eq!(keys(&unpaged).contains(&shared), thread == winner);
+            assert_eq!(
+                serde_json::to_value(&unpaged).unwrap(),
+                serde_json::to_value(thread_request_history(&forward, PERSON, thread, None, 50).unwrap()).unwrap(),
+            );
+            let mut cursor = None;
+            let mut traversed = Vec::new();
+            loop {
+                let history = thread_request_history(replica, PERSON, thread, cursor.as_deref(), 1).unwrap();
+                assert_eq!(history.items.len(), 1);
+                traversed.push(history.items[0].key.clone());
+                assert!(history.complete);
+                cursor = history.next_cursor;
+                if cursor.is_none() { break; }
+                assert!(traversed.len() < unpaged.items.len(), "every emitted cursor must advance");
+            }
+            assert_eq!(traversed, unpaged.items.iter().map(|item| item.key.clone()).collect::<Vec<_>>());
+        }
+    }
+}
+
+#[test]
+fn request_history_denied_heavy_keyset_pages_match_visible_only_metadata() {
+    let (store, _, input) = fixture();
+    store.configure_thread_write_rollout([]);
+    let seed = ask(&store, &input, "dense-visible-seed");
+    start(&store, &seed, THREAD, AGENT);
+    finish(&store, &seed, false);
+    let mut candidates = (0..256)
+        .map(|index| ask(&store, &input, &format!("dense-candidate-{index}")))
+        .collect::<Vec<_>>();
+    candidates.sort();
+    let mut visible = BTreeSet::from([seed]);
+    // Keep visible rows on both sides of long denied runs, including late pages.
+    for index in [0, 51, 102, 153, 204, 255] {
+        let key = &candidates[index];
+        attach(&store, key, None, &format!("dense-visible-link-{index}"));
+        finish(&store, key, false);
+        visible.insert(key.clone());
+    }
+    let control = Store::open_memory("birch").unwrap();
+    let baseline = store.export_replication_exchange_answering(
+        TEST_FLEET, &control.replication_inventory().unwrap(), &[],
+    ).unwrap();
+    receive_exchange(&control, &baseline);
+    let hidden = candidates.iter().filter(|key| !visible.contains(*key)).collect::<Vec<_>>();
+    assert_eq!(hidden.len(), 250);
+    for (index, key) in hidden.iter().enumerate() {
+        attach(&store, key, None, &format!("dense-hidden-link-{index}"));
+    }
+    // Reassignment denies only the still-live episodes, not the completed visible rows.
+    rename_live(&store);
+    rename_live(&control);
+    let unpaged = page(&store);
+    assert_eq!(keys(&unpaged), visible);
+    assert_eq!(serde_json::to_value(&unpaged).unwrap(), serde_json::to_value(page(&control)).unwrap());
+    for limit in [1, 2, 3] {
+        let mut cursor = None;
+        let mut traversed = Vec::new();
+        loop {
+            let history = thread_request_history(&store, PERSON, THREAD, cursor.as_deref(), limit).unwrap();
+            let reference = thread_request_history(&control, PERSON, THREAD, cursor.as_deref(), limit).unwrap();
+            assert_eq!(serde_json::to_value(&history).unwrap(), serde_json::to_value(reference).unwrap());
+            assert!(!history.items.is_empty());
+            assert!(history.complete);
+            let serialized = serde_json::to_string(&history).unwrap();
+            for key in &hidden {
+                assert!(!serialized.contains(&key.source_id));
+                assert!(!serialized.contains(&key.episode));
+            }
+            traversed.extend(history.items.iter().map(|item| item.key.clone()));
+            cursor = history.next_cursor;
+            if cursor.is_none() { break; }
+            assert!(traversed.len() < visible.len(), "denied rows must not create extra pages");
+        }
+        assert_eq!(traversed, unpaged.items.iter().map(|item| item.key.clone()).collect::<Vec<_>>());
+    }
+
+    let connection = store.readers.get();
+    let mut statement = connection.prepare(
+        "EXPLAIN QUERY PLAN
+         SELECT json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')
+         FROM claims INDEXED BY claims_thread_history_link_index
+         WHERE kind='thread.ask-linked' AND json_extract(body, '$.fields.thread_id')=?1
+           AND (json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'))>(?2,?3)
+         ORDER BY json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode')",
+    ).unwrap();
+    let anchor = &candidates[153];
+    let plan = statement.query_map(params![THREAD, anchor.source_id, anchor.episode], |row| row.get::<_, String>(3))
+        .unwrap().collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+    assert!(plan.contains("SEARCH claims USING INDEX claims_thread_history_link_index"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    assert!(!plan.contains("UNION"), "{plan}");
+}

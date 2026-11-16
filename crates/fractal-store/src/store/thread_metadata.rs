@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
 ON claims(actor, store_index DESC)
 WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
 CREATE INDEX IF NOT EXISTS claims_thread_history_link_index
-ON claims(json_extract(body, '$.fields.thread_id'), subject)
+ON claims(json_extract(body, '$.fields.thread_id'), json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'), subject)
 WHERE kind='thread.ask-linked';
 ",
     )
