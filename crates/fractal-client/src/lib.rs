@@ -660,6 +660,7 @@ impl CollectionStream {
             }
             ThreadListScope::Mission(id) => json!({"mission_id":id}),
             ThreadListScope::RecentlyClosed => json!({"recently_closed":true}),
+            ThreadListScope::MarkedUnread => json!({"marked_unread":true}),
         };
         self.send(&json!({"kind":"subscribe", "id":id, "collection":"threads", "thread_context":context, "limit":limit})).await
     }
@@ -2315,6 +2316,7 @@ impl Client {
             ),
             ThreadListScope::Mission(id) => format!("mission_id={}", percent_encode(id)),
             ThreadListScope::RecentlyClosed => "recently_closed=true".into(),
+            ThreadListScope::MarkedUnread => "marked_unread=true".into(),
         };
         let mut path = format!("/v1/client/threads?{selection}");
         if let Some(cursor) = cursor {
@@ -2346,6 +2348,22 @@ impl Client {
         if !query.is_empty() {
             path.push('?');
             path.push_str(&query.join("&"));
+        }
+        self.get(&path).await
+    }
+    pub async fn thread_timeline_around(
+        &self,
+        id: &str,
+        message_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ThreadTimelinePage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/threads/{}/timeline?around={}",
+            thread_path_segment(id)?,
+            percent_encode(message_id)
+        );
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
         }
         self.get(&path).await
     }
@@ -3924,6 +3942,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn thread_clear_unread(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadClearUnreadParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_clear_unread(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn thread_close(
         &self,
         id: impl Into<String>,
@@ -3932,6 +3961,17 @@ impl Client {
         parameters: ThreadTargetParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::thread_close(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_mark_unread(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadMarkUnreadParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_mark_unread(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
