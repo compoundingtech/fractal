@@ -5394,8 +5394,15 @@ mod tests {
         }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
-        for field in ["phase", "admission_publication"] {
+        current.claims.remove("mission-run.gate-carried").unwrap();
+        for field in ["phase", "admission_publication", "workspace_declaration"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
+        }
+        for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
+            current.claims.get_mut(kind).unwrap().fields.remove("continuity").unwrap();
+        }
+        for field in ["source_attempt", "source_gate_request", "person_continuity"] {
+            current.claims.get_mut("step-run.carried").unwrap().fields.remove(field).unwrap();
         }
         current.claims.get_mut("reconcile.fault").unwrap().fields.remove("publication").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
