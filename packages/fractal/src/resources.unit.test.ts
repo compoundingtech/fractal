@@ -12,6 +12,15 @@ const intent = { meta, id: 'checks', goal: 'Check source.', reportTo, input: Sch
 // This is a protocol test, not a replacement host accountant. Native parity tests own fit,
 // queue clocks, process containment, cancellation races and confirmed physical retirement.
 describe('scoped native resource lanes', () => {
+  it.effect('preserves impossible admission failures as typed resource errors', () => Effect.gen(function* () {
+    for (const code of ['impossible', 'impossible-capacity']) {
+      const program = Fractal.mission(intent, () => Effect.scoped(Fractal.resources.lane('checks', { host: 'executor' })))
+      const error = { _tag: 'ResourceError', code, message: 'Requested footprint exceeds host lane room.' }
+      const host = fakeHost({ resource: async () => ({ _tag: 'Failure', error }) })
+      expect(yield* start(program, host)).toEqual({ _tag: 'Failure', error })
+    }
+  }))
+
   it.effect('acquires and executes through the native boundary, then awaits release', () => Effect.gen(function* () {
     const operations: ResourceRequest[] = []
     const program = Fractal.mission(intent, () => Effect.scoped(Effect.gen(function* () {
