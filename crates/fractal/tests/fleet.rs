@@ -8915,6 +8915,34 @@ async fn client_item(node: &Node, subject: &str) -> Option<Value> {
     page["items"].as_array().unwrap().iter().find(|item| item["id"] == subject).cloned()
 }
 
+/// Read the recovery layers independently: retained claims are not necessarily admitted,
+/// projected into the shard, or mirrored into the graph's local selector indexes yet.
+fn restored_stream_diagnostics(node: &Node) -> String {
+    let graph = node.state_dir().join("claims.sqlite3");
+    let shard = node.state_dir().join("shards/messages/claims.sqlite3");
+    let read = |database: &Path, sql: &str| {
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .and_then(|connection| connection.query_row(sql, [], |row| row.get::<_, String>(0)))
+            .unwrap_or_else(|error| format!("unavailable: {error}"))
+    };
+    let raw = read(&shard, "SELECT json_group_array(json_object(
+        'subject',subject,'total',total,'sealed',sealed,'unsealed',total-sealed))
+        FROM (SELECT claims.subject,COUNT(*) AS total,
+            SUM(EXISTS(SELECT 1 FROM replica_envelopes
+                WHERE replica_envelopes.batch_id=claims.batch_id)) AS sealed
+            FROM claims WHERE kind='message.sent' GROUP BY claims.subject ORDER BY claims.subject)");
+    let admission = read(&shard, "SELECT json_group_array(json_object(
+        'writer',writer,'sequence',sequence,'state',receipt_state,'batch_id',batch_id))
+        FROM replica_envelopes");
+    let projection = read(&shard, "SELECT json_group_array(json_object(
+        'subject',subject,'store_index',store_index)) FROM stream_messages");
+    let mirror = read(&graph, "SELECT json_group_array(json_object(
+        'subject',subject,'stream_index',stream_index)) FROM local_stream_sent");
+    let cursor = read(&graph, "SELECT json_group_array(json_object('key',key,'value',value))
+        FROM meta WHERE key IN ('stream_mirror_sent_through','stream_mirror_lifecycle_through')");
+    format!("raw={raw}; admission={admission}; stream_messages={projection}; mirror={mirror}; cursor={cursor}")
+}
+
 /// Stream mail reaches the phone's message list (`GET /v1/client/messages`) on every member of
 /// this build that holds it, beside a member of the previous release. Each lists the items its
 /// shard holds, page by page, with what a graph message's item carries, and a close recorded on
@@ -9018,6 +9046,28 @@ async fn previous_release_beside_members_that_list_stream_mail_to_the_phone() {
     // Rolled back, then upgraded again, it lists what arrived meanwhile as well.
     let restored = previous_release_rollback(&mut o, &old, &recovery).await;
     if let Some(restored) = &restored {
+        // Restore rebuilds the release's local stream mirror asynchronously; health alone
+        // does not mean its selectors have reached the archived source cut.
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(60);
+        let mut previous = String::new();
+        loop {
+            let listed = client_listed(restored, false, 200).await;
+            let diagnostics = format!("listed={listed:?}; {}", restored_stream_diagnostics(restored));
+            if diagnostics != previous {
+                eprintln!("restored release after {:?}: expected={pre_upgrade:?}; {diagnostics}", started.elapsed());
+                previous = diagnostics;
+            }
+            if listed == pre_upgrade {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the restored release did not reach the archived source cut {pre_upgrade:?}: {previous}\n{}",
+                restored.logs()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         assert_eq!(client_listed(restored, false, 200).await, pre_upgrade);
     }
     let late = "message/0000000000000d03";

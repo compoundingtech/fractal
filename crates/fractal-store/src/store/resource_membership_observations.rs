@@ -48,6 +48,9 @@ impl Observations {
         if active.admission.is_none() && (member.state == "queued" || previous.is_none() || previous == Some("queued")) {
             active.admission = Some(make_phase(LanePhaseKind::Admission, member.queued_at));
         }
+        if let Some(phase) = active.admission.as_mut() {
+            phase.set_blocked_by(member.blocked_by.map(super::BlockedBy::as_str));
+        }
         if member.state != "queued" && let Some(mut phase) = active.admission.take() {
             if let Some(grant) = &member.grant { phase.set_generation(&grant.generation); }
             let outcome = if member.state == "refused" {
@@ -150,7 +153,7 @@ fn publish_snapshot(connection: &rusqlite::Connection, telemetry: &LaneTelemetry
         rusqlite::params![host,lane], |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let holds = super::super::host_holds::blocking_tx(connection, host, lane)?.len();
-    telemetry.snapshot(lane, occupancy, queued, holds as u64);
+    telemetry.snapshot(host, lane, occupancy, queued, holds as u64);
     Ok(())
 }
 
@@ -185,11 +188,15 @@ mod tests {
     fn queue_and_release_observers_survive_rechecks_and_uncertain_retirement() {
         let mut observations = Observations::default();
         let mut member = member();
+        assert_eq!(member.blocked_by, None, "older persisted memberships omit attribution");
+        member.blocked_by = Some(super::super::BlockedBy::Hold);
         observations.transition(&member, None, 100, false);
+        member.blocked_by = Some(super::super::BlockedBy::Psi);
         observations.transition(&member, Some("queued"), 110, false);
         assert_eq!(observations.active.len(), 1);
         assert!(observations.active[&member.request.id].admission.is_some());
         member.state = "admitted".into();
+        member.blocked_by = None;
         member.admitted_at = Some(120);
         observations.transition(&member, Some("queued"), 120, false);
         assert!(observations.active[&member.request.id].admission.is_none());
