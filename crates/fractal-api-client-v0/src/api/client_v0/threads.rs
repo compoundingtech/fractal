@@ -912,6 +912,10 @@ mod tests {
         assert_eq!(reminder["marks"].as_array().unwrap().len(), 1);
         assert_eq!(reminder["marks"][0]["anchor_message_id"], message);
         assert!(reminder["marks"][0]["mark_id"].is_string());
+        let persisted = state.store.claims_for(thread, Some(fractal_schema::threads::UNREAD_MARKED)).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(reminder["marks"][0]["mark_id"], persisted[0].operation_id.as_deref().unwrap());
+        assert_ne!(reminder["marks"][0]["mark_id"], persisted[0].id);
         assert_eq!(summary["unread"], true);
         let list = read("/v1/client/threads?agent_id=agent%2Freminder").await;
         assert_eq!(list["items"][0]["unread_reminder"], *reminder);

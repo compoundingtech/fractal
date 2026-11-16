@@ -2978,7 +2978,7 @@
     "ThreadReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "content"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "content": {"type": "string", "minLength": 1, "maxLength": 8192}, "thread_quote_id": {"$ref": "#/$defs/Id"}, "signature": {"$ref": "#/$defs/DeviceSignature"}}},
     "ThreadTimelineEvent": {"oneOf": [{"$ref": "#/$defs/ThreadRenamedEvent"}, {"$ref": "#/$defs/ThreadClosedEvent"}, {"$ref": "#/$defs/ThreadReopenedEvent"}, {"$ref": "#/$defs/ThreadMessageEvent"}]},
     "ThreadTimelineAnchor": {"type":"object","additionalProperties":false,"required":["message_id","state"],"properties":{"message_id":{"$ref":"#/$defs/Id"},"state":{"enum":["current","unavailable","pending"]}}},
-    "ThreadTimelinePage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "previous_cursor":{"type":"string","description":"Opaque cursor for newer items; absent when nothing is newer. Pages remain newest first."}, "anchor":{"$ref":"#/$defs/ThreadTimelineAnchor","description":"Present only for around reads. Unavailable or pending anchors expose no content and require the caller's active reminder."}}},
+    "ThreadTimelinePage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "previous_cursor":{"type":"string","description":"Opaque cursor for newer items; absent when nothing is newer. Pages remain newest first."}, "anchor":{"$ref":"#/$defs/ThreadTimelineAnchor","description":"Present only for around reads. Unavailable requires retained signed routing proof for the same owner and thread. Pending requires the caller's own authenticated signed Mark intent for that exact unknown anchor on this thread, not an active reminder; it activates no badge. Neither state exposes anchor content or grants read permission."}}},
     "ThreadTargetParameters": {"type": "object", "additionalProperties": false, "required": ["target_id"], "properties": {"target_id": {"$ref": "#/$defs/Id"}}},
     "ThreadRenameParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "title", "title_revision"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "title_revision": {"$ref": "#/$defs/Revision"}}},
     "AgentDeclaration": {
@@ -3912,6 +3912,7 @@
       }
     },
     "ThreadMarkUnreadParameters": {
+      "description":"Mark unread with an idempotent operation key. After completion, read the thread summary to obtain opaque mark_id values. The generic action-result operation_id is not a mark ID.",
       "type":"object","additionalProperties":false,
       "required":["target_id","anchor_message_id","observed_marks"],
       "properties":{
@@ -3921,6 +3922,7 @@
       }
     },
     "ThreadClearUnreadParameters": {
+      "description":"Clear exactly the opaque mark_id values captured from the thread summary. Do not substitute the generic action-result operation_id, claim IDs, timestamps or local retry counters.",
       "type":"object","additionalProperties":false,
       "required":["target_id","observed_marks"],
       "properties":{
