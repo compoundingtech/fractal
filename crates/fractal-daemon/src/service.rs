@@ -27,6 +27,10 @@ mod stage;
 pub use stage::stage_fractal;
 #[cfg(unix)]
 pub mod launchd_domain;
+#[cfg(unix)]
+pub mod launchctl;
+#[cfg(unix)]
+pub mod launchd_health;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn stage_fractal(_config: Config, _config_path: Option<&Path>) -> Result<()> {
@@ -815,9 +819,8 @@ fn status_native_service() -> Result<ServiceStatusReport> {
 #[cfg(target_os = "macos")]
 fn launchd_service_status(label: &str, plist: &Path) -> Result<ServiceStatus> {
     let target = format!("{}/{label}", launch_domain());
-    let output = host_command("launchctl")
-        .args(["print", &target])
-        .output()
+    let output = launchctl::output(host_command("launchctl")
+        .args(["print", &target]))
         .with_context(|| format!("run launchctl print {target}"))?;
     anyhow::ensure!(
         output.status.success() || output.status.code() == Some(113),
@@ -856,9 +859,8 @@ fn restart_native_service(config: &Config) -> Result<()> {
     let services = lookup::native()?;
     let domain = launch_domain();
     let replication_service = format!("{domain}/{}", services.replication.name);
-    let _ = host_command("launchctl")
-        .args(["bootout", &replication_service])
-        .status();
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["bootout", &replication_service]));
     run_command(
         "launchctl",
         &["kickstart", "-k", &format!("{domain}/{}", services.daemon.name)],
@@ -877,19 +879,15 @@ fn restart_native_service(config: &Config) -> Result<()> {
 fn uninstall_native_service() -> Result<()> {
     let services = lookup::native()?;
     let service = format!("{}/{}", launch_domain(), services.daemon.name);
-    let _ = host_command("launchctl")
-        .args(["bootout", &service])
-        .status();
-    let _ = host_command("launchctl")
-        .args(["disable", &service])
-        .status();
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["bootout", &service]));
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["disable", &service]));
     let replication_service = format!("{}/{}", launch_domain(), services.replication.name);
-    let _ = host_command("launchctl")
-        .args(["bootout", &replication_service])
-        .status();
-    let _ = host_command("launchctl")
-        .args(["disable", &replication_service])
-        .status();
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["bootout", &replication_service]));
+    let _ = launchctl::output(host_command("launchctl")
+        .args(["disable", &replication_service]));
     let plist = lookup::launchd_path(&services.daemon.name)?;
     if plist.exists() {
         fs::remove_file(plist)?;
@@ -904,12 +902,11 @@ fn uninstall_native_service() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn stop_native_service() -> Result<()> {
     let services = lookup::native()?;
-    let _ = host_command("launchctl")
+    let _ = launchctl::output(host_command("launchctl")
         .args([
             "bootout",
             &format!("{}/{}", launch_domain(), services.replication.name),
-        ])
-        .status();
+        ]));
     run_command(
         "launchctl",
         &["bootout", &format!("{}/{}", launch_domain(), services.daemon.name)],
@@ -1267,9 +1264,8 @@ pub(crate) fn replication_worker_pid() -> Result<u32> {
     #[cfg(target_os = "macos")]
     {
         let service = lookup::native()?.replication;
-        let output = host_command("launchctl")
-            .args(["print", &format!("{}/{}", launch_domain(), service.name)])
-            .output()?;
+        let output = launchctl::output(host_command("launchctl")
+            .args(["print", &format!("{}/{}", launch_domain(), service.name)]))?;
         anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
         let text = std::str::from_utf8(&output.stdout)?;
         let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))

@@ -43,6 +43,25 @@ async fn health_reports_read_only_systemd_failure_and_recovery() {
     }
 }
 
+#[tokio::test]
+async fn health_reports_read_only_supervisor_failure_and_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let failure = json!({"reason":"launchd-unresponsive", "since_unix_ms":1000,
+        "retry_after_unix_ms":6000, "consecutive_timeouts":1});
+    let current = Arc::new(std::sync::Mutex::new(Some(failure.clone())));
+    let observed = current.clone();
+    let app = router(state).layer(Extension(SupervisorHealth(Arc::new(move || {
+        observed.lock().unwrap().clone()
+    }))));
+    let (status, health) = get_request(app.clone(), "/v1/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["service_manager"], failure);
+    *current.lock().unwrap() = None;
+    let (_, health) = get_request(app, "/v1/health").await;
+    assert!(health.get("service_manager").is_none());
+}
+
 #[test]
 fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
     assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
@@ -5883,7 +5902,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let health_of = |state: &AppState| {
         let state = state.clone();
-        async move { health(State(state)).await.unwrap().0 }
+        async move { health(State(state), None).await.unwrap().0 }
     };
     assert!(health_of(&state).await.get("messages_store_index").is_none(), "no shard, no stream index");
     crate::store::messages_shard::open(&state.store, root.path()).unwrap();
@@ -14383,6 +14402,26 @@ version 2
         })
         .unwrap();
     let store = state.store.clone();
+    // Attention links use the full step-run identity, not the review's display path.
+    let resources = client_attention_resources(&store, Some("person/alex"), false).unwrap();
+    let gate = resources
+        .iter()
+        .find(|item| item["source_id"] == step.subject)
+        .unwrap();
+    let step_id = gate["step_run_id"].as_str().unwrap();
+    fractal_schema::registry().validate_subject(step_id).unwrap();
+    assert!(step_id.starts_with("step-run/"));
+    assert_eq!(step_id, step.subject);
+    assert_eq!(gate["step_run_id"], gate["source_id"]);
+    let items = store.mission_run_attention_items(Some("person/alex")).unwrap();
+    let item = items.iter().find(|item| item.subject == step.subject).unwrap();
+    let projected = crate::store::attention_ivm::resource(item).unwrap();
+    assert_eq!(projected["step_run_id"], gate["step_run_id"]);
+    let mission_gate = resources
+        .iter()
+        .find(|item| item["source_id"] == run.subject)
+        .unwrap();
+    assert!(mission_gate.get("step_run_id").is_none());
     let app = router(state);
     let (status, listed) = get_request(app.clone(), "/v1/reviews").await;
     assert_eq!(status, StatusCode::OK, "{listed}");

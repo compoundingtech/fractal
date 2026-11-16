@@ -83,6 +83,7 @@ mod availability;
 mod directive_note;
 mod completion;
 mod doctor_cli;
+mod effects_cli;
 mod fractal;
 mod release_version;
 #[cfg(test)]
@@ -348,6 +349,11 @@ enum Command {
         #[command(subcommand)]
         command: MissionViewCommand,
     },
+    /// Inspect durable native effects or explicitly resolve an uncertain outcome.
+    Effects {
+        #[command(subcommand)]
+        command: effects_cli::EffectsCommand,
+    },
     /// List locally replicated schedule declarations and their knowledge limits.
     Schedules {
         #[command(subcommand)]
@@ -365,7 +371,7 @@ enum Command {
     #[command(
         name = "alerts",
         alias = "attention",
-        after_help = "Messages never appear here; read them with `fractal conversations`.\nFaults never appear here; fractal sends each one to the agent that owns it, which asks a person with `fractal work ask` only if it needs to."
+        after_help = "Messages never appear here; read them with `fractal conversations`.\nOperational faults go to their owning agent, which asks a person with `fractal work ask` when needed. Unresolved native effects also appear here because only explicit person resolution can clear their fence."
     )]
     Attention {
         #[command(subcommand)]
@@ -1301,6 +1307,18 @@ enum MissionViewCommand {
         /// stay on `/v1/mission-runs?mission=`.
         #[arg(long, add = ArgValueCompleter::new(Complete(Entity::Mission)))]
         mission: Option<String>,
+    },
+    /// List bounded run and step summaries for a mission ID prefix.
+    Runs {
+        /// Literal mission ID prefix to select.
+        #[arg(long)]
+        mission_prefix: String,
+        /// Only include active runs.
+        #[arg(long)]
+        active: bool,
+        /// Maximum runs to return (1 through 500).
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
     },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
@@ -6380,6 +6398,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Clients => run_clients(&endpoint, cli.json).await,
         Command::Work { command } => run_work(&client, &endpoint, command, cli.json).await,
+        Command::Effects { command } => effects_cli::run(&endpoint, command, cli.json).await,
         Command::Changes(arguments) => {
             let client = if matches!(
                 &arguments.command,
@@ -6704,6 +6723,10 @@ fn guard_mutating_cli_actor(
             PersonsCommand::Rename(args) => Some(args.actor.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("a harness person rename needs explicit --as {own}")
             })?),
+        },
+        Command::Effects { command } => match command {
+            effects_cli::EffectsCommand::Resolve(args) => Some(args.actor.as_str()),
+            effects_cli::EffectsCommand::Status { .. } => None,
         },
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
@@ -7921,6 +7944,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
+    reconciler.set_ask_digest_policy(&config.asks)?;
     fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -21216,6 +21240,9 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
                 store.set_ask_deadlines(asks.deadlines);
+                if let Err(error) = reconciler.set_ask_digest_policy(&asks) {
+                    tracing::warn!("the ask digest policy keeps its last config: {error:#}");
+                }
                 limits = reloaded;
                 last_error = None;
             }

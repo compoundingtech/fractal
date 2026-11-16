@@ -19,6 +19,43 @@ pub enum EffectClass {
     FailClosed,
 }
 
+/// Daemon-owned capabilities. SDK declarations cannot widen this table.
+pub fn provider_class(provider: &str) -> Option<EffectClass> {
+    match provider {
+        "native-message" | "person-ask" | "github.comment" => Some(EffectClass::NativeCoordinated),
+        "git.branch-create" | "git.pr-create" => Some(EffectClass::ProviderIdempotent),
+        _ => None,
+    }
+}
+
+/// Targets are provider identities, not caller-selected capability declarations.
+pub fn validate_provider(provider: &str, class: EffectClass, target: &str) -> Result<(), ValidationError> {
+    let expected = provider_class(provider).ok_or_else(|| {
+        error("effect-provider-unknown", "the daemon has no capability declaration for this provider")
+    })?;
+    if class != expected {
+        return Err(error("effect-class-mismatch", "the effect class differs from the daemon capability"));
+    }
+    let valid = match provider {
+        "native-message" => ["agent/", "person/", "channel/"].iter()
+            .any(|prefix| target.strip_prefix(prefix).is_some_and(|id| !id.trim().is_empty())),
+        "person-ask" => target.strip_prefix("person/").is_some_and(|id| !id.trim().is_empty()),
+        "git.branch-create" | "git.pr-create" => serde_json::from_str::<Value>(target).ok()
+            .is_some_and(|target| ["repo", "head"].iter().all(|field| {
+                target.get(field).and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty())
+            })),
+        "github.comment" => serde_json::from_str::<Value>(target).ok()
+            .is_some_and(|target| target.get("repo").and_then(Value::as_str)
+                .is_some_and(|repo| !repo.trim().is_empty())
+                && target.get("number").and_then(Value::as_u64).is_some_and(|number| number > 0)),
+        _ => false,
+    };
+    if !valid {
+        return Err(error("effect-target-mismatch", "the target does not match the provider capability"));
+    }
+    Ok(())
+}
+
 /// Every phase repeats the immutable identity and admission bindings.
 /// Provider observations are additive; absent metadata is never guessed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -35,6 +72,10 @@ pub struct EffectRecord {
     pub lease_incarnation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovering_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,8 +123,19 @@ pub fn validate(
             "a recovering actor must be nonempty when present",
         ));
     }
+    if record.resolution.as_deref().is_some_and(|value| value != "human")
+        || record.outcome.as_deref().is_some_and(|value| value != "abandoned")
+        || (record.resolution.is_some() && (kind != KIND_CONFIRMED
+            || !record.recovering_actor.as_deref().is_some_and(|actor|
+                actor.starts_with("person/") && actor.len() > 7 && actor.matches('/').count() == 1)))
+        || (record.outcome.is_some() && record.resolution.as_deref() != Some("human"))
+    {
+        return Err(error("invalid-effect", "human resolution requires a person and a confirmed or abandoned outcome"));
+    }
     if kind == KIND_CONFIRMED
-        && (record.provider_ref.as_ref().is_none_or(|value| value.trim().is_empty())
+        && ((record.outcome.as_deref() != Some("abandoned")
+            && record.provider_ref.as_ref().is_none_or(|value| value.trim().is_empty()))
+            || record.provider_ref.as_ref().is_some_and(|value| value.trim().is_empty())
             || record.evidence.is_empty()
             || record.evidence.iter().any(|value| value.trim().is_empty()))
     {
@@ -209,6 +261,8 @@ mod tests {
             lease_owner: "agent/example/sender".into(),
             lease_incarnation: "incarnation".into(),
             recovering_actor: Some("agent/example/recoverer".into()),
+            resolution: None,
+            outcome: None,
             provider_ref: None,
             result_digest: None,
             error: None,
@@ -221,13 +275,35 @@ mod tests {
     }
 
     #[test]
+    fn human_abandonment_is_explicit_and_never_requires_a_fabricated_receipt() {
+        let mut input = fields();
+        input.insert("resolution".into(), json!("human"));
+        input.insert("outcome".into(), json!("abandoned"));
+        input.insert("recovering_actor".into(), json!("person/example"));
+        input.insert("evidence".into(), json!(["decision/example"]));
+        assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_ok());
+        assert!(crate::registry().validate_claim("effect/op", KIND_CONFIRMED, &input).is_ok());
+        assert!(validate(KIND_UNRESOLVED, "effect/op", &input).is_err());
+        input.insert("recovering_actor".into(), json!("agent/example/worker"));
+        assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_err());
+        input.insert("recovering_actor".into(), json!("person/example"));
+        input.remove("outcome");
+        assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_err());
+        input.insert("provider_ref".into(), json!("message/example"));
+        assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_ok());
+        assert!(crate::registry().validate_claim("effect/op", KIND_CONFIRMED, &input).is_ok());
+        input.insert("outcome".into(), json!("confirmed"));
+        assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_err());
+    }
+
+    #[test]
     fn optional_metadata_is_omitted_and_future_metadata_is_readable() {
         let mut input = fields();
         input.insert("future_metadata".into(), json!({"observed": true}));
         let record: EffectRecord = serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
         assert!(record.evidence.is_empty());
         let output = serde_json::to_value(&record).unwrap();
-        for field in ["recovering_actor", "provider_ref", "result_digest", "error"] {
+        for field in ["recovering_actor", "provider_ref", "result_digest", "error", "resolution", "outcome"] {
             assert!(output.get(field).is_none());
         }
         for (class, encoded) in [(EffectClass::NativeCoordinated, "native-coordinated"),

@@ -1512,6 +1512,8 @@ pub struct Reconciler<R = NativeRuntime> {
     pub incremental: crate::incremental::Incremental,
     /// How far [`Self::observe_stream`] has read the messages shard; `None` until the first pass.
     stream_seen: Mutex<Option<crate::store::messages_shard::mailbox_reads::StreamPosition>>,
+    /// Independent effect feed cursor; `None` bootstraps durable subjects once.
+    effect_seen: Mutex<Option<(u64, i64)>>,
     /// Fail a pass that makes a correction an incremental pass would have missed (tests).
     strict_incremental: bool,
     /// Skip items nothing changed for, between periodic full passes. Off in test reconcilers,
@@ -1778,6 +1780,7 @@ impl Reconciler<NativeRuntime> {
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
             stream_seen: Default::default(),
+            effect_seen: Default::default(),
             strict_incremental: false,
             skip_unneeded: std::env::var("ST3_INCREMENTAL").as_deref() != Ok("off"),
             session_starts: Arc::new(Mutex::new(HashMap::new())),
@@ -2001,6 +2004,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
             stream_seen: Default::default(),
+            effect_seen: Default::default(),
             strict_incremental: true,
             skip_unneeded: false,
             session_starts: Arc::new(Mutex::new(HashMap::new())),
@@ -3003,6 +3007,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.skip_unneeded
                 .then(|| self.incremental.next_due(""))
                 .flatten(),
+            // Effects remain incremental even when diagnostic full passes are enabled.
+            self.incremental.next_due("effect/"),
             read("deadline/work-wakes", &|| {
                 if self.skip_unneeded {
                     Ok(None)
@@ -3248,6 +3254,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{:?}", self.store.publication_cache_epoch()),
         );
         drop(observe_span);
+        // Recovery is readback-only; use per-effect changes and lease deadlines,
+        // never a full durable-history walk on unrelated daemon wakes.
+        self.reconcile_effects()?;
         let mut _runners_span = crate::reconcile_telemetry::phase("pass/gate-runners");
         let gate_runners = self.gate_runners()?;
         _runners_span.items(gate_runners.len());
@@ -4310,6 +4319,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.reconcile_provider_capacity_retries(&desired)
         });
         self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
+        self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
         });
@@ -11652,6 +11662,61 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.evaluate_mission_run(run, &mission)
     }
 
+    fn reconcile_effects(&self) -> Result<()> {
+        let mut cursor = self.effect_seen.lock().unwrap_or_else(PoisonError::into_inner);
+        // Capture the feed boundary before bootstrap/evaluation: concurrent writes
+        // are still observed next pass, after their dependencies have registered.
+        let feed = self.incremental.readers_since(&self.store, *cursor, "effect/")?;
+        let mut subjects = self.incremental.needed_items("effect/", now_ms());
+        if cursor.is_none() {
+            subjects.extend(self.store.effect_subjects()?);
+        }
+        subjects.extend(feed.readers);
+        subjects.extend(feed.unseen);
+        for subject in subjects {
+            let ((result, due), reads) = smallclaims::touched::record(|| {
+                smallclaims::touched::record_due(|| -> Result<()> {
+                    self.store.reconcile_effect(&subject)?;
+                    if let Some((state, effect)) = self.store.effect_state(&subject)?
+                        && state == "unresolved"
+                    {
+                        self.raise_unresolved_effect(&effect)?;
+                    }
+                    Ok(())
+                })
+            });
+            result?;
+            self.incremental.evaluated(&subject, reads, due);
+        }
+        *cursor = Some(feed.cursor);
+        Ok(())
+    }
+
+    fn raise_unresolved_effect(&self, effect: &crate::store::effects::EffectRecord) -> Result<()> {
+        let Some(step) = self.store.step_run(&effect.bound_step_run)? else { return Ok(()) };
+        let episode = format!("effect-unresolved:{}", effect.effect_id);
+        // Durable episode identity survives both daemon restart and lease churn.
+        self.store.record_runtime_failure(
+            &episode,
+            &AttentionRequest {
+                reviewer: effect.lease_owner.clone(),
+                title: "Native effect requires resolution".into(),
+                reason: format!(
+                    "{} waits on {}: {}. No second send will be attempted. A person must confirm delivery or explicitly abandon the effect.",
+                    step.run, effect.effect_id,
+                    effect.error.as_deref().unwrap_or("delivery cannot be established"),
+                ),
+                severity: "error".into(),
+                targets: vec![step.run.clone(), step.generation.clone(),
+                    effect.effect_id.clone(), step.subject.clone()],
+                actor: RECONCILER_ACTOR.into(),
+                idempotency_key: episode.clone(),
+            },
+            "effect-unresolved",
+        )?;
+        Ok(())
+    }
+
     // Both normal evaluation and the direct cleanup entrypoint must honor this fence.
     fn unresolved_effect_run_fence(&self, run: &MissionRunView) -> Result<Option<bool>> {
         if self.store.mission_run_has_unresolved_effect(&run.id)? {
@@ -15215,7 +15280,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                 }
                 DependencySpec::Predicate { gate } => {
-                    let fake = crate::model::StepRunView { executions: None, subject: format!(
+                    let fake = crate::model::StepRunView { executions: None, effects: Vec::new(), subject: format!(
                         "step-run/{}/{}",
                         run.generation
                             .strip_prefix("run-generation/")
@@ -16310,6 +16375,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<Option<MissingProduct>> {
         for product in products {
             let subject = crate::mission::interpolate(&product.subject, variables)?;
+            if subject.starts_with("effect/")
+                && self.store.effect_state(&subject)?.is_some_and(|(state, record)|
+                    state == "abandoned" && record.resolution.as_deref() == Some("human"))
+            {
+                // Explicit abandonment waives this product obligation; it does not
+                // fabricate delivered=true or a provider receipt for field predicates.
+                continue;
+            }
             let mut fields = Vec::with_capacity(product.fields.len());
             for (field, expected) in &product.fields {
                 let expected = match expected {
@@ -16755,6 +16828,27 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(deadline) = pass.next_deadline {
             self.arm_deadline_at(
                 "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
+    }
+
+    /// Wake immediately when a hot reload changes the daily boundary, even if no claim changed.
+    pub fn set_ask_digest_policy(&self, config: &crate::config::AsksConfig) -> Result<()> {
+        if self.store.set_ask_digest_policy(config)? {
+            self.signal_changed();
+        }
+        Ok(())
+    }
+
+    /// Publish each person's daily auto-resolution digest and wake at its next local boundary.
+    fn reconcile_ask_digests(&self) -> Result<bool> {
+        let pass = self.store.reconcile_ask_digests_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "ask-digest",
                 deadline,
                 crate::reconcile_telemetry::WakeCause::Deadline,
             );
@@ -20595,6 +20689,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn subject_value(&self, subject: &str) -> Result<Option<Value>> {
+        if subject.starts_with("effect/") {
+            return self.store.effect_state(subject)?
+                .map(|(state, record)| {
+                    let mut fields = serde_json::to_value(record)?;
+                    fields["delivered"] = Value::Bool(state == "confirmed");
+                    Ok(serde_json::json!({"fields": fields}))
+                })
+                .transpose();
+        }
         if subject.starts_with("resource/")
             && let Some((name, claim_id)) = subject.rsplit_once('@')
         {

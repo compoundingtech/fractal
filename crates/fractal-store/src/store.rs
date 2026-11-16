@@ -25,6 +25,7 @@ mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
+pub mod mission_run_query;
 pub mod step_executions;
 mod mission_supersession;
 pub mod seats;
@@ -37,6 +38,10 @@ pub mod accountable_tests;
 pub mod custom;
 pub mod model_drift;
 mod notice_authority;
+pub mod ask_digest;
+pub mod auto_resolved;
+mod ask_digest_cache;
+mod ask_digest_payload;
 mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
@@ -829,7 +834,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h0f50685697d0 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h709be0a6fbc5 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1290,6 +1295,12 @@ ON mission_runs(root_run_id, created_at_unix_ms, id);
 -- OPEN_MISSION_RUN, which queries repeat so the planner uses this index.
 CREATE INDEX IF NOT EXISTS mission_runs_open_index ON mission_runs(created_at_unix_ms, id)
 WHERE status NOT IN ('completed','failed','cancelled');
+-- Scope this partial index to explicit mission-key range readers. Without the
+-- domain term, unrelated open-run queue reads can choose its differently ordered scan.
+DROP INDEX IF EXISTS mission_runs_open_mission_page_index;
+CREATE INDEX IF NOT EXISTS mission_runs_open_mission_prefix_index
+ON mission_runs(mission_id, created_at_unix_ms DESC, id DESC)
+WHERE mission_id>='' AND status NOT IN ('completed','failed','cancelled');
 
 CREATE TABLE IF NOT EXISTS mission_run_deadlines (
     run_id TEXT PRIMARY KEY REFERENCES mission_runs(id),
@@ -2904,6 +2915,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2933,6 +2945,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2967,6 +2980,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
@@ -5608,7 +5622,9 @@ impl Store {
                 || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
-                    "SELECT subject, actor, kind IN ('work.claimed','work.progress')
+                    "SELECT subject, actor, kind IN ('work.claimed','work.progress'),
+                            kind='owned-set.revised' OR json_extract(body,'$.owned_set') IS NOT NULL
+                                OR json_extract(body,'$._operation.id') IS NOT NULL
                      FROM claims WHERE store_index>?1 AND store_index<=?2",
                 )?;
                 let mut changed = HashSet::new();
@@ -5617,10 +5633,13 @@ impl Store {
                 // authored claims. Keep those input generations distinct.
                 let mut changed_subjects = HashSet::new();
                 let mut runtime_work_actors = HashSet::new();
+                let mut indirect_runtime_inputs = false;
                 for row in statement.query_map(params![cache.through, store_index], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                        row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
                 })? {
-                    let (subject, actor, work_activity) = row?;
+                    let (subject, actor, work_activity, indirect) = row?;
+                    indirect_runtime_inputs |= indirect;
                     if work_activity && let Some(actor) = &actor {
                         runtime_work_actors.insert(actor.clone());
                     }
@@ -5629,6 +5648,13 @@ impl Store {
                     changed.extend(actor);
                 }
                 drop(statement);
+                if indirect_runtime_inputs {
+                    // Receipt-selected declarations and operation authority can change
+                    // earlier runtime subjects without a claim naming those subjects.
+                    let runtimes = self.runtime_list_changes(cache.through, store_index)?;
+                    changed.extend(runtimes.iter().cloned());
+                    changed_subjects.extend(runtimes);
+                }
                 let stale = |subject: &String, owners: &[String]| {
                     changed.contains(subject) || owners.iter().any(|owner| changed.contains(owner))
                 };
@@ -5860,20 +5886,31 @@ impl Store {
         self.status_for_subject_names_at(subjects, index, history, claims)
     }
 
+    const GENERIC_RESERVED_SUBJECTS_SQL: &str =
+        "SELECT selected.value FROM json_each(?1) selected WHERE EXISTS (
+         SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='custom.attention' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='custom.attention.' AND kind<'custom.attention/' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='attention.notice' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='attention.notice-' AND kind<'attention.notice.' AND store_index<=?2)";
+
     pub fn generic_status_subject_names_at(
         &self, mut subjects: BTreeSet<String>, index: u64,
     ) -> Result<BTreeSet<String>> {
         subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
         if subjects.is_empty() { return Ok(subjects); }
         let connection = self.readers.get();
-        let mut query = connection.prepare_cached(
-            "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
-             JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2",
-        )?;
+        // Probe only the reserved namespace in the existing (subject, kind, index)
+        // index. Enumerating DISTINCT kinds reads every runtime observation and
+        // builds a temporary btree even when none of the subjects is reserved.
+        // Separate UNION arms keep each exact/prefix probe independently indexed.
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc18b868e178d owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::GENERIC_RESERVED_SUBJECTS_SQL)?;
         for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
-            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
-            let (subject,kind) = row?;
-            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+            row.get::<_,String>(0))? {
+            subjects.remove(&row?);
         }
         Ok(subjects)
     }
@@ -19425,10 +19462,36 @@ pub fn project_mission_run_update(
             )
             .optional()
             .map_err(internal)?;
+        // A newly converged ambiguity can invalidate a previous success. Only a
+        // daemon hold backed by a current-generation unresolved effect may reopen it.
+        let mut effect_resolution_hold = false;
+        if status == "blocked" && phase == "normal"
+            && fields.get("reason").and_then(Value::as_str) == Some("effect-unresolved")
+            && claim.actor.as_deref() == Some("daemon/runtime")
+        {
+            for effect in claim.body["evidence"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if effects::effect_is_unresolved_tx(transaction, effect).map_err(internal)?
+                    && transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mission_runs m JOIN step_runs s
+                         ON s.run_id=m.id AND s.generation_id=m.current_generation_id
+                         JOIN claims c ON c.subject=?2 AND c.kind='effect.unresolved'
+                           AND json_extract(c.body,'$.fields.bound_step_run')=s.subject
+                         WHERE m.id=?1)",
+                        params![run_id, effect], |row| row.get::<_, bool>(0),
+                    ).map_err(internal)?
+                {
+                    effect_resolution_hold = true;
+                    break;
+                }
+            }
+        }
+        let reopening_effect = effect_resolution_hold && current.as_ref().is_some_and(
+            |(status, phase)| is_terminal_run_state(status) || phase == "terminal",
+        );
         if current.is_some_and(|(current_status, current_phase)| {
             (is_terminal_run_state(&current_status) || current_phase == "terminal")
                 && !(is_terminal_run_state(status) || phase == "terminal")
-        }) {
+        }) && !effect_resolution_hold {
             return Ok(());
         }
         transaction
@@ -19437,6 +19500,14 @@ pub fn project_mission_run_update(
                 /* sqlite-large-value: allow-for-now lv-he4b8f413eb73 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, status, phase, claim.accepted_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
+        if reopening_effect {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-he1edfe7bd7b2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE run_generations SET status='running', updated_at_unix_ms=?2
+                 WHERE id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
+                params![run_id, claim.accepted_at_unix_ms.to_string()],
+            ).map_err(internal)?;
+        }
         if phase == "normal"
             && fields.get("previous_phase").and_then(Value::as_str) == Some("supersession-waiting")
         {
@@ -21117,7 +21188,7 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
         .nth(1)
         .map(|id| format!("run-generation/{id}"))
         .unwrap_or_default();
-    Ok(StepRunView { executions: None, subject,
+    Ok(StepRunView { executions: None, effects: Vec::new(), subject,
     run: format!("mission-run/{}", row.get::<_, String>(1)?),
     generation,
     step: row.get(2)?,
@@ -23258,6 +23329,7 @@ pub fn mission_run_view_and_definition_tx(
     let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
         if presentation {
+            step.effects = effects::effect_views_for_step_tx(connection, &step.subject)?;
             enrich_step_queue_with(connection, step, now_ms(), &mut definitions, history)?;
         } else {
             let snapshot_unix_ms = now_ms();

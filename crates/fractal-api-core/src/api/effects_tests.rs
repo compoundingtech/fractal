@@ -15,8 +15,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::on_origin("origin")
+    }
+
+    fn on_origin(origin: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let state = persistent_state(root.path(), "origin");
+        let state = persistent_state(root.path(), origin);
         state.store.bind_fleet(FLEET).unwrap();
         state.store.apply_internal(
             &parse_intent(r#"version 2
@@ -125,6 +129,24 @@ mission "example/report" state="ready" {
             && claim.body["evidence"].as_array().unwrap().contains(&json!(effect.effect_id))));
         assert_eq!(self.state.store.step_run(&self.owner().step).unwrap().unwrap().status, "blocked");
     }
+}
+
+#[test]
+fn daemon_capabilities_refuse_unknown_provider_class_and_target_before_admission() {
+    use crate::store::effects::{EffectClass, EffectTarget};
+    let fixture = Fixture::new();
+    for (provider, class, target, code) in [
+        ("sdk-provider", EffectClass::NativeCoordinated, "agent/example/reader", "effect-provider-unknown"),
+        ("native-message", EffectClass::ProviderIdempotent, "agent/example/reader", "effect-class-mismatch"),
+        ("native-message", EffectClass::NativeCoordinated, "not-a-recipient", "effect-target-mismatch"),
+        ("git.branch-create", EffectClass::ProviderIdempotent, r#"{"repo":"example/repo"}"#, "effect-target-mismatch"),
+    ] {
+        let error = fixture.state.store.admit_effect(fixture.owner(), &fixture.request.from,
+            &fixture.request.from, "digest", EffectTarget { provider, class, target }).unwrap_err();
+        assert_eq!(error.code, code);
+    }
+    // Refused declarations cannot consume the key or widen native-message capability.
+    fixture.admit();
 }
 
 fn persistent_state(root: &Path, origin: &str) -> AppState {
@@ -530,6 +552,34 @@ fn split_host_first_send_converges_with_a_durable_peer_fence_and_never_two_messa
 }
 
 #[test]
+fn visible_two_writer_admission_conflict_parks_before_either_host_sends() {
+    for at_send_boundary in [false, true] {
+        let first = Fixture::on_origin("first");
+        let second = Fixture::on_origin("second");
+        let left = first.admit();
+        let right = second.admit();
+        assert_eq!(left.operation_id, right.operation_id);
+        // Both independently admitted before either intent was visible to the other.
+        replicate(&first.state, &second.state);
+        replicate(&second.state, &first.state);
+        for (fixture, admitted) in [(&first, &left), (&second, &right)] {
+            let key = crate::store::effects::effect_key(fixture.owner()).unwrap();
+            let (writers, _) = fixture.state.store.operation_claims(&key).unwrap();
+            assert_eq!(writers.len(), 2);
+            let error = if at_send_boundary {
+                fixture.state.store.effect_in_flight(admitted).unwrap_err().code.to_owned()
+            } else {
+                fixture.accept().unwrap_err().code
+            };
+            assert_eq!(error, "idempotency-conflict");
+            fixture.assert_parked(admitted);
+            assert!(fixture.state.store.effect_in_flight(admitted).is_err());
+            assert_message_count(&fixture.state, 0);
+        }
+    }
+}
+
+#[test]
 fn peer_replacement_lease_cannot_originate_an_absent_effect_from_a_foreign_creation_anchor() {
     let original = Fixture::new();
     let root = tempfile::tempdir().unwrap();
@@ -593,4 +643,178 @@ fn unavailable_origin_and_missing_peer_receipt_never_authorize_a_resend() {
     assert!(parked.error.is_some());
     assert_eq!(peer.store.claims_for(&effect.effect_id, Some("effect.unresolved")).unwrap().len(), 1);
     assert_message_count(&peer, 0);
+}
+
+fn resolution_request(outcome: effects::EffectResolutionOutcome) -> effects::ResolveEffectRequest {
+    let provider_ref = matches!(outcome, effects::EffectResolutionOutcome::Confirmed)
+        .then(|| "message/example-observed".into());
+    effects::ResolveEffectRequest { actor: "person/example".into(), outcome, provider_ref,
+        evidence: vec!["decision/example".into()], idempotency_key: "example-resolution".into(),
+        delegation: None }
+}
+
+async fn resolve_as(fixture: &Fixture, effect: &EffectRecord, request: effects::ResolveEffectRequest,
+    person: Option<&str>) -> Result<Json<effects::EffectResponse>, ApiError> {
+    let session = person.map(|person| Extension(client_v0::ClientSession::local(Some(person)).unwrap()));
+    effects::resolve(State(fixture.state.clone()), AxumPath(format!("{}/resolve", effect.effect_id)),
+        session, None, Json(request)).await
+}
+
+#[tokio::test]
+async fn human_confirmation_and_abandonment_release_fences_without_changing_intent_or_sending() {
+    for outcome in [effects::EffectResolutionOutcome::Confirmed, effects::EffectResolutionOutcome::Abandoned] {
+        let mut fixture = Fixture::new();
+        let effect = fixture.admit();
+        fixture.state.store.effect_in_flight(&effect).unwrap();
+        fixture.state.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
+        let intent = fixture.state.store.claims_for(&effect.effect_id, Some("effect.intended")).unwrap();
+        let request = resolution_request(outcome);
+        let expected = if request.provider_ref.is_some() { "confirmed" } else { "abandoned" };
+        let Json(resolved) = resolve_as(&fixture, &effect, request.clone(), Some("person/example")).await.unwrap();
+        assert_eq!(resolved.state, expected);
+        assert_eq!(resolved.record.resolution.as_deref(), Some("human"));
+        assert_eq!(resolved.record.recovering_actor.as_deref(), Some("person/example"));
+        assert_eq!(resolved.record.lease_owner, effect.lease_owner);
+        assert_eq!(resolved.record.lease_incarnation, effect.lease_incarnation);
+        assert_eq!(resolved.record.bound_attempt, effect.bound_attempt);
+        assert_eq!(resolved.record.bound_step_run, effect.bound_step_run);
+        assert_eq!(resolved.record.payload_digest, effect.payload_digest);
+        assert!(!fixture.state.store.step_has_unresolved_effect(&effect.bound_step_run).unwrap());
+        assert!(!fixture.state.store.mission_run_has_unresolved_effect(
+            &fixture.state.store.step_run(&effect.bound_step_run).unwrap().unwrap().run).unwrap());
+        assert_eq!(fixture.state.store.step_run(&effect.bound_step_run).unwrap().unwrap().status, "ready");
+        let Json(replay) = resolve_as(&fixture, &effect, request.clone(), Some("person/example")).await.unwrap();
+        assert_eq!(replay.state, resolved.state);
+        assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().len(), 1);
+        let mut changed = request;
+        changed.evidence.push("decision/changed".into());
+        assert_eq!(resolve_as(&fixture, &effect, changed, Some("person/example")).await.unwrap_err().code, "idempotency-conflict");
+        let encoded = serde_json::to_value(&resolved).unwrap();
+        if expected == "confirmed" { assert!(encoded["record"].get("outcome").is_none()); }
+        else { assert!(encoded["record"].get("provider_ref").is_none()); }
+        assert!(encoded["record"].get("error").is_none());
+        fixture.restart();
+        assert!(!fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
+        assert_eq!(fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap().0, expected);
+        assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.intended")).unwrap()[0].id, intent[0].id);
+        assert_message_count(&fixture.state, 0);
+    }
+}
+
+#[tokio::test]
+async fn resolution_refuses_actor_strings_agents_and_foreign_authenticated_people() {
+    let fixture = Fixture::new();
+    let effect = fixture.admit();
+    fixture.state.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
+    let request = resolution_request(effects::EffectResolutionOutcome::Abandoned);
+    for person in [None, Some("agent/example/worker"), Some("person/other")] {
+        assert_eq!(resolve_as(&fixture, &effect, request.clone(), person).await.unwrap_err().status, StatusCode::FORBIDDEN);
+    }
+    let mut agent = request;
+    agent.actor = "agent/example/worker".into();
+    assert_eq!(resolve_as(&fixture, &effect, agent, Some("agent/example/worker")).await.unwrap_err().status, StatusCode::FORBIDDEN);
+    assert!(fixture.state.store.step_has_unresolved_effect(&effect.bound_step_run).unwrap());
+    assert!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn effect_by_key_reports_effective_state_and_conventional_not_found() {
+    let fixture = Fixture::new();
+    let effect = fixture.admit();
+    let key = crate::store::effects::effect_key(fixture.owner()).unwrap();
+    let Json(found) = effects::by_key(State(fixture.state.clone()), Query(effects::EffectKeyQuery { key: key.clone() })).await.unwrap();
+    assert_eq!(found.effect_id, effect.effect_id);
+    assert_eq!(found.state, "intended");
+    let encoded = serde_json::to_value(found).unwrap();
+    for field in ["recovering_actor", "resolution", "outcome", "provider_ref", "result_digest", "error"] {
+        assert!(encoded["record"].get(field).is_none(), "{field}");
+    }
+    fixture.state.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
+    let Json(resolved) = resolve_as(&fixture, &effect, resolution_request(effects::EffectResolutionOutcome::Abandoned), Some("person/example")).await.unwrap();
+    assert_eq!(resolved.state, "abandoned");
+    let Json(found) = effects::by_key(State(fixture.state.clone()), Query(effects::EffectKeyQuery { key })).await.unwrap();
+    assert_eq!(found.state, "abandoned");
+    assert_eq!(effects::by_key(State(fixture.state.clone()), Query(effects::EffectKeyQuery { key: "missing".into() }))
+        .await.unwrap_err().status, StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn recovery_after_restart_and_lease_churn_never_implicitly_resolves_an_episode() {
+    let mut fixture = Fixture::new();
+    let effect = fixture.admit();
+    fixture.state.store.effect_in_flight(&effect).unwrap();
+    fixture.replace_attempt();
+    assert!(fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
+    fixture.assert_parked(&effect);
+    fixture.restart();
+    assert!(!fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
+    fixture.state.store.unresolved_message_effect(&effect, "still-unknown", "daemon/runtime").unwrap();
+    fixture.assert_parked(&effect);
+    assert_eq!(fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "unresolved");
+    assert!(fixture.state.store.step_has_unresolved_effect(&effect.bound_step_run).unwrap());
+    assert_message_count(&fixture.state, 0);
+}
+
+#[tokio::test]
+async fn human_resolution_does_not_clear_a_concurrent_unseen_unresolved_episode() {
+    let fixture = Fixture::new();
+    let effect = fixture.admit();
+    let peer_root = tempfile::tempdir().unwrap();
+    let peer = persistent_state(peer_root.path(), "peer");
+    peer.store.bind_fleet(FLEET).unwrap();
+    replicate(&fixture.state, &peer);
+    fixture.state.store.unresolved_message_effect(&effect, "origin-unknown", "daemon/runtime").unwrap();
+    let Json(resolved) = resolve_as(&fixture, &effect, resolution_request(effects::EffectResolutionOutcome::Abandoned), Some("person/example")).await.unwrap();
+    assert_eq!(resolved.state, "abandoned");
+    peer.store.unresolved_message_effect(&effect, "peer-unknown", "daemon/runtime").unwrap();
+    replicate(&peer, &fixture.state);
+    assert_eq!(fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "unresolved");
+    assert!(fixture.state.store.step_has_unresolved_effect(&effect.bound_step_run).unwrap());
+    assert_message_count(&fixture.state, 0);
+}
+
+#[tokio::test]
+async fn effect_routes_authenticate_person_authority_and_return_standard_receipts() {
+    let fixture = Fixture::new();
+    let effect = fixture.admit();
+    fixture.state.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
+    let path = format!("/v1/effects/{}/resolve", urlencoding::encode(&effect.effect_id));
+    let body = serde_json::to_string(&resolution_request(effects::EffectResolutionOutcome::Abandoned)).unwrap();
+    let app = router(fixture.state.clone());
+    let request = Request::builder().method("POST").uri(&path)
+        .header("content-type", "application/json").body(Body::from(body.clone())).unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let request = Request::builder().method("POST").uri(&path)
+        .header("content-type", "application/json").header("x-st3-person", "person/example")
+        .body(Body::from(body)).unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let resolved: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
+    assert_eq!(resolved["value"]["state"], "abandoned");
+    assert_eq!(resolved["value"]["effect_id"], effect.effect_id);
+    let key = crate::store::effects::effect_key(fixture.owner()).unwrap();
+    let response = app.oneshot(Request::builder().uri(format!("/v1/effects/by-key?key={}", urlencoding::encode(&key)))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let found: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
+    assert_eq!(found["value"]["state"], "abandoned");
+    assert!(found["value"]["record"].get("provider_ref").is_none());
+}
+
+#[test]
+fn dead_original_lease_recovers_committed_native_message_only_by_key() {
+    let mut fixture = Fixture::new();
+    let effect = fixture.admit();
+    fixture.state.store.effect_in_flight(&effect).unwrap();
+    let receipt = fixture.seed_message();
+    fixture.replace_attempt();
+    assert!(fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
+    let (state, record) = fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap();
+    assert_eq!(state, "confirmed");
+    assert_eq!(record.provider_ref.as_deref(), Some(receipt.message.subject.as_str()));
+    assert_eq!(record.lease_incarnation, effect.lease_incarnation);
+    assert!(record.resolution.is_none());
+    assert!(!fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
+    assert_message_count(&fixture.state, 1);
 }

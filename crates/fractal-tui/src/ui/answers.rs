@@ -487,6 +487,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            episode: None,
             id: "attention/first".into(),
             tier: Tier::Stopped,
             title: "Choose".into(),

@@ -37,7 +37,12 @@ impl Commands for NativeCommands<'_> {
             }
             return Ok(output);
         }
-        command.output().with_context(|| format!("run {} {}", self.0, arguments.join(" ")))
+        let output = if self.0 == "launchctl" {
+            super::launchctl::output(&mut command)
+        } else {
+            command.output()
+        };
+        output.with_context(|| format!("run {} {}", self.0, arguments.join(" ")))
     }
 }
 
