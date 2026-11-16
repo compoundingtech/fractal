@@ -5,7 +5,7 @@ import { submitAnswer } from './answer.ts';
 import { AttentionDeliveryTracker, retainDeliveryPrincipal } from './attentionDelivery.ts';
 test('unknown keeps exact request and blocks opposite answer until explicit same-key check', async () => {
  const tracker=new AttentionDeliveryTracker(), original={id:'action/original',idempotency_key:'original'},sent=[];let builds=0,connected=false,cleared=0;
- const ports={build:async()=>{builds++;return original;},send:async request=>{sent.push(request);if(!connected)throw new TypeError('Network request failed');},stillWaiting:async()=>true,wait:async()=>{}};
+ const ports={build:async()=>{builds++;return original;},send:async request=>{sent.push(request);if(!connected)throw new TypeError('Network request failed');return {value:{kind:'action-result',status:'completed',action_id:request.id}};},stillWaiting:async()=>true,wait:async()=>{}};
  const result=await tracker.run('attention/item',async()=>tracker.accept('attention/item',await submitAnswer(ports),()=>{cleared++;}));
  assert.equal(result,false);assert.equal(tracker.snapshot().delivery['attention/item'],'unconfirmed');
  let opposite=0;assert.equal(await tracker.run('attention/item',async()=>{opposite++;return true;}),false);assert.equal(opposite,0);

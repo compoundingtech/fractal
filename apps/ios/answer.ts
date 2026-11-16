@@ -7,7 +7,7 @@
 // reply never arrives for good, the app asks whether the thing still waits: if it does not, the
 // answer is done (this one landed, or someone answered it first) and a repeat submit is a success,
 // not a failure. A refusal while it still waits is shown as the refusal it is.
-import { notApplied, outcomeUnknown } from '../../clients/typescript/fractal-client';
+import { appliedAnswer, ClientError, notApplied, outcomeUnknown } from '../../clients/typescript/fractal-client';
 
 export type AnswerPorts<R> = {
   /** A new request with its own key, fenced to an admissible held snapshot or a fresh read. */
@@ -35,17 +35,17 @@ export async function submitAnswer<R>(ports: AnswerPorts<R>): Promise<AnswerOutc
     let request: R;
     let ambiguous = false;
     try { request = await ports.build(); } catch (error) { return { ok: false, how: 'refused', error }; }
-    try { await ports.send(request); return { ok: true, how: 'sent' }; } catch (error) { last = error; ambiguous = !notApplied(error); }
+    try { requireCompletedActionReceipt(request, await ports.send(request)); return { ok: true, how: 'sent' }; } catch (error) { last = error; ambiguous = !answerNotApplied(error); }
     if (outcomeUnknown(last)) {
       // Fractal may have taken it: the identical request gets Fractal's first answer.
       await ports.wait(REPEAT_AFTER_MS);
-      try { await ports.send(request); return { ok: true, how: 'sent' }; } catch (error) { last = error; }
+      try { requireCompletedActionReceipt(request, await ports.send(request)); return { ok: true, how: 'sent' }; } catch (error) { last = error; }
     }
     // Whatever went wrong, an answer that is no longer waited for is an answer that landed.
     if ((await settled(ports)) === true) return { ok: true, how: 'already' };
     if (ambiguous) return unresolved(ports, request, last, true);
     // Only a refusal that guarantees nothing was applied is tried again with a new request.
-    if (!notApplied(last) || attempt + 1 >= ANSWER_TRIES) return unresolved(ports, request, last);
+    if (!answerNotApplied(last) || attempt + 1 >= ANSWER_TRIES) return unresolved(ports, request, last);
     await ports.wait(wait);
     wait = Math.min(wait * 2, 2000);
   }
@@ -59,11 +59,29 @@ async function settled<R>(ports: AnswerPorts<R>): Promise<boolean> {
 
 /** Unknown delivery keeps the original immutable identity and transport. Only explicit Check retries it. */
 function unresolved<R>(ports: AnswerPorts<R>, request: R, error: unknown, ambiguous = false): AnswerOutcome {
-  if (!ambiguous && notApplied(error)) return { ok: false, how: 'refused', error };
+  if (!ambiguous && answerNotApplied(error)) return { ok: false, how: 'refused', error };
   return { ok: false, how: 'unconfirmed', error, check: async () => {
-    try { await ports.send(request); return { ok: true, how: 'sent' }; } catch (error) {
+    try { requireCompletedActionReceipt(request, await ports.send(request)); return { ok: true, how: 'sent' }; } catch (error) {
       if (await settled(ports)) return { ok: true, how: 'already' };
       return unresolved(ports, request, error, true);
     }
   } };
+}
+
+/** A resolved HTTP request is not an action receipt. Accepted, missing or unrelated receipts stay uncertain. */
+export function requireCompletedActionReceipt(request: unknown, receipt: unknown): void {
+  const id = request && typeof request === 'object' && 'id' in request ? request.id : undefined;
+  const value = receipt && typeof receipt === 'object' && 'value' in receipt ? receipt.value : undefined;
+  if (typeof id === 'string' && value && typeof value === 'object' && 'kind' in value && value.kind === 'action-result' && 'action_id' in value && value.action_id === id && 'status' in value && value.status === 'completed') return;
+  throw new Error('The original action has no matching completed receipt. Check delivery before acting again.');
+}
+
+/** Unknown/replay-unsafe metadata overrides the older stale/rate-limited shorthand. */
+export function answerNotApplied(error: unknown): boolean {
+  if (appliedAnswer(error) === 'unknown') return false;
+  if (error instanceof ClientError) {
+    const details = error.response.details as Record<string, unknown> | undefined;
+    if (details?.replay_unsafe !== undefined && details.replay_unsafe !== false) return false;
+  }
+  return notApplied(error);
 }

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Add tested iOS delivery and request-draft models, and preserve an ambiguous answer's original identity when a later replay is refused.",
+  "summary": "Require matching completed iOS answer receipts and preserve ambiguous delivery identities through replay refusals.",
   "replay": {
     "status": "none",
     "detail": "No graph replay or data migration is required."
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "An ambiguous answer is not rebuilt with a fresh identity after a later stale-fence response. The retained check remains in memory only; this is not a durable outbox after process termination."
+    "detail": "An ambiguous answer is not rebuilt with a fresh identity after a later stale-fence response. The retained check remains in memory only; this is not a durable outbox after process termination. A resolved transport promise with an accepted, missing, or unrelated receipt remains unconfirmed; only a completed receipt for the original action confirms delivery."
   }
 }
