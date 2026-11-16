@@ -16,8 +16,8 @@ public enum PanelMetrics {
   static let highlightRadius: CGFloat = 10
   /// One-line inbox rows.
   static let rowHeight: CGFloat = 28
-  /// The tallest a page's scrolling content gets before it scrolls.
-  static let scrollHeight: CGFloat = 520
+  /// A deterministic compact-screen budget for the gallery's bounded snapshots.
+  static let snapshotScrollHeight: CGFloat = 520
   /// The top level's scroll content padding, above and below.
   static let scrollPadding: CGFloat = 4
   /// Leading symbol column of a row.
@@ -64,13 +64,50 @@ extension View {
 /// The height limit of a page's scrolling content; snapshots lift it to render whole pages. An
 /// explicit key: the `@Entry` macro's plugin ships only with Xcode.
 private struct PanelScrollHeightKey: EnvironmentKey {
-  static let defaultValue: CGFloat = PanelMetrics.scrollHeight
+  static let defaultValue: CGFloat = .infinity
 }
 
 extension EnvironmentValues {
   public var panelScrollHeight: CGFloat {
     get { self[PanelScrollHeightKey.self] }
     set { self[PanelScrollHeightKey.self] = newValue }
+  }
+}
+
+private struct PanelAvailableHeightKey: EnvironmentKey {
+  static let defaultValue: CGFloat = .infinity
+}
+
+extension EnvironmentValues {
+  /// Whole-panel space below the menu bar, supplied by the live window's screen.
+  public var panelAvailableHeight: CGFloat {
+    get { self[PanelAvailableHeightKey.self] }
+    set { self[PanelAvailableHeightKey.self] = newValue }
+  }
+}
+
+/// Reserve actual chrome heights before giving the remaining screen space to scrolling
+/// content. The same budget reaches Glance's inbox cap, so signals are never budgeted twice.
+struct PanelPage<Header: View, Content: View, Footer: View>: View {
+  @Environment(\.panelAvailableHeight) private var availableHeight
+  @Environment(\.panelScrollHeight) private var scrollHeight
+  @State private var headerHeight: CGFloat = 0
+  @State private var footerHeight: CGFloat = 0
+  @ViewBuilder let header: () -> Header
+  @ViewBuilder let content: () -> Content
+  @ViewBuilder let footer: () -> Footer
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      VStack(alignment: .leading, spacing: 0, content: header)
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
+      content()
+        .environment(\.panelScrollHeight, min(scrollHeight, max(0, availableHeight - headerHeight - footerHeight)))
+      VStack(alignment: .leading, spacing: 0, content: footer)
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
+    }
   }
 }
 

@@ -76,14 +76,15 @@ final class PanelMinuteClock {
   }
 }
 
-/// Unlike fixedSize, respects a short window's proposal while retaining compact ideal size.
+/// The screen-derived cap is authoritative: a MenuBarExtra's previous window height is
+/// merely a proposal, not a reason to keep newly available content below the fold.
 struct PanelScrollLayout: Layout {
   let cap: CGFloat
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
     guard let child = subviews.first else { return .zero }
     let ideal = child.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
-    return CGSize(width: proposal.width ?? ideal.width, height: min(ideal.height, proposal.height ?? .infinity, cap))
+    return CGSize(width: proposal.width ?? ideal.width, height: min(ideal.height, cap))
   }
 
   func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {

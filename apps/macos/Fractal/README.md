@@ -10,7 +10,9 @@ collection, but `FractalClient` has no typed attention or availability stream.
   Objectives tiles, a height-capped inbox, ten signal tiles in two columns, and
   the footer. Inbox rows show symbol, title, asker and age; drafts, writes in flight
   and refusals are marked on the row. Overflow opens a full scrollable inbox via
-  “N more”; the home cap adapts to the panel height with at least three rows.
+  “N more”; the home cap uses the screen's visible height minus a 12 pt margin
+  and measured tile/footer chrome. At least three inbox rows stay on short screens,
+  which then scroll; tall screens show more rows while keeping all signals in view.
   A row or tile opens its page within the panel, with a back chevron and Esc;
   cards opened from the full inbox return there on Back. With Reduce Motion pages
   cross-fade instead of sliding, and VoiceOver focus moves to the page title
@@ -221,11 +223,12 @@ literal (also `CFBundleShortVersionString`). Fractal sees the tray as
 
 The footer follows the identity spec's UI modality, refreshed each minute:
 
-- A Nix build abbreviates to the base version and the shared short form
-  (revision, `*` iff dirty, compact commit age): `0.2.0 · 2c3b5d7 · 2h`.
-- A source run or dev build keeps the spec's local prose, so it never passes
-  for a release:
-  `0.2.0 — running from local source (d7a78aea1b, committed 2 hours ago)`.
+- Every source kind abbreviates to the base version and the shared Swift
+  `BuildIdentity.short(now:)` form (seven revision characters, `*` iff dirty,
+  compact commit age): `0.2.0 · 883b657 · 2h`.
+- A stamped source run or dev build adds a compact `local` marker:
+  `0.2.0 · d7a78ae* · 2h · local`. The age always describes the commit, never
+  process uptime; a missing revision or commit timestamp is shown as `n/a`.
 - Its hover lists `displayVersion`, `machineVersion` (`0.2.0+2c3b5d77c917`,
   `0.2.0+local.d7a78aea1b`), the absolute commit time (and a dev build's start
   time) and the FractalClient revision (`FractalClientRevision` in
@@ -236,8 +239,15 @@ A build that does not run `flake.nix` (the dev channel, `swift run`) leaves the
 the tray process's `CLI_BUILD_STAMP` environment variable (effect-utils
 `cliBuildStamp`'s shape, timestamps in Unix seconds):
 `{"type":"local","rev":"<git rev-parse --short HEAD>","ts":<start>,"commitTs":<git log -1 --format=%ct HEAD>,"dirty":<false|true>}`.
-Without it the footer shows only `0.2.0`. `Contents/Resources/nix-build-stamp.json`
-is no longer read.
+Without it the footer shows `0.2.0 · n/a · n/a`; the shared reader classifies
+this as a package identity because source provenance is unknown.
+`Contents/Resources/nix-build-stamp.json` is no longer read.
+
+For a source review install, capture the built HEAD and its
+`git log -1 --format=%ct HEAD` together; use that revision's real timestamp,
+not the install time, for `commitTs`. Set `ts` to the install time and `dirty`
+from `git status --porcelain -- flakes/attention-tray` in the built checkout.
+Do not reuse an earlier review's stamp or append a feature label to its revision.
 
 Run tests with `nix develop ./flakes/attention-tray -c /usr/bin/swift test`.
 The compiler-free shell avoids nixpkgs' xcrun stub; explicit `/usr/bin/swift`
@@ -332,7 +342,8 @@ the footers show its build identity at render time. It needs a Mac with a login
 session and has these outputs:
 
 The `glance-quiet` (three items) and `glance-busy` (17 items) scenarios render at
-the live panel height, not an uncapped page. Their synthetic Fractal fixtures cover
+a deterministic 520 pt scroll budget, not an uncapped page. Live panels instead
+use their own screen's available height. Their synthetic Fractal fixtures cover
 all tones, unmeasured producer objectives, daemon-health misses and a 37%-used
 weekly budget. Render just these on a Mac with:
 `swift run TrayGallery <out-dir> glance-quiet glance-busy`.
@@ -460,8 +471,9 @@ is gone.
 
 ## Scroll and refresh performance Mac gate
 
-`PanelScroll` and `PanelForm` preserve their compact ideal height but accept a shorter
-window proposal (bounded by the scroll cap). Markdown blocks/inline attributed strings
+`PanelScroll` and `PanelForm` preserve their compact ideal height, bounded by the
+screen's available height after measured page chrome. A previous short window
+proposal cannot pin the panel below its content. Markdown blocks/inline attributed strings
 and attachment images use bounded content-keyed caches. Ages share one minute-aligned
 clock. Identical page polls and pruning do not rewrite observable sections; separately
 kept successful-read timestamps preserve accurate subsequent stale errors. Closing the

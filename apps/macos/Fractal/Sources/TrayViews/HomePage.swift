@@ -11,8 +11,9 @@ struct HomePage: View {
   let build: BuildIdentity
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
+    PanelPage {
       if model.configurationError == nil { TileRow(model: model) }
+    } content: {
       PanelScroll {
         if let message = model.configurationError {
           ConfigurationNotice(message: message)
@@ -20,6 +21,7 @@ struct HomePage: View {
           Glance(model: model)
         }
       }
+    } footer: {
       PanelFooter(model: model, build: build)
     }
   }
@@ -32,12 +34,13 @@ struct InboxPage: View {
   var body: some View {
     let asks = model.asks
     let updates = model.updates
-    VStack(alignment: .leading, spacing: 0) {
+    PanelPage {
       PageHeader(title: "Inbox", model: model) {
         Text("\(asks.count + updates.count)")
           .font(.subheadline.monospacedDigit())
           .foregroundStyle(.secondary)
       }
+    } content: {
       PanelScroll {
         if case .stale = model.attention.state { StaleRow(model: model) }
         if asks.isEmpty && updates.isEmpty { CaughtUpRow() }
@@ -51,6 +54,8 @@ struct InboxPage: View {
         }
         SnoozedNote(model: model)
       }
+    } footer: {
+      EmptyView()
     }
   }
 }

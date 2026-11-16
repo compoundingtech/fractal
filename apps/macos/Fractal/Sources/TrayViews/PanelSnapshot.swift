@@ -9,8 +9,8 @@ import SwiftUI
 /// panel sits on the plain window background instead. The window is never key, so controls draw
 /// inactive (the default button is not tinted). TrayGallery's capture mode has the real thing.
 @MainActor public enum PanelSnapshot {
-  /// The live panel's scroll limit, for renders that measure what the person sees.
-  public static let liveScrollHeight = PanelMetrics.scrollHeight
+  /// A compact-screen scroll budget for deterministic bounded gallery renders.
+  public static let compactScrollHeight = PanelMetrics.snapshotScrollHeight
 
   /// `scrollHeight` caps the scrolling content as the live panel does; the default renders
   /// whole pages. `variant` picks options of the open design questions.

@@ -116,11 +116,14 @@ private struct ModulePage<Trailing: View, Content: View>: View {
   @ViewBuilder let content: () -> Content
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
+    PanelPage {
       PageHeader(title: title, model: model, trailing: trailing)
+    } content: {
       PanelForm(content: content)
         .contentMargins(.top, 2, for: .scrollContent)
         .environment(\.pageTitle, title)
+    } footer: {
+      EmptyView()
     }
   }
 }

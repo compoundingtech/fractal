@@ -11,15 +11,11 @@ extension BuildIdentity {
   /// This build: the embedded Nix stamp, else a source run's `CLI_BUILD_STAMP`, else `baseVersion`.
   public static let tray = resolve(baseVersion: TrayViews.baseVersion, buildStamp: embeddedBuildStamp)
 
-  /// The footer, refreshed each minute. A stamped build abbreviates to the base version and the
-  /// shared short form (`0.2.0 · 2c3b5d7 · 3h`); a source run keeps the spec's prose, so a dev
-  /// build never passes for a release (`0.2.0 — running from local source (2c3b5d7, committed
-  /// 3 hours ago)`).
+  /// The footer, refreshed each minute: the base version and the shared short form
+  /// (`0.2.0 · 883b657 · 2h`), with a compact marker for local source runs.
+  /// Full canonical versions remain available in the hover.
   func footerText(now: Date) -> String {
-    switch sourceKind {
-    case .nix: "\(baseVersion) · \(short(now: now))"
-    case .local, .package: displayVersion(now: now)
-    }
+    "\(baseVersion) · \(short(now: now))\(sourceKind == .local ? " · local" : "")"
   }
 
   /// The footer's hover: the canonical details (both versions), the absolute times behind the
