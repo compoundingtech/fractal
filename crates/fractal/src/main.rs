@@ -18470,10 +18470,10 @@ fn accept_managed_channel_frame(
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
-            "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
+            "state" | "session" | "ready" | "delivery_ready" | "delivered" | "read" | "failed" | "todo" => true,
             "timeline" | "context" | "turn" | "subagent" | "question.open" | "question.closed" => observer.is_some(),
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-            "delivery_ready" | "retry_pending_ask" | "diagnostic" => true,
+            "retry_pending_ask" | "diagnostic" => true,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             _ => false,
         };
@@ -18601,6 +18601,7 @@ struct PiChannelResume {
     #[serde(default)]
     retry_after_ms: BTreeMap<String, u64>,
     failed_diagnostics: BTreeSet<String>,
+    // Historical resume-wire name: either idle or an explicit handoff-ready proof opens delivery.
     first_idle_seen: bool,
     frame_sequence: u64,
     // Reports the daemon has not accepted yet. A restart must not end the channel or lose the
@@ -18676,13 +18677,11 @@ impl PiChannelResume {
                 }
                 true
             }
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
             Some("delivery_ready") => {
-                // Delivery readiness is independent of the reopened picker's human-blocked state.
+                // The extension proved its handoff path is installed, independently of activity.
                 self.first_idle_seen = true;
                 false
             }
-            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             Some("state") => {
                 let Some(state) = frame.get("state").and_then(Value::as_str) else {
                     return false;
