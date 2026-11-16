@@ -214,7 +214,7 @@ export const AnswerAlert = ({
     label={context === undefined ? firstLine(alert.title) : `${context}: ${firstLine(alert.title)}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[...(from === undefined ? [] : [from]), KIND_WORDS[alert.attention_kind] ?? 'Alert', ...(step ? [`step ${step}`] : []), `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`, ...(deadline ? [deadline] : [])]}
-    heading={plain ? <InlineCode text={question} /> : <InlineMarkdown text={markdownInline(headingText)} />}
+    heading={<InlineMarkdown text={markdownInline(headingText)} />}
     headingText={plain ? firstLine(question) : markdownLine(headingText)}
     {...(line === '' ? {} : { context: line })}
     {...(contextFull === undefined ? {} : { contextFull })}
