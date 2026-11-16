@@ -80,6 +80,13 @@ mark controls. The reminder indicator uses only the authoritative summary, never
 natural unread or guessed seek state. The new lifecycle and domain tests run with
 `node --experimental-transform-types --import ./testHooks.mjs --test unreadVisit.test.mjs unreadVisitNative.test.mjs`.
 
+The future owner-wide `thread.list(marked_unread=true)` adapter uses
+`readMarkedUnread` in `unreadPaging.ts`. Empty pages may still have a continuation;
+only cursor exhaustion permits the empty state. The injected fetch port is local,
+not a proposed wire shape. Repeated cursors, fetch failures, and the 20-page default
+bound return typed errors (with partial rows), never a misleading empty/complete
+list. `unreadPaging.test.mjs` covers those cases and empty-page prefixes.
+
 
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
