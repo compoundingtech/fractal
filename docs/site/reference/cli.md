@@ -26,12 +26,38 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 | `fractal agents show ID` | Inspect one agent's current state and its charter. |
 | `fractal agents queue ID` | Inspect its ordered runs. |
 | `fractal missions ls` | List missions and current work. |
+| `fractal missions runs --mission-prefix PREFIX` | Read bounded run and step summaries for a mission ID prefix. |
 | `fractal missions show ID` | Inspect a definition or run. |
 | `fractal work ls` | Inspect ready and active steps. |
 | `fractal alerts ls` | List requests and approvals. |
 | `fractal conversations` | Read and send durable conversation. |
 | `fractal usage` | Inspect observed usage and estimated cost. |
 | `fractal availability` | Read or set your status, interruptions and deadline clock. |
+
+### Bounded mission run queries
+
+```sh
+fractal missions runs --mission-prefix mission/garden/ --active --json
+fractal missions runs --mission-prefix mission/garden/ --limit 500
+```
+
+`--mission-prefix` is required and matches a literal mission ID prefix, not a
+pattern. `--active` selects only active runs; without it, terminal runs are also
+eligible. `--limit` defaults to 100 runs and accepts 1 through 500.
+
+The command makes one read-only request to
+`GET /v1/client/mission-runs?mission_prefix=<encoded>&active=true|false&limit=N`.
+It does not fetch run cards or follow additional pages. JSON output passes through
+the daemon's complete `{snapshot,value}` envelope. `value` contains `runs` and
+`truncated`; each run includes `run_id`, `mission_id`, `revision`, `phase`,
+`status`, `started_at`, `updated_at`, `steps`, and `steps_truncated`, with optional
+data omitted when absent (including `host_id`). Steps contain `step_id` and
+`state`, with at most 500 steps per run.
+
+`truncated: true` means more runs match: narrow the prefix or increase the limit.
+`steps_truncated: true` means more steps exist for that run; use
+`fractal missions show RUN` to inspect it. Plain output shows the same summaries
+and makes both truncation conditions explicit.
 
 ## Publication and planning
 
