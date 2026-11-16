@@ -15922,9 +15922,12 @@ const STRUCTURED_REQUEST_HELP: &str = r##"A structured request as a JSON file (`
 A `decision` proposes one action: exactly one `accept` answer, one `decline` answer and at most
 one `request_changes` answer, each naming what happens next. A `choice` names 2 to 5 options,
 and `"custom": true` also takes the person's own words. `feedback` asks for text and has no
-answers. `why_person` says why no runtime fact or standing instruction settles it. Omit
-`recommendation` to make none. An `update` asks nothing: it names `about`, the person's own
-run or step or their message to you, and clears once read (`fractal work update` builds one). Subject kinds: pull_request, issue, document, mission, run,
+answers. `why_person` says why no runtime fact or standing instruction settles it. Put a
+recommendation only in `recommendation`, with an answer id and reason; omit it to make none.
+Answer labels must not contain recommendation prose: any word beginning `recommend`
+(case-insensitive) is refused at creation, even with a native recommendation.
+An `update` asks nothing: it names `about`, the person's own run or step or their message
+to you, and clears once read (`fractal work update` builds one). Subject kinds: pull_request, issue, document, mission, run,
 step, agent, host, commit, link; `revision` pins what was reviewed. `--attach FILE` shows the
 person an image with the request (up to 4), as `fractal conversations send --attach` does.
 
@@ -15942,6 +15945,13 @@ person an image with the request (up to 4), as `fractal conversations send --att
       "consequence": "Nothing merges."},
      {"id": "revise", "label": "Request changes", "outcome": "request_changes",
       "consequence": "I make the changes and ask again."}]}
+
+  {"version": 1, "type": "choice",
+   "question": "Which launch day?", "why_person": "The owner chooses the launch date.",
+   "recommendation": {"answer": "friday", "reason": "The launch will be ready."},
+   "answers": [
+     {"id": "friday", "label": "Friday", "consequence": "Launch on Friday."},
+     {"id": "monday", "label": "Monday", "consequence": "Launch on Monday."}]}
 
 The person answers with `fractal work done STEP --answer ID [--text TEXT]`; requesting changes,
 feedback and a custom choice need text. The resumed step's `person_answers` carries the answer

@@ -1350,6 +1350,14 @@ Each named answer has a stable `id`, a `label`, the `consequence` that follows, 
 `conditions`. Without `--reason`, the person reads the request's question. `fractal work ask --help`
 shows a complete example.
 
+At creation, shared validation refuses any answer label containing a case-insensitive word
+beginning `recommend` (a word begins at the start or after a non-alphanumeric character).
+This deliberately includes labels such as "Open recommendation settings". Put a recommendation
+only in `request.recommendation = {"answer":"ID","reason":"Why this answer is preferred"}`;
+native recommendations do not exempt labels. Questions, reasons and consequences may still use
+the word. The guard neither strips prose nor infers a recommendation, and stored asks remain
+readable and answerable without revalidating their historical labels.
+
 ```sh
 fractal work done step-run/release/ask-ID --as person/operator --answer land
 fractal work done step-run/release/ask-ID --as person/operator --answer revise --text "Split the migration"

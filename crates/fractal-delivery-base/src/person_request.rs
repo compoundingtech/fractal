@@ -162,6 +162,12 @@ fn line(name: &str, value: &str) -> Result<(), FractalError> {
     Ok(())
 }
 
+fn contains_recommendation_prose(label: &str) -> bool {
+    label
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| word.get(..9).is_some_and(|prefix| prefix.eq_ignore_ascii_case("recommend")))
+}
+
 fn answer_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     !bytes.is_empty()
@@ -312,6 +318,12 @@ impl StructuredRequest {
                 return Err(invalid(format!("answer id `{}` repeats", answer.id)));
             }
             line("an answer label", &answer.label)?;
+            if contains_recommendation_prose(&answer.label) {
+                return Err(invalid(format!(
+                    "answer `{id}` label contains recommendation prose. Remove it from the label and set request.recommendation = {{\"answer\":\"{id}\",\"reason\":\"Why this answer is preferred\"}}. Use fractal work ask --request FILE (or --request -); see --help.",
+                    id = answer.id
+                )));
+            }
             line("an answer consequence", &answer.consequence)?;
             if answer.conditions.len() > MAX_CONDITIONS {
                 return Err(invalid(format!(
@@ -668,6 +680,62 @@ mod tests {
                 {"id": "revise-auth", "label": "Revise auth and review", "outcome": "request_changes", "consequence": "The author changes sign-in and asks again."}
             ]
         })
+    }
+
+    #[test]
+    fn answer_labels_reject_recommendation_prose_with_or_without_native_recommendation() {
+        for label in [
+            "Land the gateway (Recommended)",
+            "RECOMMEND this",
+            "rEcOmMeNdEd: land",
+            "A (recommended): land",
+            "Open recommendation settings",
+            "Land_recommending",
+            "Land—recommended",
+        ] {
+            for native in [false, true] {
+                let mut value = decision();
+                value["answers"][0]["label"] = json!(label);
+                if !native {
+                    value.as_object_mut().unwrap().remove("recommendation");
+                }
+                let error = StructuredRequest::parse(&value).unwrap_err();
+                assert_eq!(error.code, "invalid-person-request");
+                assert_eq!(
+                    error.message,
+                    "answer `land` label contains recommendation prose. Remove it from the label and set request.recommendation = {\"answer\":\"land\",\"reason\":\"Why this answer is preferred\"}. Use fractal work ask --request FILE (or --request -); see --help."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recommendations_are_allowed_outside_labels_and_are_optional() {
+        for native in [false, true] {
+            let mut value = decision();
+            value["question"] = json!("Do you recommend landing the gateway?");
+            value["answers"][0]["consequence"] = json!("The recommended gateway merges.");
+            value["answers"][0]["conditions"] = json!(["Review the recommendation first."]);
+            value["answers"][0]["label"] = json!("Land the prerecommended gateway");
+            if !native {
+                value.as_object_mut().unwrap().remove("recommendation");
+            }
+            StructuredRequest::parse(&value).unwrap();
+        }
+    }
+
+    #[test]
+    fn stored_requests_with_recommendation_labels_still_deserialize_and_answer() {
+        let mut value = decision();
+        value["answers"][0]["label"] = json!("Land the gateway (Recommended)");
+        let request: StructuredRequest = serde_json::from_value(value).unwrap();
+        let answer = request
+            .answer(
+                Some(&AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
+                "",
+            )
+            .unwrap();
+        assert_eq!(answer["label"], "Land the gateway (Recommended)");
     }
 
     #[test]

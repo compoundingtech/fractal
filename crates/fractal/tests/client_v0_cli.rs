@@ -4052,6 +4052,11 @@ fn help_starts_with_examples_and_keeps_plumbing_reachable() {
         help(&["--endpoint", "help", "help", "--all"])
     );
     assert!(!help(&["agents", "ls", "--all", "--help"]).contains("Plumbing:"));
+    let ask = help(&["work", "ask", "--help"]);
+    assert!(ask.contains("recommendation only in `recommendation`"));
+    assert!(ask.contains("Answer labels must not contain recommendation prose"));
+    assert!(ask.contains("\"type\": \"choice\""));
+    assert!(ask.contains("\"answers\": ["));
     for path in [
         vec!["schema"],
         vec!["agents", "new"],
