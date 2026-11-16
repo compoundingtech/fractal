@@ -9,6 +9,7 @@ import TrayViews
 struct LiveTrayPanel: View {
   let model: AttentionModel
   let build: BuildIdentity
+  @State private var lastSize = CGSize(width: PanelMetrics.width, height: 280)
   @State private var availableHeight = max(0, (NSScreen.main?.visibleFrame.height ?? 600) - 12)
 
   var body: some View {
@@ -16,12 +17,12 @@ struct LiveTrayPanel: View {
       if model.isPanelVisible {
         TrayPanel(model: model, build: build)
           .environment(\.panelAvailableHeight, availableHeight)
+          .onGeometryChange(for: CGSize.self) { $0.size } action: { lastSize = $0 }
       } else {
-        // The closed placeholder and the first visible layout have the same budget, even
-        // before async data arrives. Opening must not resize a bottom-anchored NSPanel.
-        Color.clear.frame(width: PanelMetrics.width, height: availableHeight)
+        Color.clear.frame(width: lastSize.width, height: lastSize.height)
       }
     }
     .background(PanelVisibility(model: model, availableHeight: $availableHeight))
+    .background(PanelWindowFrame())
   }
 }
