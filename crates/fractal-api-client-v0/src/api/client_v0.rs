@@ -13671,7 +13671,7 @@ mission "differential" state="ready" {
         state.store.apply_as(&intent, &expected, "example-timed-target", Some("person/example")).unwrap();
         let request: MessageSendRequest = serde_json::from_value(json!({
             "idempotency_key": "example-client-timed-message",
-            "from": "person/example", "to": "agent/example/timed-target",
+            "from": "agent/example/timed-target", "to": "agent/example/timed-target",
             "content": "Review the example report", "at": "2030-01-02T03:04:05Z",
         })).unwrap();
         match accept_message_response_authorized(state, request, None, None, None, None, None).unwrap() {

@@ -395,6 +395,7 @@ enum Command {
         command: PersonsCommand,
     },
     /// Read, follow, and send normalized conversations.
+    #[command(visible_alias = "messages")]
     Conversations {
         #[command(subcommand)]
         command: MessageCommand,
