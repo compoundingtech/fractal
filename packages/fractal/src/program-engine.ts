@@ -46,7 +46,9 @@ export const CommandResultSchema = Schema.Struct({
 /** Admission failures are distinct from a command's exit status or a child run's failure. */
 export const ResourceError = Schema.TaggedStruct('ResourceError', {
   code: Schema.Literals([
-    'admission-expired', 'unsupported-coverage', 'impossible-capacity', 'clock-uncertain',
+    'admission-expired', 'unsupported-coverage', 'impossible', 'clock-uncertain',
+    // Persisted program results retain historical refusal codes.
+    'impossible-capacity',
     'cancelled', 'retired', 'retiring', 'uncertain', 'invalid-state',
     'resource-operation-refused', 'execution-timeout', 'stale-membership', 'execution-refused',
   ]),

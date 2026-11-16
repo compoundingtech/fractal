@@ -10,7 +10,7 @@
 import { notApplied, outcomeUnknown } from '../../clients/typescript/fractal-client';
 
 export type AnswerPorts<R> = {
-  /** A fresh request with its own key, fenced to a snapshot read now. */
+  /** A fresh request with its own key, fenced to the viewed revision; a known-refused retry reads a fresh snapshot. */
   build(): Promise<R>;
   send(request: R): Promise<unknown>;
   /** Whether the thing still waits: true, false (answered, closed or gone), or null when Fractal cannot say. */
