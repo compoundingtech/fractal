@@ -1833,10 +1833,11 @@ export type ClientConnections = typeof ClientConnections.Type
 export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const ThreadCollectionContext = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "agent_id": AgentId, "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
+  Schema.Struct({ "agent_id": AgentId, "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "marked_unread": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ThreadCollectionContext" }))()
 export type ThreadCollectionContext = typeof ThreadCollectionContext.Type
 export type ThreadCollectionContextEncoded = typeof ThreadCollectionContext.Encoded
@@ -3404,6 +3405,23 @@ export const StreamSync = /*#__PURE__*/ (() => Schema.Union([
 export type StreamSync = typeof StreamSync.Type
 export type StreamSyncEncoded = typeof StreamSync.Encoded
 
+export const ThreadUnreadMark = /*#__PURE__*/ (() => Schema.Struct({
+  "anchor_message_id": Id,
+  /** Opaque stable signed operation ID. Never a claim ID, timestamp, or local retry counter. */
+  "mark_id": Schema.String.annotate({ description: "Opaque stable signed operation ID. Never a claim ID, timestamp, or local retry counter." })
+}).annotate({ identifier: "ThreadUnreadMark" }))()
+export type ThreadUnreadMark = typeof ThreadUnreadMark.Type
+export type ThreadUnreadMarkEncoded = typeof ThreadUnreadMark.Encoded
+
+export const ThreadUnreadReminder = /*#__PURE__*/ (() => Schema.Struct({
+  /** Canonical primary return anchor. */
+  "anchor_message_id": Id,
+  /** All active marks, each with its own return anchor. Clear only captured mark IDs whose own anchor was deliberately viewed on a later visit; the current visit stays sticky. */
+  "marks": Schema.Array(ThreadUnreadMark).annotate({ description: "All active marks, each with its own return anchor. Clear only captured mark IDs whose own anchor was deliberately viewed on a later visit; the current visit stays sticky." })
+}).annotate({ identifier: "ThreadUnreadReminder" }))()
+export type ThreadUnreadReminder = typeof ThreadUnreadReminder.Type
+export type ThreadUnreadReminderEncoded = typeof ThreadUnreadReminder.Encoded
+
 export const ThreadSummary = /*#__PURE__*/ (() => Schema.Struct({
   /** Canonical originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent. Clients must not infer a chief-of-staff or other role as fallback. */
   "agent_id": Id,
@@ -3413,7 +3431,9 @@ export const ThreadSummary = /*#__PURE__*/ (() => Schema.Struct({
   "state": Schema.Literals(["open","closed"]),
   "title": Schema.String,
   "title_revision": Revision,
-  "unread": optionalKey(Schema.Boolean)
+  /** Natural message unread; unaffected by reminders. */
+  "unread": optionalKey(Schema.Boolean).annotate({ description: "Natural message unread; unaffected by reminders." }),
+  "unread_reminder": Schema.OptionFromOptionalNullOr(ThreadUnreadReminder, NULL_NONE)
 }).annotate({ identifier: "ThreadSummary" }))()
 export type ThreadSummary = typeof ThreadSummary.Type
 export type ThreadSummaryEncoded = typeof ThreadSummary.Encoded
@@ -5177,10 +5197,12 @@ export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
 export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
 
 export const ThreadListQuery = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "agent_id": Id, "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
+  Schema.Struct({ "agent_id": Id, "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), /** Current person's threads with an active unread reminder, newest operation time first, then thread ID. Operation time is the earliest accepted_at among validated equivalent receipts for the stable operation ID; repaired, invalid and conflicting receipts are excluded. */
+"marked_unread": Schema.Literal(true).annotate({ description: "Current person's threads with an active unread reminder, newest operation time first, then thread ID. Operation time is the earliest accepted_at among validated equivalent receipts for the stable operation ID; repaired, invalid and conflicting receipts are excluded." }), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ThreadListQuery" }))()
 export type ThreadListQuery = typeof ThreadListQuery.Type
 export type ThreadListQueryEncoded = typeof ThreadListQuery.Encoded
@@ -5192,9 +5214,20 @@ export const ThreadSummaryPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ThreadSummaryPage = typeof ThreadSummaryPage.Type
 export type ThreadSummaryPageEncoded = typeof ThreadSummaryPage.Encoded
 
+export const ThreadTimelineAnchor = /*#__PURE__*/ (() => Schema.Struct({
+  "message_id": Id,
+  "state": Schema.Literals(["current","unavailable","pending"])
+}).annotate({ identifier: "ThreadTimelineAnchor" }))()
+export type ThreadTimelineAnchor = typeof ThreadTimelineAnchor.Type
+export type ThreadTimelineAnchorEncoded = typeof ThreadTimelineAnchor.Encoded
+
 export const ThreadTimelinePage = /*#__PURE__*/ (() => Schema.Struct({
+  /** Present only for around reads. Unavailable requires retained signed routing proof for the same owner and thread. Pending requires the caller's own authenticated signed Mark intent for that exact unknown anchor on this thread, not an active reminder; it activates no badge. Neither state exposes anchor content or grants read permission. */
+  "anchor": optionalKey(ThreadTimelineAnchor),
   "items": Schema.Array(ThreadTimelineEvent),
-  "next_cursor": Schema.OptionFromNullOr(Schema.String)
+  "next_cursor": Schema.OptionFromNullOr(Schema.String),
+  /** Opaque cursor for newer items; absent when nothing is newer. Pages remain newest first. */
+  "previous_cursor": optionalKey(Schema.String).annotate({ description: "Opaque cursor for newer items; absent when nothing is newer. Pages remain newest first." })
 }).annotate({ identifier: "ThreadTimelinePage" }))()
 export type ThreadTimelinePage = typeof ThreadTimelinePage.Type
 export type ThreadTimelinePageEncoded = typeof ThreadTimelinePage.Encoded

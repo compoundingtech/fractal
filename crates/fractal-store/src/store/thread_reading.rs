@@ -114,6 +114,16 @@ pub(super) fn reminder_conn(
     person: &str,
     thread: &str,
 ) -> Result<Option<ThreadUnreadReminder>, FractalError> {
+    Ok(reminder_with_time_conn(connection, person, thread)?.map(|(reminder, _)| reminder))
+}
+
+/// Presentation order uses an operation's earliest validated equivalent signed receipt,
+/// independent of which equivalent receipt is currently canonical. No new clock is stored.
+pub(super) fn reminder_with_time_conn(
+    connection: &Connection,
+    person: &str,
+    thread: &str,
+) -> Result<Option<(ThreadUnreadReminder, u128)>, FractalError> {
     let creation = owned_creation(connection, thread, person, false)?.ok_or_else(unavailable)?;
     let headers = valid_headers(connection, person, thread, &creation)?;
     let removed = headers
@@ -121,11 +131,18 @@ pub(super) fn reminder_conn(
         .filter(|header| header.valid)
         .flat_map(|header| header.observed.iter().map(String::as_str))
         .collect::<BTreeSet<_>>();
-    let marks = headers
+    let active = headers
         .iter()
         .filter(|header| {
             header.valid && header.kind == UNREAD_MARKED && !removed.contains(header.id.as_str())
         })
+        .collect::<Vec<_>>();
+    let Some(first) = active.first() else {
+        return Ok(None);
+    };
+    let time = first.own_time;
+    let marks = active
+        .into_iter()
         .filter_map(|header| {
             header.anchor.as_ref().map(|anchor| ThreadUnreadMark {
                 mark_id: header.id.clone(),
@@ -136,10 +153,29 @@ pub(super) fn reminder_conn(
     let Some(first) = marks.first() else {
         return Ok(None);
     };
-    Ok(Some(ThreadUnreadReminder {
-        anchor_message_id: first.anchor_message_id.clone(),
-        marks,
-    }))
+    Ok(Some((
+        ThreadUnreadReminder {
+            anchor_message_id: first.anchor_message_id.clone(),
+            marks,
+        },
+        time,
+    )))
+}
+
+fn operation_time(connection: &Connection, operation: &str) -> Result<u128, FractalError> {
+    let sql = format!(
+        "SELECT claims.accepted_at_unix_ms FROM claims INDEXED BY claims_operation_index
+        JOIN operations ON operations.id=?1 AND operations.state='active'
+        WHERE json_extract(claims.body,'$._operation.id')=?1
+          AND json_extract(claims.body,'$._operation.id') IS NOT NULL
+          AND json_extract(claims.body,'$._operation.request_digest')=operations.request_digest
+          AND {UNREPAIRED_CLAIM}
+        ORDER BY length(claims.accepted_at_unix_ms),claims.accepted_at_unix_ms,claims.id LIMIT 1"
+    );
+    let time: String = connection
+        .query_row(/* sqlite-large-value: allow-for-now lv-hc5e92b33924f owner=fractal_store::store::thread_reading TODO=trace-statement-and-value-representation */ &sql, [operation], |row| row.get(0))
+        .map_err(internal)?;
+    time.parse().map_err(internal)
 }
 
 struct Header {
@@ -150,6 +186,7 @@ struct Header {
     anchor: Option<String>,
     observed: Vec<String>,
     valid: bool,
+    own_time: u128,
 }
 
 fn reminder_headers_sql() -> String {
@@ -173,6 +210,37 @@ fn valid_headers(
     thread: &str,
     creation: &ClaimRecord,
 ) -> Result<Vec<Header>, FractalError> {
+    headers_with_pending(connection, person, thread, creation, false)
+}
+
+pub(super) fn private_anchor_intent_conn(
+    connection: &Connection,
+    person: &str,
+    thread: &str,
+    anchor: &str,
+) -> Result<bool, FractalError> {
+    let creation = owned_creation(connection, thread, person, false)?.ok_or_else(unavailable)?;
+    let headers = headers_with_pending(connection, person, thread, &creation, true)?;
+    let removed = headers
+        .iter()
+        .filter(|header| header.valid)
+        .flat_map(|header| header.observed.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    Ok(headers.iter().any(|header| {
+        header.valid
+            && header.kind == UNREAD_MARKED
+            && header.anchor.as_deref() == Some(anchor)
+            && !removed.contains(header.id.as_str())
+    }))
+}
+
+fn headers_with_pending(
+    connection: &Connection,
+    person: &str,
+    thread: &str,
+    creation: &ClaimRecord,
+    allow_pending: bool,
+) -> Result<Vec<Header>, FractalError> {
     let sql = reminder_headers_sql();
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h47f366444514 owner=fractal_store::store::thread_reading TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
     let rows = statement
@@ -190,7 +258,9 @@ fn valid_headers(
     let mut headers = Vec::new();
     for row in rows {
         let (id, kind, actor, owner, anchor, observed) = row.map_err(internal)?;
+        let own_time = operation_time(connection, &id)?;
         headers.push(Header {
+            own_time,
             id,
             kind,
             actor,
@@ -200,6 +270,12 @@ fn valid_headers(
             valid: false,
         });
     }
+    headers.sort_by(|left, right| {
+        right
+            .own_time
+            .cmp(&left.own_time)
+            .then_with(|| right.id.cmp(&left.id))
+    });
     let indices = headers
         .iter()
         .enumerate()
@@ -222,6 +298,7 @@ fn valid_headers(
         let anchor_valid = match header.anchor.as_deref() {
             Some(anchor) if header.kind == UNREAD_MARKED => {
                 anchor_member(connection, creation, person, thread, anchor, false)?
+                    || (allow_pending && !connection.query_row("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index WHERE subject=?1 AND kind='message.sent')",[anchor],|row|row.get::<_,bool>(0)).map_err(internal)?)
             }
             None => header.kind == UNREAD_CLEARED,
             _ => false,
@@ -983,5 +1060,465 @@ mod tests {
         assert!(reminder(&store, "person/foreign", THREAD).is_err());
         clear(&store, "clear-unavailable", &[marked.operation_id.unwrap()]);
         assert!(reminder(&store, PERSON, THREAD).unwrap().is_none());
+    }
+    fn marked_page(
+        store: &Store,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> thread_metadata::SummaryPage {
+        thread_metadata::list_context(
+            store,
+            PERSON,
+            thread_metadata::ThreadContext::MarkedUnread,
+            cursor,
+            limit,
+        )
+        .unwrap()
+    }
+    fn timeline_ids(page: &thread_metadata::TimelinePage) -> Vec<String> {
+        page.items
+            .iter()
+            .filter_map(|item| match item {
+                thread_metadata::TimelineItem::Message(message) => Some(message.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn read_helpers_seek_middle_and_page_both_directions_without_acknowledging() {
+        let store = Store::open_memory("seek").unwrap();
+        setup(&store);
+        create(&store, THREAD);
+        for n in 1..=9 {
+            store.set_write_clock_at(n * 100).unwrap();
+            message(&store, THREAD, &format!("message/{n}"));
+        }
+        let around =
+            thread_metadata::mixed_timeline(&store, PERSON, THREAD, None, Some("message/5"), 3)
+                .unwrap();
+        assert_eq!(
+            timeline_ids(&around),
+            ["message/6", "message/5", "message/4"]
+        );
+        assert_eq!(
+            around.anchor.as_ref().unwrap().state,
+            thread_metadata::TimelineAnchorState::Current
+        );
+        let newer = thread_metadata::mixed_timeline(
+            &store,
+            PERSON,
+            THREAD,
+            around.previous_cursor.as_deref(),
+            None,
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            timeline_ids(&newer),
+            ["message/9", "message/8", "message/7"]
+        );
+        assert!(newer.previous_cursor.is_none());
+        let older = thread_metadata::mixed_timeline(
+            &store,
+            PERSON,
+            THREAD,
+            around.next_cursor.as_deref(),
+            None,
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            timeline_ids(&older),
+            ["message/3", "message/2", "message/1"]
+        );
+        assert!(older.next_cursor.is_none());
+        let first = thread_metadata::mixed_timeline(&store, PERSON, THREAD, None, None, 3).unwrap();
+        assert!(first.previous_cursor.is_none());
+        assert!(first.anchor.is_none());
+        let encoded = serde_json::to_value(&older).unwrap();
+        assert!(encoded["next_cursor"].is_null());
+        assert!(
+            serde_json::to_value(&newer)
+                .unwrap()
+                .get("previous_cursor")
+                .is_none()
+        );
+        assert!(
+            thread_metadata::mixed_timeline(
+                &store,
+                PERSON,
+                THREAD,
+                around.next_cursor.as_deref(),
+                Some("message/5"),
+                3
+            )
+            .is_err()
+        );
+        for n in 1..=9 {
+            assert!(
+                store
+                    .claims_for(&format!("message/{n}"), Some("message.read"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn read_helpers_private_late_anchor_transitions_pending_current_unavailable() {
+        let source = Store::open_memory("anchor-source").unwrap();
+        let target = Store::open_memory("anchor-target").unwrap();
+        setup(&source);
+        setup(&target);
+        create(&source, THREAD);
+        create(&source, "thread/foreign");
+        message(&source, "thread/foreign", "message/foreign");
+        replicate(&source, &target);
+        message(&source, THREAD, "message/late");
+        let intent = target
+            .append_claim(&ClaimInput {
+                subject: THREAD.into(),
+                kind: UNREAD_MARKED.into(),
+                actor: Some(PERSON.into()),
+                fields: serde_json::from_value(
+                    json!({"person":PERSON,"anchor_message":"message/late","observed_marks":[]}),
+                )
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some("late-intent".into()),
+            })
+            .unwrap();
+        assert!(reminder(&target, PERSON, THREAD).unwrap().is_none());
+        let pending =
+            thread_metadata::mixed_timeline(&target, PERSON, THREAD, None, Some("message/late"), 5)
+                .unwrap();
+        assert!(pending.items.is_empty());
+        assert_eq!(
+            pending.anchor.unwrap().state,
+            thread_metadata::TimelineAnchorState::Pending
+        );
+        assert!(
+            thread_metadata::mixed_timeline(
+                &target,
+                "person/foreign",
+                THREAD,
+                None,
+                Some("message/late"),
+                5
+            )
+            .is_err()
+        );
+        target
+            .append_claim(&ClaimInput {
+                subject: THREAD.into(),
+                kind: UNREAD_MARKED.into(),
+                actor: Some(PERSON.into()),
+                fields: serde_json::from_value(
+                    json!({"person":PERSON,"anchor_message":"message/foreign","observed_marks":[]}),
+                )
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some("foreign-intent".into()),
+            })
+            .unwrap();
+        assert!(
+            thread_metadata::mixed_timeline(
+                &target,
+                PERSON,
+                THREAD,
+                None,
+                Some("message/foreign"),
+                5
+            )
+            .is_err()
+        );
+        replicate(&source, &target);
+        let current =
+            thread_metadata::mixed_timeline(&target, PERSON, THREAD, None, Some("message/late"), 5)
+                .unwrap();
+        assert_eq!(
+            current.anchor.unwrap().state,
+            thread_metadata::TimelineAnchorState::Current
+        );
+        let anchor = target
+            .newest_claim_for_subject_kind("message/late", "message.sent")
+            .unwrap()
+            .unwrap();
+        target
+            .connection
+            .batched(|tx| -> anyhow::Result<()> {
+                tx.execute(
+                    "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+                    [&anchor.id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        let unavailable =
+            thread_metadata::mixed_timeline(&target, PERSON, THREAD, None, Some("message/late"), 5)
+                .unwrap();
+        assert!(unavailable.items.is_empty());
+        assert_eq!(
+            unavailable.anchor.unwrap().state,
+            thread_metadata::TimelineAnchorState::Unavailable
+        );
+        clear(&target, "clear-retired", &[intent.operation_id.unwrap()]);
+        assert!(
+            thread_metadata::mixed_timeline(&target, PERSON, THREAD, None, Some("message/late"), 5)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn read_helpers_marked_context_finds_old_closed_thread_outside_other_first_pages() {
+        let store = Store::open_memory("old-closed").unwrap();
+        setup(&store);
+        let old = "thread/z-ancient";
+        create(&store, old);
+        message(&store, old, "message/ancient");
+        let revision = thread_metadata::summary(&store, PERSON, old)
+            .unwrap()
+            .revision;
+        thread_metadata::apply(
+            &store,
+            PERSON,
+            old,
+            "close-old",
+            thread_metadata::Edit::Close {
+                revision: &revision,
+            },
+        )
+        .unwrap();
+        for n in 0..102 {
+            let id = format!("thread/a-recent-{n:03}");
+            create(&store, &id);
+            let revision = thread_metadata::summary(&store, PERSON, &id)
+                .unwrap()
+                .revision;
+            thread_metadata::apply(
+                &store,
+                PERSON,
+                &id,
+                &format!("close-{n}"),
+                thread_metadata::Edit::Close {
+                    revision: &revision,
+                },
+            )
+            .unwrap();
+        }
+        apply_as(
+            &store,
+            PersonAuthority::TrustedLocal,
+            PERSON,
+            old,
+            "mark-old",
+            Edit::Mark {
+                anchor_message: "message/ancient",
+                observed_marks: &[],
+            },
+        )
+        .unwrap();
+        assert!(
+            !thread_metadata::list_conversation(&store, PERSON, AGENT, None, 100)
+                .unwrap()
+                .items
+                .iter()
+                .any(|summary| summary.id == old)
+        );
+        assert!(
+            !thread_metadata::list_context(
+                &store,
+                PERSON,
+                thread_metadata::ThreadContext::RecentlyClosed,
+                None,
+                100
+            )
+            .unwrap()
+            .items
+            .iter()
+            .any(|summary| summary.id == old)
+        );
+        let marked = marked_page(&store, None, 1);
+        assert_eq!(marked.items.len(), 1);
+        assert_eq!(marked.items[0].id, old);
+        assert_eq!(marked.items[0].state, "closed");
+        let foreign = thread_metadata::list_context(
+            &store,
+            "person/foreign",
+            thread_metadata::ThreadContext::MarkedUnread,
+            None,
+            10,
+        )
+        .unwrap();
+        assert!(foreign.items.is_empty());
+    }
+
+    #[test]
+    fn read_helpers_equivalent_late_retry_does_not_refresh_marked_order() {
+        let left = Store::open_memory("time-left").unwrap();
+        let right = Store::open_memory("time-right").unwrap();
+        setup(&left);
+        setup(&right);
+        create(&left, THREAD);
+        create(&left, "thread/later");
+        message(&left, THREAD, "message/old");
+        message(&left, "thread/later", "message/later");
+        replicate(&left, &right);
+        // write_time clamps to this writer's newest accepted batch/checkpoint cut.
+        // Pick a future base above both real setup histories, rather than backdating.
+        let base = left
+            .claims_page(None, None, 0, None, false, 100)
+            .unwrap()
+            .claims
+            .iter()
+            .chain(
+                right
+                    .claims_page(None, None, 0, None, false, 100)
+                    .unwrap()
+                    .claims
+                    .iter(),
+            )
+            .map(|claim| claim.accepted_at_unix_ms)
+            .max()
+            .unwrap()
+            + 100;
+        left.set_write_clock_at(base + 100).unwrap();
+        let first = mark(&left, "same-retried-op", "message/old", &[]);
+        assert_eq!(first.accepted_at_unix_ms, base + 100);
+        left.set_write_clock_at(base + 200).unwrap();
+        apply_as(
+            &left,
+            PersonAuthority::TrustedLocal,
+            PERSON,
+            "thread/later",
+            "different-later-op",
+            Edit::Mark {
+                anchor_message: "message/later",
+                observed_marks: &[],
+            },
+        )
+        .unwrap();
+        right.set_write_clock_at(base + 300).unwrap();
+        let retry = mark(&right, "same-retried-op", "message/old", &[]);
+        assert_eq!(retry.accepted_at_unix_ms, base + 300);
+        assert_eq!(first.operation_id, retry.operation_id);
+        replicate(&right, &left);
+        replicate(&left, &right);
+        for store in [&left, &right] {
+            assert_eq!(
+                operation_time(&store.readers.get(), first.operation_id.as_deref().unwrap())
+                    .unwrap(),
+                first.accepted_at_unix_ms
+            );
+            let page = marked_page(store, None, 1);
+            assert_eq!(page.items[0].id, "thread/later");
+            let second = marked_page(store, page.next_cursor.as_deref(), 1);
+            assert_eq!(second.items[0].id, THREAD);
+            assert!(
+                thread_metadata::list_context(
+                    store,
+                    PERSON,
+                    thread_metadata::ThreadContext::RecentlyClosed,
+                    page.next_cursor.as_deref(),
+                    1
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn read_helpers_empty_candidate_pages_keep_continuation_to_older_active_mark() {
+        let store = Store::open_memory("empty-candidates").unwrap();
+        setup(&store);
+        create(&store, THREAD);
+        create(&store, "thread/old-active");
+        message(&store, THREAD, "message/inactive");
+        message(&store, "thread/old-active", "message/still-active");
+        apply_as(
+            &store,
+            PersonAuthority::TrustedLocal,
+            PERSON,
+            "thread/old-active",
+            "old-active",
+            Edit::Mark {
+                anchor_message: "message/still-active",
+                observed_marks: &[],
+            },
+        )
+        .unwrap();
+        let mut retired = Vec::new();
+        for n in 0..9 {
+            retired.push(
+                mark(&store, &format!("retired-{n}"), "message/inactive", &[])
+                    .operation_id
+                    .unwrap(),
+            );
+        }
+        clear(&store, "clear-candidates", &retired);
+        let first = marked_page(&store, None, 1);
+        assert!(first.items.is_empty());
+        assert!(first.next_cursor.is_some());
+        let mut cursor = first.next_cursor;
+        let mut found = Vec::new();
+        for _ in 0..5 {
+            let page = marked_page(&store, cursor.as_deref(), 1);
+            found.extend(page.items.into_iter().map(|item| item.id));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(found, ["thread/old-active"]);
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn read_helpers_equal_time_duplicate_generations_page_each_thread_once() {
+        let store = Store::open_memory("same-time").unwrap();
+        setup(&store);
+        create(&store, THREAD);
+        create(&store, "thread/z-tie");
+        message(&store, THREAD, "message/same-time");
+        message(&store, "thread/z-tie", "message/tie-other");
+        let time = store
+            .claims_page(None, None, 0, None, false, 100)
+            .unwrap()
+            .claims
+            .iter()
+            .map(|claim| claim.accepted_at_unix_ms)
+            .max()
+            .unwrap()
+            + 100;
+        store.set_write_clock_at(time).unwrap();
+        let mut ids = Vec::new();
+        for n in 0..64 {
+            let claim = mark(&store, &format!("same-time-{n}"), "message/same-time", &[]);
+            assert_eq!(claim.accepted_at_unix_ms, time);
+            ids.push(claim.operation_id.unwrap());
+        }
+        apply_as(
+            &store,
+            PersonAuthority::TrustedLocal,
+            PERSON,
+            "thread/z-tie",
+            "same-time-other",
+            Edit::Mark {
+                anchor_message: "message/tie-other",
+                observed_marks: &[],
+            },
+        )
+        .unwrap();
+        let reminder = reminder(&store, PERSON, THREAD).unwrap().unwrap();
+        assert_eq!(reminder.marks.len(), 64);
+        assert_eq!(reminder.marks[0].mark_id, ids.into_iter().max().unwrap());
+        let first = marked_page(&store, None, 1);
+        assert_eq!(first.items[0].id, THREAD);
+        let second = marked_page(&store, first.next_cursor.as_deref(), 1);
+        assert_eq!(second.items[0].id, "thread/z-tie");
+        assert!(second.next_cursor.is_none());
     }
 }
