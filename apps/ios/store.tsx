@@ -48,7 +48,7 @@ import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalFore
 import { ownAvailability, servesAvailability, writeRefusal } from './availability';
 import { PresenceReporter } from './presence';
 import { ThreadEdits, threadRefusalMessage, type ThreadEdit, type ThreadEditResult } from './threadEdits';
-import { pendingUnreadAPI } from './unreadActions';
+import { unreadClient as bindUnreadClient, type UnreadClientPorts, type UnreadMutation } from './unreadClient';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -1056,7 +1056,7 @@ function useAppStore(proof?: FabricProfile) {
   };
   async function submitThreadAction(
     targetId: string,
-    kind: ThreadEdit['kind'] | 'start' | 'reply' | 'read',
+    kind: ThreadEdit['kind'] | 'start' | 'reply' | 'read' | UnreadMutation,
     revisions: Record<string, string>,
     prepare: (client: FractalClient, key: string) => Promise<PreparedThreadAction>,
   ): Promise<ThreadEditResult> {
@@ -1634,13 +1634,30 @@ function useAppStore(proof?: FabricProfile) {
   const gatewayMachineId = knownHostId ? `machine/${knownHostId.replace(/^host\//, '')}` : '';
   const gatewayHost = data.machines.find(m => m.id === gatewayMachineId)?.name ?? (knownHostId ? knownHostId.replace(/^host\//, '') : '');
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
+  const unreadPorts = useRef<UnreadClientPorts>({
+    canRead: () => false, canWrite: () => false, read: actions.markThreadRead,
+    submit: async () => ({ how: 'failed', error: 'The thread connection is unavailable.' }),
+  });
+  unreadPorts.current = {
+    canRead: () => threadConnection.current === client && status === 'online',
+    canWrite: kind => threadConnection.current === client && status === 'online' && !!capsRef.current?.capabilities.some(capability => capability.id === `thread.${kind}` && capability.state === 'granted'),
+    read: actions.markThreadRead,
+    submit: (target, kind, send) => trackThreadDelivery(`unread/${target}`, target, () =>
+      submitThreadAction(target, kind, {}, async member => ({ send: request => send(member, request) }))),
+  };
+  const unreadClient = useMemo(() => bindUnreadClient(client, {
+    canRead: () => threadConnection.current === client && unreadPorts.current.canRead(),
+    canWrite: kind => threadConnection.current === client && unreadPorts.current.canWrite(kind),
+    read: (thread, ids) => threadConnection.current === client ? unreadPorts.current.read(thread, ids) : Promise.resolve({ how: 'failed', error: 'The original thread connection is unavailable.' }),
+    submit: (target, kind, send) => threadConnection.current === client ? unreadPorts.current.submit(target, kind, send) : Promise.resolve({ how: 'failed', error: 'The original thread connection is unavailable.' }),
+  }), [client]);
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, threadEdits, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,
-    unreadAPI: pendingUnreadAPI,
+    unreadClient,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
