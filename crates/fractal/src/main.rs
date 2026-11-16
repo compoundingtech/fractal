@@ -2180,6 +2180,20 @@ enum SloCommand {
         #[arg(long)]
         width: Option<usize>,
     },
+    /// Count a declared objective's events or completed intervals per time bucket.
+    Series {
+        /// Exact declared objective id (without the objective/ subject prefix).
+        id: String,
+        /// Inclusive range start, in Unix milliseconds.
+        #[arg(long)]
+        from: u64,
+        /// Exclusive range end, in Unix milliseconds (at most 31 days after --from).
+        #[arg(long)]
+        to: u64,
+        /// Bucket width in seconds; at most 1000 buckets are returned.
+        #[arg(long, default_value_t = 86_400)]
+        bucket_seconds: u64,
+    },
 }
 
 #[derive(Args)]
@@ -11430,6 +11444,23 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
 }
 
 async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()> {
+    // The series read does not evaluate current SLO rows or their rolling windows.
+    if let Some(SloCommand::Series { id, from, to, bucket_seconds }) = &args.command {
+        let series: Value = client.get(&format!(
+            "/v1/slo/series?id={}&from={from}&to={to}&bucket_seconds={bucket_seconds}",
+            urlencoding::encode(id),
+        )).await?;
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&series)?);
+        } else {
+            println!("{id}  counts by bucket (Unix milliseconds)");
+            println!("START\tEND\tCOUNT");
+            for bucket in series["buckets"].as_array().into_iter().flatten() {
+                println!("{}\t{}\t{}", bucket["start"], bucket["end"], bucket["count"]);
+            }
+        }
+        return Ok(());
+    }
     let report: Value = client.get("/v1/slo").await?;
     let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     match args.command.unwrap_or(SloCommand::Ls) {
@@ -11466,6 +11497,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
                 print!("{}", render_slo_explanation(row));
             }
         }
+        SloCommand::Series { .. } => unreachable!("series is handled before current SLO reads"),
     }
     Ok(())
 }

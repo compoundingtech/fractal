@@ -583,6 +583,22 @@ pub async fn get_slo_history(
     })))
 }
 
+/// Counts measured from replicated claims, not the local budget-remaining log.
+pub async fn get_slo_series(
+    State(state): State<AppState>,
+    Query(query): Query<SloSeriesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        crate::declared_objectives::series(
+            &state.store, &query.id, query.from, query.to, query.bucket_seconds,
+        )
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map(Json)
+    .map_err(ApiError::bad)
+}
+
 #[derive(Deserialize)]
 pub struct HarnessDiagnosticRequest {
     actor: String,

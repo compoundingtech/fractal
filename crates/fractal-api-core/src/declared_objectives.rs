@@ -32,6 +32,7 @@ use crate::objectives::{clamp_percent, duration, nearest_rank, plural};
 use crate::store::Store;
 use crate::store::declared_objectives::DeclaredObjective;
 use smallclaims::error::internal;
+use crate::store::objective_series::time_ms;
 
 /// Claims read per page while catching up.
 const PAGE: usize = 1_000;
@@ -122,6 +123,73 @@ struct Point<'a> {
     member: Option<&'a str>,
     class: Class,
 }
+/// Counts, not latency percentiles: events for a count and closed samples by completion time
+/// for an interval. Selection is the same fold as the objective rows, over indexed candidates.
+pub fn series(store: &Store, id: &str, from: u64, to: u64, bucket_seconds: u64) -> Result<Value, FractalError> {
+    let invalid = || FractalError::new("invalid-slo-series", "require from < to, at most 31 days, positive bucket_seconds, and at most 1000 buckets");
+    let width = bucket_seconds.saturating_mul(1_000);
+    if width == 0 {
+        return Err(invalid());
+    }
+    let span = to.checked_sub(from).filter(|span| *span > 0 && *span <= 31 * 86_400_000).ok_or_else(invalid)?;
+    let bucket_count = span.div_ceil(width);
+    if bucket_count > 1_000 {
+        return Err(invalid());
+    }
+    let declaration = store.declared_objectives().map_err(internal)?.into_iter().find(|declaration| declaration.name() == id);
+    let unsupported = || FractalError::new("unsupported-objective-series", format!("`{id}` is not a declared count or interval objective"));
+    let declaration = match declaration {
+        Some(declaration) => declaration,
+        None if crate::slo::shipped().iter().any(|objective| objective.name == id) => return Err(unsupported()),
+        None => return Err(FractalError::new("unknown-objective", format!("unknown objective `{id}`"))),
+    };
+    let objective = declaration.objective.as_ref().map_err(|_| unsupported())?;
+    if !objective.declarable() {
+        return Err(unsupported());
+    }
+    let mut tracked = Tracked::new(&declaration);
+    let mut counts = vec![0u64; bucket_count as usize];
+    let mut tally = |at: u64| {
+        if at >= from && at < to {
+            counts[((at - from) / width) as usize] += 1;
+        }
+    };
+    match &objective.indicator {
+        Indicator::Count(count) => {
+            let claims = store.objective_series_claims(&[(&count.event, Some(&count.at))], &[&count.event], &count.subject_prefix, from, to).map_err(internal)?;
+            for claim in &claims {
+                tracked.observe_count(count, claim, 0);
+            }
+            for event in tracked.events.values().filter(|event| !left_out(count, &event.fields)) {
+                tally(event.at);
+            }
+        }
+        Indicator::Interval(interval) => {
+            // A completion is a stop, an empty expected set, or (when expect precedes start)
+            // the start itself. Each seek is bounded; all context for candidates is retained.
+            let mut events = vec![(interval.stop.0.kind.as_str(), interval.stop.0.at.as_deref()), (interval.start.kind.as_str(), interval.start.at.as_deref())];
+            if let Some((expect, _)) = &interval.expect {
+                events.push((expect.kind.as_str(), expect.at.as_deref()));
+            }
+            let claims = store.objective_series_claims(&events, &interval.kinds(), &interval.subject_prefix, from, to).map_err(internal)?;
+            for claim in &claims {
+                tracked.observe(interval, claim);
+            }
+            for sample in tracked.samples.values() {
+                if let Class::Closed { stop, .. } = sample.class(interval, None, to) {
+                    tally(stop);
+                }
+            }
+        }
+        _ => return Err(unsupported()),
+    }
+    let buckets: Vec<Value> = counts.into_iter().enumerate().map(|(index, count)| {
+        let start = from + index as u64 * width;
+        json!({"start": start, "end": start.saturating_add(width).min(to), "count": count})
+    }).collect();
+    Ok(json!({"id": id, "from": from, "to": to, "bucket_seconds": bucket_seconds, "buckets": buckets}))
+}
+
 
 /// The declared objectives' rows, evaluated at `now`.
 pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
@@ -701,18 +769,6 @@ fn holds(only: &[Only], fields: &BTreeMap<String, String>) -> bool {
     only.iter().all(|only| fields.get(&only.field).is_some_and(|value| only.values.contains(value)))
 }
 
-/// A time from an RFC 3339 string or Unix milliseconds, either possibly JSON-encoded in a string.
-fn time_ms(value: &Value) -> Option<u64> {
-    match value {
-        Value::Number(number) => number.as_u64(),
-        Value::String(text) => chrono::DateTime::parse_from_rfc3339(text)
-            .ok()
-            .and_then(|at| u64::try_from(at.timestamp_millis()).ok())
-            .or_else(|| text.parse().ok())
-            .or_else(|| serde_json::from_str::<Value>(text).ok().filter(Value::is_string).and_then(|value| time_ms(&value))),
-        _ => None,
-    }
-}
 
 /// A field's text: a string (a JSON-encoded one decoded), a number or a boolean.
 fn text(value: &Value) -> Option<String> {

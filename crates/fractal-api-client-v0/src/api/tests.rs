@@ -336,6 +336,64 @@ async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history()
 }
 
 #[tokio::test]
+async fn slo_series_reads_declared_event_counts_on_both_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = parse_intent(r#"version 2
+objective "factory/work-throughput" {
+  about "Merged pull requests"
+  indicator "count" {
+    subject-prefix "custom/acme/change/"
+    event "custom.acme.change-merged" at="merged_at"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, "node").unwrap();
+    state.store.apply_internal(&intent, "series-objective").unwrap();
+    for (name, at) in [("a", 1000), ("b", 2000), ("c", 4000)] {
+        state.store.append_claim(&ClaimInput {
+            subject: format!("custom/acme/change/{name}"),
+            kind: "custom.acme.change-merged".into(),
+            actor: None,
+            fields: BTreeMap::from([("merged_at".into(), json!(at))]),
+            evidence: vec![],
+            idempotency_key: None,
+            expected_revision: None,
+        }).unwrap();
+    }
+    let app = router(state.clone());
+    for prefix in ["/v1/slo/series", "/v1/client/slo/series"] {
+        let (status, body) = get_request(app.clone(), &format!(
+            "{prefix}?id=factory%2Fwork-throughput&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({
+            "id": "factory/work-throughput", "from": 1000, "to": 4000, "bucket_seconds": 1,
+            "buckets": [
+                {"start": 1000, "end": 2000, "count": 1},
+                {"start": 2000, "end": 3000, "count": 1},
+                {"start": 3000, "end": 4000, "count": 0},
+            ],
+        }));
+        let (status, _) = get_request(app.clone(), &format!(
+            "{prefix}?id=missing&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get_request(app.clone(), &format!(
+            "{prefix}?id=factory%2Fwork-throughput&from=4000&to=1000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let denied = client_v0::slo_series(
+        State(state),
+        Extension(client_v0::ClientSession::for_tests_scoped("person/fixture", "person/fixture", &["read.attention"])),
+        Query(SloSeriesQuery { id: "factory/work-throughput".into(), from: 1000, to: 4000, bucket_seconds: 1 }),
+    ).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

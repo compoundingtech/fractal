@@ -1284,6 +1284,30 @@ The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms,
 Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
 `sloHistory(id, { since_ms, until_ms, steps })`.
 
+`GET /v1/client/slo/series?id=…&from=…&to=…&bucket_seconds=…` returns
+`SloSeries { id, from, to, bucket_seconds, buckets: [{ start, end, count }] }` for
+one declared count or interval objective. All four query parameters are required.
+`id` is the exact declaration name, not a live-window or budget row id. `from` and
+`to` are unsigned Unix milliseconds defining a half-open `[from,to)` range with
+`from < to` and a span of at most 31 days. `bucket_seconds` is a positive integer;
+the ceiling of the span divided by that bucket duration must be at most 1000.
+Buckets are half-open, include zero counts, and the final bucket ends at `to`
+even when shorter than the requested duration.
+
+Count objectives count selected events; interval objectives count closed samples
+by completion time, with the same selection, deduplication and exclusions as the
+declared-objective evaluator. This is a count histogram, **not percentiles** or
+the remaining-budget readings of `slo.history`. Unknown names return
+`unknown-objective` (HTTP 404); non-declared or non-count/non-interval objectives
+return `unsupported-objective-series` (HTTP 422); invalid queries return
+`invalid-slo-series` (HTTP 422). The read requires `read.projections`.
+
+Typed clients expose Rust `Client::slo_series(id, from, to, bucket_seconds)`,
+Swift `sloSeries(id:from:to:bucketSeconds:) async throws -> Envelope<SloSeries>`,
+and TypeScript `sloSeries(id, from, to, bucketSeconds, requestOptions?)` returning
+`Promise<EnvelopeOf<SloSeries>>`. See `fixtures/slo-series.json` for an empty
+middle bucket and a clipped final bucket.
+
 ### Documents
 
 Clients read documents through three reads under `read.projections`; the `documents`

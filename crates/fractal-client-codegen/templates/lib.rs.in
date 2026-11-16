@@ -1193,6 +1193,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::UnknownObjective
+        | ErrorCode::InvalidSloSeries
+        | ErrorCode::UnsupportedObjectiveSeries
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
         | ErrorCode::AttentionDismissUnsupported

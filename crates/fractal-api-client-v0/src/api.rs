@@ -103,7 +103,7 @@ use fractal_api_core::api::launches::{
     revise_planning_session, start_planning_session,
 };
 use fractal_api_core::api::messages::post_message_claim;
-use fractal_api_core::api::operations::{get_slo, get_slo_history};
+use fractal_api_core::api::operations::{get_slo, get_slo_history, get_slo_series};
 use fractal_api_core::api::records::post_review;
 use fractal_api_core::api::sessions::clear_context;
 use fractal_api_core::api::work::retry_work;
@@ -127,7 +127,7 @@ pub use crate::model::FleetEndpointsRequest;
 pub use fractal_api_core::api::*;
 pub use fractal_api_core::api::{AUTHORITY_INDETERMINATE_REASON, AgentSuspensionRequest, ApiError, AppState, BoundAgent, ClientListQuery, ClientPageResponse, ClientSnapshot, ClientTransportBoundary, DEVICE_SIGNATURE_WINDOW_MS, EventQuery, FleetInviteCreated};
 pub use fractal_api_core::api::{FleetInviteRequest, FleetInviteRevokeRequest, FleetPersonRequest, FleetRemoveRequest, FleetStatus, LiveSession, LocalPeer, MessageRead, MessagesQuery, NativeDeliveryPeer, PUBLISH_SAMPLE_CLAIMS, ReservedUnixSocket};
-pub use fractal_api_core::api::{RouteFamily, RuleAudit, RuleSetRequest, SIGNED_LONG_MESSAGE_FIELDS, SIGNED_MESSAGE_FIELDS, SloHistoryQuery, SuspensionFence, WorkQuery, agent_harness, apply, blocking_action, client_attention_resources_at};
+pub use fractal_api_core::api::{RouteFamily, RuleAudit, RuleSetRequest, SIGNED_LONG_MESSAGE_FIELDS, SIGNED_MESSAGE_FIELDS, SloHistoryQuery, SloSeriesQuery, SuspensionFence, WorkQuery, agent_harness, apply, blocking_action, client_attention_resources_at};
 pub use fractal_api_core::api::{client_now_ms, client_reads, cold_agent_roster_rebuild, fabric_router_with, harness_events, is_work_wake, launches, mail_backlog, mailbox, messages, mission_eligibility_doctor};
 pub use fractal_api_core::api::{operations, published_attention, raw_terminal_owner_splice, record_publish_latency, record_stream_latency, records, replication, request_latency_target_windows, request_latency_windows, request_resume, request_suspend, reserve_unix_socket};
 pub use fractal_api_core::api::{response_envelope, router_with, serve_reserved_unix_with_ready, serve_tcp, serve_unix, serve_unix_bound, serve_unix_bound_with_ready, serve_unix_with_ready, sessions, signal_changed, signal_local_change};

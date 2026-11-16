@@ -343,6 +343,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn slo_history(&self, id: &str, since_ms: Option<u64>, until_ms: Option<u64>, steps: Option<usize>) -> Result<Envelope<SloHistory>, ClientError> {{ let mut path = format!(\"/v1/client/slo/history?id={{}}\", percent_encode(id)); if let Some(since_ms) = since_ms {{ path.push_str(&format!(\"&since_ms={{since_ms}}\")); }} if let Some(until_ms) = until_ms {{ path.push_str(&format!(\"&until_ms={{until_ms}}\")); }} if let Some(steps) = steps {{ path.push_str(&format!(\"&steps={{steps}}\")); }} self.get(&path).await }}"
             )?;
+        } else if id == "slo.series" {
+            writeln!(out, "    pub async fn slo_series(&self, id: &str, from: u64, to: u64, bucket_seconds: u64) -> Result<Envelope<SloSeries>, ClientError> {{ self.get(&format!(\"/v1/client/slo/series?id={{}}&from={{from}}&to={{to}}&bucket_seconds={{bucket_seconds}}\", percent_encode(id))).await }}")?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
         } else if id == "usage-hub.quota" {
@@ -585,6 +587,8 @@ fn swift_operation_methods(
                 out,
                 "    public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> {{ var query: [URLQueryItem] = [.init(name: \"id\", value: id)]; if let sinceMS {{ query.append(.init(name: \"since_ms\", value: String(sinceMS))) }}; if let untilMS {{ query.append(.init(name: \"until_ms\", value: String(untilMS))) }}; if let steps {{ query.append(.init(name: \"steps\", value: String(steps))) }}; return try await get(\"v1/client/slo/history\", query: query) }}"
             )?;
+        } else if id == "slo.series" {
+            writeln!(out, "    public func sloSeries(id: String, from: UInt64, to: UInt64, bucketSeconds: UInt64) async throws -> Envelope<SloSeries> {{ try await get(\"v1/client/slo/series\", query: [.init(name: \"id\", value: id), .init(name: \"from\", value: String(from)), .init(name: \"to\", value: String(to)), .init(name: \"bucket_seconds\", value: String(bucketSeconds))]) }}")?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
         } else if id == "usage-hub.quota" {
@@ -965,6 +969,8 @@ fn validate_surfaces(
         "SloList",
         "SloRow",
         "SloHistory",
+        "SloSeries",
+        "SloSeriesBucket",
         "UsageRow",
         "UsagePricing",
         "UsagePricingRates",
@@ -1849,6 +1855,8 @@ fn typescript_operation_methods(
                 out,
                 "    async sloHistory(id: string, options: {{ since_ms?: number; until_ms?: number; steps?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloHistory>> {{ return this.get('/v1/client/slo/history' + query({{ id, ...options }}), undefined, requestOptions); }}"
             )?;
+        } else if id == "slo.series" {
+            writeln!(out, "    async sloSeries(id: string, from: number, to: number, bucketSeconds: number, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloSeries>> {{ return this.get('/v1/client/slo/series' + query({{ id, from, to, bucket_seconds: bucketSeconds }}), undefined, requestOptions); }}")?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
         } else if id == "usage-hub.quota" {

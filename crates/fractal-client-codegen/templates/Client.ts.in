@@ -11,7 +11,7 @@ import type {
     AvailabilitySet, AvailabilityHistory, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
-    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, SloSeries, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
     MissionDeclaration, SubjectSourceMap, SourceBlob,
     GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,

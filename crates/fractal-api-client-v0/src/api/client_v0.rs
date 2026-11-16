@@ -140,6 +140,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
+        .route("/v1/client/slo/series", get(slo_series))
         .route("/v1/client/clients", get(clients_list))
         .route(
             "/v1/client/subject-definition",
@@ -2909,6 +2910,16 @@ pub async fn slo_history(
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     super::get_slo_history(State(state), Query(query)).await
+}
+
+/// Event or closed-sample counts from a declared objective's replicated claims.
+pub async fn slo_series(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<super::SloSeriesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    super::get_slo_series(State(state), Query(query)).await
 }
 
 #[derive(Deserialize)]

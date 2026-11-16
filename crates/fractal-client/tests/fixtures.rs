@@ -15,6 +15,40 @@ fn fixture(name: &str) -> Vec<u8> {
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
 }
+
+#[test]
+fn slo_series_fixture_preserves_zero_and_clipped_buckets() {
+    let raw: serde_json::Value = decode("slo-series.json");
+    let series: Envelope<SloSeries> = decode("slo-series.json");
+    assert_eq!(series.value.id, "objective/example");
+    assert_eq!(series.value.bucket_seconds, 60);
+    assert_eq!(series.value.buckets.iter().map(|bucket| bucket.count).collect::<Vec<_>>(), vec![2, 0, 1]);
+    assert_eq!(series.value.buckets.last().unwrap().end, series.value.to);
+    assert_eq!(serde_json::to_value(&series.value).unwrap(), raw["value"]);
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/SloSeries"
+    })).unwrap();
+    assert!(validator.is_valid(&raw["value"]));
+    for (pointer, invalid_value) in [
+        ("/bucket_seconds", serde_json::json!(0)),
+        ("/buckets/0/count", serde_json::json!(-1)),
+        ("/buckets/0/start", serde_json::json!(-1)),
+        ("/buckets/0/end", serde_json::json!(-1)),
+    ] {
+        let mut invalid = raw["value"].clone();
+        *invalid.pointer_mut(pointer).unwrap() = invalid_value;
+        assert!(!validator.is_valid(&invalid), "{pointer}");
+    }
+    for field in ["id", "from", "to", "bucket_seconds", "buckets"] {
+        let mut invalid = raw["value"].clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&invalid), "{field}");
+        assert!(serde_json::from_value::<SloSeries>(invalid).is_err(), "{field}");
+    }
+}
+
 #[test]
 fn availability_fixtures_decode_coarse_and_full_views_and_encode_a_status_clear_as_null() {
     let read: Envelope<PersonAvailabilities> = decode("person-availability.json");

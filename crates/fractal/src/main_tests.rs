@@ -1,4 +1,17 @@
 #[test]
+fn slo_series_requires_explicit_millisecond_bounds_and_defaults_to_daily_buckets() {
+    let cli = Cli::try_parse_from([
+        "fractal", "slo", "series", "factory/work-throughput", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Slo(SloArgs { command: Some(SloCommand::Series { id, from, to, bucket_seconds }) }) = cli.command else {
+        panic!("expected slo series");
+    };
+    assert_eq!((id.as_str(), from, to, bucket_seconds), ("factory/work-throughput", 1000, 4000, 86_400));
+    assert!(Cli::try_parse_from(["fractal", "slo", "series", "factory/work-throughput", "--from", "1000"]).is_err());
+    assert!(Cli::try_parse_from(["fractal", "slo", "series", "factory/work-throughput", "--to", "4000"]).is_err());
+}
+
+#[test]
 fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
     for (subcommand, transport) in [("add", "fabric"), ("remove", "fabric"), ("prefer", "tailscale")] {
         for actor in ["agent/example", "agent/other", "person/example"] {

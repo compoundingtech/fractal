@@ -802,3 +802,123 @@ fn an_objective_owns_its_rows_and_not_a_deeper_objectives() {
         assert!(!owns("a/b", id), "{id}");
     }
 }
+
+#[test]
+fn series_empty_edges_and_clipped_final_bucket() {
+    let store = store_with(&count_declaration("", "1h", "min=1", ""));
+    assert_eq!(series(&store, THROUGHPUT, 1_000, 3_500, 1).unwrap()["buckets"], json!([
+        {"start":1000,"end":2000,"count":0},
+        {"start":2000,"end":3000,"count":0},
+        {"start":3000,"end":3500,"count":0}
+    ]));
+    for (name, at) in [("before", 999), ("lower", 1000), ("edge", 2000), ("last", 3499), ("upper", 3500)] {
+        claim(&store, name, MERGED, json!({"merged_at":at}));
+    }
+    let result = series(&store, THROUGHPUT, 1_000, 3_500, 1).unwrap();
+    assert_eq!(result, json!({"id":THROUGHPUT,"from":1000,"to":3500,"bucket_seconds":1,"buckets":[
+        {"start":1000,"end":2000,"count":1},
+        {"start":2000,"end":3000,"count":1},
+        {"start":3000,"end":3500,"count":1}
+    ]}));
+}
+
+#[test]
+fn series_validates_range_caps_and_exact_objective_names() {
+    let store = store_with(&count_declaration("", "1h", "min=1", ""));
+    for (from, to, width) in [(0, 1, 0), (1, 1, 1), (2, 1, 1), (0, 31 * 86_400_000 + 1, 86400), (0, 1_000_001, 1)] {
+        assert_eq!(series(&store, THROUGHPUT, from, to, width).unwrap_err().code, "invalid-slo-series");
+    }
+    assert_eq!(series(&store, THROUGHPUT, 0, 1_000_000, 1).unwrap()["buckets"].as_array().unwrap().len(), 1000);
+    assert!(series(&store, THROUGHPUT, 0, 31 * 86_400_000, 86400).is_ok());
+    assert_eq!(series(&store, THROUGHPUT, u64::MAX - 100, u64::MAX, u64::MAX).unwrap()["buckets"], json!([
+        {"start":u64::MAX - 100,"end":u64::MAX,"count":0}
+    ]));
+    for name in ["missing/name", "factory/work", "factory/work-throughput{repository=x}"] {
+        assert_eq!(series(&store, name, 0, 1, 1).unwrap_err().code, "unknown-objective");
+    }
+    let native = &crate::slo::shipped()[0].name;
+    assert_eq!(series(&store, native, 0, 1, 1).unwrap_err().code, "unsupported-objective-series");
+}
+
+#[test]
+fn series_count_reuses_selection_and_original_timestamp_decoding() {
+    let store = store_with(&count_declaration("    only \"workflow\" \"CI\"\n    exclude \"author\" \"bot\"\n", "1h", "min=1", ""));
+    let at = 1_000;
+    for value in [json!(at), json!("1000"), json!("1970-01-01T00:00:01Z"), json!("\"1970-01-01T00:00:01Z\"")] {
+        claim(&store, "same", MERGED, json!({"merged_at":value,"workflow":"CI"}));
+    }
+    claim(&store, "excluded", MERGED, json!({"merged_at":at,"workflow":"CI","author":"bot"}));
+    claim(&store, "missing-only", MERGED, json!({"merged_at":at}));
+    claim(&store, "unreadable", MERGED, json!({"merged_at":"not-a-time","workflow":"CI"}));
+    // An earlier event outside the range wins even if a malformed producer changes its time.
+    claim(&store, "old", MERGED, json!({"merged_at":500,"workflow":"CI"}));
+    claim(&store, "old", MERGED, json!({"merged_at":1500,"workflow":"CI"}));
+    assert_eq!(series(&store, THROUGHPUT, 1000, 2000, 1).unwrap()["buckets"][0]["count"], 1);
+    assert_eq!(series(&store, THROUGHPUT, 1500, 2000, 1).unwrap()["buckets"][0]["count"], 0);
+}
+
+#[test]
+fn series_interval_loads_pre_range_context_and_counts_subject_completion_once() {
+    let store = store_with(&declaration("    exclude \"class\" \"ignored\"\n    only \"workflow\" \"CI\"\n", "7d", ""));
+    for name in ["closed", "open", "ignored", "left-out", "cancelled", "empty"] {
+        claim(&store, name, READY, json!({"ready_at":100,"class":if name == "ignored" {"ignored"} else {"normal"},"workflow":if name == "left-out" {"other"} else {"CI"}}));
+        claim(&store, name, MERGED, json!({"merged_at":1200,"hosts":if name == "empty" {json!([])} else {json!(["a","b"])}}));
+        if name != "open" && name != "empty" {
+            claim(&store, name, APPLIED, json!({"applied_at":1100,"host":"a"}));
+            claim(&store, name, APPLIED, json!({"applied_at":2100,"host":"b"}));
+            claim(&store, name, APPLIED, json!({"applied_at":2200,"host":"b"}));
+        }
+    }
+    // Cancellation's acceptance time is before a future completion.
+    claim(&store, "cancelled", ABANDONED, json!({}));
+    claim(&store, "cancelled", READY, json!({"ready_at":*NOW,"workflow":"CI"}));
+    claim(&store, "cancelled", APPLIED, json!({"applied_at":*NOW + MINUTE,"host":"a"}));
+    claim(&store, "cancelled", APPLIED, json!({"applied_at":*NOW + MINUTE,"host":"b"}));
+    // The original earlier stops still close this subject; cancellation cannot undo closure.
+    let result = series(&store, "ops/change-rollout", 1000, 3000, 1).unwrap();
+    assert_eq!(result["buckets"][0]["count"], 1, "the empty expect set");
+    assert_eq!(result["buckets"][1]["count"], 2, "closed and closed-before-cancel, not members or retries");
+    claim(&store, "truly-cancelled", READY, json!({"ready_at":*NOW - MINUTE,"workflow":"CI"}));
+    claim(&store, "truly-cancelled", MERGED, json!({"merged_at":*NOW,"hosts":["a"]}));
+    claim(&store, "truly-cancelled", ABANDONED, json!({}));
+    claim(&store, "truly-cancelled", APPLIED, json!({"applied_at":*NOW + MINUTE,"host":"a"}));
+    assert_eq!(series(&store, "ops/change-rollout", *NOW, *NOW + 2 * MINUTE, 60).unwrap()["buckets"][1]["count"], 0);
+}
+
+#[test]
+fn series_one_claim_interval_keeps_the_earliest_starts_own_stop() {
+    let source = declaration("", "7d", "")
+        .replace(&format!("    expect \"{MERGED}\" set=\"hosts\" at=\"merged_at\"\n"), "")
+        .replace(&format!("stop \"{APPLIED}\" member=\"host\" at=\"applied_at\""), &format!("stop \"{READY}\" at=\"completed_at\""));
+    let store = store_with(&source);
+    claim(&store, "retry", READY, json!({"ready_at":100,"completed_at":2500}));
+    claim(&store, "retry", READY, json!({"ready_at":200,"completed_at":1500}));
+    assert_eq!(series(&store, "ops/change-rollout", 1000, 3000, 1).unwrap()["buckets"], json!([
+        {"start":1000,"end":2000,"count":0},{"start":2000,"end":3000,"count":1}
+    ]));
+}
+
+#[test]
+fn series_empty_expect_can_complete_at_a_later_start_and_uses_latest_context() {
+    let store = store_with(&declaration("", "7d", ""));
+    claim(&store, "late-start", MERGED, json!({"merged_at":100,"hosts":[]}));
+    claim(&store, "late-start", READY, json!({"ready_at":1500}));
+    assert_eq!(series(&store, "ops/change-rollout", 1000, 2000, 1).unwrap()["buckets"][0]["count"], 1);
+    // A newer expect outside the range leaves the sample open. This is selection from current
+    // history, not an as-of reconstruction or a fold truncated at the request's end.
+    claim(&store, "late-start", MERGED, json!({"merged_at":3000,"hosts":["new-member"]}));
+    assert_eq!(series(&store, "ops/change-rollout", 1000, 2000, 1).unwrap()["buckets"][0]["count"], 0);
+}
+
+#[test]
+fn series_interval_without_at_uses_original_acceptance_time() {
+    let source = declaration("", "7d", "")
+        .replace(" at=\"ready_at\"", "")
+        .replace(" at=\"applied_at\"", "");
+    let store = store_with(&source);
+    claim(&store, "accepted", READY, json!({}));
+    claim(&store, "accepted", MERGED, json!({"merged_at":100,"hosts":["a"]}));
+    claim(&store, "accepted", APPLIED, json!({"host":"a"}));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    assert_eq!(series(&store, "ops/change-rollout", now - MINUTE, now + MINUTE, 120).unwrap()["buckets"][0]["count"], 1);
+}
