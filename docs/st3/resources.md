@@ -56,6 +56,17 @@ reserving a second footprint. The parent retains custody until every execution r
 `fractal resources ls` lists host holders and waiters; `fractal resources show` exposes membership
 details and blocking reasons. `fractal resources hold` and `fractal resources release` operate on
 the existing durable host holds, including authenticated ownership and revision checks.
+Use `ls --host worker --class check` to narrow inventory, and `show EXECUTION_ID` to inspect one
+execution. A hold's affected operation is the lane name, or `*` for all lanes:
+
+```sh
+fractal resources hold worker --operation verification --reason 'maintenance'
+fractal resources release worker HOLD_ID --expected-revision 1 --resolution 'maintenance complete'
+```
+
+Ownership comes from the authenticated run/attempt or native agent invocation, not mutable
+environment labels. An ad-hoc local operator has an explicit local/person owner. Nested
+membership inheritance requires that same authenticated owner; inventory never exports grants.
 
 ## Program API
 

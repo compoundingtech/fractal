@@ -72,8 +72,12 @@ impl Store {
     pub fn shell_resources(&self, host: &str, active_only: bool) -> Result<Vec<Execution>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare("SELECT body FROM shell_resources_v1 WHERE host=?1 AND (?2=0 OR state IN ('waiting','admitted','running','retiring','finishing')) ORDER BY id")?;
-        statement.query_map(rusqlite::params![host,active_only], |row| row.get::<_,String>(0))?
-            .map(|body| Ok(serde_json::from_str(&body?)?)).collect()
+        let mut executions = statement.query_map(rusqlite::params![host,active_only], |row| row.get::<_,String>(0))?
+            .map(|body| Ok(serde_json::from_str(&body?)?)).collect::<Result<Vec<Execution>>>()?;
+        executions.sort_by(|left, right| left.command.lane.class.cmp(&right.command.lane.class)
+            .then_with(|| left.queued_at.cmp(&right.queued_at))
+            .then_with(|| left.command.id.cmp(&right.command.id)));
+        Ok(executions)
     }
 
     pub fn update_shell_resource(&self, execution: &Execution) -> Result<bool> {
@@ -197,6 +201,22 @@ mod tests {
         assert!(!store.update_shell_resource(&execution).unwrap());
         assert_eq!(store.shell_resource("one").unwrap().exit_code, Some(37));
         assert!(store.shell_resources("host-a", true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_shell_commands_reach_native_admission_in_class_then_fifo_order() {
+        let store = Store::open_memory("host-a").unwrap();
+        let mut agent = command("agent");
+        agent.lane.class = RequestClass::Agent;
+        store.submit_shell_resource(agent, 1).unwrap();
+        store.submit_shell_resource(command("check-second"), 3).unwrap();
+        store.submit_shell_resource(command("check-first"), 2).unwrap();
+        let mut landing = command("landing");
+        landing.lane.class = RequestClass::Landing;
+        store.submit_shell_resource(landing, 4).unwrap();
+        let executions = store.shell_resources("host-a", true).unwrap();
+        assert_eq!(executions.iter().map(|execution| execution.command.id.as_str()).collect::<Vec<_>>(),
+            ["landing", "check-first", "check-second", "agent"]);
     }
 
     #[test]

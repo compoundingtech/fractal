@@ -23,28 +23,34 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
         Ok(())
     })().map_err(|error| ApiError::bad(FractalError::new("resource-exec-refused", error.to_string())))?;
     command.lane.host.clone_from(&state.node);
+    let local_operator = run.is_none() && !matches!(&bound, Some(BoundActor::Agent(_) | BoundActor::Run(_)));
+    let owner = if let Some(Extension(BoundRun(binding))) = run {
+        crate::store::resource_membership::Owner { run: binding.run, step: binding.step_run, attempt: binding.attempt,
+            invocation: Some(format!("shell:{}", command.id)) }
+    } else if let Some(BoundActor::Agent(agent)) = bound {
+        state.store.shell_resource_agent_owner(&agent).map_err(|error|
+            ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?
+    } else if matches!(bound, Some(BoundActor::Run(_))) {
+        return Err(ApiError::bad(FractalError::new("resource-exec-owner", "run caller has no verified attempt binding")));
+    } else {
+        crate::store::resource_membership::Owner {
+            run: state.owning_person.clone().unwrap_or_else(|| format!("local:{}", state.node)),
+            step: format!("shell:{}", command.id), attempt: 1, invocation: Some(format!("shell:{}", command.id)),
+        }
+    };
+    state.store.shell_resource_owner_live(&owner).map_err(|error|
+        ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?;
     if let Some(parent) = &command.parent {
         let record = state.store.resource_membership_for_grant(parent).map_err(ApiError::internal)?;
+        if record.request.owner.run != owner.run || (!local_operator
+            && (record.request.owner.step != owner.step || record.request.owner.attempt != owner.attempt)) {
+            return Err(ApiError::bad(FractalError::new("resource-exec-owner", "nested membership belongs to another execution owner")));
+        }
         validate_parent(&command, &record.request, &record.state).map_err(ApiError::internal)?;
         // The same durable membership owns every nested root. Never submit a second charge.
         command.lane = record.request;
     } else {
-        command.lane.owner = if let Some(Extension(BoundRun(binding))) = run {
-            crate::store::resource_membership::Owner { run: binding.run, step: binding.step_run, attempt: binding.attempt,
-                invocation: Some(format!("shell:{}", command.id)) }
-        } else if let Some(BoundActor::Agent(agent)) = bound {
-            state.store.shell_resource_agent_owner(&agent).map_err(|error|
-                ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?
-        } else if matches!(bound, Some(BoundActor::Run(_))) {
-            return Err(ApiError::bad(FractalError::new("resource-exec-owner", "run caller has no verified attempt binding")));
-        } else {
-            crate::store::resource_membership::Owner {
-                run: state.owning_person.clone().unwrap_or_else(|| format!("local:{}", state.node)),
-                step: format!("shell:{}", command.id), attempt: 1, invocation: Some(format!("shell:{}", command.id)),
-            }
-        };
-        state.store.shell_resource_owner_live(&command.lane.owner).map_err(|error|
-            ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?;
+        command.lane.owner = owner;
     }
     let execution = state.store.submit_shell_resource(command, u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(ApiError::internal)?;
     state.notify.notify_one();
@@ -73,6 +79,7 @@ fn validate_parent(command: &Command, parent: &crate::store::resource_membership
 fn present(mut execution: Execution) -> Execution {
     // The durable launch envelope can contain credentials. Inspection never exports it.
     execution.command.environment.clear();
+    execution.command.parent = None;
     execution
 }
 
@@ -83,7 +90,8 @@ pub(super) async fn list(State(state): State<AppState>, Query(query): Query<List
         .filter(|row| query.head.as_ref().is_none_or(|head| row.head_start.as_ref() == Some(head)))
         .map(present).collect();
     let memberships: Vec<_> = state.store.resource_memberships_for_host(host).map_err(ApiError::internal)?.into_iter()
-        .filter(|row| query.class.is_none_or(|class| row.request.class == class)).collect();
+        .filter(|row| query.class.is_none_or(|class| row.request.class == class))
+        .map(|mut row| { row.grant = None; row }).collect();
     let holds = state.store.host_holds(Some(host), false).map_err(ApiError::internal)?;
     let accountant = state.seat_admission.snapshot(admission_now());
     Ok(Json(json!({"executions":rows,"memberships":memberships,"holds":holds,"accountant":accountant})))
@@ -92,7 +100,8 @@ pub(super) async fn list(State(state): State<AppState>, Query(query): Query<List
 pub(super) async fn show(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
     let membership = state.store.resource_memberships_for_host(&execution.command.lane.host).map_err(ApiError::internal)?.into_iter()
-        .find(|member| member.request.id == execution.command.lane.id);
+        .find(|member| member.request.id == execution.command.lane.id)
+        .map(|mut member| { member.grant = None; member });
     let holds = state.store.host_holds(Some(&execution.command.lane.host), false).map_err(ApiError::internal)?;
     Ok(Json(json!({"execution":present(execution),"membership":membership,"holds":holds,"accountant":state.seat_admission.snapshot(admission_now())})))
 }
@@ -142,6 +151,7 @@ mod tests {
         let state = super::super::tests::state(directory.path());
         state.store.start_resource_authority(&state.node, "epoch").unwrap();
         let mut parent = request(); parent.host.clone_from(&state.node);
+        parent.owner.run = state.owning_person.clone().unwrap_or_else(|| format!("local:{}", state.node));
         let Admission::Admitted(grant) = state.store.request_resource_membership(&parent,
             Fit { room: Some(fractal_runtime::Capacity { cores:32, memory:128 << 30 }), ..Fit::default() }, 10).unwrap() else { panic!("parent was not admitted") };
         let id = uuid::Uuid::now_v7().to_string();
@@ -150,8 +160,15 @@ mod tests {
         lane.owner = Owner { run:owner.clone(), step:owner.clone(), attempt:1, invocation:Some(owner) };
         let command = Command { id, lane, argv:vec!["true".into()], cwd:"/work".into(), environment:BTreeMap::new(),
             timeout_ms:None, parent:Some(grant.clone()) };
+        let mut other_owner = state.clone();
+        other_owner.owning_person = Some("person/other".into());
+        assert!(submit(State(other_owner), None, None, Json(command.clone())).await.is_err());
         let Json(child) = submit(State(state.clone()), None, None, Json(command.clone())).await.unwrap();
         assert_eq!(child.command.lane, parent);
+        assert!(child.command.parent.is_none(), "inspection must not export replayable parent grants");
+        let Json(details) = show(State(state.clone()), AxumPath(child.command.id.clone())).await.unwrap();
+        assert!(details["membership"]["grant"].is_null(), "operator inspection must not export grants");
+        assert!(state.store.shell_resource(&child.command.id).unwrap().command.parent.is_some());
         assert_eq!(state.store.resource_memberships_for_host(&state.node).unwrap().len(), 1);
         assert_eq!(state.store.held_resource_membership_bytes(&state.node, "").unwrap(), 24 << 30);
         state.store.cancel_resource_membership(&grant, &parent.owner, 11).unwrap();
