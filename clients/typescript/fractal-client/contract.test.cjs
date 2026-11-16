@@ -310,10 +310,14 @@ test('sloSeries preserves required query values, cancellation and clipped zero-c
     const controller = new AbortController();
     const client = new FractalClient({
         baseUrl: 'https://example.test',
-        fetchImpl: async (url, init) => { calls.push([String(url), init]); return response(wire); },
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            return response(String(url).endsWith('/capabilities') ? capabilityFixture : wire);
+        },
     });
     assert.deepEqual(await client.sloSeries(wire.value.id, wire.value.from, wire.value.to, wire.value.bucket_seconds, { signal: controller.signal }), wire);
-    const [url, init] = calls[0];
+    assert.equal(calls[0][0], 'https://example.test/v1/client/capabilities');
+    const [url, init] = calls[1];
     assert.equal(url, 'https://example.test/v1/client/slo/series?id=objective%2Fexample&from=1767225600000&to=1767225725000&bucket_seconds=60');
     assert.equal(init.method, 'GET');
     assert.equal(init.signal, controller.signal);

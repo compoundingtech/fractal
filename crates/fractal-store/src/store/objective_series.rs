@@ -1,7 +1,7 @@
 //! Rebuildable timestamp seeks for declared objectives. Original claim bodies remain authoritative.
 use super::*;
 
-const SCHEMA: &str = "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h65b5b05b828f owner=fractal_store::store::objective_series TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_objective_times_v1 (
  store_index INTEGER NOT NULL, field TEXT NOT NULL, kind TEXT NOT NULL,
  at BLOB NOT NULL, subject TEXT NOT NULL, PRIMARY KEY(store_index,field)
@@ -32,13 +32,13 @@ pub fn time_ms(value: &Value) -> Option<u64> {
 }
 
 pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(SCHEMA)?;
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h346f4a67bec1 owner=fractal_store::store::objective_series TODO=trace-statement-and-value-representation */ SCHEMA)?;
     let initialized: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='local_objective_times_v1')", [], |row| row.get(0))?;
     if !initialized {
         // Once at startup, not on a series request. The transaction also installs capture.
-        tx.execute("INSERT OR IGNORE INTO local_objective_times_pending_v1 SELECT store_index FROM claims", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc4f3532cf370 owner=fractal_store::store::objective_series TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_objective_times_pending_v1 SELECT store_index FROM claims", [])?;
         flush(tx)?;
-        tx.execute("INSERT INTO meta(key,value) VALUES('local_objective_times_v1','ready')", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h747854030285 owner=fractal_store::store::objective_series TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_objective_times_v1','ready')", [])?;
     }
     flush(tx)
 }
@@ -50,7 +50,7 @@ pub(super) fn flush(tx: &Transaction<'_>) -> Result<()> {
         if indexes.is_empty() { return Ok(()); }
         for index in indexes {
             let claim = tx.query_row("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE store_index=?1", [index], claim_from_row).optional()?;
-            tx.execute("DELETE FROM local_objective_times_v1 WHERE store_index=?1", [index])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h9982846b0d0e owner=fractal_store::store::objective_series TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_objective_times_v1 WHERE store_index=?1", [index])?;
             if let Some(claim) = claim {
                 let accepted = u64::try_from(claim.accepted_at_unix_ms).unwrap_or(u64::MAX);
                 insert(tx, &claim, "accepted", accepted)?;
@@ -60,13 +60,13 @@ pub(super) fn flush(tx: &Transaction<'_>) -> Result<()> {
                     }
                 }
             }
-            tx.execute("DELETE FROM local_objective_times_pending_v1 WHERE store_index=?1", [index])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h9f1ce24f4131 owner=fractal_store::store::objective_series TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_objective_times_pending_v1 WHERE store_index=?1", [index])?;
         }
     }
 }
 
 fn insert(tx: &Transaction<'_>, claim: &ClaimRecord, field: &str, at: u64) -> Result<()> {
-    tx.execute("INSERT INTO local_objective_times_v1(store_index,field,kind,at,subject) VALUES(?1,?2,?3,?4,?5)",
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hee8c9060116b owner=fractal_store::store::objective_series TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_objective_times_v1(store_index,field,kind,at,subject) VALUES(?1,?2,?3,?4,?5)",
         params![claim.store_index, field, claim.kind, at.to_be_bytes().as_slice(), claim.subject])?;
     Ok(())
 }
@@ -86,12 +86,12 @@ impl Store {
         let mut subjects = BTreeSet::new();
         for (kind, field) in events {
             let field = field.map_or_else(|| "accepted".to_owned(), |field| format!("field:{field}"));
-            subjects.extend(tx.prepare_cached(CANDIDATES)?.query_map(params![kind, field, from.to_be_bytes().as_slice(), to.to_be_bytes().as_slice(), prefix, upper], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+            subjects.extend(tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-he1f5fdf7608d owner=fractal_store::store::objective_series TODO=trace-statement-and-value-representation */ CANDIDATES)?.query_map(params![kind, field, from.to_be_bytes().as_slice(), to.to_be_bytes().as_slice(), prefix, upper], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
         }
         let mut claims = Vec::new();
         for subject in subjects {
             for kind in kinds {
-                claims.extend(tx.prepare_cached(CONTEXT)?.query_map(params![subject, kind], claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?);
+                claims.extend(tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb026bfd6774d owner=fractal_store::store::objective_series TODO=trace-statement-and-value-representation */ CONTEXT)?.query_map(params![subject, kind], claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?);
             }
         }
         Ok(claims)
