@@ -564,7 +564,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
         const time = iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>
         // A lifecycle change is one quiet line; only messages carry the sender header.
         if (event.kind !== 'message') return <li key={event.id} data-thread-event={event.kind} {...stylex.props(stylex.defaultMarker(), styles.lifecycle)}>
-          <span>{sender} {event.kind === 'thread.renamed' ? <>renamed it to “{event.title}”</> : event.kind === 'thread.closed' ? 'closed the thread' : 'reopened the thread'}</span>
+          <span>{sender} {event.kind === 'thread.renamed' ? <>renamed “{event.previous_title}” to “{event.title}”</> : event.kind === 'thread.closed' ? 'closed the thread' : 'reopened the thread'}</span>
           {time === null ? null : <><span aria-hidden="true">·</span>{time}</>}
         </li>
         const quotedId = Option.getOrUndefined(event.thread_quote_id)
