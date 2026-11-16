@@ -24,6 +24,71 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  ios-rust-toolchain-cache:
+    name: Publish iOS Rust toolchain cache
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository_owner == 'compoundingtech' && github.event.repository.fork == false
+    runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check cache publishing credentials
+        id: credentials
+        env:
+          FRACTAL_CACHIX_CACHE: ${{ vars.FRACTAL_CACHIX_CACHE }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [[ -n "$FRACTAL_CACHIX_CACHE" && -n "$CACHIX_AUTH_TOKEN" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            printf '## iOS toolchain cache publishing skipped\n\nConfigure the FRACTAL_CACHIX_CACHE repository variable and CACHIX_AUTH_TOKEN repository secret to enable publishing.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.credentials.outputs.enabled == 'true'
+        with:
+          persist-credentials: false
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+        if: steps.credentials.outputs.enabled == 'true'
+      - name: Configure producer-owned Cachix cache
+        if: steps.credentials.outputs.enabled == 'true'
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866
+        with:
+          name: ${{ vars.FRACTAL_CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+      - name: Build and publish the full iOS Rust toolchain closure
+        if: steps.credentials.outputs.enabled == 'true'
+        env:
+          FRACTAL_CACHIX_CACHE: ${{ vars.FRACTAL_CACHIX_CACHE }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          toolchain=$(nix build --no-link --print-out-paths .#ios-rust-toolchain)
+          nix path-info --recursive "$toolchain" | cachix push "$FRACTAL_CACHIX_CACHE"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: This producer publishes the explicit iOS Rust toolchain closure to Cachix, including substituted paths; no Actions build cache is configured.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   macos-ci:
     name: macos-ci
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}

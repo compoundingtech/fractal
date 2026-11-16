@@ -39,6 +39,7 @@ pub mod custom;
 pub mod model_drift;
 mod notice_authority;
 pub mod ask_digest;
+pub mod auto_resolved;
 mod ask_digest_cache;
 mod ask_digest_payload;
 mod transaction_work;
@@ -5623,7 +5624,9 @@ impl Store {
                 || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
-                    "SELECT subject, actor, kind IN ('work.claimed','work.progress')
+                    "SELECT subject, actor, kind IN ('work.claimed','work.progress'),
+                            kind='owned-set.revised' OR json_extract(body,'$.owned_set') IS NOT NULL
+                                OR json_extract(body,'$._operation.id') IS NOT NULL
                      FROM claims WHERE store_index>?1 AND store_index<=?2",
                 )?;
                 let mut changed = HashSet::new();
@@ -5632,10 +5635,13 @@ impl Store {
                 // authored claims. Keep those input generations distinct.
                 let mut changed_subjects = HashSet::new();
                 let mut runtime_work_actors = HashSet::new();
+                let mut indirect_runtime_inputs = false;
                 for row in statement.query_map(params![cache.through, store_index], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                        row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
                 })? {
-                    let (subject, actor, work_activity) = row?;
+                    let (subject, actor, work_activity, indirect) = row?;
+                    indirect_runtime_inputs |= indirect;
                     if work_activity && let Some(actor) = &actor {
                         runtime_work_actors.insert(actor.clone());
                     }
@@ -5644,6 +5650,13 @@ impl Store {
                     changed.extend(actor);
                 }
                 drop(statement);
+                if indirect_runtime_inputs {
+                    // Receipt-selected declarations and operation authority can change
+                    // earlier runtime subjects without a claim naming those subjects.
+                    let runtimes = self.runtime_list_changes(cache.through, store_index)?;
+                    changed.extend(runtimes.iter().cloned());
+                    changed_subjects.extend(runtimes);
+                }
                 let stale = |subject: &String, owners: &[String]| {
                     changed.contains(subject) || owners.iter().any(|owner| changed.contains(owner))
                 };
@@ -5875,20 +5888,31 @@ impl Store {
         self.status_for_subject_names_at(subjects, index, history, claims)
     }
 
+    const GENERIC_RESERVED_SUBJECTS_SQL: &str =
+        "SELECT selected.value FROM json_each(?1) selected WHERE EXISTS (
+         SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='custom.attention' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='custom.attention.' AND kind<'custom.attention/' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind='attention.notice' AND store_index<=?2
+         UNION ALL SELECT 1 FROM claims WHERE subject=selected.value
+           AND kind>='attention.notice-' AND kind<'attention.notice.' AND store_index<=?2)";
+
     pub fn generic_status_subject_names_at(
         &self, mut subjects: BTreeSet<String>, index: u64,
     ) -> Result<BTreeSet<String>> {
         subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
         if subjects.is_empty() { return Ok(subjects); }
         let connection = self.readers.get();
-        let mut query = connection.prepare_cached(
-            "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
-             JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2",
-        )?;
+        // Probe only the reserved namespace in the existing (subject, kind, index)
+        // index. Enumerating DISTINCT kinds reads every runtime observation and
+        // builds a temporary btree even when none of the subjects is reserved.
+        // Separate UNION arms keep each exact/prefix probe independently indexed.
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc18b868e178d owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::GENERIC_RESERVED_SUBJECTS_SQL)?;
         for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
-            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
-            let (subject,kind) = row?;
-            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+            row.get::<_,String>(0))? {
+            subjects.remove(&row?);
         }
         Ok(subjects)
     }

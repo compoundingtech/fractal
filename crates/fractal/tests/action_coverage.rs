@@ -920,6 +920,7 @@ async fn dispatch(
         "work.ask" => work_ask, "work.cancel-ask" => work_cancel_ask,
         "work.claim" => work_claim, "work.complete" => work_complete,
         "work.done" => work_done, "work.fail" => work_fail, "work.progress" => work_progress,
+        "work.override" => work_override,
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
         "work.renew" => work_renew, "work.retry" => work_retry,
     }
