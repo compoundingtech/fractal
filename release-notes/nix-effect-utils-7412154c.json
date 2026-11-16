@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Update the effect-utils build input to published 7412154c with the reindeer fix and Vite 8.3.8",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Build input only. Pins effect-utils 7412154cde31346d8e7de2d8111b53b3ae40d7bb, including the reindeer fix and Vite 8.3.8, and refreshes the TypeScript client dependency pin. The upstream nixpkgs pin is unchanged."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or recovery steps."}
+}
