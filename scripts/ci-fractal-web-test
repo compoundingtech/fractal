@@ -74,6 +74,8 @@ web_inputs = (
     "megarepo.kdl",
     "megarepo.lock",
     "flake.lock",
+    "nix/fractal-web-publisher.nix",
+    "apps/fractal-web/server/main.mts",
     "scripts/ci-web-shell",
     "scripts/ci-web-shell-test",
     "scripts/prepare-pnpm-source-inputs.py",
@@ -105,6 +107,15 @@ for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
         if actual != expected:
             unexpected.append(path)
 assert not unexpected, f"incorrect web input classification: {unexpected}"
+
+# A new app story folder is owned automatically; unrelated app modules remain outside kit scope.
+new_folder_stories = [
+    "apps/fractal-web/src/new-feature/nested/Example.stories.tsx",
+    "apps/fractal-web/src/Example.stories.tsx",
+]
+assert detector_contract["kit_paths"](new_folder_stories) == new_folder_stories
+assert not detector_contract["kit_paths"](["apps/fractal-web/src/new-feature/nested/Example.tsx"])
+print("passed: new app story folders select kit lanes without enumerating files")
 
 # Static kit scope must cover every declared workspace dependency, including transitive ones.
 package_paths = subprocess.run(["git", "ls-files", "--", "package.json", "*/package.json"],
@@ -166,6 +177,118 @@ raw_terminal_kit_inputs = (
 assert detector_contract["kit_paths"](raw_terminal_kit_inputs) == list(raw_terminal_kit_inputs)
 assert not detector_contract["kit_paths"](["apps/fractal-web/src/terminal/rawTerminalInput.unit.test.ts"])
 print("passed: raw terminal runtime dependencies select kit lanes, unit tests do not")
+# App modules the kit Storybook bundles through alert, mission, usage, settings, theme, to-do, sidebar, GitHub plugin,
+# state cell, transcript and workspace stories.
+# Some are declared ahead of the web changes that add them, so those changes select kit plays without touching CI paths.
+bundled_app_kit_inputs = (
+    "apps/fractal-web/src/conversation/alerts/PromptAlert.tsx",
+    "apps/fractal-web/src/conversation/alerts/alertAnswers.ts",
+    "apps/fractal-web/src/conversation/alerts/alertChoices.ts",
+    "apps/fractal-web/src/conversation/alerts/answerableAlerts.fixture.ts",
+    "apps/fractal-web/src/conversation/alerts/decisionText.ts",
+    "apps/fractal-web/src/conversation/alerts/useAlertAnswers.ts",
+    "apps/fractal-web/src/conversation/systemRecords.ts",
+    "apps/fractal-web/src/conversation/todos/fixtures.ts",
+    "apps/fractal-web/src/missions/MissionFeedNotice.tsx",
+    "apps/fractal-web/src/missions/SidebarMissionsList.tsx",
+    "apps/fractal-web/src/missions/missionTitle.ts",
+    "apps/fractal-web/src/missions/missionWords.ts",
+    "apps/fractal-web/src/missions/useMissionRows.ts",
+    "apps/fractal-web/src/monitor/UsageSection.tsx",
+    "apps/fractal-web/src/monitor/model.ts",
+    "apps/fractal-web/src/monitor/state.ts",
+    "apps/fractal-web/src/monitor/usageSectionState.ts",
+    "apps/fractal-web/src/monitor/usageSectionView.ts",
+    "apps/fractal-web/src/monitor/wire.ts",
+    "apps/fractal-web/src/shell/sameFolderFleet.ts",
+    "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
+    "apps/fractal-web/src/telemetry/devBarPreference.ts",
+    "apps/fractal-web/src/web/AgentResourcesPanel.tsx",
+    "apps/fractal-web/src/web/AlertDetailsPane.tsx",
+    "apps/fractal-web/src/web/AlertFlashBand.tsx",
+    "apps/fractal-web/src/web/SettingsDialog.tsx",
+    "apps/fractal-web/src/web/missionsTab.ts",
+    "apps/fractal-web/src/web/settingsModel.ts",
+    "apps/fractal-web/src/web/shortcuts.ts",
+    "apps/fractal-web/src/web/themePreference.ts",
+    "apps/fractal-web/src/workbench-kit/keys.tsx",
+    "apps/fractal-web/src/conversation/alerts/LiveAlertNames.tsx",
+    "apps/fractal-web/src/conversation/alerts/alertNames.ts",
+    "apps/fractal-web/src/conversation/alerts/decisionWords.ts",
+    "apps/fractal-web/src/conversation/mail.ts",
+    "apps/fractal-web/src/missions/MissionDetailView.tsx",
+    "apps/fractal-web/src/missions/missionPlan.ts",
+    "apps/fractal-web/src/missions/rowData.ts",
+    "apps/fractal-web/src/plugins/github/card/GithubCard.tsx",
+    "apps/fractal-web/src/plugins/github/data.ts",
+    "apps/fractal-web/src/plugins/github/detail/Checks.tsx",
+    "apps/fractal-web/src/plugins/github/detail/Conversation.tsx",
+    "apps/fractal-web/src/plugins/github/detail/DetailShell.tsx",
+    "apps/fractal-web/src/plugins/github/detail/Files.tsx",
+    "apps/fractal-web/src/plugins/github/detail/IssueDetail.tsx",
+    "apps/fractal-web/src/plugins/github/detail/PullRequestDetail.tsx",
+    "apps/fractal-web/src/plugins/github/detail/RunDetail.tsx",
+    "apps/fractal-web/src/plugins/github/detail/detail-model.ts",
+    "apps/fractal-web/src/plugins/github/detail/index.ts",
+    "apps/fractal-web/src/plugins/github/fixtures.ts",
+    "apps/fractal-web/src/plugins/github/index.ts",
+    "apps/fractal-web/src/plugins/github/model.ts",
+    "apps/fractal-web/src/plugins/github/refs.ts",
+    "apps/fractal-web/src/plugins/github/schema.ts",
+    "apps/fractal-web/src/plugins/github/surface.tsx",
+    "apps/fractal-web/src/plugins/github/views.tsx",
+    "apps/fractal-web/src/state/cell/StateCell.ts",
+    "apps/fractal-web/src/state/cell/defaultEnvironment.ts",
+    "apps/fractal-web/src/state/cell/environment.ts",
+    "apps/fractal-web/src/state/cell/store.ts",
+    "apps/fractal-web/src/state/cell/testing.ts",
+    "apps/fractal-web/src/state/cells/drafts.ts",
+    "apps/fractal-web/src/state/cells/lists.ts",
+    "apps/fractal-web/src/state/cells/panels.ts",
+    "apps/fractal-web/src/state/cells/view.ts",
+    "apps/fractal-web/src/web/AgentMissions.tsx",
+    "apps/fractal-web/src/web/composerDraftPort.ts",
+    "apps/fractal-web/src/web/composerDrafts.ts",
+    "apps/fractal-web/src/web/narrowLayout.ts",
+    "apps/fractal-web/src/web/rightPanel.ts",
+    "apps/fractal-web/src/workbench-kit/EditorTabs.tsx",
+    "apps/fractal-web/src/workspace/WorkspaceBody.tsx",
+    "apps/fractal-web/src/workspace/WorkspaceStrip.tsx",
+    "apps/fractal-web/src/workspace/chunks.ts",
+    "apps/fractal-web/src/workspace/kinds.ts",
+    "apps/fractal-web/src/workspace/model.ts",
+    "apps/fractal-web/src/workspace/openable.ts",
+    "apps/fractal-web/src/workspace/registry.ts",
+    "apps/fractal-web/src/workspace/resources.ts",
+    "apps/fractal-web/src/workspace/store.ts",
+    "apps/fractal-web/src/workspace/subject.ts",
+    "apps/fractal-web/src/workspace/surfaces.tsx",
+    "apps/fractal-web/src/workspace/tabPresentation.tsx",
+    "apps/fractal-web/src/workspace/useWorkspace.ts",
+    "apps/fractal-web/src/workspace/useWorkspaceKeys.ts",
+    "docs/st3/client-v0/fixtures/github-plugin-checks.json",
+    "docs/st3/client-v0/fixtures/github-plugin-comment.json",
+    "docs/st3/client-v0/fixtures/github-plugin-conversation.json",
+    "docs/st3/client-v0/fixtures/github-plugin-files.json",
+    "docs/st3/client-v0/fixtures/github-plugin-gone.json",
+    "docs/st3/client-v0/fixtures/github-plugin-issue.json",
+    "docs/st3/client-v0/fixtures/github-plugin-moved.json",
+    "docs/st3/client-v0/fixtures/github-plugin-not-found.json",
+    "docs/st3/client-v0/fixtures/github-plugin-pull-request.json",
+    "docs/st3/client-v0/fixtures/github-plugin-run.json",
+    "docs/st3/client-v0/fixtures/github-plugin-stale.json",
+    "docs/st3/client-v0/fixtures/github-plugin-unavailable.json",
+    "fixtures/clients/transcripts/wakes.json",
+)
+assert detector_contract["kit_paths"](bundled_app_kit_inputs) == list(bundled_app_kit_inputs)
+assert not detector_contract["kit_paths"]([
+    "apps/fractal-web/src/missions/missionTitle.unit.test.ts",
+    "apps/fractal-web/src/monitor/usageSectionState.unit.test.ts",
+    "apps/fractal-web/src/web/themePreference.unit.test.ts",
+    "apps/fractal-web/src/workspace/model.unit.test.ts",
+    "apps/fractal-web/src/plugins/github/model.unit.test.ts",
+])
+print("passed: app modules bundled by kit stories select kit lanes, their unit tests do not")
 
 
 with tempfile.TemporaryDirectory() as scratch:
@@ -344,7 +467,7 @@ for pattern in ("crates/fractal-client*/**", "crates/fractal-schema/**", "docs/s
     assert f'"{pattern}"' not in changes, f"generated detector retains broad input {pattern}"
 for block in (changes, execution, gate_job):
     assert "runs-on: ubuntu-latest" in block
-assert "timeout-minutes: 1" in changes and "timeout-minutes: 1" in gate_job and "timeout-minutes: 25" in execution
+assert "timeout-minutes: 3" in changes and "timeout-minutes: 3" in gate_job and "timeout-minutes: 25" in execution
 assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in changes
 assert "github.event.pull_request.head.sha || github.event.merge_group.head_sha" in changes
 assert "github.event.merge_group.base_sha || github.event.before" in changes
@@ -531,23 +654,20 @@ for shard, app, kit, build, index, expected in (
 print("passed: every shard generates Storybook inputs before building; only shard 0 runs non-kit lanes")
 print("passed: browser controls, Storybook and strict plays wait until the non-kit test streams finish")
 
-# Exercise the production hash/receipt aggregator without a browser.
+# Exercise the production cost scheduler/receipt aggregator without a browser.
 subprocess.run(["node", "--input-type=module", "-"], cwd=root, check=True, input=r'''
 import assert from 'node:assert/strict'
-import { shardNumber, shardStories, aggregateShards as aggregate, shardArtifactName } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+import { createHash } from 'node:crypto'
+import { shardStories, aggregateShards as aggregate, shardArtifactName } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+import costs from './packages/fractal-ui/scripts/kit-play-costs.json' with { type: 'json' }
 const provenance = { runId: '1234', runAttempt: 2, headSha: 'a'.repeat(40) }
 const aggregateShards = (receipts, count) => aggregate(receipts, count, provenance)
 const ids = Array.from({ length: 313 }, (_, i) => `story-${i}`).sort()
-assert.equal(shardNumber('story-0', 2), 1)
 for (const count of [1, 2, 3, 4]) {
   const shards = Array.from({ length: count }, (_, i) => shardStories(ids, i, count))
   assert.deepEqual(shards.flat().sort(), ids)
-  for (const id of ids) {
-    assert.equal(shardNumber(id, count), shardNumber(id, count))
-    assert.equal(shards[shardNumber(id, count)].includes(id), true)
-  }
+  assert.deepEqual(Array.from({ length: count }, (_, i) => shardStories(ids, i, count)), shards)
   assert.deepEqual(shardStories([...ids].reverse(), 0, count).sort(), shards[0])
-  assert.deepEqual(shardStories([...ids, 'new-story'], 0, count).filter(id => id !== 'new-story'), shards[0])
   const receipts = shards.map((selected, shardIndex) => ({
     ...provenance, pass: true, fullIds: ids, shardIndex, shardCount: count,
     rows: selected.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width, pass: true })))),
@@ -585,10 +705,24 @@ for (const count of [1, 2, 3, 4]) {
   }
 }
 assert.throws(() => shardStories(['story-0', 'story-0'], 0, 2))
-assert.throws(() => shardStories(['story-0', 'story-2'], 0, 2))
+assert.deepEqual(shardStories(['story-0', 'story-2'], 0, 2), ['story-2'])
 assert.deepEqual(shardStories(['story-0'], 0, 2), [])
 for (const count of [0, -1, NaN, 1.5]) assert.throws(() => shardStories(ids, 0, count))
-console.log('passed: stable hashes, exact union, configurable count, missing/empty/failed/duplicate shards')
+for (const index of [-1, 4, NaN, 1.5]) assert.throws(() => shardStories(ids, index, 4))
+const measuredIds = Object.keys(costs.storyMilliseconds)
+const loads = Array.from({ length: 4 }, (_, index) => shardStories(measuredIds, index, 4)
+  .reduce((total, id) => total + costs.storyMilliseconds[id], 0))
+const total = loads.reduce((a, b) => a + b, 0)
+assert.ok(loads[0] < Math.min(...loads.slice(1)) / 2, 'reserve room for shard 0 non-play lanes')
+loads[0] += total * 0.2
+assert.ok(Math.max(...loads) - Math.min(...loads) <= Math.max(...Object.values(costs.storyMilliseconds)),
+  'balanced projected work differs by no more than one largest story')
+assert.deepEqual(Array.from({ length: 4 }, (_, i) => shardStories([...measuredIds].reverse(), i, 4)),
+  Array.from({ length: 4 }, (_, i) => shardStories(measuredIds, i, 4)))
+assert.ok(Object.values(costs.storyMilliseconds).every(value => Number.isSafeInteger(value) && value > 0))
+assert.ok(Number.isSafeInteger(costs.newStoryMilliseconds) && costs.newStoryMilliseconds > 0)
+assert.equal(createHash('sha256').update(JSON.stringify(costs.storyMilliseconds)).digest('hex'), costs.inputSha256)
+console.log('passed: deterministic cost balance, shard-0 reserve, exact union, configurable count, missing/failed/duplicate shards')
 console.log('passed: workflow provenance, same-head older attempts, newest-attempt precedence')
 ''', text=True)
 sharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
@@ -620,8 +754,26 @@ transcript_story = ["apps/fractal-web/src/web/TranscriptImages.stories.tsx", "ap
 assert detector_kit_paths(transcript_story) == transcript_story, "the transcript image integration story and production image cache select kit plays"
 app_story = ["apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx", "apps/fractal-web/src/web/ConversationPane.stories.tsx", "apps/fractal-web/src/fixtures/appStoryStates.ts", "apps/fractal-web/src/data/feedSync.ts"]
 assert detector_kit_paths(app_story) == app_story, "the production app suites and their state fixtures select kit plays"
+usage_story = ["apps/fractal-web/src/monitor/UsagePane.stories.tsx", "apps/fractal-web/src/monitor/UsagePane.tsx", "apps/fractal-web/src/monitor/usageFixtures.ts", "apps/fractal-web/src/monitor/usageModel.ts", "apps/fractal-web/src/data/objectivesSource.ts"]
+assert detector_kit_paths(usage_story) == usage_story, "the Usage story and its production data closure select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/web/subagentThreadFocus.ts", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
+browser_pairing_closure = [
+    "apps/fractal-web/src/data/browserPairing.ts",
+    "apps/fractal-web/src/web/BrowserPairing.tsx",
+    "apps/fractal-web/src/web/browserPairingState.ts",
+]
+assert detector_kit_paths(browser_pairing_closure) == browser_pairing_closure, "workspace stories bundle the browser pairing panel and its state/transport closure"
+assert not detector_kit_paths(["apps/fractal-web/src/web/BrowserPairing.integration.test.tsx"]), "pairing runtime coverage must not select its integration test"
+pins_closure = ["apps/fractal-web/src/data/pins.ts", "apps/fractal-web/src/data/sidebarPins.ts"]
+assert detector_kit_paths(pins_closure) == pins_closure, "the workspace sidebar bundles the ordered Pins binding"
+lazy_schema_closure = [
+    "apps/fractal-web/src/data/attachmentSchema.ts",
+    "apps/fractal-web/src/folders/arrangementSchema.ts",
+    "apps/fractal-web/src/terminal/terminalSchema.ts",
+]
+assert detector_kit_paths(lazy_schema_closure) == lazy_schema_closure, "workspace stories bundle the lazy write schema adapters"
+assert not detector_kit_paths([path.replace(".ts", ".unit.test.ts") for path in lazy_schema_closure]), "adapter coverage must not select unrelated unit tests"
 embed_closure = ["apps/fractal-web/src/embed/Embed.stories.tsx", "apps/fractal-web/src/embed/Embed.tsx", "apps/fractal-web/src/embed/captures/provenance.json", "apps/fractal-web/src/state/storageAdapter.ts"]
 assert detector_kit_paths(embed_closure) == embed_closure, "the product embed story and its nested fixtures select kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
@@ -635,8 +787,11 @@ with tempfile.TemporaryDirectory() as scratch:
                     "./../../apps/fractal-web/src/telemetry/inputPaint.ts",
                     "./../../apps/fractal-web/src/web/ComposerImages.stories.tsx",
                     "./../../apps/fractal-web/src/web/NativeTranscript.stories.tsx",
+                    *[f"./../../{path}" for path in lazy_schema_closure],
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
-    assert covered.returncode == 0 and "7 repository files, 0 outside" in covered.stdout, covered
+    assert covered.returncode == 0 and "10 repository files, 0 outside" in covered.stdout, covered
+    pairing = graph(*[f"./../../{path}" for path in browser_pairing_closure])
+    assert pairing.returncode == 0 and "3 repository files, 0 outside" in pairing.stdout, pairing
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):

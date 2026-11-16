@@ -4,7 +4,7 @@
 
 use super::*;
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9ba868b7fa5 owner=fractal_store::store::unread_mail TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h4989830fa0ba owner=fractal_store::store::unread_mail TODO=chunk-or-reference-variable-columns */ r#"
 BEGIN IMMEDIATE;
 DROP INDEX IF EXISTS claims_message_sent_time_index;
 CREATE TABLE IF NOT EXISTS unread_mail (
@@ -20,6 +20,16 @@ CREATE TABLE IF NOT EXISTS unread_mail_prefixes (
 CREATE TABLE IF NOT EXISTS unread_mail_pending (
     subject TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+-- Delivery/read evidence supersedes expiry, but still-unread delivered mail counts.
+CREATE VIEW IF NOT EXISTS unread_mail_expired AS
+SELECT expiry.subject FROM claims expiry WHERE expiry.kind='message.expired'
+AND NOT EXISTS (
+    SELECT 1 FROM claims WHERE subject=expiry.subject AND kind IN ('message.delivered','message.read')
+    UNION ALL SELECT 1 FROM local_message_marks
+        WHERE message=expiry.subject AND kind IN ('message.delivered','message.read')
+    UNION ALL SELECT 1 FROM local_stream_lifecycle
+        WHERE subject=expiry.subject AND kind IN ('message.delivered','message.read')
+);
 CREATE TRIGGER IF NOT EXISTS unread_mail_insert AFTER INSERT ON unread_mail
 BEGIN
     INSERT INTO unread_mail_prefixes(shift, prefix, count)
@@ -58,6 +68,31 @@ WHEN OLD.kind IN ('message.sent','message.read','message.closed')
 BEGIN
     INSERT OR IGNORE INTO unread_mail_pending(subject) VALUES(OLD.subject);
 END;
+CREATE TRIGGER IF NOT EXISTS unread_mail_expiry_pending AFTER INSERT ON claims
+WHEN NEW.kind IN ('message.expired','message.delivered')
+BEGIN
+    INSERT OR IGNORE INTO unread_mail_pending VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS unread_mail_expiry_pending_delete AFTER DELETE ON claims
+WHEN OLD.kind IN ('message.expired','message.delivered')
+BEGIN
+    INSERT OR IGNORE INTO unread_mail_pending VALUES(OLD.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS unread_mail_delivered_mark AFTER INSERT ON local_message_marks
+WHEN NEW.kind='message.delivered'
+BEGIN
+    INSERT OR IGNORE INTO unread_mail_pending VALUES(NEW.message);
+END;
+CREATE TRIGGER IF NOT EXISTS unread_mail_delivered_stream AFTER INSERT ON local_stream_lifecycle
+WHEN NEW.kind='message.delivered'
+BEGIN
+    INSERT OR IGNORE INTO unread_mail_pending VALUES(NEW.subject);
+END;
+CREATE TRIGGER IF NOT EXISTS unread_mail_expired_stream_sent AFTER INSERT ON local_stream_sent
+WHEN EXISTS(SELECT 1 FROM claims WHERE subject=NEW.subject AND kind='message.expired')
+BEGIN
+    INSERT OR IGNORE INTO unread_mail_pending VALUES(NEW.subject);
+END;
 COMMIT;
 "#;
 
@@ -70,7 +105,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     )?;
     if !filled {
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-he0ee7a5b7b4e owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
+            /* sqlite-large-value: allow-for-now lv-h20b53be73fcd owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
              DELETE FROM unread_mail;
              DELETE FROM unread_mail_prefixes;
              INSERT INTO unread_mail(subject,sent_time)
@@ -81,9 +116,27 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
              ) AND NOT EXISTS (
                  SELECT 1 FROM local_message_marks mark WHERE mark.message=claims.subject
                  AND mark.kind IN ('message.read','message.closed')
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM unread_mail_expired WHERE subject=claims.subject
              ) GROUP BY subject;
              DELETE FROM unread_mail_pending;
              INSERT INTO meta(key,value) VALUES('unread_mail_prefixes','1');
+             COMMIT;",
+        )?;
+    }
+    // Upgrade only expiry subjects once, not retained sent history on each open/read.
+    let expiry_migrated: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_expiry_v1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !expiry_migrated {
+        connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hb7fe422f0e26 owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
+             INSERT OR IGNORE INTO unread_mail_pending
+             SELECT subject FROM claims WHERE kind='message.expired'
+               AND NOT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_expiry_v1');
+             INSERT OR IGNORE INTO meta(key,value) VALUES('unread_mail_expiry_v1','1');
              COMMIT;",
         )?;
     }
@@ -98,10 +151,14 @@ macro_rules! unread_cte {
          WHERE subject NOT IN (SELECT subject FROM unread_mail_pending)
          UNION
          SELECT pending.subject FROM unread_mail_pending pending
-         WHERE EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject AND kind='message.sent')
+         WHERE (EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject AND kind='message.sent')
+                OR EXISTS (SELECT 1 FROM local_stream_sent WHERE subject=pending.subject))
+           AND NOT EXISTS (SELECT 1 FROM unread_mail_expired WHERE subject=pending.subject)
            AND NOT EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject
                            AND kind IN ('message.read','message.closed'))
            AND NOT EXISTS (SELECT 1 FROM local_message_marks WHERE message=pending.subject
+                           AND kind IN ('message.read','message.closed'))
+           AND NOT EXISTS (SELECT 1 FROM local_stream_lifecycle WHERE subject=pending.subject
                            AND kind IN ('message.read','message.closed')))
 "
     };
@@ -128,8 +185,8 @@ pub const OVERDUE_TO: &str = concat!(
 /// Unread mail sent before `before_unix_ms` that waits for no turn, by its raw recipient:
 /// how many messages, and how many of those a native harness accepted. A reader never writes,
 /// so this applies the queued subjects itself, as `count_in_snapshot` does. It reads the unread
-/// and idle-mail indexes, never a claim body: a message is unread until a read or closed claim
-/// or a read or closed local mark records it, and held mail waits for its seat's next turn.
+/// and idle-mail indexes, never a claim body: read/closed mail and non-superseded expiry do
+/// not count; delivered-but-unread mail does. Held mail waits for its seat's next turn.
 pub fn overdue_by_recipient(connection: &Connection, before_unix_ms: u128) -> Result<Vec<(String, u64, u64)>> {
     let before = i64::try_from(before_unix_ms).unwrap_or(i64::MAX);
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5b6029c6d328 owner=fractal_store::store::unread_mail TODO=trace-statement-and-value-representation */ OVERDUE_BY_RECIPIENT)?;

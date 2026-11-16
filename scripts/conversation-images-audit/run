@@ -47,7 +47,14 @@ on() {
     "$audit/tools/st3" --instance "$name" "$@"
 }
 
-socket() { find "$home/.st-instance/$instance/run" -name 'st3.sock' -print -quit 2>/dev/null; }
+socket() {
+  local endpoint="$home/.st-instance/$instance/run/fractal.sock"
+  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+  local legacy="$home/.st-instance/$instance/run/st3.sock"
+  if [[ ! -e "$endpoint" && -e "$legacy" ]]; then endpoint="$legacy"; fi
+  # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+  printf '%s\n' "$endpoint"
+}
 
 # curl over the instance socket as ACTOR.
 api() {

@@ -35,7 +35,7 @@ fn a_step_raises_its_seats_lane_while_the_seat_holds_it() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
     let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     let run = run(&store, r#"version 2
 mission "orchid" state="ready" {
   goal "Build."
@@ -81,7 +81,7 @@ mission "orchid" state="ready" {
 fn a_step_whose_raised_lane_does_not_fit_waits_blocked_until_it_does() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     apply_source(&store, r#"version 2
 agent "held" { workspace "/tmp"; command "true"; capacity cores=8 memory="40G" }"#, "held");
     observe(&store, "agent/node.held", "running");
@@ -120,7 +120,7 @@ mission "orchid" state="ready" {
 fn a_step_below_the_lane_of_a_seat_declared_elsewhere_waits_with_why() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     // Publication cannot see this seat's lane: it is declared on its own.
     apply_source(&store, r#"version 2
 agent "builder" { workspace "/tmp"; command "true"; capacity cores=4 memory="8G" }"#, "builder");
@@ -143,7 +143,7 @@ mission "orchid" state="ready" {
 fn two_steps_judged_in_one_pass_do_not_take_the_same_room() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     apply_source(&store, r#"version 2
 agent "amber" { workspace "/tmp"; command "true"; capacity cores=2 memory="4G" }
 agent "birch" { workspace "/tmp"; command "true"; capacity cores=2 memory="4G" }"#, "seats");
@@ -161,7 +161,7 @@ fn the_wake_stage_of_a_seat_raises_its_lane_for_the_step_it_holds() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let runtime = Arc::new(FakeRuntime::default());
     let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
     let run = run(&store, r#"version 2
 mission "orchid" state="ready" {
   goal "Build."
@@ -193,7 +193,7 @@ agent "amber" { workspace "/tmp"; command "true"; capacity cores=2 memory="4G" }
         *runtime.lane_live.lock().unwrap() = Some(Capacity { cores: 8, memory: 16 * G });
         *runtime.lane_held.lock().unwrap() = held;
         let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
-            .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }));
+            .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }));
         reconciler.hold_step_lanes("agent/node.amber", "amber-1", &member, &store.work_for_reconcile("agent/node.amber").unwrap()).unwrap();
         (reconciler, runtime)
     };

@@ -60,11 +60,18 @@ class SignedTree(unittest.TestCase):
         defaults.update(kwargs)
         return self.f.note(head, tree, self.ci, 'machine/ci1', **defaults)
 
-    def run_job(self, head, number=1, base_changes=None, **env):
-        """Run the script in a fresh clone of the repository at main, the way the workflow's checkout of the base branch is."""
+    def run_job(self, head, number=1, base_changes=None, shallow=False, **env):
+        """Run the script in a fresh clone of the repository at main, the way the workflow's checkout of the base branch is: with
+        `shallow`, at depth 1 as actions/checkout makes it, from a server that serves partial and by-object fetches as GitHub does."""
         checkout = self.f.root / f'base-checkout-{len(list(self.f.root.glob("base-checkout-*")))}'
         # --no-tags: actions/checkout fetches no tags at its default depth, so an evidence tag is here only if the job fetched it.
-        subprocess.run(['git', 'clone', '-q', '--no-tags', str(self.f.repo), str(checkout)], check=True, capture_output=True)
+        if shallow:
+            for key in ('uploadpack.allowFilter', 'uploadpack.allowAnySHA1InWant'):
+                self.f.git('config', key, 'true')
+            source = ['--depth=1', f'file://{self.f.repo}']
+        else:
+            source = [str(self.f.repo)]
+        subprocess.run(['git', 'clone', '-q', '--no-tags', *source, str(checkout)], check=True, capture_output=True)
         self.last_checkout = checkout
         summary, output = self.f.root / 'summary', self.f.root / 'output'
         summary.write_text('')
@@ -79,8 +86,10 @@ class SignedTree(unittest.TestCase):
         status = subprocess.run(['git', '-C', str(checkout), 'status', '--porcelain'], capture_output=True).stdout
         self.assertEqual(status, b'', 'the pull request must never be checked out into the base checkout')
         self.assertEqual(subprocess.run(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], capture_output=True).stdout, before)
-        line = done.stdout.decode().strip()
-        self.assertEqual(line, summary.read_text().strip())
+        text = done.stdout.decode().strip()
+        self.assertEqual(text, summary.read_text().strip())
+        line, *self.errors = text.splitlines()
+        self.assertTrue(all(error.startswith('signed-tree v1 error ') for error in self.errors), text)
         fields = dict(part.split('=', 1) for part in line.split()[2:])
         self.assertTrue(line.startswith('signed-tree v1 '), line)
         self.assertEqual(output.read_text().strip(), f'decision={fields["decision"]}')
@@ -228,6 +237,52 @@ class SignedTree(unittest.TestCase):
         self.f.git('commit', '-q', '-m', 'invalid require')
         fields = self.run_job(head)
         self.assertEqual((fields['decision'], fields['reason']), ('error', 'verifier:error'))  # a malformed require is refused, not ignored
+
+    def lagging_pull_request(self):
+        """A head that changes no lane file, branched before main changed its lane's definition, with a note carrying the lane digest
+        at its branch point: what scripts/st-test signs for a branch that only lags main."""
+        point = self.f.git('rev-parse', 'main')
+        head, tree = self.pull_request({'src.txt': 'behind main\n'})
+        (self.f.repo / 'scripts/lane.sh').write_text('lane, changed on main\n')
+        self.f.git('commit', '-q', '-am', 'main changes the lane definition')
+        rules = support.evidence_verify.lane_rules((self.f.repo / '.st/required-lanes.json').read_text(), 'unit')
+        digest = support.evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', f'{point}^{{tree}}'), tree, rules)['sha256']
+        self.note(head, tree, inputs={'lane_definition_sha256': digest})
+        return head, tree
+
+    def test_a_head_that_only_lags_a_lane_change_on_main_is_held_to_its_branch_point(self):
+        head, _ = self.lagging_pull_request()
+        for shallow in (False, True):
+            fields = self.run_job(head, shallow=shallow)
+            self.assertEqual((fields['decision'], fields['reason'], fields['lanes']), ('ok', 'satisfied', 'unit:ok'), shallow)
+            self.assertEqual(self.errors, [])
+
+    def test_without_its_branch_point_the_head_is_held_to_the_tip_and_the_reason_says_so(self):
+        _, tree = self.lagging_pull_request()
+        # The same tree, and so the same note, as a commit with no history in common with main: it has no branch point.
+        head = self.f.git('commit-tree', tree, '-m', 'unrelated history')
+        self.f.git('update-ref', 'refs/pull/2/head', head)
+        fields = self.run_job(head, number=2, shallow=True)
+        self.assertEqual((fields['decision'], fields['lanes']), ('would-reject', 'unit:definition_changed'))
+        self.assertTrue(fields['reason'].endswith(',lanes-at-the-base-tip:no-branch-point'), fields['reason'])
+
+    def test_a_failed_notes_fetch_says_why(self):
+        head, tree = self.pull_request({'src.txt': 'unfetchable\n'})
+        # A record ref the server advertises but cannot send.
+        ref = self.f.repo / '.git' / 'refs' / 'notes' / 'evidence' / tree / ('0' * 40)
+        ref.parent.mkdir(parents=True)
+        ref.write_text('1' * 40 + '\n')
+        fields = self.run_job(head)
+        self.assertEqual(fields['decision'], 'would-reject')
+        self.assertTrue(fields['reason'].endswith(',notes-fetch-failed'), fields['reason'])
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.assertTrue(self.errors[0].startswith('signed-tree v1 error notes-fetch: '), self.errors)
+        self.assertNotIn('no stderr', self.errors[0])
+        # A verifier that then gives no answer still leaves the fetch's error beside its own.
+        fields = self.run_job(head, SIGNED_TREE_VERIFIER_TIMEOUT='0')
+        self.assertEqual((fields['decision'], fields['reason']), ('error', 'verifier-exit-124-without-json'))
+        self.assertEqual(len(self.errors), 1, self.errors)
+        self.assertTrue(self.errors[0].startswith('signed-tree v1 error notes-fetch: '), self.errors)
 
 
 if __name__ == '__main__':

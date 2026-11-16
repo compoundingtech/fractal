@@ -4,6 +4,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Checkbox as SurfaceCheckbox, Menu as SurfaceMenu, MenuItem as SurfaceMenuItem, MenuTrigger as SurfaceMenuTrigger, Popover as SurfacePopover, Tooltip as SurfaceTooltip } from './assistant-ui/composition/Controls'
 import { borderVars as border, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 import { lightTheme } from './assistant-ui/composition-theme'
+import { LiveRing } from './assistant-ui/composition/LiveRing'
 
 export type Direction = 'folio' | 'relay' | 'orbit'
 export type Scheme = 'light' | 'dark'
@@ -54,7 +55,7 @@ export function StatusDot({ state, label }: { state: DotState; label?: string })
   return <span className={`inline-flex items-center gap-2 ${dotStyle[state].text}`}><span aria-hidden="true" className={`size-1.5 rounded-full ${dotStyle[state].dot}`} />{label ?? state}</span>
 }
 export function Spinner({ label, size = 'md' }: { label: string; size?: ButtonSize }) {
-  return <span role="status" className={`inline-flex items-center gap-2 text-muted ${size === 'sm' ? 'text-[11px]' : ''}`}><span aria-hidden="true" className="fui-spin inline-block size-3 rounded-full border-2 border-muted border-t-accent" />{label}</span>
+  return <span role="status" className={`inline-flex items-center gap-2 text-muted ${size === 'sm' ? 'text-[11px]' : ''}`}><LiveRing size={size} />{label}</span>
 }
 export function Progress({ label, value = 0, maxValue = 100, tone = 'neutral', size = 'md' }: { label: string; value?: number; maxValue?: number; tone?: Tone; size?: ButtonSize }) {
   return <Aria.ProgressBar aria-label={label} value={value} maxValue={maxValue} className="w-full">
@@ -195,17 +196,6 @@ export function CommandMenu({ groups, placeholder = 'Type a command…', emptyHi
     </Aria.Autocomplete>
     <p aria-live="polite" className="border-t border-line px-3 py-2 text-[11px] text-muted">{status || 'Arrow keys move · Enter runs · Escape clears'}</p>
   </div>
-}
-
-/* ContextCard — preview on hover AND keyboard focus (350 ms intent delay). */
-export function ContextCard({ title, children, preview }: { title: string; children: React.ReactNode; preview: React.ReactNode }) {
-  return <Aria.TooltipTrigger delay={350} closeDelay={0}>
-    <Aria.Button className={`${focusClass} w-full cursor-pointer rounded-panel border border-line bg-panel p-3 text-left transition-colors data-[hovered]:bg-recess`}>
-      <span className="mb-1 block text-[10px] font-semibold uppercase tracking-widest text-accent">{title}</span>
-      {children}
-    </Aria.Button>
-    <Aria.Tooltip placement="top start" offset={8} className="z-50 max-w-80 rounded-panel border border-line bg-panel p-3 text-[12px] font-sans leading-relaxed text-ink shadow-xl">{preview}</Aria.Tooltip>
-  </Aria.TooltipTrigger>
 }
 
 const styles = stylex.create({

@@ -3,7 +3,7 @@ import type * as Native from '@fractal/client/schema'
 
 /** One answer to a native prompt: sent, or refused in words a person reads. */
 export type PromptAnswerResult =
-  | { readonly _tag: 'Sent' }
+  | { readonly _tag: 'Sent'; readonly settled?: boolean }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
 /** A native harness prompt's alert, as much of it as an answer names. */

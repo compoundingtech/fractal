@@ -12,7 +12,7 @@ use anyhow::Result;
 use rusqlite::{Connection, Transaction};
 use serde_json::{Value, json};
 
-use super::checkpoint::{DropPlan, SealedSet};
+use super::checkpoint::{ClaimTombstone, DropPlan, SealedSet};
 use super::checkpoint_staging::{CheckpointClaimFacts, StagedPlanner};
 use super::{ReplicatedClaimAdmission, Store, append_claim_record_tx};
 use crate::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
@@ -103,6 +103,25 @@ pub trait Runtime: Send + Sync {
         BTreeMap::new()
     }
 
+    /// Kinds whose authority requires a keyed writer's signed envelope on every import,
+    /// including source-admitted backup history. Local operation writes are unaffected.
+    fn requires_keyed_envelope(&self, _kind: &str) -> bool {
+        false
+    }
+
+    /// Admit a write whose claim names no actor but whose writer is known, such as a document
+    /// binding: the runtime's actor-keyed decisions see the writer as they see an actor.
+    fn admit_writer_tx(
+        &self,
+        _transaction: &Transaction<'_>,
+        _origin: &str,
+        _writer: &str,
+        _kind: &str,
+        _subject: &str,
+    ) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
     /// Check a replicated claim's kind and fields once the graph has verified its hash and batch.
     fn classify_replicated_claim(
         &self,
@@ -163,6 +182,27 @@ pub trait Runtime: Send + Sync {
         through: u64,
     ) -> Result<IncrementalProjection, Error>;
 
+    /// Defer expensive aggregate rebuilds across bounded replication chunks. Implementations
+    /// must persist their pending work in this transaction and suppress updates to that work.
+    fn project_incremental_chunk(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        through: u64,
+    ) -> Result<IncrementalProjection, Error> {
+        self.project_incremental(transaction, origin, through)
+    }
+
+    /// Whether committed chunks still have aggregate work, including after a restart.
+    fn projection_work_pending(&self, _connection: &Connection) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    /// Finish at most one pending aggregate, deleting its marker atomically with its rebuild.
+    fn finish_projection_work(&self, _transaction: &Transaction<'_>) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Clear every shared projection and fold the claims into it again in canonical order.
     fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), Error>;
 
@@ -196,6 +236,19 @@ pub trait Runtime: Send + Sync {
     /// can refold each subject a trim touched once instead of once per deleted claim.
     fn rebuild_deferred(&self, _transaction: &Transaction<'_>, _budget: std::time::Duration) -> Result<bool> {
         Ok(false)
+    }
+
+    /// A trim's step deletes `claims` by calling `delete`, inside the chunk's transaction. A
+    /// runtime whose projections queue work for each deleted claim's subject settles it here, in
+    /// the trim's own paced chunk, instead of leaving it to whichever write projects next; what
+    /// it leaves goes to `rebuild_deferred`. By default, the delete alone.
+    fn delete_trimmed_claims_tx(
+        &self,
+        _transaction: &Transaction<'_>,
+        _claims: &[ClaimTombstone],
+        delete: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        delete()
     }
 
     /// Whether a trim's deletes left anything for `rebuild_deferred`, read without the writer.

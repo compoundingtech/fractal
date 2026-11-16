@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Modal, Popover } from 'react-aria-components'
+import { Button as AriaButton, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Modal, Popover, Tooltip as AriaTooltip, TooltipTrigger } from 'react-aria-components'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { ChromeControl } from './assistant-ui/composition/ChromeControl'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
@@ -17,7 +17,7 @@ import { tooltipFor } from './story-play'
  * Resources is a dialog trigger and Conversation menu a menu trigger, as in the app; each is disabled when
  * given a reason. Below 640px the sidebar strip stacks above the header. `phone` hosts it in a narrow (touch) layout.
  */
-function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabledReason, conversationDisabledReason, onResources }: { scheme?: Scheme; phone?: boolean; resourcesDisabledReason?: string; conversationDisabledReason?: string; onResources?: () => void }) {
+function ChromeControlsStory({ scheme = 'dark', phone = false, rawTooltip = false, resourcesDisabledReason, conversationDisabledReason, onResources }: { scheme?: Scheme; phone?: boolean; rawTooltip?: boolean; resourcesDisabledReason?: string; conversationDisabledReason?: string; onResources?: () => void }) {
   const [collapsed, setCollapsed] = React.useState(false)
   const [panelOpen, setPanelOpen] = React.useState(true)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
@@ -36,10 +36,11 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
         <ChromeControl icon="swap" label="Toggle color scheme" tooltipPlacement="top" />
         <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" />
         <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" />
+        {rawTooltip && <TooltipTrigger delay={0} closeDelay={0}><AriaButton>Raw RAC tooltip trigger</AriaButton><AriaTooltip>Raw RAC tooltip</AriaTooltip></TooltipTrigger>}
       </footer>
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" panelOpen={panelOpen} drawerOpen={drawerOpen} onTogglePanel={() => setPanelOpen(value => !value)} onToggleDrawer={() => setDrawerOpen(value => !value)} terminalAvailable nativeActions={
+      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" panelOpen={panelOpen} terminalOpen={drawerOpen} onTogglePanel={() => setPanelOpen(value => !value)} onToggleTerminal={() => setDrawerOpen(value => !value)} terminalAvailable nativeActions={
         <div {...stylex.props(styles.actions)}>
           <ChromeControl icon="person" label="Actions for fractal-web" />
           <DialogTrigger>
@@ -77,12 +78,13 @@ export const scenarioExemptions: readonly string[] = [
   'QuietIcons:primitive',
   'QuietIconsFlow:primitive',
   'QuietIconsLight:primitive',
+  'TooltipReleasedWithPointer:primitive',
   'WindowBlurQuiet:primitive',
 ]
 type Story = StoryObj<typeof meta>
 
 const header = (canvasElement: HTMLElement) => within(canvasElement).getByTestId('thread-header')
-const headerNames = ['Actions for fractal-web', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel']
+const headerNames = ['Actions for fractal-web', 'Resources', 'Conversation menu', 'Show terminal', 'Toggle right panel']
 
 /** Every chrome control is a 28px icon button named by its accessible name; open toggles and set filters keep the fill. */
 export const QuietIcons: Story = { play: async ({ canvasElement }) => {
@@ -94,7 +96,7 @@ export const QuietIcons: Story = { play: async ({ canvasElement }) => {
     await expect(button.getBoundingClientRect().height).toBe(28)
   }
   await expect(within(header(canvasElement)).getByRole('button', { name: 'Toggle right panel' })).toHaveAttribute('aria-pressed', 'true')
-  await expect(within(header(canvasElement)).getByRole('button', { name: 'Toggle terminal drawer' })).toHaveAttribute('aria-pressed', 'false')
+  await expect(within(header(canvasElement)).getByRole('button', { name: 'Show terminal' })).not.toHaveAttribute('aria-pressed')
   const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
   await expect(sidebar.getByRole('button', { name: 'Filter agents · 1 active' })).not.toHaveAttribute('aria-pressed')
   await expect(sidebar.getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Collapse agents', 'Needs me only', 'Filter agents · 1 active', 'Sort agents · Manual', 'Toggle color scheme', 'Missions', 'Usage'])
@@ -133,9 +135,10 @@ export const QuietIconsFlow: Story = { play: async ({ args, canvasElement }) => 
   await expect(conversation).toHaveAttribute('aria-expanded', 'true')
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
-  const terminal = scope.getByRole('button', { name: 'Toggle terminal drawer' })
+  const terminal = scope.getByRole('button', { name: 'Show terminal' })
   await userEvent.click(terminal)
-  await expect(terminal).toHaveAttribute('aria-pressed', 'true')
+  await expect(terminal).toHaveAccessibleName('Show conversation')
+  await expect(terminal).not.toHaveAttribute('aria-pressed')
 } }
 
 const resourcesReason = 'Read access to agent resources has not been granted.'
@@ -231,6 +234,93 @@ export const ProgrammaticFocusQuiet: Story = { tags: ['critical'], play: async (
   await expect(resources).toHaveFocus()
   await waitFor(() => expect(resources).not.toHaveAttribute('data-focus-visible'))
   await expect(getComputedStyle(resources).outlineStyle).toBe('none')
+  await staysWithoutTooltip(600)
+} }
+
+/**
+ * Keyboard navigation closing a hovered control's tooltip must not bring it back as an unpositioned surface at the
+ * top-left corner once the pointer leaves, and a control a modal covers opens no tooltip however the pointer moves.
+ */
+export const TooltipReleasedWithPointer: Story = { args: { rawTooltip: true }, tags: ['critical'], play: async ({ canvasElement }) => {
+  const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
+  const sort = sidebar.getByRole('button', { name: 'Sort agents · Manual' })
+  const needsMe = sidebar.getByRole('button', { name: 'Needs me only' })
+  const filter = sidebar.getByRole('button', { name: 'Filter agents · 1 active' })
+  const resources = within(header(canvasElement)).getByRole('button', { name: 'Resources' })
+  const tooltips = () => within(document.body).queryAllByRole('tooltip', { hidden: true }).map(tooltip => tooltip.textContent)
+  const namedTooltip = async (step: string, anchor: HTMLElement, label: string) => {
+    try { return await tooltipFor(anchor, label) } catch (cause) { throw new Error(`${step}: tooltip did not open`, { cause }) }
+  }
+
+  // The page's very first hover opens no tooltip.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(sort)
+  await namedTooltip('Initial sort hover', sort, 'Sort agents · Manual')
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await namedTooltip('Tab from Needs me to filter while sort is hovered', filter, 'Filter agents · 1 active')
+  await userEvent.unhover(sort)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).not.toContain('Sort agents · Manual')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(tooltips()).toEqual([]))
+
+  // The pointer is what moves next, which ends keyboard modality.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(sort)
+  await namedTooltip('Sort hover before opening resources dialog', sort, 'Sort agents · Manual')
+  resources.focus()
+  await userEvent.keyboard('{Enter}')
+  const dialog = await within(document.body).findByRole('dialog', { name: 'Agent resources' })
+  await waitFor(() => expect(tooltips()).toEqual([]))
+  await userEvent.unhover(sort)
+  await userEvent.hover(sort)
+  const until = performance.now() + 600
+  while (performance.now() < until) {
+    await expect(tooltips()).toEqual([])
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(dialog).not.toBeInTheDocument())
+  await userEvent.unhover(sort)
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(tooltips()).toEqual([])
+
+  // A tooltip its control still holds by keyboard focus outlives the pointer that also hovered it.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(filter)
+  await namedTooltip('Filter hover after dialog dismissal', filter, 'Filter agents · 1 active')
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await namedTooltip('Keyboard ownership of hovered filter', filter, 'Filter agents · 1 active')
+  await userEvent.unhover(filter)
+  const heldUntil = performance.now() + 600
+  while (performance.now() < heldUntil) {
+    await expect(tooltips()).toContain('Filter agents · 1 active')
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }
+  // After RAC's 500ms cooldown, a non-kit tooltip must still replace the keyboard-retained one.
+  // This fixture emits no fractal-kit-tooltip-open event: only RAC's own registry can close the old tooltip.
+  const raw = within(canvasElement).getByRole('button', { name: 'Raw RAC tooltip trigger' })
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(raw)
+  await namedTooltip('Raw RAC replaces keyboard-retained filter after cooldown', raw, 'Raw RAC tooltip')
+  await waitFor(() => expect(tooltips()).toEqual(['Raw RAC tooltip']))
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(tooltips()).toEqual([]))
+
+  // Pointer release must not resurrect a tooltip Escape already dismissed, even while keyboard focus remains.
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(filter)
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await namedTooltip('Keyboard ownership before Escape and pointer release', filter, 'Filter agents · 1 active')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(tooltips()).toEqual([]))
+  await userEvent.unhover(filter)
   await staysWithoutTooltip(600)
 } }
 

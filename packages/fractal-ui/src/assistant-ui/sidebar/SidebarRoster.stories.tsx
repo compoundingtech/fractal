@@ -20,7 +20,7 @@ const roster = Array.from({ length: 100 }, (_, index) => {
   const ref = `agent/roster-${index}`
   const row: Row = {
     ref, id: `roster-${index}`, title: titles[index % titles.length]!, description: work[index % work.length],
-    status: index % 5 === 0 ? 'waiting' : index % 3 === 0 ? 'idle' : 'working', statusLabel: index % 5 === 0 ? 'Needs you' : index % 3 === 0 ? 'Idle' : 'Working',
+    status: index % 5 === 0 ? 'waiting' : index % 3 === 0 ? 'idle' : 'working', statusLabel: index % 5 === 0 ? 'Waiting' : index % 3 === 0 ? 'Idle' : 'Working',
     host: `host-${(index % 4) + 1}`, harness: 'seat-1', model: index % 2 === 0 ? 'glm-5' : undefined,
     statusSince: storyNow - (index + 1) * 61_000, lastActivityAt: storyNow - (index + 1) * 13_000,
     needsMe: index % 5 === 0, unread: index % 4 === 0 ? (index % 13) + 1 : 0, freshness: index % 9 === 0 ? 'stale' : 'live',
@@ -47,7 +47,8 @@ export const scenarioExemptions: readonly string[] = [
 type Story = StoryObj<typeof meta>
 
 /** Observe the actual render task and its first 1.5s of fitting, not Storybook module/bootstrap work. */
-export const HundredAgentRender: Story = { tags: ['critical'], render: () => <RosterRender />, play: async ({ canvasElement }) => {
+// About 10 s of case time measures hundred-agent render cost rather than a per-commit kit contract.
+export const HundredAgentRender: Story = { tags: ['critical', 'merge-only'], render: () => <RosterRender />, play: async ({ canvasElement }) => {
   await document.fonts.ready
   await expect(PerformanceObserver.supportedEntryTypes).toContain('longtask')
   performance.clearMarks('sidebar-roster-render-start')

@@ -1,3 +1,7 @@
+import { ClientError, type ActionOf, type Arrangement, type OrderedMembership } from '@fractal/client'
+import type { MembershipEditEvent } from './edit.ts'
+import type { MembershipDelivery, SidebarJournalRequest, SidebarJournalState } from './sidebarJournal.ts'
+import type { MembershipComplete } from './memberships.ts'
 import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { drawnParents, insertAt, isLive, liveAncestor, positionKey, project, wouldCycle, type FolderDoc, type Insertion, type Projection, type ProjectedFolder } from './core.mts'
 import { refusalText, sidebarOperations, type ArrangementEditorState, type RestageVerdict, type SidebarOperation } from './edit.ts'
@@ -17,7 +21,8 @@ const compare = (left: string, right: string): number => {
 export const sidebarTree = (projection: Projection, roster: readonly SidebarSeat[], collapse: SidebarCollapse): SidebarNode[] => {
   const agent = (seat: SidebarSeat): SidebarNode => ({
     _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label,
-    children: seat.children, collapsed: collapse.get(seat.id) ?? true,
+    // A seat with further missions starts open, so they show; otherwise children wait behind the chevron.
+    children: seat.children, collapsed: collapse.get(seat.id) ?? !seat.children?.some(child => child.missionId !== undefined),
   })
   const seats = new Map<string, SidebarNode[]>()
   for (const seat of roster) {
@@ -228,3 +233,216 @@ export const rowStatus = (editorState: Pick<ArrangementEditorState, 'phase' | 'r
 }
 
 export const sidebarProjection = (doc: SidebarDocument): Projection => project(doc, new Set(doc.roster.map((seat) => seat.subject)))
+
+/** Exact canonical-key capacity, matching Rust keys/capacity.rs (BigInt ranks). */
+export const spreadMembershipKeys = (lower: string | null, upper: string | null, count: number): string[] | undefined => {
+  if (!Number.isSafeInteger(count) || count < 0 || count > 4097 || lower !== null && !validArrangementKey(lower) || upper !== null && !validArrangementKey(upper) || lower !== null && upper !== null && lower >= upper) return undefined
+  if (count === 0) return []
+  const digits = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+  const powers = [1n]
+  for (let i = 1; i <= 128; i++) powers.push(powers[i - 1]! * 62n)
+  for (let max = 2; max <= 128; max++) {
+    const cache = new Map<string, bigint>()
+    const capacity = (prefix: string): bigint => {
+      if (upper !== null && prefix >= upper || lower !== null && prefix < lower && !lower.startsWith(prefix)) return 0n
+      const head = prefix.charCodeAt(0)
+      const integer = prefix === '' ? 0 : head >= 97 ? head - 97 + 2 : 90 - head + 2
+      if (integer > max) return 0n
+      const zero = prefix.startsWith('A') && /^0*$/.test(prefix.slice(1, integer))
+      if (zero && prefix.length >= integer) return 0n
+      const after = lower === null || prefix > lower
+      const valid = validArrangementKey(prefix)
+      if (prefix !== '' && after && (upper === null || !upper.startsWith(prefix))) {
+        return powers[max - prefix.length]! - (zero ? powers[max - integer]! : prefix.length >= integer && !valid ? 1n : 0n)
+      }
+      const cached = cache.get(prefix)
+      if (cached !== undefined) return cached
+      let total = valid && after ? 1n : 0n
+      if (prefix.length < max) for (const char of prefix === '' ? digits.slice(10) : digits) total += capacity(prefix + char)
+      cache.set(prefix, total)
+      return total
+    }
+    const total = capacity('')
+    if (total < BigInt(count)) continue
+    const select = (prefix: string, rank: bigint): string => {
+      if (validArrangementKey(prefix) && (lower === null || prefix > lower)) {
+        if (rank === 0n) return prefix
+        rank--
+      }
+      for (const char of prefix === '' ? digits.slice(10) : digits) {
+        const size = capacity(prefix + char)
+        if (rank < size) return select(prefix + char, rank)
+        rank -= size
+      }
+      throw new RangeError('canonical key rank outside admitted capacity')
+    }
+    return Array.from({ length: count }, (_, i) => select('', total * BigInt(i + 1) / BigInt(count + 1)))
+  }
+  return undefined
+}
+
+export type MembershipIntent = SidebarJournalState['intent']
+export type MembershipPlan = { readonly folders: Extract<SidebarOperation, { op: 'folder.move' }>[]; readonly memberships: Extract<SidebarJournalRequest['operations'], { Memberships: unknown }>['Memberships'] }
+type PlanNode = { readonly node: MembershipIntent['node']; readonly parent: string | null; readonly shown: string | null; readonly key: string }
+export type MembershipPlanResult = { readonly _tag: 'PlannedV2'; readonly edit: MembershipPlan } | { readonly _tag: 'RefusedV2'; readonly refusal: string }
+type MembershipRefusal = Extract<MembershipPlanResult, { _tag: 'RefusedV2' }>
+export type MembershipProjection = MembershipRefusal | {
+  readonly _tag: 'ProjectedV2'; readonly nodes: ReadonlyMap<string, PlanNode>
+  readonly partitions: ReadonlyMap<string | null, { readonly folder: readonly PlanNode[]; readonly subject: readonly PlanNode[] }>
+}
+const membershipNodeId = (node: MembershipIntent['node']): string => node.kind === 'folder' ? `folder:${node.id}` : `subject:${node.subject}`
+/** Complete-input projection validates and indexes once. Catalog rows never create members. */
+export const projectMemberships = (arrangement: Arrangement, memberships: readonly OrderedMembership[]): MembershipProjection => {
+  const refuse = (refusal: string): MembershipRefusal => ({ _tag: 'RefusedV2', refusal })
+  if (arrangement.deleted) return refuse('ArrangementUnavailable')
+  if (arrangement.body.version !== 2) return refuse('Unsupported')
+  const resolved = arrangement.resolved
+  if (!resolved) return refuse('NotReady')
+  const nodes = new Map<string, PlanNode>()
+  const id = membershipNodeId
+  let missingParent = false
+  for (const [folder, value] of Object.entries(arrangement.body.folders)) {
+    if (value.tombstone !== null) continue
+    if (!Object.hasOwn(resolved.parents, folder)) { missingParent = true; continue }
+    nodes.set(`folder:${folder}`, { node: { kind: 'folder', id: folder }, parent: value.position.value.parent, shown: resolved.parents[folder]!, key: value.position.value.key })
+  }
+  for (const member of memberships) {
+    const node = { kind: 'subject', subject: member.member } as const
+    if (member.container !== arrangement.id || nodes.has(id(node))) return refuse('InvalidResolution')
+    nodes.set(id(node), { node, parent: member.position.bucket, shown: member.position.bucket, key: member.position.key })
+  }
+  // Rust validates member identity/container before reporting an incomplete resolved-parent map.
+  if (missingParent) return refuse('NotReady')
+  for (const row of nodes.values()) {
+    const seen = new Set<string>([id(row.node)])
+    let parent = row.shown
+    while (parent !== null) {
+      const ancestor = nodes.get(`folder:${parent}`)
+      if (!ancestor || seen.has(id(ancestor.node))) return refuse('InvalidResolution')
+      seen.add(id(ancestor.node)); parent = ancestor.shown
+    }
+  }
+  const partitions = new Map<string | null, { folder: PlanNode[]; subject: PlanNode[] }>()
+  for (const row of nodes.values()) {
+    let partition = partitions.get(row.shown)
+    if (!partition) { partition = { folder: [], subject: [] }; partitions.set(row.shown, partition) }
+    partition[row.node.kind].push(row)
+  }
+  for (const partition of partitions.values()) for (const rows of [partition.folder, partition.subject])
+    rows.sort((a, b) => compare(a.key, b.key) || compare(id(a.node), id(b.node)))
+  return { _tag: 'ProjectedV2', nodes, partitions }
+}
+
+/** One retained projection per host. Snapshot store_index is deliberately not a collection revision. */
+export class MembershipProjectionCache {
+  #held: { id: string; revision: string; scope: MembershipComplete['scope']; frontier: MembershipComplete['frontier']; catalog: string; presentation: string; model: Extract<MembershipProjection, { _tag: 'ProjectedV2' }> } | undefined
+  get(arrangement: Arrangement, complete: MembershipComplete, catalog: string, presentation: string): MembershipProjection {
+    const held = this.#held
+    const scope = complete.scope
+    if (scope.owner !== arrangement.owner || scope.container !== arrangement.id) {
+      this.#held = undefined
+      return { _tag: 'RefusedV2', refusal: 'InvalidResolution' }
+    }
+    if (arrangement.deleted || arrangement.body.version !== 2 || !arrangement.resolved) {
+      this.#held = undefined
+      return projectMemberships(arrangement, complete.members)
+    }
+    // PR21 supplies resolved.parents directly: validate at most 1,024 folders, never scan members on a cache hit.
+    let resolutionChanged = false
+    for (const folder in arrangement.body.folders) {
+      if (arrangement.body.folders[folder]!.tombstone !== null) continue
+      if (!Object.hasOwn(arrangement.resolved.parents, folder)) {
+        this.#held = undefined
+        return projectMemberships(arrangement, complete.members)
+      }
+      if (held && held.model.nodes.get(`folder:${folder}`)?.shown !== arrangement.resolved.parents[folder]) resolutionChanged = true
+    }
+    if (held && !resolutionChanged && held.id === arrangement.id && held.revision === arrangement.revision
+      && held.catalog === catalog && held.presentation === presentation
+      && held.scope.owner === scope.owner && held.scope.container === scope.container && held.scope.endpoint === scope.endpoint
+      && held.scope.host === scope.host && held.scope.projection === scope.projection
+      && held.frontier.epoch === complete.frontier.epoch && held.frontier.changed_index === complete.frontier.changed_index
+      && held.frontier.live_count === complete.frontier.live_count) return held.model
+    const model = projectMemberships(arrangement, complete.members)
+    // Copy primitive key values; host inputs may be updated in place. Incomplete resolutions are never retained.
+    this.#held = model._tag === 'ProjectedV2' ? { id: arrangement.id, revision: arrangement.revision, scope: { ...scope }, frontier: { ...complete.frontier }, catalog, presentation, model } : undefined
+    return model
+  }
+}
+
+/** Per-input planning consumes the cached complete projection, never rebuilds its ancestry or partitions. */
+export const planMembershipMove = (model: MembershipProjection, intent: MembershipIntent): MembershipPlanResult => {
+  if (model._tag === 'RefusedV2') return model
+  const { nodes, partitions } = model
+  const id = membershipNodeId
+  const refuse = (refusal: string): MembershipRefusal => ({ _tag: 'RefusedV2', refusal })
+  const node = nodes.get(id(intent.node))
+  if (!node) return refuse('NodeMissing')
+  if (intent.node.kind === 'folder' && intent.node.id === intent.parent) return refuse('Self')
+  if (intent.parent !== null && !nodes.has(`folder:${intent.parent}`)) return refuse('ParentMissing')
+  if (intent.node.kind === 'folder') {
+    let parent = intent.parent
+    while (parent !== null) {
+      if (parent === intent.node.id) return refuse('Cycle')
+      parent = nodes.get(`folder:${parent}`)!.shown
+    }
+  }
+  const anchor = intent.before === null ? undefined : nodes.get(id(intent.before))
+  if (intent.before !== null && (!anchor || id(intent.before) === id(intent.node) || anchor.node.kind !== node.node.kind || anchor.shown !== intent.parent)) return refuse('AnchorMoved')
+  const all = partitions.get(intent.parent)?.[node.node.kind] ?? []
+  const from = all.indexOf(node)
+  if (node.parent === intent.parent && node.shown === intent.parent && all[from + 1] === anchor) return refuse('NoChange')
+  const siblings = all.filter(row => row !== node)
+  const index = anchor === undefined ? siblings.length : siblings.indexOf(anchor)
+  let best: { key: string; rekeys: [number, string][] } | undefined
+  for (let end = index; end <= siblings.length; end++) {
+    const keys = spreadMembershipKeys(siblings[index - 1]?.key ?? null, siblings[end]?.key ?? null, end - index + 1)
+    if (keys) { best = { key: keys[0]!, rekeys: keys.slice(1).map((key, at) => [index + at, key]) }; break }
+  }
+  for (let start = index - 1; start >= 0 && index - start < (best?.rekeys.length ?? Infinity); start--) {
+    const keys = spreadMembershipKeys(siblings[start - 1]?.key ?? null, siblings[index]?.key ?? null, index - start + 1)
+    if (keys) { best = { key: keys.at(-1)!, rekeys: keys.slice(0, -1).map((key, at) => [start + at, key]) }; break }
+  }
+  if (!best) return refuse('OrderingUnavailable')
+  if (best.rekeys.length + 1 > 1024) return refuse('TooManyOperations')
+  const changes: [PlanNode, string][] = [[node, best.key], ...best.rekeys.map(([at, key]): [PlanNode, string] => [siblings[at]!, key])]
+  const folders: MembershipPlan['folders'] = []
+  const members: { op: 'place'; member: string; bucket: string | null; key: string }[] = []
+  for (const [row, key] of changes) {
+    if (row.node.kind === 'folder') folders.push({ op: 'folder.move', id: row.node.id, parent: intent.parent, key })
+    else members.push({ op: 'place', member: row.node.subject, bucket: intent.parent, key })
+  }
+  if (new TextEncoder().encode(JSON.stringify(folders.length ? folders : members)).length > 1024 * 1024) return refuse('TooManyBytes')
+  return { _tag: 'PlannedV2', edit: { folders, memberships: members } }
+}
+
+/** Send only requests returned by the journal executor's Send effect. Actor stays transport-owned. */
+export const membershipWriteRequest = (request: SidebarJournalRequest): ActionOf<'arrangement.edit'> | ActionOf<'arrangement.membership.edit'> => {
+  const { fence, identity, operations } = request
+  const common = { api_version: 'st3.client.v0' as const, id: identity.action_id, idempotency_key: identity.idempotency_key,
+    fence: { snapshot_id: fence.snapshot.id, subject_revisions: { [fence.scope.container]: fence.revision } } }
+  const parameters = { subject: fence.scope.container, owner: fence.scope.owner }
+  return 'Folders' in operations
+    ? { ...common, type: 'arrangement.edit', parameters: { ...parameters, operations: [...operations.Folders] } }
+    : { ...common, type: 'arrangement.membership.edit', parameters: { ...parameters, operations: [...operations.Memberships] } }
+}
+/** Forward Send delivery unchanged: admission errors cannot disprove an earlier uncertain commit. */
+export const membershipWriteResult = (request: SidebarJournalRequest, delivery: MembershipDelivery, result: unknown): MembershipEditEvent => {
+  const identity = request.identity
+  if (typeof result === 'object' && result !== null && 'action_id' in result && result.action_id === identity.action_id && 'status' in result) {
+    if (result.status === 'accepted' || result.status === 'completed') return { _tag: 'Ack', identity }
+    if (result.status === 'rejected') return { _tag: 'Refused', identity, refusal: 'Conflict' }
+  }
+  if (delivery === 'Replay') return { _tag: 'Unknown', identity }
+  if (result instanceof ClientError) {
+    const { code, details } = result.response
+    if (details?.applied === 'unknown') return { _tag: 'Unknown', identity }
+    const refusal = code === 'stale-fence' ? 'StaleFence'
+      : ['forbidden', 'arrangement-owner-forbidden', 'membership-owner-forbidden'].includes(code) ? 'Unauthorized'
+      : ['arrangement-folder-deleted', 'arrangement-retired', 'not-found'].includes(code) ? 'DestinationMissing'
+      : code === 'invalid-membership-operations' ? 'InvalidPlan'
+      : details?.applied === 'none' ? code === 'idempotency-conflict' ? 'Conflict' : 'InvalidPlan' : undefined
+    if (refusal) return { _tag: 'Refused', identity, refusal }
+  }
+  return { _tag: 'Unknown', identity }
+}

@@ -10,6 +10,13 @@ It asks `evidence-verify --require-all` about the head tree and prints ONE decis
 
   signed-tree v1 decision=ok|would-reject|reject|skipped|error mode=shadow pr=N head=SHA tree=SHA base=SHA reason=... lanes=name:state,...
 
+followed, when a fetch failed, by one `signed-tree v1 error WHAT: STDERR` line each, so `notes-fetch-failed` says why.
+
+Like the enforced gate (scripts/ci-evidence-gate), it holds the head to each lane's definition at the pull request's BRANCH POINT
+(`--lane-base`), not at the base's tip: a branch that only lags main changed no lane file itself (docs/st3/gate-evidence.md, "Which
+lane definition a pull request is held to"). Finding the branch point deepens the shallow checkout's history without blobs, as the
+gate does, and fetches only the lane file's blob at that commit. Without a branch point the tip is used and the reason says so.
+
 `decision` mirrors the verifier (`reject` only if a check whose policy says `require: reject` is unsatisfied) but this job is SHADOW
 ONLY: it exits 0 whatever it finds, is not a required check, and reads no secret (read-only token, no credentials in the checkout).
 It is a no-op (no notes fetched) when no check in the base policy says `require`, and for forks and drafts.
@@ -37,12 +44,55 @@ REPOSITORY = re.compile(r'^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$')
 VERIFIER_TIMEOUT = int(os.environ.get('SIGNED_TREE_VERIFIER_TIMEOUT', '60'))
 
 
-def run(*command, timeout=120):
+def run(*command, timeout=120, env=None):
+    return run_err(*command, timeout=timeout, env=env)[:2]
+
+
+def run_err(*command, timeout=120, env=None):
+    """(exit status, stdout, stderr); a command that cannot start or times out is 124 with the reason as its stderr."""
     try:
-        done = subprocess.run(command, capture_output=True, timeout=timeout)
-        return done.returncode, done.stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return 124, b''
+        done = subprocess.run(command, capture_output=True, timeout=timeout, env=dict(os.environ, **env) if env else None)
+        return done.returncode, done.stdout, done.stderr
+    except subprocess.TimeoutExpired:
+        return 124, b'', f'timed out after {timeout} s'.encode()
+    except OSError as error:
+        return 124, b'', str(error).encode()
+
+
+def stderr_text(stderr):
+    """A failed command's stderr on one bounded line."""
+    text = ' '.join(stderr.decode(errors='replace').split())
+    return (text or 'no stderr')[:400]
+
+
+def branch_point(base, head, pr):
+    """(the pull request's branch point, None), or (None, why) when it cannot be read.
+
+    The checkout and the head are depth 1. Their history is deepened without blobs (commits and trees: what `merge-base` and the
+    verifier's definition paths read), and only the lane file's blob at the branch point is fetched if it is missing, with no
+    negotiation: a server would otherwise leave out a blob an advertised commit reaches."""
+    _, shallow = run('git', 'rev-parse', '--is-shallow-repository')
+    if shallow.strip() == b'true':
+        code, _, stderr = run_err('git', 'fetch', '--no-tags', '-q', '--filter=blob:none', '--unshallow', 'origin', base,
+                                  f'refs/pull/{pr}/head', timeout=180)
+        if code != 0:
+            return None, ('history-fetch-failed', stderr)
+    code, point = run('git', 'merge-base', base, head)
+    point = point.decode().strip()
+    if code != 0 or not OID.match(point):
+        return None, ('no-branch-point', b'')
+    path = config_path(point, LANES)
+    if path is None:
+        return point, None
+    code, blob = run('git', 'rev-parse', '--verify', f'{point}:{path}')
+    blob = blob.decode().strip()
+    if code != 0 or not OID.match(blob):
+        return None, ('no-lane-file-at-the-branch-point', b'')
+    if run('git', 'cat-file', '-e', blob, env={'GIT_NO_LAZY_FETCH': '1'})[0] != 0:
+        code, _, stderr = run_err('git', '-c', 'fetch.negotiationAlgorithm=noop', 'fetch', '--no-tags', '-q', 'origin', blob)
+        if code != 0:
+            return None, ('lane-file-fetch-failed', stderr)
+    return point, None
 
 
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — no candidate or sibling fallback.
@@ -60,10 +110,11 @@ def field(value):
     return text[:200]
 
 
-def emit(context, decision, reason, tree='-', base='-', lanes=None, seconds=0.0):
+def emit(context, decision, reason, tree='-', base='-', lanes=None, seconds=0.0, errors=()):
     names = ','.join(f'{name}:{state}' for name, state in sorted((lanes or {}).items())) or '-'
     text = (f"signed-tree v1 decision={decision} mode=shadow pr={field(context.get('pr'))} head={field(context.get('head'))} "
             f"tree={field(tree)} base={field(base)} reason={field(reason)} lanes={field(names)} seconds={seconds:.1f}")
+    text = '\n'.join([text, *(f'signed-tree v1 error {what}: {stderr_text(stderr)}' for what, stderr in errors)])
     print(text)
     for variable, body in (('GITHUB_STEP_SUMMARY', text + '\n'), ('GITHUB_OUTPUT', f'decision={decision}\n')):
         target = os.environ.get(variable)
@@ -113,9 +164,11 @@ def main():
         if code != 0 or not OID.match(tree):
             return emit(context, 'error', 'no-head-tree', base=base, seconds=elapsed())
         # Only this tree's records (one prefix), plus the input-keyed records of each required check that declares inputs: never the namespace.
-        code, _ = run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{TAGS}/{tree}/*:{TAGS}/{tree}/*',
-                      f'+{NOTES}/{tree}/*:{NOTES}/{tree}/*')
-        notes = 'ok' if code == 0 else 'failed'
+        errors = []
+        code, _, stderr = run_err('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{TAGS}/{tree}/*:{TAGS}/{tree}/*',
+                                  f'+{NOTES}/{tree}/*:{NOTES}/{tree}/*')
+        if code != 0:
+            errors.append(('notes-fetch', stderr))
         for check, entry in sorted(checks.items()):
             if isinstance(entry, dict) and entry.get('require', 'off') != 'off' and entry.get('inputs') is not None and re.fullmatch(r'[A-Za-z0-9._-]+', check):
                 code, out = run(sys.executable, VERIFIER, '--repo', '.', '--revision', context['head'], '--check', check, '--project', '--policy-from', base,
@@ -126,24 +179,35 @@ def main():
                     key = None
                 if isinstance(key, str) and OID.match(key):
                     prefix, tags = f'{INPUT_NOTES}/{check}/{key}', f'{TAGS}/input/{check}/{key}'
-                    if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{tags}/*:{tags}/*', f'+{prefix}/*:{prefix}/*')[0] != 0:
-                        notes = 'failed'
+                    code, _, stderr = run_err('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{tags}/*:{tags}/*',
+                                              f'+{prefix}/*:{prefix}/*')
+                    if code != 0:
+                        errors.append((f'notes-fetch:{check}', stderr))
+        notes_failed = bool(errors)
         command = [sys.executable, VERIFIER, '--repo', '.', '--tree', tree, '--require-all', '--keys-from', base,
                    '--policy-from', base, '--repository', repository]
+        lane_base = None
         if config_path(base, LANES) is not None:
             command += ['--lanes-from', base]
+            lane_base, missing = branch_point(base, context['head'], context['pr'])
+            if lane_base is not None:
+                command += ['--lane-base', lane_base]
+            elif missing[1]:
+                errors.append(missing)
         code, out = run(*command, timeout=VERIFIER_TIMEOUT)
         try:
             result = json.loads(out)
         except ValueError:
-            return emit(context, 'error', f'verifier-exit-{code}-without-json', tree=tree, base=base, seconds=elapsed())
+            return emit(context, 'error', f'verifier-exit-{code}-without-json', tree=tree, base=base, seconds=elapsed(), errors=errors)
         if result.get('decision') == 'error':
-            return emit(context, 'error', f'verifier:{result.get("reason", "error")}', tree=tree, base=base, seconds=elapsed())
+            return emit(context, 'error', f'verifier:{result.get("reason", "error")}', tree=tree, base=base, seconds=elapsed(), errors=errors)
         lanes = {name: ('ok' if lane.get('satisfied') else lane.get('reason', 'unsatisfied')) for name, lane in result.get('lanes', {}).items()}
         reason = 'satisfied' if result.get('satisfied') else 'unsatisfied'
-        if notes != 'ok':
+        if notes_failed:
             reason += ',notes-fetch-failed'
-        return emit(context, result.get('decision', 'error'), reason, tree=tree, base=base, lanes=lanes, seconds=elapsed())
+        if lane_base is None and config_path(base, LANES) is not None:
+            reason += f',lanes-at-the-base-tip:{missing[0]}'
+        return emit(context, result.get('decision', 'error'), reason, tree=tree, base=base, lanes=lanes, seconds=elapsed(), errors=errors)
     except Exception as error:  # a shadow job never fails
         return emit(context, 'error', f'{type(error).__name__}', seconds=elapsed())
 

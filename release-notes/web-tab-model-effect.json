@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web app's unmounted workspace tab model declares its subjects and commands as Effect Schema tagged unions, reports a tab-kind claim conflict as a tagged error, and persists through Effect's browser key-value store; adds @effect/platform-browser 4.1.0",
+  "replay": { "status": "none", "detail": "Web modules only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No server storage changes. The device-local tab document keeps the caller's localStorage key and the same JSON encoding of WorkspaceState, now written through KeyValueStore.toSchemaStore; a test reads a document the earlier plain JSON codec wrote. No app code mounts the store yet, so no browser reads or writes it." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "changed", "detail": "Adds the @effect/platform-browser 4.1.0 dependency to apps/fractal-web (pnpm lock, Buck sha256 pin, licenses and nix/typescript-client-deps.hash updated). The workspace module's TypeScript surface changes: WorkspaceStorage is now a key plus a change stream over a KeyValueStore layer, makeKindRegistry throws TabKindClaimConflict, and Subject, Command, Drop and ReceivedLayout are exported as schemas. No module outside src/workspace imports them; no runtime, wire or client changes." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Reverting restores the hand-written unions and the direct localStorage store and removes the dependency; a document either version wrote stays readable by the other." }
+}

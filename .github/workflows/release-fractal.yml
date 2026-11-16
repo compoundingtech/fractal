@@ -3,11 +3,28 @@
 
 name: Fractal tag release
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('Fractal candidate {0} {1}', inputs.sha, inputs.request_id) || format('Fractal tag release {0}', github.ref_name) }}
+
 on:
   push:
     branches: [main]
-    tags: ["**", "!edge", "!embed-*", "!evidence/**"]
-  workflow_dispatch: null
+    tags: ["**", "!edge", "!embed-*", "!fleet-*", "!evidence/**"]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact first-parent main source SHA for an isolated candidate build
+        required: false
+        type: string
+      request_id:
+        description: Caller correlation ID for this candidate build
+        required: false
+        type: string
+      purpose:
+        description: Candidate requires main first-parent history; compatibility builds any deployed source without publication
+        required: false
+        type: choice
+        default: candidate
+        options: [candidate, compatibility]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
@@ -23,8 +40,16 @@ on:
       - scripts/release-build-stamp.py
       - scripts/release-rust-version
       - scripts/fixtures/install-release-v0.3.17
+      - scripts/release-zig-preseed*
+      - vendor/libghostty-vt-sys/**
       - scripts/release-fractal*
+      - scripts/release_artifact.py
+      - scripts/release_draft_recovery.py
+      - scripts/release_gh.py
+      - scripts/release_tag.py
+      - scripts/release-publish-embed*
       - scripts/release-fractal-embed.mjs
+      - scripts/release_gh.py
       - apps/fractal-web/**
       - scripts/release_notes*
       - scripts/compat-baseline-release*
@@ -45,10 +70,95 @@ permissions:
   actions: read
 
 concurrency:
-  group: "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}"
+  group: "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('candidate-{0}', inputs.sha)) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-source:
+    name: Validate the requested release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the trusted dispatch ref, never the unvalidated candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Validate exact source and preserve the stable candidate main gate
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.sha }}
+          DISPATCH_REF: ${{ github.ref }}
+          PURPOSE: ${{ inputs.purpose }}
+        run: |
+          set -euo pipefail
+          if [[ "$PURPOSE" != compatibility && "$DISPATCH_REF" != refs/heads/main ]]; then
+            echo "::error::Release builds must be dispatched from main."
+            exit 1
+          fi
+          if [[ "$PURPOSE" == compatibility && -z "$REQUESTED_SHA" ]]; then
+            echo "::error::Compatibility archives require an exact source SHA."
+            exit 1
+          fi
+          if [[ -n "$REQUESTED_SHA" ]]; then
+            if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The candidate source must be a full lowercase 40-character SHA."
+              exit 1
+            fi
+            if [[ "$PURPOSE" == compatibility ]]; then
+              # Full history is fetched from origin before inspecting this exact commit.
+              git cat-file -e "$REQUESTED_SHA^{commit}"
+              refs=$(git for-each-ref --contains "$REQUESTED_SHA" --format='%(refname)' refs/remotes/origin refs/tags)
+              if [[ -z "$refs" ]]; then
+                echo "::error::Compatibility source must be reachable from an origin ref."
+                exit 1
+              fi
+              printf 'Compatibility archive source=%s reachable-from:\n%s\n' "$REQUESTED_SHA" "$refs"
+            else
+              # Read the whole stream: pipefail must not mistake an early reader exit for invalid history.
+              if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$REQUESTED_SHA"; then
+                echo "::error::The candidate source must belong to origin/main first-parent history."
+                exit 1
+              fi
+            fi
+          fi
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   pick-runner:
     name: pick-runner
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request') }}
@@ -358,16 +468,18 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   installer:
     name: "installer (${{ matrix.runner }})"
+    needs: validate-source
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+    timeout-minutes: ${{ matrix.runner == 'macos-15' && 10 || 5 }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Test release names, install entry points and isolated app transactions
         run: |
           scripts/install-test
@@ -377,6 +489,7 @@ jobs:
           python3 scripts/release-fractal-edge-test
           python3 scripts/release-publish-embed-test
           python3 scripts/release-fractal-manifest-test
+          python3 scripts/release-fractal-publish-test
           python3 scripts/compat-baseline-release-test
 
       - name: Test the daily release failure path
@@ -385,30 +498,36 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Runs isolated installer fixtures without downloads or compilation.
+          CACHE_REASON: Runs isolated installer and publication-gate fixtures without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   embed:
     name: release-web-embed
+    needs: validate-source
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/cache@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "web-embed-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-source-inputs.json') }}"
         id: cache-1
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -441,6 +560,9 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: embed
     runs-on: ubuntu-latest
+    concurrency:
+      group: fractal-release-mutation
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -451,6 +573,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: release-web-embed
@@ -464,8 +587,8 @@ jobs:
           CACHE_REASON: Publishes the verified immutable web archive; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   build:
-    needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
+    needs: [pick-runner, validate-source]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
     name: "release-build (${{ matrix.target }})"
     strategy:
       fail-fast: false
@@ -485,6 +608,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
           toolchain: 1.97.0
@@ -516,14 +640,18 @@ jobs:
           use-cache: false
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -542,7 +670,10 @@ jobs:
           python3 scripts/install-macos-test
           python3 scripts/release-fractal-test
           python3 scripts/release_notes_test.py
+          python3 scripts/release-zig-preseed-test.py
 
+      - name: Preseed hash-verified Zig GitHub archives
+        run: python3 scripts/release-zig-preseed.py --github-env "$GITHUB_ENV"
       - name: Build, package, and test extracted tools
         run: "scripts/release-fractal '${{ matrix.target }}' dist"
       - id: build-snapshot-save
@@ -596,10 +727,13 @@ jobs:
     name: release-assemble
     needs: [build, embed, installer]
     runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.release.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -607,7 +741,7 @@ jobs:
           path: dist
       - name: Verify both targets and record exact sources
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.sha || github.sha }}
         run: |
           set -euo pipefail
           cd dist
@@ -615,11 +749,14 @@ jobs:
           sha256sum --check SHA256SUMS
           python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
           cp ../docs/st3/binary-releases.md RELEASE-NOTES.md
+          # Markdown backticks are literal, not command substitution.
+          # shellcheck disable=SC2016
           printf '\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\n' "$SOURCE_SHA" >> RELEASE-NOTES.md
 
-      - uses: actions/upload-artifact@v4
+      - id: release
+        uses: actions/upload-artifact@v4
         with:
-          name: fractal-release
+          name: "fractal-release-attempt-${{ github.run_attempt }}"
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -627,17 +764,17 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Downloads verified build artifacts; builds nothing.
+          CACHE_REASON: Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   publishEdge:
     name: release-publish-edge
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-    needs: assemble
+    needs: [assemble, publishEmbed]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      group: fractal-edge-publish
+      group: fractal-release-mutation
       cancel-in-progress: false
     permissions:
       contents: write
@@ -650,6 +787,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 1
       - name: Fetch the whole history without evidence tags
         env:
@@ -679,7 +817,8 @@ jobs:
           git fsck --connectivity-only --no-dangling --no-progress
       - uses: actions/download-artifact@v4
         with:
-          name: fractal-release
+          artifact-ids: ${{ needs.assemble.outputs.artifact-id }}
+          merge-multiple: true
           path: dist
       - name: Move the rolling edge pre-release to this verified commit
         run: scripts/release-fractal-edge --source "$SOURCE_SHA" --dist dist --run-url "$RUN_URL"
@@ -687,99 +826,37 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Moves the rolling edge pre-release to a verified main commit; builds nothing.
+          CACHE_REASON: Moves the rolling edge pre-release after embed publication in the shared mutation lock; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  publish:
-    name: release-publish
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false) }}
-    needs: assemble
+  observePublishers:
+    name: report-cancelled-release-publishers
+    needs: [publishEmbed, publishEdge]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
-      contents: write
+      contents: read
+      actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.ref_name }}
-      SOURCE_SHA: ${{ github.sha }}
+      CANCELLED_RUN: ${{ github.run_id }}
+      REPOSITORY: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-      - name: Fetch the whole history without evidence tags
-        env:
-          FETCH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
-            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
-            export GIT_CONFIG_VALUE_0
-          fi
-          head=$(git rev-parse HEAD)
-          shallow=$(git rev-parse --git-path shallow)
-          errors=$(mktemp)
-          fetch() {
-            status=0
-            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
-            cat "$errors" >&2
-            return "$status"
-          }
-          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
-          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
-          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
-            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
-            exit 1
-          fi
-          rm -f "$shallow.full-fetch"
-          git fsck --connectivity-only --no-dangling --no-progress
-      - uses: actions/download-artifact@v4
-        with:
-          name: fractal-release
-          path: dist
-      - name: Publish the verified tag artifacts
+      - name: Fail visibly with cancelled publisher job-ID recovery commands
         run: |
           set -euo pipefail
-          git fetch origin "refs/tags/$TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
-          python3 scripts/compat-baseline-release check --source "$SOURCE_SHA" --require-latest
-          python3 scripts/release_notes.py --source "$SOURCE_SHA" --tag "$TAG" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json
-          cd dist
-          sha256sum --check SHA256SUMS
-          python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
-          # Refuse to replace any existing release or its assets. A partial draft stays private
-          # for inspection; delete that draft before retrying, never move the tag.
-          gh release create "$TAG" --verify-tag --draft --title "Fractal $TAG" \
-            --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json
-          gh release edit "$TAG" --draft=false
-
+          echo "::error::A release publisher was cancelled. Check edge/embed state, then run only the cancelled publisher job IDs printed below; do not rebuild successful embed artifacts."
+          gh api --paginate --slurp "repos/$REPOSITORY/actions/runs/$CANCELLED_RUN/jobs?filter=latest&per_page=100" |
+            jq -er --arg repo "$REPOSITORY" '
+              [.[].jobs[]
+                | select(.conclusion == "cancelled")
+                | select(.name == "release-publish-web-embed" or .name == "release-publish-edge")
+                | "gh run rerun --job " + (.id | tostring) + " --repo " + $repo]
+              | if length == 0 then error("No cancelled publisher job IDs found; inspect the original run before retrying.") else .[] end'
+          exit 1
       - name: Report job cache coverage
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Publishes verified assembled artifacts; builds nothing.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  advance:
-    name: advance-compatibility-baselines
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false) }}
-    needs: publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: write
-      actions: write
-      pull-requests: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Propose compatibility baselines after publication
-        run: python3 scripts/compat-baseline-release advance "$TAG"
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Verifies published archives and proposes the baseline maintenance PR; builds nothing.
+          CACHE_REASON: Fails visibly on cancelled publishers and explains re-dispatch of the original push event; performs no release mutations.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""

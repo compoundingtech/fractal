@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Define the attention budget window in docs/st3/priority.md: rolling 7 days per mission and person, with one native person ask as the unit; delegated child runs count for the ancestor mission. The previously added attention request report measures this window; it is a report only, with no admission or enforcement, and is not fleet-complete.",
+  "replay": { "status": "none", "detail": "Documentation only; no changes to claim replay or run-lineage interpretation." },
+  "schema": { "status": "none", "detail": "No durable claim or table changes." },
+  "rules": { "status": "none", "detail": "Clarifies that Store::attention_request_count measures the documented attention budget window, correcting the earlier description that it was not a budget window. No attention declaration, admission or enforcement is introduced." },
+  "compatibility": { "status": "none", "detail": "No Rust API, CLI, HTTP or wire API changes." },
+  "downtime": { "status": "none", "detail": "No runtime or startup changes." },
+  "manual": { "status": "none", "detail": "No operator actions." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

@@ -12,6 +12,18 @@ const rowMembers = (row: HTMLElement): readonly string[] => row.dataset.scrollAn
 /** A prefix can grow inside a turn without moving its wrapper, so the wrapper anchors only when it has no leaf row. */
 const isAnchorContainer = (row: HTMLElement) => row.hasAttribute('data-scroll-anchor-container')
 const navigationKeys: Readonly<Record<string, true>> = { PageUp: true, PageDown: true, Home: true, End: true, ArrowUp: true, ArrowDown: true, ' ': true }
+/** Keys that move the reader toward history. Shift+Space pages up. */
+const upwardKeys: Readonly<Record<string, true>> = { PageUp: true, Home: true, ArrowUp: true }
+/** A reader within about one line of the end is at the end: a scroll that lands here resumes following. */
+export const followEndBand = 48
+/** A control that opens or closes part of a row; pressing it is a request to read that row, not the live end. */
+const disclosureSelector = '[aria-expanded], summary'
+
+/**
+ * Which way reader input moves the lane. Following is a state, not a position: only input toward history leaves it,
+ * because input that cannot scroll (a wheel or key at the end, a click, focus) produces no scroll event to restore it.
+ */
+type Intent = 'history' | 'end' | 'none'
 
 /** A bounded lane owns scrolling; a misconfigured host may leave it to an ancestor or the page. */
 function pressScrollOwner(lane: HTMLElement): HTMLElement {
@@ -41,14 +53,23 @@ export type ViewportAnchorHistory =
 /** Per-surface memory, one entry per conversation. Owners drop closed keys and dispose on unmount. */
 export class ViewportStore {
   private readonly states = new Map<string, ViewportState>()
+  private readonly folds = new Map<string, boolean>()
   private disposed = false
   get size(): number { return this.states.size }
+  /** A reader's work-log fold choice by turn. Bounded, since only recent turns are worth remembering. */
+  foldChoice(id: string): boolean | undefined { return this.folds.get(id) }
+  rememberFold(id: string, expanded: boolean): void {
+    if (this.disposed) return
+    this.folds.delete(id)
+    this.folds.set(id, expanded)
+    if (this.folds.size > 500) this.folds.delete(this.folds.keys().next().value!)
+  }
   get(key: string): ViewportState | undefined { return this.states.get(key) }
   save(key: string, state: ViewportState): void { if (!this.disposed) this.states.set(key, state) }
   retain(keys: ReadonlySet<string>): void { for (const key of this.states.keys()) if (!keys.has(key)) this.states.delete(key) }
   open(): void { this.disposed = false }
   /** Parent-first teardown must ignore late saves from unmounting viewports. */
-  dispose(): void { this.disposed = true; this.states.clear() }
+  dispose(): void { this.disposed = true; this.states.clear(); this.folds.clear() }
 }
 
 /** Viewports outside a store-owning surface keep memory only for their own mount. */
@@ -139,7 +160,7 @@ class ViewportController {
   firstRenderedId: string | undefined
   loadEarlier: (() => void) | undefined
 
-  private loadEarlierIfNeeded() {
+  loadEarlierIfNeeded() {
     const element = this.element
     if (element === null || this.loadEarlier === undefined || element.clientHeight === 0) return
     if (this.following ? element.scrollHeight >= element.clientHeight * 2 : element.scrollTop > element.clientHeight) return
@@ -258,7 +279,9 @@ class ViewportController {
     if (element === null) return
     const viewport = element.getBoundingClientRect()
     const top = viewport.top
-    const hit = element.ownerDocument.elementFromPoint(viewport.left + viewport.width / 2, top + geometryNumbers.scrollEndTolerance)?.closest<HTMLElement>(anchorSelector)
+    // Hit-testing is a shortcut; a document without it (jsdom, some embedders) takes the row scan below.
+    const page = element.ownerDocument
+    const hit = typeof page.elementFromPoint === 'function' ? page.elementFromPoint(viewport.left + viewport.width / 2, top + geometryNumbers.scrollEndTolerance)?.closest<HTMLElement>(anchorSelector) : undefined
     if (hit !== undefined && hit !== null && element.contains(hit) && !isAnchorContainer(hit)) {
       this.remember(hit, hit.getBoundingClientRect().top - top)
       return
@@ -374,10 +397,37 @@ class ViewportController {
     if (element === null) return
     this.element = element
     this.lastWidth = element.clientWidth
+    let touchY: number | undefined
+    /** A press on the lane itself, outside any row: its scrollbar. A drag there arrives only as scroll events. */
+    let laneHeld = false
+    const touchStart = (event: TouchEvent) => { touchY = event.touches[0]?.clientY }
+    const intent = (event: Event): Intent => {
+      const target = event.target instanceof Element ? event.target : null
+      if (event.type === 'wheel') return (event as WheelEvent).deltaY < 0 ? 'history' : (event as WheelEvent).deltaY > 0 ? 'end' : 'none'
+      if (event.type === 'touchmove') {
+        const y = (event as TouchEvent).touches[0]?.clientY
+        const previous = touchY
+        touchY = y
+        // A finger moving down drags the content down: the reader scrolls toward history.
+        return y === undefined || previous === undefined ? 'none' : y > previous ? 'history' : y < previous ? 'end' : 'none'
+      }
+      if (event instanceof KeyboardEvent) {
+        if ((event.key === 'Enter' || event.key === ' ') && target?.closest(disclosureSelector) != null) return 'history'
+        return upwardKeys[event.key] === true || (event.key === ' ' && event.shiftKey) ? 'history' : 'end'
+      }
+      // Expanding a row: the reader wants that row to stay put, not the live end. Assistive tech may activate it with a click
+      // alone, so the click counts too; it reaches the lane (capture) before the disclosure's own handler changes the content.
+      if ((event.type === 'pointerdown' || event.type === 'click') && target?.closest(disclosureSelector) != null) return 'history'
+      return 'none'
+    }
     const manual = (event: Event) => {
       // Focusing the lane itself does not navigate to a row or change the reader's position.
       if (event.type === 'focusin' && event.target === element) return
-      if (event instanceof KeyboardEvent && (navigationKeys[event.key] !== true || (event.target instanceof HTMLElement && event.target.closest('input,textarea,[contenteditable="true"]')))) return
+      if (event instanceof KeyboardEvent && (navigationKeys[event.key] !== true || (event.target instanceof HTMLElement && event.target.closest('input,textarea,[contenteditable="true"]')))) {
+        if (!(event.key === 'Enter' && event.target instanceof Element && event.target.closest(disclosureSelector) !== null)) return
+      }
+      // A following lane leaves the end only on input toward history; the end, a click or focus keep it following.
+      if (this.following && intent(event) !== 'history') return
       if (event.type === 'wheel' || event.type === 'touchmove' || event.type === 'keydown') this.pressedAnchor = undefined
       // Reader input interrupts an eased return where it is.
       this.followAnimation.cancel()
@@ -388,6 +438,11 @@ class ViewportController {
       this.scheduleCapture()
       if (this.frame !== undefined) cancelAnimationFrame(this.frame)
       this.frame = undefined
+      this.dock()
+    }
+    // Only a disclosure click is reader intent; any other click (text, links, row actions) keeps the lane as it is.
+    const disclosureClick = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest(disclosureSelector) !== null && element.contains(event.target)) manual(event)
     }
     const scroll = () => {
       if (this.programmaticTop !== undefined && Math.abs(element.scrollTop - this.programmaticTop) < geometryNumbers.scrollEndTolerance) {
@@ -402,10 +457,20 @@ class ViewportController {
         return
       }
       // A real reader scroll (including scrollbar dragging) takes ownership until the next press, and interrupts an eased return.
-      this.followAnimation.cancel()
+      const toward = element.scrollTop > this.lastTop
+      const distance = element.scrollHeight - element.clientHeight - element.scrollTop
       this.pressedAnchor = undefined
       this.lastTop = element.scrollTop
-      this.following = element.scrollHeight - element.clientHeight - element.scrollTop <= geometryNumbers.scrollEndTolerance
+      if (this.following) {
+        // Moving toward the end, or a shrink that clamps the lane at the end, keeps following; only a move up into history leaves it.
+        if (toward || (distance <= followEndBand && !laneHeld)) { this.schedule(); return }
+        this.followAnimation.cancel()
+        this.following = false
+      } else if (toward && distance <= followEndBand && !this.followAnimation.active) {
+        // Back within a line of the end: follow again and close the gap.
+        this.following = true
+        this.schedule()
+      }
       if (this.following) {
         this.unread = false
         this.dock()
@@ -418,6 +483,7 @@ class ViewportController {
     const view = page.defaultView
     const press = (event: PointerEvent) => {
       this.pressed.add(event.pointerId)
+      laneHeld = event.target === element
       if (this.pressedAnchor !== undefined || !(event.target instanceof Element)) return
       const row = event.target.closest<HTMLElement>(rowSelector)
       if (row !== null && element.contains(row)) {
@@ -431,23 +497,34 @@ class ViewportController {
     }
     const release = (event: PointerEvent) => {
       this.pressed.delete(event.pointerId)
+      if (this.pressed.size === 0) laneHeld = false
       if (this.pressedAnchor?.pointerId === event.pointerId) this.pressedAnchor = undefined
       this.dock()
+      // A press held the row in place while rows arrived below; a following lane catches up once it ends.
+      if (this.pressedAnchor === undefined && this.following) this.schedule()
     }
     // A release the page never sees (the window blurs, the tab hides) must not latch the dock.
     const abandon = () => {
+      laneHeld = false
       this.pressed.clear()
       this.pressedAnchor = undefined
       this.dock()
+      if (this.following) this.schedule()
     }
     const hidden = () => { if (page.visibilityState === 'hidden') abandon() }
-    const observer = new ResizeObserver(() => { this.preservePress(); this.schedule() })
+    // Pin in the observer, after layout and before paint, so a streaming block never shows a frame below the fold.
+    const observer = new ResizeObserver(() => {
+      if (!this.preservePress() && this.following && !this.followAnimation.active) this.writeTop(element.scrollHeight)
+      this.schedule()
+    })
     observer.observe(element)
     if (element.firstElementChild !== null) observer.observe(element.firstElementChild)
     element.addEventListener('wheel', manual, { passive: true })
+    element.addEventListener('touchstart', touchStart, { passive: true })
     element.addEventListener('touchmove', manual, { passive: true })
     element.addEventListener('keydown', manual)
     element.addEventListener('pointerdown', manual, { passive: true })
+    element.addEventListener('click', disclosureClick, { capture: true })
     element.addEventListener('focusin', manual)
     element.addEventListener('scroll', scroll, { passive: true })
     page.addEventListener('pointerdown', press, true)
@@ -473,9 +550,11 @@ class ViewportController {
       if (this.captureFrame !== undefined) cancelAnimationFrame(this.captureFrame)
       this.captureFrame = undefined
       element.removeEventListener('wheel', manual)
+      element.removeEventListener('touchstart', touchStart)
       element.removeEventListener('touchmove', manual)
       element.removeEventListener('keydown', manual)
       element.removeEventListener('pointerdown', manual)
+      element.removeEventListener('click', disclosureClick, { capture: true })
       element.removeEventListener('focusin', manual)
       element.removeEventListener('scroll', scroll)
       page.removeEventListener('pointerdown', press, true)
@@ -558,6 +637,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   const previousItems = React.useRef(items)
   const previousKey = React.useRef(stateKey)
   const previousCommand = React.useRef(scrollToBottomKey)
+  const prepended = React.useRef(false)
   const history = React.useMemo<ViewportAnchorHistory>(() => anchorHistory ?? { _tag: 'Complete', includes: id => items.some(row => row.id === id) }, [anchorHistory, items])
   React.useLayoutEffect(() => {
     if (stateKey !== previousKey.current) {
@@ -569,7 +649,11 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
       controller.jump()
     } else if (previousItems.current !== items) {
       // Metadata-only snapshots still reach geometry; only new or changed rows count as unread.
-      if (sameRows(previousItems.current, items)) controller.schedule()
+      // Loaded older history is not news: the reader's anchor settles it without a jump control.
+      const previous = previousItems.current
+      const olderLoaded = previous.length > 0 && items.length > previous.length && sameRows(previous, items.slice(items.length - previous.length))
+      prepended.current ||= olderLoaded
+      if (olderLoaded || sameRows(previous, items)) controller.schedule()
       else controller.changed()
     }
     controller.updateHistory(history)
@@ -583,6 +667,8 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     if (window.key !== stateKey || window.firstId === undefined && firstId !== undefined) setWindow({ key: stateKey, firstId })
     controller.loadEarlier = !active || materializing || startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - historyBatchSize)]?.id })
     if (windowChanged) controller.settle()
+    // Mount into loaded older rows before paint, so a reader at the top never sees a frame without its anchor.
+    if (prepended.current) { prepended.current = false; controller.loadEarlierIfNeeded() }
     controller.schedule()
     return () => { controller.loadEarlier = undefined }
   }, [active, controller, firstId, items, materializing, stateKey, startIndex, window.key, window.firstId])

@@ -4,7 +4,7 @@ version 2
     completion { when "all-steps-exhausted" }
     goal "Complete mission eval/network-isolation."
     step "contract" timeout="2m" {
-      title "Two nested st3 networks remain isolated"
+      title "Two nested fractal networks remain isolated"
         exec "eval/network-isolation/contract" {
           host "local"
           workspace "${ST_WORKSPACE}/fixture"

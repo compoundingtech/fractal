@@ -49,17 +49,24 @@ export const tokens = stylex.defineVars({
 '--ds-shadow-medium': '0 8px 24px rgb(0 0 0 / 0.18)',
 })
 
-export const scale = Object.assign((units: number): string => String(units * 4) + 'px', {
-fontSans: 'var(--sans, Arial, sans-serif)',
-fontMono: 'var(--mono, ui-monospace, monospace)',
-radiusDefault: 'var(--radius, 4px)', radiusSm: '2px', radiusLg: 'var(--panel-radius, 8px)', radiusFull: '9999px',
-space1: '4px',
-space2: '8px',
-space3: '12px',
-space4: '16px',
-space5: '20px',
-space6: '24px',
-space8: '32px',
-space10: '40px',
-space12: '48px',
+/**
+ * Layout scale. A `*.stylex` module's exports compile to `var(--hash)` at every use, so this has to define those
+ * variables: a plain object here compiles without error and leaves each rule with no value.
+ */
+export const scale = stylex.defineVars({
+  fontSans: 'var(--sans, Arial, sans-serif)',
+  fontMono: 'var(--mono, ui-monospace, monospace)',
+  radiusDefault: 'var(--radius, 4px)',
+  radiusSm: '2px',
+  radiusLg: 'var(--panel-radius, 8px)',
+  radiusFull: '9999px',
+  space1: '4px',
+  space2: '8px',
+  space3: '12px',
+  space4: '16px',
+  space5: '20px',
+  space6: '24px',
+  space8: '32px',
+  space10: '40px',
+  space12: '48px',
 })

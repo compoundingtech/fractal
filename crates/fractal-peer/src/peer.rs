@@ -594,6 +594,30 @@ impl ClientRelay {
         host_id: &str,
         request: &ClientReadRequest,
     ) -> Result<(serde_json::Value, ClientReadProvenance)> {
+        let started = std::time::Instant::now();
+        let result = self.read_traced_inner(host_id, request).await;
+        let operation = match &request.request {
+            ClientReadOperation::Timeline { .. } => Some("timeline"),
+            ClientReadOperation::SessionDetail { .. } => Some("session_detail"),
+            ClientReadOperation::ConversationChanges { after: None, .. } => Some("first_snapshot"),
+            ClientReadOperation::ConversationChanges { .. } => Some("changes"),
+            _ => None,
+        };
+        if let Some(operation) = operation {
+            let owner = result.as_ref().map_or(host_id, |(_, provenance)| provenance.owner_host_id.as_str());
+            crate::otel::record_conversation_relay_read(
+                crate::otel::conversation_owner(owner, &self.node, self.peers.iter().map(|peer| peer.name.as_str())),
+                operation, started.elapsed(),
+            );
+        }
+        result
+    }
+
+    async fn read_traced_inner(
+        &self,
+        host_id: &str,
+        request: &ClientReadRequest,
+    ) -> Result<(serde_json::Value, ClientReadProvenance)> {
         let target = host_id
             .strip_prefix("host/")
             .context("the owner host ID is invalid")?;
@@ -1190,6 +1214,8 @@ async fn receive_raw_terminal(
     axum::Extension(splice): axum::Extension<RawSplice>,
     headers: HeaderMap,
 ) -> Response {
+    let started = std::time::Instant::now();
+    tracing::debug!(terminal = %query.terminal, incarnation = %query.incarnation, phase = "peer-auth", "raw terminal owner setup started");
     let profile = crate::profile::Op::start("GET /v1/peer/raw-terminal", None);
     let path = uri.path_and_query().map_or(uri.path(), |value| value.as_str());
     if path.len() > 16_384 || !query.person.starts_with("person/") || query.person.matches('/').count() != 1 {
@@ -1201,6 +1227,7 @@ async fn receive_raw_terminal(
         _ => return (StatusCode::UNAUTHORIZED, "untrusted raw terminal member").into_response(),
     };
     drop(auth_span);
+    tracing::debug!(terminal = %query.terminal, phase = "peer-auth", elapsed_ms = %started.elapsed().as_millis(), "raw terminal owner phase completed");
     if query.mode == fractal_client::RawTerminalMode::Peek {
         let binding: RawLeaseBinding = match query
             .binding
@@ -1241,14 +1268,20 @@ async fn receive_raw_terminal(
     let client = fractal_client::Client::unix_as(state.backend().socket(), &query.person);
     let transport = async {
         let attachment_span = profile.as_ref().map(|op| op.wall_span("raw/owner-attachment"));
+        let attachment_started = std::time::Instant::now();
+        tracing::debug!(terminal = %query.terminal, phase = "owner-attachment", elapsed_ms = %started.elapsed().as_millis(), "raw terminal owner phase started");
         let attachment = client.raw_terminal_attachment(&query.terminal, &query.incarnation, query.mode).await?;
         drop(attachment_span);
+        tracing::debug!(terminal = %query.terminal, phase = "owner-attachment", duration_ms = %attachment_started.elapsed().as_millis(), elapsed_ms = %started.elapsed().as_millis(), "raw terminal owner phase completed");
         if attachment.owner_host_id != format!("host/{}", state.node()) {
             return Err(fractal_client::ClientError::Protocol("raw terminal route is not owner-local".into()));
         }
         let open_span = profile.as_ref().map(|op| op.wall_span("raw/owner-open"));
+        let open_started = std::time::Instant::now();
+        tracing::debug!(terminal = %query.terminal, phase = "owner-open", elapsed_ms = %started.elapsed().as_millis(), "raw terminal owner phase started");
         let transport = client.raw_terminal_stream(&attachment).await;
         drop(open_span);
+        tracing::debug!(terminal = %query.terminal, phase = "owner-open", success = transport.is_ok(), duration_ms = %open_started.elapsed().as_millis(), elapsed_ms = %started.elapsed().as_millis(), "raw terminal owner phase completed");
         transport
     }.await;
     if let Some(profile) = profile {
@@ -1264,7 +1297,10 @@ async fn receive_raw_terminal(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "raw terminal signature failed").into_response(),
     };
     let mut response = websocket.max_message_size(64 * 1024).max_frame_size(64 * 1024)
-        .on_upgrade(move |socket| splice(socket, transport));
+        .on_upgrade(move |socket| async move {
+            tracing::debug!(terminal = %query.terminal, phase = "peer-upgrade", elapsed_ms = %started.elapsed().as_millis(), "raw terminal owner phase completed");
+            splice(socket, transport).await;
+        });
     response.headers_mut().extend(signed);
     response
 }
@@ -2119,6 +2155,7 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             .clone()
             .context("the replication worker needs shared_secret_file")?,
         state_dir: config.state_dir.clone(),
+        api_socket: config.socket.clone(),
         peers: config.peers.clone(),
         peer_listen: config.peer_listen.clone(),
         fleet: config.fleet.clone(),

@@ -22,16 +22,10 @@ fractal-resource-providers = { path = "../fractal-resource-providers", optional 
 fractal-resource-wasip2 = { path = "../fractal-resource-wasip2", optional = true, features = ["runtime"] }
 fractal-wire = { path = "../fractal-wire" }
 fractal-schema = { path = "../fractal-schema" }
+fractal-runtime = { path = "../fractal-runtime" }
 tempfile = "3"
 toml = "0.9"
-opentelemetry = "0.30"
-opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
-opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
-# `experimental_use_tracing_span_context` stamps the active tracing span's trace/span ids onto
-# emitted log records — required so logs correlate with spans without manual context plumbing.
-opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
 tracing = "0.1"
-tracing-opentelemetry = "0.31"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "registry", "std"] }
 tungstenite = "0.30"
 tokio = { version = "1", features = ["rt", "sync", "time"] }

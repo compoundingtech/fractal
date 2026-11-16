@@ -35,8 +35,32 @@ const EVENT_RETENTION_MS: u128 = 30 * 24 * 60 * 60 * 1000;
 /// The most rows one mirror read returns.
 pub const MAX_READ_ROWS: usize = 500;
 
+/// Local freshness, independent of receipts (unchanged successful polls write no receipt).
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub(super) struct ObserverFreshness {
+    started_at_unix_ms: u128,
+    last_complete_unix_ms: Option<u128>,
+}
+
+/// Allow three effective poll intervals, but never fault a brief budget deferral.
+const LOCAL_BUDGET_FRESHNESS_MIN_MS: u128 = 30 * 60_000;
+
+impl ObserverFreshness {
+    pub(super) fn budget_state(self, now: u128, effective_interval_ms: u64) -> &'static str {
+        let bound = u128::from(effective_interval_ms)
+            .saturating_mul(3)
+            .max(LOCAL_BUDGET_FRESHNESS_MIN_MS);
+        if now.saturating_sub(self.last_complete_unix_ms.unwrap_or(self.started_at_unix_ms)) > bound {
+            "degraded"
+        } else {
+            "healthy"
+        }
+    }
+}
+
 /// The GitHub plugin and the only graph writes it may make: one compact state per item, written
-/// on change, and one claim per keyed event. Neither is written before step 3b.
+/// on change, one claim per keyed event, and one claim per completed CI run. The first two are
+/// not written before step 3b.
 pub const MANIFEST: Manifest = Manifest {
     name: "github",
     graph_kinds: &[
@@ -49,6 +73,11 @@ pub const MANIFEST: Manifest = Manifest {
             kind: fractal_schema::github_plugin::EVENT,
             subject_prefix: "github-event/",
             max_fields_bytes: fractal_schema::github_plugin::MAX_EVENT_BYTES,
+        },
+        GraphKind {
+            kind: fractal_schema::github_plugin::WORKFLOW_RUN,
+            subject_prefix: "github-workflow-run/",
+            max_fields_bytes: fractal_schema::github_plugin::MAX_WORKFLOW_RUN_BYTES,
         },
     ],
 };
@@ -199,6 +228,47 @@ impl GithubPluginStore {
             )?;
         }
         Ok(())
+    }
+    /// Start the local freshness clock once, including observers that have never completed.
+    pub(super) fn observer_freshness(&self, observer: &str, now: u128) -> Result<ObserverFreshness> {
+        let connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
+        let key = format!("observer-freshness:{observer}");
+        let value: Option<String> = connection.query_row(
+            "SELECT value FROM plugin_meta WHERE key=?1", [&key], |row| row.get(0),
+        ).optional()?;
+        if let Some(value) = value {
+            return Ok(serde_json::from_str(&value)?);
+        }
+        let freshness = ObserverFreshness { started_at_unix_ms: now, last_complete_unix_ms: None };
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h6388f1a4bc1c owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
+            "INSERT INTO plugin_meta(key, value) VALUES (?1, ?2)",
+            params![key, serde_json::to_string(&freshness)?],
+        )?;
+        Ok(freshness)
+    }
+
+    /// Every successful provider poll advances the clock, even when no facts or cursor changed.
+    pub(super) fn complete_observation(
+        &self, observer: &str, freshness: &mut ObserverFreshness, now: u128,
+    ) -> Result<()> {
+        let next = ObserverFreshness { last_complete_unix_ms: Some(now), ..*freshness };
+        self.connection.lock().unwrap_or_else(PoisonError::into_inner).execute(
+            /* sqlite-large-value: allow-for-now lv-hbd0b2188b3ea owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE plugin_meta SET value=?2 WHERE key=?1",
+            params![format!("observer-freshness:{observer}"), serde_json::to_string(&next)?],
+        )?;
+        *freshness = next;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_freshness_writes(&self) {
+        self.connection.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_freshness BEFORE UPDATE ON plugin_meta
+             WHEN NEW.key LIKE 'observer-freshness:%'
+             BEGIN SELECT RAISE(FAIL, 'freshness write failed'); END;",
+        ).unwrap();
     }
 
     /// Where `observer` last polled to on this member: `None` when it never polled here (or
@@ -788,6 +858,27 @@ mod tests {
         assert!(store.repositories("acme/garden").unwrap().is_empty());
     }
 
+    #[test]
+    fn observer_freshness_survives_restart_and_respects_effective_cadence() {
+        let state = tempfile::tempdir().unwrap();
+        let store = GithubPluginStore::open(state.path()).unwrap();
+        let mut clock = store.observer_freshness(OBSERVER, 1_000).unwrap();
+        assert_eq!(clock.budget_state(1_801_000, 180_000), "healthy");
+        assert_eq!(clock.budget_state(1_801_001, 180_000), "degraded");
+        // Standing quiet backoff is at most ten minutes, hence the thirty-minute floor.
+        assert_eq!(clock.budget_state(1_801_001, 600_000), "degraded");
+        assert_eq!(clock.budget_state(1_801_001, 3_600_000), "healthy");
+        assert_eq!(clock.budget_state(10_801_001, 3_600_000), "degraded");
+        store.complete_observation(OBSERVER, &mut clock, 2_000_000).unwrap();
+        drop(store);
+        let reopened = GithubPluginStore::open(state.path()).unwrap();
+        let clock = reopened.observer_freshness(OBSERVER, 4_000_000).unwrap();
+        assert_eq!(clock.last_complete_unix_ms, Some(2_000_000));
+        assert_eq!(clock.budget_state(3_800_000, 180_000), "healthy");
+        assert_eq!(clock.budget_state(3_800_001, 180_000), "degraded");
+        assert_eq!(clock.budget_state(0, 180_000), "healthy", "clock rollback does not fault");
+    }
+
     /// A repeated event never reuses an earlier one's key, even after that event aged out of
     /// the mirror: from step 3b each key is a graph subject written once.
     #[test]
@@ -888,6 +979,32 @@ mod tests {
             ("kind".to_owned(), json!("vcs.pull-request")), ("facts".to_owned(), facts),
         ]);
         assert!(MANIFEST.admit("resource/github/acme/garden/pull-request/7", "resource.observed", &snapshot).is_err());
+    }
+
+    #[test]
+    fn the_github_manifest_admits_a_completed_run_within_its_bound_and_field_set() {
+        let subject = "github-workflow-run/acme/garden/9001";
+        let run = std::collections::BTreeMap::from([
+            ("version".to_owned(), json!(1)), ("observer".to_owned(), json!(OBSERVER)),
+            ("repository".to_owned(), json!("acme/garden")), ("workflow".to_owned(), json!("Workspace CI")),
+            ("run_id".to_owned(), json!(9001)), ("attempt".to_owned(), json!(1)),
+            ("event".to_owned(), json!("merge_group")), ("conclusion".to_owned(), json!("success")),
+            ("head_sha".to_owned(), json!("a".repeat(40))), ("created_at".to_owned(), json!("2026-11-13T10:00:00Z")),
+            ("started_at".to_owned(), json!("2026-11-13T10:00:30Z")), ("completed_at".to_owned(), json!("2026-11-13T10:09:30Z")),
+            ("duration_ms".to_owned(), json!(540_000)), ("flaky_tests".to_owned(), json!(0)), ("flakes".to_owned(), json!(0)),
+        ]);
+        MANIFEST.admit(subject, fractal_schema::github_plugin::WORKFLOW_RUN, &run).unwrap();
+        let refused = |subject: &str, fields: &std::collections::BTreeMap<String, Value>| {
+            MANIFEST.admit(subject, fractal_schema::github_plugin::WORKFLOW_RUN, fields).unwrap_err().reason
+        };
+        let mut oversize = run.clone();
+        oversize.insert("head_sha".into(), json!("a".repeat(fractal_schema::github_plugin::MAX_WORKFLOW_RUN_BYTES)));
+        assert!(refused(subject, &oversize).contains("the bound is 1024"));
+        assert!(refused("github-event/github/acme/garden/pull-request/7/run/9001", &run).contains("not under github-workflow-run/"));
+        assert!(refused("resource/github/acme/garden", &run).contains("not under github-workflow-run/"));
+        let mut extra = run.clone();
+        extra.insert("jobs".into(), json!([]));
+        assert!(!refused(subject, &extra).is_empty(), "a field outside the kind's set");
     }
 
     #[test]

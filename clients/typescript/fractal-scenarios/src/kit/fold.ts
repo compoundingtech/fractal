@@ -27,6 +27,7 @@ const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
   subscription: 'subscriptions',
   lane: 'lanes',
   device: 'devices',
+  'device-command': 'deviceCommands',
   operation: 'operations',
   history: 'history',
   session: 'sessions',

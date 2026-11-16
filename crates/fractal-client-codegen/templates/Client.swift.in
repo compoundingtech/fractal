@@ -19,7 +19,7 @@ public struct TraceContext: Sendable, Equatable {
 
 public actor FractalClient {
     public let baseURL: URL
-    private let session: URLSession
+    private let transport: Transport
     private var credential: String?
     /// The app's name and build, sent as `x-st3-client` ("smalltalk-ios 1.0 (42)"). st lists it as
     /// reported; it is never identity or authority.
@@ -27,10 +27,30 @@ public actor FractalClient {
     private let traceContext: (@Sendable () -> TraceContext?)?
     private let messagesPaging: Bool
 
+    private enum Transport: Sendable {
+        case session(URLSession)
+        /// The member's trusted local socket, acting for one person (`x-st3-person`).
+        case localSocket(LocalSocketEndpoint)
+    }
+
     public init(fabricLoopbackURL: URL, credential: String? = nil, session: URLSession = .shared, client: String? = nil, traceContext: (@Sendable () -> TraceContext?)? = nil, messagesPaging: Bool = false) {
         self.baseURL = fabricLoopbackURL
         self.credential = credential
-        self.session = session
+        self.transport = .session(session)
+        self.client = client
+        self.traceContext = traceContext
+        self.messagesPaging = messagesPaging
+    }
+
+    /// A desktop app of the person on the member's own host: every request and stream goes over the
+    /// member's trusted local Unix socket (`fractal.sock` in its state directory's `run/`) as
+    /// `person`, with no bearer credential or pairing. Writes act as the person only when no process
+    /// above the app carries an agent or run identity (docs/st3/client-v0/README.md,
+    /// "A person's desktop app on the local socket").
+    public init(localSocketPath: String, person: String, client: String? = nil, traceContext: (@Sendable () -> TraceContext?)? = nil, messagesPaging: Bool = false) {
+        self.baseURL = URL(string: "http://localhost")!
+        self.credential = nil
+        self.transport = .localSocket(LocalSocketEndpoint(path: localSocketPath, person: person))
         self.client = client
         self.traceContext = traceContext
         self.messagesPaging = messagesPaging
@@ -94,7 +114,7 @@ public actor FractalClient {
         // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.conversation.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -132,7 +152,7 @@ public actor FractalClient {
         if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
         if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             task.resume()
             continuation.onTermination = { @Sendable _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -155,7 +175,7 @@ public actor FractalClient {
         // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -180,7 +200,7 @@ public actor FractalClient {
         // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
         var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -201,6 +221,32 @@ public actor FractalClient {
             }
         }
     }
+    /// Follow the person's read positions; frames are invalidations, so re-list `readPositionsList` on each.
+    public func readPositionsStream(person: String, subscriptionID: String = "read-positions", limit: Int = 100) -> AsyncThrowingStream<ReadPositionCollectionFrame, Error> {
+        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        applyTraceContext(to: &request)
+        let task = webSocketTask(with: request)
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
+            task.resume()
+            Task {
+                do {
+                    let subscription: [String: Any] = ["kind":"subscribe", "id":subscriptionID, "collection":"read-positions", "person":person, "limit":limit]
+                    let command = try JSONSerialization.data(withJSONObject: subscription)
+                    try await task.send(.string(String(decoding: command, as: UTF8.self)))
+                    while true {
+                        let data = try Self.websocketData(from: try await task.receive())
+                        let frame = try JSONDecoder().decode(ReadPositionCollectionFrame.self, from: data)
+                        if frame.kind == "error" { throw NSError(domain: "St3Client", code: 0, userInfo: [NSLocalizedDescriptionKey: frame.message ?? "Read position subscription failed"]) }
+                        if frame.kind == "resync" { try await task.send(.string(String(decoding: command, as: UTF8.self))); continue }
+                        continuation.yield(frame)
+                    }
+                } catch { continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error); task.cancel(with: .normalClosure, reason: nil) }
+            }
+        }
+    }
     /// Advertised in capabilities when an agents subscription may select one exact agent; an older
     /// daemon ignores the selector and answers with the fleet.
     public static let exactAgentSelectorCapability = "collection.agents.exact-selector"
@@ -211,7 +257,7 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -242,7 +288,7 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -287,10 +333,20 @@ public actor FractalClient {
     }
     /// Diagnostic local acceptance: no graph receipt or snapshot fence.
     public func observationsReport(_ report: ObservationReport) async throws -> ObservationResponse { try await post("v1/client/observations", report) }
+    /// Set or clear the session person's own availability. Requires write.availability; agent sessions are refused.
+    public func availabilitySet(_ request: AvailabilitySet) async throws -> Envelope<PersonAvailability> { try await self.request("v1/client/availability", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
+    /// Report one device's raw state for the session person, on every state change and again at `reportAgainAt`; the daemon derives presence and assigns the source. Requires write.presence.
+    public func presenceReport(_ report: PresenceReport) async throws -> Envelope<PresenceReportResult> { try await post("v1/client/presence", report) }
+    /// Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused.
+    public func notesSet(_ request: DirectiveNoteSet) async throws -> Envelope<DirectiveNoteSetResult> { try await self.request("v1/client/notes", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
 
     /// Replace this paired device's local-only registration. No graph receipt.
     public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }
     public func pushUnregister() async throws -> PushRegistrationResponse { try await request("v1/client/push-registration", query: [], method: "DELETE", body: nil) }
+
+    /// Issue one expiring foreground command, without durable receipt or replay.
+    public func deviceCommand(_ command: DeviceCommandRequest) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-commands", command) }
+    public func deviceResult(_ result: DeviceResult) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-results", result) }
 
     public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PersonPairingBegin(apiVersion: fractalClientAPIVersion, deviceName: deviceName, personID: personID)) }
     public func beginPairing(_ request: PairingBegin) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", request) }
@@ -331,7 +387,7 @@ public actor FractalClient {
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("\(fractalClientTerminalSubprotocol), fractal.cap.\(streamCapability)", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -347,6 +403,25 @@ public actor FractalClient {
                     } catch { continuation.finish(throwing: error); task.cancel(with: .normalClosure, reason: nil); return }
                 }
             }
+        }
+    }
+
+    private func webSocketTask(with request: URLRequest) -> any ClientWebSocket {
+        switch transport {
+        case .session(let session):
+            return session.webSocketTask(with: request)
+        case .localSocket(let endpoint):
+            return LocalWebSocket(endpoint: endpoint, request: request)
+        }
+    }
+
+    private func perform(_ request: URLRequest) async throws -> (Data, Int) {
+        switch transport {
+        case .session(let session):
+            let (data, response) = try await session.data(for: request)
+            return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+        case .localSocket(let endpoint):
+            return try await LocalHTTP.exchange(endpoint: endpoint, request: request)
         }
     }
 
@@ -387,15 +462,24 @@ public actor FractalClient {
         components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.httpMethod = method; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // DeviceCommandRequest.ttl_ms permits 60000 ms; allow the daemon's full deadline plus transport margin.
+        if method == "GET" && path.hasPrefix("v1/client/device-commands/")
+            && query.contains(where: { $0.name == "wait" && $0.value == "true" }) {
+            let deviceCommandMaximumTTL: TimeInterval = 60
+            let deviceCommandTransportMargin: TimeInterval = 5
+            request.timeoutInterval = deviceCommandMaximumTTL + deviceCommandTransportMargin
+        }
         if body != nil { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }; if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
         if let readAuthorization { request.setValue(readAuthorization.header, forHTTPHeaderField: "x-st3-scg-read-authorization") }
         applyTraceContext(to: &request)
-        let (data, response) = try await session.data(for: request); let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, status) = try await perform(request)
         if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
-        if status == 404 && path == "v1/client/schedules" {
+        let relatedRuns = path.hasPrefix("v1/client/agent-related-runs/")
+        if status == 404 && (relatedRuns || path == "v1/client/schedules") {
+            let operation = relatedRuns ? "agent-related-runs.get" : "schedules.list"
             throw ErrorEnvelope(apiVersion: "st3.client.v0", errorVersion: "st3.client.error.v0", requestID: "",
-                code: .unsupportedCapability, message: "This server does not support schedules.list; upgrade the server",
+                code: .unsupportedCapability, message: "This server does not support " + operation + "; upgrade the server",
                 retryable: false, retryAfterMS: nil, details: [:])
         }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }

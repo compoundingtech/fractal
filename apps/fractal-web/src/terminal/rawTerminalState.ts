@@ -14,11 +14,12 @@ import {
   type PtySize,
   type PtyState,
   type PtyTarget,
-} from '@fractal/sdk/effect'
+} from '@fractal/sdk/pty'
 import type * as Effect from 'effect/Effect'
 import type * as Scope from 'effect/Scope'
 
 import type { Grants } from '../data/source.ts'
+import type { SdkChunkFailure } from '../data/lazySdk.ts'
 
 /**
  * A source's raw PTY stream: one scoped session per pane, bound to one terminal incarnation.
@@ -34,7 +35,7 @@ export interface RawTerminalPort {
     readonly signal: AbortSignal
     /** A PEEK renews its selected-use lease only while this holds. */
     readonly isForegroundSelected: () => boolean
-  }) => Effect.Effect<PtySession, never, Scope.Scope>
+  }) => Effect.Effect<PtySession, SdkChunkFailure, Scope.Scope>
 }
 
 /** Who receives what is typed into the pane. */

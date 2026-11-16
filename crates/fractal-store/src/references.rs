@@ -5,24 +5,34 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, St3Error, UsedMissionSpec,
+    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec,
     WorkSelector,
 };
+
+// Prepared internally; publication stays closed until the complete agent-review safety path lands.
+#[allow(dead_code)]
+pub(crate) mod agent_review;
+
+// Prepared for concrete start/reassignment validation; no public gate kind dispatches here.
+#[allow(dead_code)]
+mod step_review;
+#[doc(hidden)]
+pub use step_review::validate_step_reviewer;
 
 /// What the graph holds, as far as the reference checks need it.
 pub trait Graph {
     /// Whether `subject` has a current declaration.
-    fn declared(&self, subject: &str) -> Result<bool, St3Error>;
+    fn declared(&self, subject: &str) -> Result<bool, FractalError>;
     /// Whether any revision of the mission is published.
-    fn mission_published(&self, mission: &str) -> Result<bool, St3Error>;
+    fn mission_published(&self, mission: &str) -> Result<bool, FractalError>;
     /// The stored revision of the mission.
     fn mission_revision(
         &self,
         mission: &str,
         revision: &str,
-    ) -> Result<Option<MissionSpec>, St3Error>;
+    ) -> Result<Option<MissionSpec>, FractalError>;
     /// Why `mission/MISSION@REVISION` does not resolve.
-    fn missing_revision(&self, mission: &str, revision: &str) -> Result<String, St3Error>;
+    fn missing_revision(&self, mission: &str, revision: &str) -> Result<String, FractalError>;
 }
 
 /// The run a mission's declarations are checked under, so a step can select an agent that another
@@ -41,7 +51,7 @@ pub fn graph(
     desired: &[DesiredSubject],
     graph: &impl Graph,
     host: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut refusals = Vec::new();
     for run in runs(&missions.iter().collect::<Vec<_>>()) {
         let scope = Scope {
@@ -108,16 +118,19 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn subject(&self, graph: &impl Graph, subject: &str) -> Result<bool, St3Error> {
-        Ok(subject.contains(RUN_VALUE)
-            || self.run.contains(subject)
+    fn subject(&self, graph: &impl Graph, subject: &str) -> Result<bool, FractalError> {
+        Ok(subject.contains(RUN_VALUE) || self.declared_subject(graph, subject)?)
+    }
+
+    fn declared_subject(&self, graph: &impl Graph, subject: &str) -> Result<bool, FractalError> {
+        Ok(self.run.contains(subject)
             || self
                 .intent
                 .is_some_and(|intent| intent.subjects.contains_key(subject))
             || graph.declared(subject)?)
     }
 
-    fn mission(&self, graph: &impl Graph, mission: &str) -> Result<bool, St3Error> {
+    fn mission(&self, graph: &impl Graph, mission: &str) -> Result<bool, FractalError> {
         Ok(self
             .intent
             .is_some_and(|intent| intent.missions.contains_key(mission))
@@ -129,7 +142,7 @@ impl<'a> Scope<'a> {
         graph: &impl Graph,
         mission: &str,
         revision: &str,
-    ) -> Result<Option<MissionSpec>, St3Error> {
+    ) -> Result<Option<MissionSpec>, FractalError> {
         if let Some(published) = self
             .intent
             .and_then(|intent| intent.missions.get(mission))
@@ -212,7 +225,7 @@ pub fn mission_references(
     graph: &impl Graph,
     host: &str,
     refusals: &mut Vec<String>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let variables = proof_variables(mission);
     let mut selectors = mission.work_selector.iter().collect::<Vec<_>>();
     let mut steps = mission.steps.values().collect::<Vec<_>>();
@@ -278,7 +291,7 @@ pub fn subject_references(
     graph: &impl Graph,
     host: &str,
     refusals: &mut Vec<String>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let owner = mission.map_or(String::new(), |mission| {
         format!("mission `{}` declares ", mission.subject)
     });

@@ -167,8 +167,6 @@ pub fn run_native(
         &PI_KIND,
         &environment,
         &[],
-        None,
-        false,
     )
 }
 
@@ -190,6 +188,5 @@ pub fn adopt_native(
         pid,
         session,
         seq,
-        false,
     )
 }

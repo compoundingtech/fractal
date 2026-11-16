@@ -4,20 +4,64 @@ use crate::LanesStore;
 use crate::PersonWorkStore;
 use crate::EvidenceStore;
 use super::*;
+use super::client_v0::{ClientSession, require_scope};
+use rusqlite::OptionalExtension as _;
+
+pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
+    !fractal_schema::notice::is_reserved_subject(&claim.subject)
+        && !fractal_schema::notice::is_reserved_kind(&claim.kind)
+}
+
+/// Fill a serving page with visible claims, leaving raw replication/projector reads intact.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn generic_claims_page(
+    store: &Store,
+    filter: fractal_store::store::ClaimsFilter<'_>,
+    owner_run: Option<&str>,
+    mut after: u64,
+    mut before: Option<u64>,
+    descending: bool,
+    limit: usize,
+    kinds: Option<&[&str]>,
+) -> anyhow::Result<ClaimsPage> {
+    let mut claims = Vec::with_capacity(limit.saturating_add(1));
+    loop {
+        let page = store.claims_page_matching_with_kinds(filter, owner_run, after, before, descending, limit.saturating_add(1), kinds)?;
+        let next = page.next_cursor;
+        for claim in page.claims.into_iter().filter(generic_claim_visible) {
+            claims.push(claim);
+            if claims.len() > limit {
+                claims.pop();
+                let next_cursor = claims.last().map(|claim| claim.store_index);
+                return Ok(ClaimsPage { claims, next_cursor });
+            }
+        }
+        let Some(next) = next else {
+            return Ok(ClaimsPage { claims, next_cursor: None });
+        };
+        if descending {
+            before = Some(next);
+        } else {
+            after = next;
+        }
+    }
+}
 
 pub async fn put_document(
     State(state): State<AppState>,
-    bound: Option<axum::Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<DocumentPutRequest>,
 ) -> Result<Json<DocumentVersion>, ApiError> {
+    // A seat writes only its own seat documents; a run, which has none, writes none.
     if let Some(bound) = bound.as_ref()
-        && !crate::handoff::may_write(&bound.0.0, &request.name)
+        && !crate::handoff::may_write(bound.actor(), &request.name)
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "document-not-yours",
             format!(
-                "`{}` belongs to another seat; a seat writes only doc/agents/… for itself",
-                request.name
+                "`{}` belongs to a seat; a seat writes only doc/agents/… for itself, and `{}` is not that seat",
+                request.name,
+                bound.actor(),
             ),
         )));
     }
@@ -28,7 +72,7 @@ pub async fn put_document(
             &request.bytes,
             &request.expected_document,
             &request.idempotency_key,
-            bound.as_ref().map(|bound| bound.0.0.as_str()),
+            bound.as_ref().map(BoundActor::actor),
         )
         .map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -131,13 +175,13 @@ pub async fn list_documents(
             let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(encoded.strip_prefix("document/").unwrap_or(""))
                 .map_err(|_| {
-                    ApiError::bad(St3Error::new(
+                    ApiError::bad(FractalError::new(
                         "validation-failed",
                         "invalid document cursor",
                     ))
                 })?;
             let cursor: DocumentCursor = serde_json::from_slice(&bytes).map_err(|_| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "validation-failed",
                     "invalid document cursor",
                 ))
@@ -146,7 +190,7 @@ pub async fn list_documents(
                 || cursor.prefix != query.prefix
                 || cursor.history != history
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "validation-failed",
                     "document cursor filters changed",
                 )));
@@ -213,7 +257,7 @@ pub async fn get_document(
     Query(query): Query<DocumentContentQuery>,
 ) -> Result<Json<DocumentContent>, ApiError> {
     let (name, hash) = query.reference.rsplit_once('@').ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "invalid-document-reference",
             "a document reference needs `@HASH`",
         ))
@@ -248,19 +292,61 @@ pub async fn post_claim(
 pub async fn get_claim(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ClaimRecord>, ApiError> {
+    session: Option<Extension<ClientSession>>,
+) -> Result<Json<Value>, ApiError> {
+    let service = session.as_ref().is_some_and(|session|
+        client_v0::external_grants::is_service(&session.0));
+    if let Some(session) = &session
+        && client_v0::external_grants::is_service(&session.0) {
+        require_scope(&session.0, "read.claims")?;
+    }
     let store = state.store.clone();
     let id_for_read = id.clone();
-    blocking_store(move || store.claim_by_id(&id_for_read))
+    blocking_store(move || {
+        if service {
+            // The id index resolves only kind. Hidden and absent rows take the
+            // same path without loading or parsing any potentially large body.
+            let kind: Option<String> = store.readers.get()
+                .query_row("SELECT kind FROM claims WHERE id=?1", [&id_for_read],
+                    |row| row.get(0))
+                .optional()?;
+            if !kind.as_deref().is_some_and(|kind| service_claim_fields(kind).is_some()) {
+                return Ok(None);
+            }
+        }
+        store.claim_by_id(&id_for_read)
+    })
         .await?
         .filter(|claim| !claim.subject.starts_with("glass/"))
-        .map(Json)
+        .filter(generic_claim_visible)
+        .map(|claim| Json(if service {
+            service_claim(&claim)
+        } else { json!(claim) }))
         .ok_or_else(|| ApiError::not_found(format!("claim `{id}` does not exist")))
+}
+
+/// These aliases are a service surface, not a new projection capability for devices.
+pub async fn client_get_claim(
+    state: State<AppState>,
+    id: AxumPath<String>,
+    session: Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_service_claims(&session.0)?;
+    get_claim(state, id, Some(session)).await
+}
+
+fn require_service_claims(session: &ClientSession) -> Result<(), ApiError> {
+    if !client_v0::external_grants::is_service(session) {
+        return Err(client_v0::forbidden("client claim reads require a service principal"));
+    }
+    require_scope(session, "read.claims")
 }
 
 #[derive(Deserialize)]
 pub struct ClaimsQuery {
     subject: Option<String>,
+    subject_prefix: Option<String>,
+    kind: Option<String>,
     owner_run: Option<String>,
     #[serde(default, alias = "after")]
     after_index: u64,
@@ -270,6 +356,14 @@ pub struct ClaimsQuery {
     order: ClaimsOrder,
     #[serde(default = "default_claim_limit")]
     limit: usize,
+}
+
+impl ClaimsQuery {
+    fn has_selector(&self) -> bool {
+        // Every new query field requires an explicit selector-admission decision.
+        let Self { subject, subject_prefix, kind, owner_run, after_index: _, before_index: _, order: _, limit: _ } = self;
+        subject.is_some() || subject_prefix.is_some() || kind.is_some() || owner_run.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -283,29 +377,98 @@ enum ClaimsOrder {
 pub async fn list_claims(
     State(state): State<AppState>,
     Query(query): Query<ClaimsQuery>,
-) -> Result<Json<ClaimsPage>, ApiError> {
+    session: Option<Extension<ClientSession>>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(session) = &session
+        && client_v0::external_grants::is_service(&session.0) {
+        require_scope(&session.0, "read.claims")?;
+    }
     if query.limit == 0 || query.limit > 500 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-page-limit",
             "a claim page limit must be between 1 and 500",
         )));
     }
+    let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
     let store = state.store.clone();
-    blocking_store(move || {
-        let subject = query.subject.as_deref().map(|subject| {
-            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
-        }).transpose()?;
-        store.claims_page(
-            subject.as_deref(),
+    let page = blocking_store(move || {
+        let kinds = (service && query.has_selector()).then_some(SERVICE_CLAIM_KINDS);
+        let subject = if service {
+            // Services select literal canonical subjects, without alias resolution.
+            query.subject
+        } else {
+            query.subject.as_deref().map(|subject| {
+                crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+            }).transpose()?
+        };
+        generic_claims_page(
+            &store,
+            fractal_store::store::ClaimsFilter {
+                subject: subject.as_deref(),
+                subject_prefix: query.subject_prefix.as_deref(),
+                kind: query.kind.as_deref(),
+            },
             query.owner_run.as_deref(),
             query.after_index,
             query.before_index,
             matches!(query.order, ClaimsOrder::Desc),
             query.limit,
+            kinds,
         )
     })
-    .await
-    .map(Json)
+    .await?;
+    Ok(Json(if service {
+        json!({"claims":page.claims.iter().map(service_claim).collect::<Vec<_>>(),
+            "next_cursor":page.next_cursor})
+    } else { json!(page) }))
+}
+
+pub async fn client_list_claims(
+    state: State<AppState>,
+    query: Query<ClaimsQuery>,
+    session: Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_service_claims(&session.0)?;
+    list_claims(state, query, Some(session)).await
+}
+
+/// Closed R29 receipt/state schema. Unknown rows reveal only a paging position.
+fn service_claim(claim: &ClaimRecord) -> Value {
+    let Some(fields) = service_claim_fields(&claim.kind) else {
+        return json!({"store_index":claim.store_index, "withheld":true});
+    };
+    let mut value = json!({
+        "id":claim.id, "kind":claim.kind, "subject":claim.subject, "origin":claim.origin,
+        "store_index":claim.store_index, "accepted_at_unix_ms":claim.accepted_at_unix_ms,
+        "body_digest":client_v0::credential_digest(&claim.body.to_string()),
+    });
+    value["actor"] = json!(claim.actor);
+    let source = claim.body.get("fields").unwrap_or(&claim.body);
+    let projected = fields.iter().filter_map(|field| {
+        source.get(*field).filter(|value| value.is_string() || value.is_number() || value.is_boolean())
+            .map(|value| ((*field).to_owned(), value.clone()))
+    }).collect::<serde_json::Map<_, _>>();
+    value["body"] = json!({"fields":projected});
+    value
+}
+
+const SERVICE_CLAIM_KINDS: &[&str] = &[
+    "gate.result", "work.claimed", "work.renewed", "work.progress", "work.submitted",
+    "work.failed", "work.released", "work.extended",
+];
+
+fn service_claim_fields(kind: &str) -> Option<&'static [&'static str]> {
+    if kind == "gate.result" {
+        Some(&["verdict", "operation", "request", "baseline", "token_usage", "stage"])
+    } else if SERVICE_CLAIM_KINDS.contains(&kind) {
+        Some(&[
+            "attempt", "status", "worker_reported", "claimant", "claim_incarnation",
+            "claim_expires_at_unix_ms", "readiness_epoch", "extend_ms", "clock",
+            "wait_until_unix_ms", "submitted_incarnation",
+        ])
+    } else {
+        None
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -343,7 +506,7 @@ pub async fn list_attention(
         .as_deref()
         .is_some_and(|person| !person.starts_with("person/"))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-attention-person",
             "an attention filter must name a person subject",
         )));
@@ -358,7 +521,7 @@ pub async fn request_attention(
     State(_state): State<AppState>,
     Json(_post): Json<crate::model::AttentionRequestPost>,
 ) -> Result<Json<AttentionRequestView>, ApiError> {
-    Err(ApiError::bad(St3Error::new(
+    Err(ApiError::bad(FractalError::new(
         "attention-migrated",
         "attention is a derived view; use work ask/done/cancel-ask or act on its source",
     )))
@@ -390,7 +553,7 @@ pub async fn resolve_attention(
         let actor = request.actor.clone();
         let summary = request.reason.clone().unwrap_or_else(|| "Read".into());
         if !matches!(request.outcome.as_str(), "resolved" | "dismissed") {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-attention-outcome",
                 "an attention outcome must be resolved or dismissed",
             )));
@@ -406,7 +569,7 @@ pub async fn resolve_attention(
                     .map_err(ApiError::internal)?
                     != subject
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "delegation-refused",
                     "dismissal needs the exact denial card and episode",
                 )));
@@ -452,7 +615,7 @@ pub async fn resolve_attention(
             .map_err(ApiError::internal)?
             != subject
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "delegation-refused",
                 "the attention card does not match the update episode",
             )));
@@ -472,10 +635,7 @@ pub async fn resolve_attention(
                     evidence: vec![],
                     episode: Some(proof.episode.clone()),
                     delegation: Some(proof),
-                    answer: Some(crate::person_request::AnswerInput {
-                        id: Some("read".into()),
-                        text: None,
-                    }),
+                    answer: Some(crate::person_request::AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() }),
                     idempotency_key: request.idempotency_key,
                 },
                 false,
@@ -503,7 +663,7 @@ pub async fn resolve_attention(
             closed_by: None,
         }));
     }
-    Err(ApiError::bad(St3Error::new(
+    Err(ApiError::bad(FractalError::new(
         "attention-migrated",
         "attention is a derived view; use work ask/done/cancel-ask or act on its source",
     )))
@@ -520,7 +680,7 @@ pub async fn withdraw_attention(
             .claim_by_id(episode)
             .map_err(ApiError::internal)?
             .filter(|claim| claim.kind == "work.person-asked")
-            .ok_or_else(|| ApiError::bad(St3Error::new("stale-fence", "missing update episode")))?;
+            .ok_or_else(|| ApiError::bad(FractalError::new("stale-fence", "missing update episode")))?;
         let person = original.body["fields"]["person"]
             .as_str()
             .unwrap_or_default();
@@ -529,7 +689,7 @@ pub async fn withdraw_attention(
                 .map_err(ApiError::internal)?
                 != subject
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "stale-fence",
                 "the update episode belongs to another item",
             )));
@@ -538,7 +698,7 @@ pub async fn withdraw_attention(
     } else if subject.starts_with("step-run/") {
         subject
     } else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "withdraw an update's step-run source, or supply its exact --episode; remedy other alerts at their source",
         )));
@@ -571,7 +731,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     {
         return Ok(target.to_owned());
     }
-    let unknown = |why: String| ApiError::bad(St3Error::new("review-target-unknown", why));
+    let unknown = |why: String| ApiError::bad(FractalError::new("review-target-unknown", why));
     if target.starts_with("attention/") {
         if let Some(card) = client_attention_resources(&state.store, None, false)
             .map_err(ApiError::internal)?
@@ -617,7 +777,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
                         .map_err(ApiError::internal)?
                 ),
             };
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "review-not-requested",
                 format!("`{target}` is not open: {why}"),
             )));
@@ -639,7 +799,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     if target.contains('/')
         && state
             .store
-            .step_run(&step)
+            .step_run_fenced(&step)
             .map_err(ApiError::internal)?
             .is_some()
     {
@@ -660,7 +820,7 @@ pub async fn post_review(
         request.decision.as_str(),
         "approved" | "rejected" | "changes-requested"
     ) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-review-decision",
             "a review decision must be approved, rejected, or changes-requested",
         )));
@@ -671,7 +831,7 @@ pub async fn post_review(
             .as_deref()
             .is_none_or(|reason| reason.trim().is_empty())
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "missing-review-reason",
             "a rejection or request for changes needs a reason",
         )));
@@ -699,7 +859,7 @@ pub async fn post_review(
                 .store
                 .human_review_refusal(&subject)
                 .map_err(ApiError::internal)?;
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "review-not-requested",
                 format!("`{subject}` has no pending human review: {why}"),
             )));
@@ -721,7 +881,7 @@ pub async fn post_review(
                         .is_some_and(|actor| actor.starts_with("agent/"))
             })
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "wrong-reviewer",
                 format!("the pending review requires `{reviewer}`"),
             )));
@@ -736,7 +896,7 @@ pub async fn post_review(
         .and_then(Value::as_str)
         .unwrap_or("approve");
     if mode == "feedback" && !subject.starts_with("step-run/") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "feedback-gate-needs-step",
             "a feedback review must belong to a step",
         )));
@@ -745,7 +905,7 @@ pub async fn post_review(
         "feedback" => matches!(request.decision.as_str(), "approved" | "changes-requested"),
         _ => matches!(request.decision.as_str(), "approved" | "rejected"),
     } {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "review-decision-not-offered",
             format!(
                 "`{}` is not offered by this {mode} review",
@@ -799,7 +959,7 @@ pub async fn post_review(
             .and_then(Value::as_str)
         && owner.starts_with("step-run/")
     {
-        let step = state.store.step_run(owner).map_err(ApiError::internal)?;
+        let step = state.store.step_run_fenced(owner).map_err(ApiError::internal)?;
         let claimant = if let Some(step) = step {
             if step.claimant.is_some() || step.carried_claimant.is_some() {
                 step.claimant.or(step.carried_claimant)
@@ -880,7 +1040,7 @@ pub async fn sekrets_attest(
     Json(request): Json<SekretsAttestRequest>,
 ) -> Result<Json<crate::sekrets::protocol::Attestation>, ApiError> {
     let Some(axum::Extension(peer)) = peer else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "sekrets-attestation-refused",
             "attestations are only given over the local socket",
         )));
@@ -923,8 +1083,8 @@ pub async fn get_lane(
         let subject = store.resolve_lane(&lane)?;
         store
             .lane(&subject)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
-            .ok_or_else(|| St3Error::new("lane-not-found", format!("no lane `{subject}`")))
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
+            .ok_or_else(|| FractalError::new("lane-not-found", format!("no lane `{subject}`")))
     })
     .await
     .map(Json)
@@ -939,7 +1099,7 @@ pub async fn change_lane(
     request.actor = match request.actor.trim() {
         actor if actor.starts_with("person/") => actor.to_owned(),
         actor => normalized_agent_actor(actor).ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "invalid-lane-actor",
                 "a lane change needs a person or agent actor",
             ))

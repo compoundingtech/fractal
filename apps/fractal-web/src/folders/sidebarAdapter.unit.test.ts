@@ -396,3 +396,20 @@ it.live('Any sequence of valid moves keeps raw parents acyclic, partition keys u
     }
   }), { numRuns: 120 })
 }))
+
+describe('mission child rows', () => {
+  const child = (fields: { readonly missionId?: string; readonly childId?: string }) => ({ _tag: 'Agent' as const, id: `child-${fields.missionId ?? fields.childId}`, subject: 'agent/a', parent: 'agent/a', label: 'child', ...fields })
+  const seat = (children: readonly ReturnType<typeof child>[]) => ({ id: 'agent/a', subject: 'agent/a', host: 'h', label: 'A', children })
+  const doc = (roster: readonly ReturnType<typeof seat>[]) => sidebarProjection({ folders: {}, placements: {}, roster } as never)
+  const agentNode = (children: readonly ReturnType<typeof child>[], collapse = new Map<string, boolean>()) => {
+    const roster = [seat(children)]
+    return sidebarTree(doc(roster), roster, collapse)[0]!.children![0]!
+  }
+  it('starts a seat with further missions open, and a seat with only subagents shut', () => {
+    expect(agentNode([child({ missionId: 'mission/x' })]).collapsed).toBe(false)
+    expect(agentNode([child({ childId: 's' })]).collapsed).toBe(true)
+  })
+  it('keeps a stored collapse', () => {
+    expect(agentNode([child({ missionId: 'mission/x' })], new Map([['agent/a', true]])).collapsed).toBe(true)
+  })
+})

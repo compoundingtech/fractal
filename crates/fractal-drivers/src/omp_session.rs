@@ -280,6 +280,30 @@ pub(crate) fn has_confirmed_channel_binding(
         .is_some_and(|binding| binding.ready && binding.runtime_incarnation == runtime_incarnation))
 }
 
+/// Lifecycle proof for an observed ask. A witnessed successor retires the predecessor
+/// before readiness; missing/unreadable evidence remains indeterminate, not replacement.
+pub fn native_question_session_current(
+    state_dir: &Path,
+    agent: &str,
+    runtime_id: &str,
+    runtime_incarnation: &str,
+    native_session_id: &str,
+) -> Result<bool> {
+    let pending = load_pending_binding(state_dir, agent, runtime_id)?;
+    let ready = load_binding(state_dir, agent, runtime_id)?;
+    if pending.iter().chain(ready.iter()).any(|binding| {
+        binding.runtime_incarnation == runtime_incarnation
+            && binding.native_session_id != native_session_id
+    }) {
+        return Ok(false);
+    }
+    anyhow::ensure!(ready.is_some_and(|binding| {
+        binding.ready && binding.runtime_incarnation == runtime_incarnation
+            && binding.native_session_id == native_session_id
+    }), "question native session evidence is unavailable");
+    Ok(true)
+}
+
 /// Current, ready native session for an owner read. A pending switch is not a read authority.
 pub fn bound_native_session(
     state_dir: &Path,
@@ -388,120 +412,6 @@ fn ensure_no_authored_session_selection(authored_args: &[String]) -> Result<()> 
     Ok(())
 }
 
-fn with_required_resume(mut argv: Vec<String>, native_session_id: &str) -> Result<Vec<String>> {
-    anyhow::ensure!(!argv.is_empty(), "OMP provider argv is empty");
-    ensure_no_authored_session_selection(&argv[1..])?;
-    argv.splice(
-        1..1,
-        ["--resume".to_string(), native_session_id.to_string()],
-    );
-    Ok(argv)
-}
-
-/// Run one interactive omp provider and maintain its presence until it exits.
-pub fn run(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    omp_argv: Vec<String>,
-) -> Result<()> {
-    pi_family_session::run_for_with_environment(
-        catalog_root,
-        identity,
-        runtime_id,
-        omp_argv,
-        &OMP_KIND,
-        &[],
-        &RESUME_FENCE_ENV,
-        None,
-        true,
-    )
-}
-
-/// Resume supervising an omp provider a predecessor driver image launched and released.
-pub fn adopt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    pid: u32,
-    session: String,
-    seq: u64,
-) -> Result<()> {
-    pi_family_session::adopt_for(
-        catalog_root,
-        identity,
-        runtime_id,
-        &OMP_KIND,
-        pid,
-        session,
-        seq,
-        true,
-    )
-}
-
-/// Run one host-owned cold-residency attempt under its exact incarnation.
-pub fn run_residency_attempt(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    omp_argv: Vec<String>,
-    resume_generation: crate::residency::Generation,
-    required_incarnation: String,
-) -> Result<()> {
-    anyhow::ensure!(
-        !required_incarnation.is_empty(),
-        "OMP required runtime incarnation is empty"
-    );
-    run_with_required_resume(
-        catalog_root,
-        identity,
-        runtime_id,
-        omp_argv,
-        resume_generation,
-        required_incarnation,
-    )
-}
-
-fn run_with_required_resume(
-    catalog_root: &Path,
-    identity: String,
-    runtime_id: String,
-    omp_argv: Vec<String>,
-    resume_generation: crate::residency::Generation,
-    required_incarnation: String,
-) -> Result<()> {
-    anyhow::ensure!(
-        !omp_argv.is_empty(),
-        "omp driver '{runtime_id}' has no provider argv"
-    );
-    let native_session = required_residency_resume(
-        &state_dir(catalog_root, &identity),
-        &identity,
-        &runtime_id,
-        resume_generation,
-        &omp_argv[1..],
-    )?;
-    let omp_argv = with_required_resume(omp_argv, &native_session)?;
-    let residency_env = [
-        (
-            CHANNEL_RESUME_GENERATION.to_string(),
-            resume_generation.0.to_string(),
-        ),
-        (CHANNEL_EXPECTED_NATIVE_SESSION.to_string(), native_session),
-    ];
-    pi_family_session::run_for_with_environment(
-        catalog_root,
-        identity,
-        runtime_id,
-        omp_argv,
-        &OMP_KIND,
-        &residency_env,
-        &RESUME_FENCE_ENV,
-        Some(required_incarnation),
-        true,
-    )
-}
-
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 /// Admit the same installed producer and shipped extension before the RPC heal touches a session.
 /// Interactive launch still admits its own fork after the asynchronous heal.
@@ -546,42 +456,6 @@ mod tests {
                 hook();
             }
         });
-    }
-
-    struct FakeExecutable {
-        _directory: tempfile::TempDir,
-        path: PathBuf,
-    }
-
-    impl FakeExecutable {
-        fn new(body: &str) -> Self {
-            let directory = tempfile::Builder::new()
-                .prefix("st-omp-version-")
-                .tempdir()
-                .unwrap();
-            let source = directory.path().join("omp.source");
-            let path = directory.path().join("omp");
-            std::fs::write(&source, body).unwrap();
-            // A writer opened by one libtest thread is inherited by a child forked concurrently
-            // from another, which can make the writer's later exec fail with ETXTBSY even after
-            // the parent closes it. Let `install` create and close the executable in its own child:
-            // the test process never owns a writable descriptor for the file it will execute.
-            let output = std::process::Command::new("install")
-                .args(["-m", "755"])
-                .arg(&source)
-                .arg(&path)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "install failed: {output:?}");
-            Self {
-                _directory: directory,
-                path,
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
     }
 
     fn claim_omp(agent_dir: &Path, incarnation: &str) -> u64 {
@@ -633,31 +507,29 @@ mod tests {
 
     #[test]
     fn ordinary_launch_clears_inherited_resume_fences() {
-        const CHILD_ROOT: &str = "ST2_TEST_OMP_ORDINARY_CHILD_ROOT";
-        const CHILD_PROVIDER: &str = "ST2_TEST_OMP_ORDINARY_CHILD_PROVIDER";
+        const CHILD_ROOT: &str = "ST_TEST_OMP_ORDINARY_CHILD_ROOT";
+        const CHILD_PROVIDER: &str = "ST_TEST_OMP_ORDINARY_CHILD_PROVIDER";
 
         if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let paths = crate::driver_paths::Paths {
+                root: root.clone(),
+                agent_dir: root.join("observations"),
+                session_dir: root.join("sessions"),
+            };
             let provider = std::env::var(CHILD_PROVIDER).unwrap();
-            run(
-                &PathBuf::from(root).join("catalog"),
+            run_native(
+                &paths,
                 "worker".into(),
                 "worker".into(),
                 vec![provider, "boot".into()],
+                &[],
             )
             .unwrap();
             return;
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let catalog = temp.path().join("catalog");
-        let agent_dir = catalog.join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let host = crate::run::detect_host();
-        std::fs::write(
-            agent_dir.join("agent.kdl"),
-            format!(r#"agent "worker" {{ host "{host}"; command "true" }}"#),
-        )
-        .unwrap();
         let marker = temp.path().join("provider-env");
         let fake = crate::harness_admission::tests::fake_omp(temp.path());
         let hooks = temp.path().join("hooks");
@@ -691,16 +563,20 @@ mod tests {
         const CHILD: &str = "ST_TEST_ADMISSION_REFUSAL_ROOT";
         if let Some(root) = std::env::var_os(CHILD) {
             let root = PathBuf::from(root);
-            let agent_dir = root.join("catalog/agent");
-            let state = crate::harness_state::harness_state_path(&agent_dir);
-            claim_omp(&agent_dir, "predecessor");
+            let paths = crate::driver_paths::Paths {
+                root: root.clone(),
+                agent_dir: root.join("observations"),
+                session_dir: root.join("sessions"),
+            };
+            let state = crate::harness_state::harness_state_path(&paths.agent_dir);
+            claim_omp(&paths.agent_dir, "predecessor");
             let before = std::fs::read(&state).unwrap();
-            let error = run(&root.join("catalog"), "worker".into(), "worker".into(),
-                vec![root.join("omp").display().to_string()]).unwrap_err();
+            let error = run_native(&paths, "worker".into(), "worker".into(),
+                vec![root.join("omp").display().to_string()], &[]).unwrap_err();
             assert!(error.to_string().contains("admissionNativeConsumption"), "{error:#}");
             assert_eq!(std::fs::read(&state).unwrap(), before);
             assert!(!root.join("provider-env").exists());
-            let observed = crate::driver_diagnostic::read(&crate::driver_diagnostic::path(&agent_dir));
+            let observed = crate::driver_diagnostic::read(&crate::driver_diagnostic::path(&paths.agent_dir));
             assert!(matches!(observed, crate::driver_diagnostic::Observed::Failure(failure)
                 if failure.reason == crate::driver_diagnostic::Reason::AdmissionNativeConsumption));
             assert!(error.to_string().contains("st admission override omp"));
@@ -715,17 +591,13 @@ mod tests {
                 &cache,
                 "isolated regression operator exception",
             ).unwrap();
-            run(&root.join("catalog"), "worker".into(), "worker".into(),
-                vec![root.join("omp").display().to_string()]).unwrap();
+            run_native(&paths, "worker".into(), "worker".into(),
+                vec![root.join("omp").display().to_string()], &[]).unwrap();
             assert!(root.join("provider-env").exists(), "overridden omp seat launches");
             assert_ne!(std::fs::read(&state).unwrap(), before);
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("catalog/agent")).unwrap();
-        let host = crate::run::detect_host();
-        std::fs::write(root.path().join("catalog/agent/agent.kdl"),
-            format!(r#"agent "worker" {{ host "{host}"; command "true" }}"#)).unwrap();
         crate::harness_admission::tests::fake_omp(root.path());
         let mut fixture = crate::harness_admission::tests::measured_omp();
         crate::harness_admission::tests::fail_omp(&mut fixture, crate::harness_admission::Check::NativeConsumption);
@@ -737,46 +609,6 @@ mod tests {
             .env(CHILD, root.path()).env("ST_HOOKS", hooks)
             .env("XDG_STATE_HOME", root.path().join("state")).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    #[test]
-    fn mandatory_residency_validation_precedes_any_provider_child() {
-        let temp = tempfile::tempdir().unwrap();
-        let empty_incarnation = run_residency_attempt(
-            temp.path(),
-            "residency-no-spawn.worker".into(),
-            "residency-no-spawn.worker".into(),
-            vec!["omp".into()],
-            crate::residency::Generation(2),
-            String::new(),
-        )
-        .unwrap_err();
-        assert!(
-            empty_incarnation
-                .to_string()
-                .contains("required runtime incarnation is empty")
-        );
-        let marker = temp.path().join("provider-started");
-        let fake = FakeExecutable::new(&format!(
-            "#!/bin/sh\ntouch '{}'\nprintf 'omp v18.1.7\\n'\n",
-            marker.display()
-        ));
-
-        let error = run_residency_attempt(
-            temp.path(),
-            "residency-no-spawn.worker".into(),
-            "residency-no-spawn.worker".into(),
-            vec![fake.path().display().to_string(), "boot".into()],
-            crate::residency::Generation(2),
-            "attempt-test".into(),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("residency checkpoint"));
-        assert!(
-            !marker.exists(),
-            "the OMP provider started before mandatory resume validation"
-        );
     }
 
     #[test]
@@ -824,21 +656,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(native, "session-exact");
-        assert_eq!(
-            with_required_resume(
-                vec!["omp".into(), "--model".into(), "test".into(), "boot".into()],
-                &native,
-            )
-            .unwrap(),
-            [
-                "omp",
-                "--resume",
-                "session-exact",
-                "--model",
-                "test",
-                "boot",
-            ]
-        );
         assert!(
             !residency_ready(
                 &state,
@@ -1089,13 +906,7 @@ mod tests {
             vec!["--from-codex".into()],
             vec!["--no-session".into()],
         ] {
-            assert!(
-                with_required_resume(
-                    std::iter::once("omp".into()).chain(authored).collect(),
-                    "session-exact",
-                )
-                .is_err()
-            );
+            assert!(ensure_no_authored_session_selection(&authored).is_err());
         }
 
         let temp = tempfile::tempdir().unwrap();
@@ -1142,8 +953,6 @@ pub fn run_native(
         &OMP_KIND,
         &environment,
         &RESUME_FENCE_ENV,
-        None,
-        false,
     )
 }
 
@@ -1165,6 +974,5 @@ pub fn adopt_native(
         pid,
         session,
         seq,
-        false,
     )
 }

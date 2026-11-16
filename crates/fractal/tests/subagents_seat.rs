@@ -33,6 +33,8 @@ fn a_seats_subagents_appear_renew_and_end() {
             "-u",
             "ST_AGENT",
             "-u",
+            "FRACTAL_AGENT",
+            "-u",
             "ST3_SUBJECT",
             "python3",
         ])

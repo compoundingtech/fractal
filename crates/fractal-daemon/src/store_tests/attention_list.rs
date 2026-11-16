@@ -487,6 +487,55 @@ assert_eq!(policy_folds(), folded, "an unchanged policy folds nothing");
 assert!(!revisions.has_changed().unwrap());
 }
 
+/// The asked person's deadline clock moves an ask's deadline, and each change is a claim, so it
+/// folds the published list: the home serves no deadline while the clock is held, and the
+/// stored deadline plus the time held once it runs again. The person's status, interruptions
+/// and presence move nothing attention shows, so they fold nothing.
+#[test]
+fn the_published_list_follows_the_asked_persons_deadline_clock() {
+use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore, DeadlineClock, DeviceReport, DeviceState, Interruptions, Status};
+let (store, _, mut request) = fixture();
+store.start_attention_list_refresher().unwrap();
+store.set_ask_deadlines(true);
+request.deadline_ms = Some(2 * 3_600_000);
+let ask = store.ask_person(&request).unwrap();
+store.reconcile_person_asks_at(now_ms()).unwrap();
+let deadline = u128::from(store.claims_for(&ask.subject, Some("work.person-asked")).unwrap()[0]
+    .body["fields"]["deadline_unix_ms"].as_u64().unwrap());
+let served = |publication: &AttentionPublication| {
+    publication.rows.iter().find(|row| row["source_id"] == ask.subject)
+        .expect("the ask is on the home")["deadline_at"].clone()
+};
+let at = |ms: u128| json!(fractal_store::client_values::client_timestamp(ms));
+let clock_folds = || store.attention_list_folds().get("person.deadline-clock-set").copied().unwrap_or(0);
+assert_eq!(served(&refresh_and_check(&store)), at(deadline));
+let set = |clock: DeadlineClock| {
+    let folded = clock_folds();
+    store.set_person_availability("person/avery", "host/alder", &[AvailabilityChange::DeadlineClock(clock, None)], now_ms()).unwrap();
+    let published = refresh_and_check(&store);
+    assert_eq!(clock_folds(), folded + 1, "{clock:?} folds the list");
+    served(&published)
+};
+assert_eq!(set(DeadlineClock::HoldAll), Value::Null, "no deadline while held");
+let served_after_run = set(DeadlineClock::Run);
+let changes = store.claims_for("person/avery", Some("person.deadline-clock-set")).unwrap();
+let held = changes[1].accepted_at_unix_ms - changes[0].accepted_at_unix_ms;
+assert_eq!(served_after_run, at(deadline + held));
+let published = refresh_and_check(&store);
+store.set_person_availability("person/avery", "host/alder", &[
+    AvailabilityChange::Status(Some(Status::Away), None),
+    AvailabilityChange::Interruptions(Interruptions::Urgent, None),
+], now_ms()).unwrap();
+store.report_person_presence("person/avery", "host/alder",
+    DeviceReport { state: DeviceState::Active, last_input_at: None, observed_at: now_ms() }, now_ms()).unwrap();
+assert!(store.index().unwrap() > published.cut);
+assert_eq!(
+    store.read_snapshot(|index| store.attention_list_delta(&published, index, now_ms())).unwrap(),
+    AttentionDelta::Unchanged(None),
+    "status, interruptions and presence fold nothing"
+);
+}
+
 #[test]
 fn delta_reads_only_claims_since_the_cut() {
 let (store, _, request) = fixture();
@@ -713,6 +762,63 @@ store
 let answered = refresh_and_check(&store);
 assert_eq!(folds(&store), before + 1, "the answer folds");
 assert_eq!(prompts(&answered), 0);
+}
+
+#[test]
+fn human_questions_use_principals_and_invalidate_on_republication() {
+    for declared in [true, false] {
+        for configured in [true, false] {
+            let store = Store::open_memory("node").unwrap();
+            if configured {
+                store.question_principal_default.set("person/config-operator".into()).unwrap();
+            }
+            let workspace = tempfile::tempdir().unwrap();
+            let publish = |principal: Option<&str>, key: &str| {
+                let principal = principal.map_or_else(String::new, |person| {
+                    format!("principal {person:?};")
+                });
+                let source = format!(
+                    "version 2\nagent \"example/worker\" {{ workspace {:?}; {principal} harness \"omp\" {{}} }}\n",
+                    workspace.path().display().to_string()
+                );
+                let intent = crate::graph::parse_intent(&source, "node").unwrap();
+                let preview = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+                store.apply_as(&intent, &preview.subject_tokens, key, Some("agent/example/publisher")).unwrap();
+            };
+            publish(declared.then_some("person/operator"), "first");
+            let seat = "agent/example/worker";
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":"one"})),
+                ("harness.observed", json!({"state":"working", "driver":"omp",
+                    "incarnation_id":"one", "blocked_on":"human", "ask":"question",
+                    "reason":"Choose an option", "ownership_sequence":1, "transition_sequence":1})),
+            ] {
+                store.append_claim(&input(seat, kind, Some(seat), fields)).unwrap();
+            }
+            store.start_attention_list_refresher().unwrap();
+            let before = refresh_and_check(&store);
+            let expected = if declared { Some("person/operator") }
+                else if configured { Some("person/config-operator") } else { None };
+            let items = store.harness_prompt_attention_items(None, now_ms()).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].person, expected.unwrap_or(""));
+            assert_eq!(items[0].kind, "harness-prompt");
+            if expected.is_none() {
+                assert!(items[0].detail.contains("configure the daemon's person"));
+                assert!(items[0].answers.is_empty());
+                assert!(before.rows.iter().any(|row| row["attention_kind"] == "harness-prompt"));
+            }
+            publish(Some("person/operator-two"), "replacement");
+            let after = refresh_and_check(&store);
+            assert!(after.rows.iter().any(|row| row["person_id"] == "person/operator-two"
+                && row["attention_kind"] == "harness-prompt"));
+            assert!(!after.rows.iter().any(|row| row["person_id"] == expected.unwrap_or("")));
+            // An old incarnation must not acquire the new principal's attention.
+            store.append_claim(&input(seat, "runtime.observed", Some(seat),
+                json!({"status":"running", "incarnation_id":"two"}))).unwrap();
+            assert!(store.harness_prompt_attention_items(None, now_ms()).unwrap().is_empty());
+        }
+    }
 }
 
 /// The fleet the attention presentation reads: each agent's label, the step each holds, and the

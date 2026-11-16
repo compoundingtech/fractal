@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fetch compatibility baselines through the release asset API when browser downloads time out or return HTTP 5xx",
+  "replay": {"status": "none", "detail": "CI download transport only."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "The same pinned archive SHA256 and BUILD.json source/target checks apply to both download paths."},
+  "downtime": {"status": "none", "detail": "No runtime or service changes."},
+  "manual": {"status": "none", "detail": "CI supplies its GitHub token for API downloads."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

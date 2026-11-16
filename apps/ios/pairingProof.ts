@@ -1,6 +1,15 @@
 // Match st3-client/device/grant_proof.rs. Crypto is supplied by Expo/CryptoKit in the app and
 // node:crypto in tests; no gateway value can supply the independently trusted fingerprint.
 import type { PersonPairedSession } from '../../clients/typescript/fractal-client';
+import { isClientApiVersion } from './protocolVersions.ts';
+
+export type PairingAdvertisement = { api_version?: string; capabilities?: Array<{ id: string; version: number; state: string }> };
+export const requirePairingAdvertisement = (advertisement: PairingAdvertisement): NonNullable<PairingAdvertisement['capabilities']> => {
+  if (!isClientApiVersion(advertisement.api_version) || !Array.isArray(advertisement.capabilities) || !advertisement.capabilities.some(c => c.id === 'device-key-proofs' && c.version === 1 && c.state === 'granted')) {
+    throw new Error('Member does not support verifiable device grants; upgrade it. The code was not submitted.');
+  }
+  return advertisement.capabilities;
+};
 
 export type ProofCrypto = {
   hash(bytes: Uint8Array): Promise<Uint8Array>;
@@ -117,6 +126,14 @@ async function rootProof(root: Grant, fingerprint: string | undefined, crypto: P
   require(p256 ? raw.length === 65 && raw[0] === 4 : raw.length === 32, 'Invalid person-root public key');
   const actual = `sha256:${encoded(await crypto.hash(new TextEncoder().encode(fields.key)))}`;
   require(!fingerprint || fingerprint === actual, 'Person-root fingerprint mismatch. Do not trust this response; obtain the fingerprint separately from the trusted machine.');
+}
+
+/** Authenticate a renewal issuer using only the profile's previously saved root pin. */
+export async function verifyPersonRoot(proof: unknown, person: string, fingerprint: string, crypto: ProofCrypto): Promise<string> {
+  validatePairingTrust(fingerprint, false);
+  const root = await grantProof(proof, undefined, person, crypto);
+  await rootProof(root, fingerprint, crypto);
+  return root.body.fields.key as string;
 }
 
 /** Check enrollment before saving any credential. A fingerprint must be validated before POST. */

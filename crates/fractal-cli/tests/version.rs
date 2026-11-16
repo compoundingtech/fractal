@@ -125,7 +125,7 @@ fn executable_alias_warning_is_one_stderr_line_without_changing_json_stdout() {
             assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
             let basename = std::path::Path::new(name).file_name().unwrap().to_str().unwrap();
             let warning = if !suppressed && matches!(basename, "st" | "st3") {
-                format!("warning: '{basename}' is deprecated; use 'fractal' instead. '{basename}' will be removed on 2026-11-16.\n")
+                format!("warning: '{basename}' is deprecated; use 'fractal' instead. '{basename}' will be removed once every host and caller uses 'fractal'.\n")
             } else {
                 String::new()
             };

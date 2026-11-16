@@ -436,16 +436,48 @@ fn uptime(presence: &Presence) -> Duration {
 pub mod uptime_pin {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+
+    type Clocks = Arc<Mutex<HashMap<String, IncarnationStateClocks>>>;
 
     thread_local! {
         pub(super) static PINNED: Cell<Option<Duration>> = const { Cell::new(None) };
-        pub(super) static CLOCKS: RefCell<Option<HashMap<String, IncarnationStateClocks>>> = const { RefCell::new(None) };
+        pub(super) static CLOCKS: RefCell<Option<Clocks>> = const { RefCell::new(None) };
+    }
+
+    /// Carry a test's frozen assessment clock across its blocking read boundary.
+    pub struct Context(Option<Duration>, Option<Clocks>);
+
+    pub fn capture() -> Context {
+        Context(PINNED.get(), CLOCKS.with_borrow(Clone::clone))
+    }
+
+    impl Context {
+        pub fn enter(self) -> impl Drop {
+            let previous = capture();
+            PINNED.set(self.0);
+            CLOCKS.set(self.1);
+            Restore(previous)
+        }
+    }
+
+    struct Restore(Context);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PINNED.set(self.0.0);
+            CLOCKS.set(self.0.1.take());
+        }
     }
 
     /// Assessments on this thread read `uptime`, and keep state clocks of their own, until the
     /// returned pin drops. A nested pin shares the clocks of the pin it is inside.
     pub fn pin(uptime: Duration) -> Pin {
-        let started = CLOCKS.with_borrow_mut(|clocks| clocks.is_none() && clocks.insert(HashMap::new()).is_empty());
+        let started = CLOCKS.with_borrow_mut(|clocks| {
+            if clocks.is_some() { return false; }
+            *clocks = Some(Arc::new(Mutex::new(HashMap::new())));
+            true
+        });
         Pin(PINNED.replace(Some(uptime)), started)
     }
 
@@ -721,7 +753,7 @@ pub fn finish_legacy_shape(
             if fractal_drivers::claude_process::failure_kind(&error)
                 == Some(fractal_drivers::claude_process::FailureKind::Refused)
                 || error
-                    .downcast_ref::<crate::St3Error>()
+                    .downcast_ref::<crate::FractalError>()
                     .is_some_and(|error| error.code == "stale-mailbox-session") =>
         {
             "would-have-refused direct-chain shape; installed topology remains unverified".into()
@@ -911,7 +943,8 @@ fn state_since(presence: &Presence, recipient: &str, incarnation: &str, state: &
         row.1
     };
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(since) = uptime_pin::CLOCKS.with_borrow_mut(|clocks| clocks.as_mut().map(record)) {
+    if let Some(since) = uptime_pin::CLOCKS.with_borrow(|clocks| clocks.as_ref()
+        .map(|clocks| record(&mut clocks.lock().expect("test assessment clocks poisoned")))) {
         return Some(since);
     }
     presence.state_since.lock().ok().map(|mut rows| record(&mut rows))
@@ -1109,6 +1142,16 @@ mod tests {
             assert_eq!(assess_current(seat, "omp", Some("current")).state, "stale");
         }).join().unwrap());
         assert_eq!(assess_current(seat, "omp", Some("current")).since_unix_ms, first.since_unix_ms);
+        let carried_seat = "agent/example/carried-state-clock";
+        let context = uptime_pin::capture();
+        let carried = std::thread::scope(|scope| scope.spawn(move || {
+            let _context = context.enter();
+            assess_current(carried_seat, "omp", Some("current"))
+        }).join().unwrap());
+        assert_eq!(carried.state, "unknown");
+        past(carried.since_unix_ms.unwrap());
+        assert_eq!(assess_current(carried_seat, "omp", Some("current")).since_unix_ms,
+            carried.since_unix_ms, "carried assessments share the fixture's state clocks");
     }
 
     #[test]

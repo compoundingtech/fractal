@@ -14,7 +14,7 @@ remain byte-for-byte unchanged: the wrapper owns its guard, config and state pat
 The installer does not restart services or agent seats. If a direct definition needs
 a different executable path, stop its loaded service before installing; the installer
 refuses to rewrite a loaded definition.
-For a first daemon install, run `st service install` from the installed app executable;
+For a first daemon install, run `fractal service install` from the installed app executable;
 for an update, restart the daemon and replication services when ready.
 
 When the `--from` directory also holds `StListen.app` (the terminal UI's speech helper, built by
@@ -84,6 +84,26 @@ configured keychain identity. The helper restores installation files, not
 application databases; schema compatibility must be checked by the deployment caller.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+Follow the [default-host cutover procedure](../site/guides/upgrading.md#default-host-st3--fractal-cutover)
+for staging, migration evidence, seat-continuity checks and readiness-based recovery.
+The mover recognizes either `com.compoundingtech.st3` or
+`org.nix-community.home.smalltalk` as the legacy daemon, and either
+`com.compoundingtech.st3.replication` or
+`org.nix-community.home.smalltalk-replication` as the legacy replication worker.
+Targets use `com.compoundingtech.fractal` and
+`com.compoundingtech.fractal.replication`. Duplicate installed legacy aliases
+refuse; a recognized Home Manager worker does not require a separate manual
+bootout before migration.
+
+The current mover inspects and operates only in the `gui/UID` launchd domain.
+It has no domain-selection option and does not migrate jobs owned by the
+session-independent `user/UID` domain. Establish the actual service domain before
+staging; a user-domain installation requires supported domain handling before
+this procedure can be used. Do not infer support from an installed plist alone.
+Domain handling for host cutover and staging is being revised; until supported
+handling is available, the limitation above applies. Fresh installs and the app
+installer remain GUI-domain-only and are outside that cutover/staging work.
+
 For the default-host Fractal cutover, `st service install --stage-fractal` installs
 `com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
 disabled without loading or starting them. On Linux the same command stages
@@ -153,15 +173,31 @@ services stop and are checked again under the store fence before exchanges.
 The product-root bridge is an ancestor symlink, not a database-file symlink,
 and remains compatible with the daemon's store checks.
 
-To put only the database on a dataset mounted at
-`~/.local/state/fractal/store`, first complete cutover without mounts below either
-product root. Then stop only the Fractal daemon, preserve and move
-`claims.sqlite3`, `claims.sqlite3-wal` and `claims.sqlite3-shm` together into the
-dataset without hiding other migrated files, and configure the daemon with
-`store_dir = "/Users/example/.local/state/fractal/store"` (or its equivalent
-`up --store-dir` flag). Keep `state_dir` at `~/.local/state/fractal`; identity,
-sockets, locks, logs and PTY state do not move into the dataset. Restart the daemon.
-This database relocation is operator-managed, not performed by `migrate host`.
+To relocate the store after cutover, first complete cutover without mounts below
+either product root. Record the current store directory (the configured
+`store_dir`, or `state_dir` when unset). Stop **all writers**, including the daemon
+and any other process that can write that store, and prevent automatic restarts
+throughout relocation. Make and verify a recovery copy of the complete store tree
+before changing paths or mounts.
+
+Relocate the **complete store tree**, including `claims.sqlite3`, its WAL/SHM
+companions when present, and all of `shards/messages` with its databases and
+WAL/SHM companions. The messages shard is opened relative to the graph database's
+parent directory; moving only the top-level SQLite trio leaves the local message
+stream and delivery/read state behind and can open a new empty shard at the
+destination. Preserve any other store-tree contents as well. If the store currently
+shares `state_dir`, inventory the graph and shard trees rather than moving or
+hiding unrelated product state.
+
+Use an empty destination such as `/absolute/path/to/new-store`, preserving the
+directory structure and contents without hiding existing files under a mount.
+Configure `store_dir = "/absolute/path/to/new-store"` (or the equivalent
+`up --store-dir` flag). Keep `state_dir = "/absolute/path/to/product-state"`
+unchanged: product-state message bodies, identity, sockets, locks, logs and PTY
+state stay there. Verify the destination against the recovery copy before
+restarting writers; then verify graph, message stream and delivery/read continuity.
+Retain the recovery copy until acceptance. This store relocation is
+operator-managed, not performed by `migrate host`.
 
 Rerunning a committed migration accepts exactly the configured store mount;
 other mounts below either product root still refuse. `--rollback` always refuses
@@ -174,3 +210,44 @@ still applies. The receipt format is unchanged.
 A second install for testing: `scripts/install --instance NAME` (or `install.sh --instance NAME`) puts
 the app, commands, bundle identifier and launchd services below `~/.st-instance/NAME` and never
 rewrites the default install's plists. See [Instances](instances.md).
+
+## Protected-operation helper contract
+
+The Nix-managed host integration must obey this protected-operation contract.
+The production operation allowlist is empty. Candidate operations and the
+disposable probe read are not authorized for production.
+
+Do not request or grant Full Disk Access, Developer Tools, Accessibility or Screen
+Recording to the daemon or agents. Agent work roots must remain outside Desktop,
+Documents, Downloads, iCloud Drive and removable volumes. If an agent touches a
+protected folder, macOS may deny access with `Operation not permitted` or show a
+privacy prompt. Do not approve broad access to bypass the boundary; move the work
+or explicitly selected input into an unprotected workspace.
+[Authority](step-run/ask-e62df730e50c152fcd1d8be8f3f3d872/ask).
+
+- Keep only named protected operations in a small signed helper, rather than
+  granting the daemon's agents broad Full Disk Access or Developer Tools.
+  [Authority](step-run/ask-7f78ee87f8c690d5c15bad2b3da8d998/ask).
+- Sign locally at activation with Johannes's Apple-issued certificate through a
+  declared human-approved signing path. Agents neither create nor use signing
+  identities, unlock keychains, nor grant consent.
+  [Authority](step-run/ask-998fbdc2ebeb476f009cecd084c65d2f/ask).
+- Serve callers over a same-user Unix socket with a fixed operation allowlist and
+  an audit log, not arbitrary command execution or caller-selected paths.
+  Same-user IPC does not authenticate individual seats or resist same-uid tampering.
+  [Authority](step-run/ask-1cd7d6ea959b711614ab9c3352e8a4ce/ask).
+- Use a Nix-built helper and a user LaunchAgent installed by the existing host
+  activation, keeping build outputs unsigned and signing local.
+  [Authority](step-run/ask-563ed90daacfeb7a4c53335ae8b73ef2/ask).
+- Build the helper and its disposable probe only when a first real protected
+  operation requires them. Before admitting that operation, prove retention with
+  a throwaway helper in Johannes's session: its own bundle ID, one harmless read,
+  one version-1 approval, then no renewed approval for changed version 2 under the
+  same signing requirement. Remove the probe and grant afterwards; do not alter
+  the live daemon for the proof.
+  [Timing authority](step-run/ask-e62df730e50c152fcd1d8be8f3f3d872/ask);
+  [proof authority](step-run/ask-797dda8c3019b78c983dc0ef4db30928/ask).
+
+Authority links identify native ask subjects (`fractal work show SUBJECT`).
+Successful consent retention for one service does not establish grants for
+other services or authorize a broader production operation list.

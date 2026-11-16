@@ -280,8 +280,7 @@ fn append_fixture_claim(
     actor: &str,
     fields: BTreeMap<String, Value>,
 ) {
-    store
-        .append_claim(&ClaimInput {
+    let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: Some(actor.into()),
@@ -289,8 +288,12 @@ fn append_fixture_claim(
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        })
-        .unwrap();
+        };
+    if kind.starts_with("custom.client.pairing") {
+        store.append_client_operation_claim(&input)
+    } else {
+        store.append_claim(&input)
+    }.unwrap();
 }
 
 fn send_fixture_message(store: &Store, index: usize, seed: usize) -> String {
@@ -456,14 +459,15 @@ async fn sql_message_pages_preserve_local_body_references_without_inlining_text(
         let receipt = accept_message_receipt(
             &state,
             MessageSendRequest {
-                idempotency_key: format!("sql-body-{size}"),
-                from: "person/alex".into(),
-                to: "agent/worker".into(),
-                content: "λ".repeat(size / 2),
-                title: Some("local body".into()),
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: format!("sql-body-{size}"),
+            from: "person/alex".into(),
+            to: "agent/worker".into(),
+            content: "λ".repeat(size / 2),
+            title: Some("local body".into()),
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,

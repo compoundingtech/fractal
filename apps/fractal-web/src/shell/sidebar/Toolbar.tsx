@@ -1,7 +1,9 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import { DialogTrigger, Dialog, Popover } from 'react-aria-components'
-import { ChromeControl, compositionLightTheme, NarrowLayoutContext } from '@fractal/ui/assistant-ui/shell'
+import { ChromeControl } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
+import { lightTheme as compositionLightTheme } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
+import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { geometryVars as g, typeVars as t, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import {

@@ -36,6 +36,14 @@ fn rss_kib() -> Option<u64> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() -> anyhow::Result<()> {
+    fractal_drivers::version::set_build_stamps(
+        option_env!("CLI_BUILD_STAMP"),
+        option_env!("ST_BUILD_STAMP_LOCAL"),
+    );
+    fractal_client::set_client_name(format!(
+        "fractal-reader-cache {}",
+        fractal_drivers::version::machine_version()
+    ));
     let keep = PathBuf::from(std::env::args().nth(1).expect("scratch fixture directory"));
     std::fs::create_dir_all(&keep)?;
     let source = daemon_bench::generated_store(&keep, 0.1).await;
@@ -58,12 +66,14 @@ async fn main() -> anyhow::Result<()> {
     )?);
     let socket = root.join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: daemon_bench::NODE.into(),
+        api_socket: state_dir.join("api.sock"),
         state_dir,
         pty_root: root.join("pty"),
         pty_binary: daemon_bench::stub_pty(root),

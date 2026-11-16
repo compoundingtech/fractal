@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { decodeConversationChunk } from '@fractal/sdk/effect'
+import { decodeConversationChunk } from '@fractal/sdk/read'
 import { assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@fractal/ui/assistant-ui'
 import { colorVars as color, typeVars as type } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -11,6 +11,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { ConversationPane } from './ConversationPane.tsx'
+import { systemEventsPreference } from './conversationPreferences.ts'
 
 // Synthetic native wire records cross the real SDK, projection, data-source and pane boundaries.
 const agentRef = 'agent/build-host-a/workbench-shell'
@@ -35,8 +36,10 @@ const timeline = new LiveTimeline()
 timeline.apply(decodeConversationChunk({ kind: 'conversation', collection: 'conversation', id: 'follow/native-proof', session_id: 'session/native-proof', replace: true, has_more: false, items: records }))
 const source = fixtureSource({ world: { ...fixtureProjections, conversations: { [agentRef]: { items: timeline.project().items, hasOlder: false } } } })
 
+const showSystemEvents: { current: (value: boolean) => void } = { current: () => undefined }
 const NativeTranscript = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
+  React.useEffect(() => { showSystemEvents.current = value => registry.set(systemEventsPreference, value) }, [registry])
   return <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
     <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Native transcript review" onOpenTool={() => undefined} /></DataSourceProvider>
   </main>
@@ -62,6 +65,9 @@ const assertNative: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(initialIds).toEqual(Array.from({ length: 6 }, (_, index) => `timeline-entry/native-proof/${records.length - 6 + index}`))
   await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
   await waitFor(() => expect(history).toHaveAttribute('data-state', 'complete'))
+  // Per-response facts stay out of the reading lane until system events are shown.
+  await expect(canvas.queryByTestId('native-turn-footer')).toBeNull()
+  showSystemEvents.current(true)
   await expect(await canvas.findByText('Last response: last-model · 84 tokens · $0.025', {}, { timeout: 60000 })).toBeInTheDocument()
   await expect(canvas.getByText('Last response: tool-owner-model · 96 tokens · $0.012')).toBeInTheDocument()
   await expect(canvas.getByText('Last response: error-owner-model · 108 tokens · $0')).toBeInTheDocument()
@@ -71,6 +77,7 @@ const assertNative: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(canvas.queryByText('Last response: first-model · 42 tokens · $0.01')).toBeNull()
   await expect(canvas.queryByText(/body_ref/)).toBeNull()
   await expect(canvas.queryByTestId('live-work')).toBeNull()
+  showSystemEvents.current(false)
 }
 export const Dark: Story = { play: assertNative }
 export const Light: Story = { args: { scheme: 'light' }, play: assertNative }

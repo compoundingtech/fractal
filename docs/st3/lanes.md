@@ -76,13 +76,13 @@ claims on the same lane subject. When the run ends, the lane is closed and no lo
 ## Commands
 
 ```sh
-st lanes ls
-st lanes show app
-st lanes join app 42 --reason "reviewed and green"
-st lanes leave app 42 --reason "superseded by 43"
-st lanes move app 42 --bottom --reason "main moved during the run"
-st lanes approve app 42 --as person/ada
-st lanes mark app 42 --state running --detail "testing 1f2e3d4 on st/ci" --head 1f2e3d4...
+fractal lanes ls
+fractal lanes show app
+fractal lanes join app 42 --reason "reviewed and green"
+fractal lanes leave app 42 --reason "superseded by 43"
+fractal lanes move app 42 --bottom --reason "main moved during the run"
+fractal lanes approve app 42 --as person/ada
+fractal lanes mark app 42 --state running --detail "testing 1f2e3d4 on st/ci" --head 1f2e3d4...
 ```
 
 A lane argument is a full `lane/RUN/NAME` subject, the run of a mission that declares exactly one
@@ -93,7 +93,7 @@ Every mutation records its actor. An agent inside a harness acts as its own seat
 `--as person/NAME`, or the command uses the `person` from the Fractal configuration. `approve` refuses
 any actor except the lane's approver.
 
-`st lanes show` prints the entries in order with their status, and the recent joins, leaves,
+`fractal lanes show` prints the entries in order with their status, and the recent joins, leaves,
 moves, and approvals, newest first:
 
 ```text
@@ -109,7 +109,7 @@ RECENT
   moved 43 to the bottom by agent/example/driver 15m ago: main moved during the run
 ```
 
-`st missions show RUN` lists the lanes the run owns with the same entries, and `st missions tree`
+`fractal missions show RUN` lists the lanes the run owns with the same entries, and `fractal missions tree`
 lists every active lane under `LANES`. The client API serves the same view: the `lanes`
 collection, `lanes.get`, and the actions `lane.join`, `lane.leave`, `lane.move`, `lane.mark`,
 and `lane.approve`.

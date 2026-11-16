@@ -5,9 +5,10 @@ import type { Duplex } from 'node:stream'
 import { Cause, Context, Effect, Exit, Fiber, Layer, Schema, Scope, Tracer } from 'effect'
 import { completedResponse, reject } from './boundary.mts'
 import { createContentSecurityPolicy } from './csp.mts'
-import { clientRoute, Gateway } from './gateway.mts'
+import { browserPath, clientRoute, Gateway } from './gateway.mts'
 import { RuntimeIdentity, StaticAssets } from './static.mts'
 import { requestSpanOptions } from './tracing.mts'
+import { handlePairing, pairingRoute, type BrowserPairingOptions } from './pairing.mts'
 
 /** The host supplies authentication/CSRF policy; no deployment identity is assumed. */
 export interface MiddlewareOptions {
@@ -15,6 +16,7 @@ export interface MiddlewareOptions {
   readonly admit: (request: IncomingMessage) => boolean | Promise<boolean>
   readonly gateway: { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly timeoutMs: number }
   readonly tracer: Tracer.Tracer
+  readonly pairing?: BrowserPairingOptions
   /** Explicit cross-origin HTTP collectors; the gateway itself is always same-origin. */
   readonly connectOrigins?: readonly string[]
 }
@@ -79,12 +81,17 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
       if (!await admitted(req)) { reject(res, 403, 'Forbidden\n'); return }
       const dispatch = Effect.gen(function* () {
         const url = req.url ?? ''
+        const path = browserPath(url)
+        if (path === undefined) { reject(res, 404, 'Not found\n'); return }
+        if (pairingRoute(url)) {
+          return yield* Effect.promise(() => handlePairing(req, res, options.gateway, options.pairing))
+        }
         if (clientRoute(url)) {
           const parent = yield* Effect.currentSpan.pipe(Effect.orDie)
           return yield* gateway.http(req, res, parent)
         }
         // No privileged local API or application-specific private routes.
-        if (/^\/(?:v1|wf|otlp)(?:\/|\?|$)/.test(url)) { reject(res, 404, 'Not found\n'); return }
+        if (/^\/(?:v1|wf|otlp)(?:\/|$)/.test(path)) { reject(res, 404, 'Not found\n'); return }
         yield* next
       }).pipe(
         Effect.catchDefect(() => Effect.sync(() => {
@@ -101,7 +108,8 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
     }
     const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
       // As dev middleware the host server (Vite HMR) owns every other upgrade; answering it here would close that socket.
-      if (assets === undefined && !clientRoute(req.url ?? '')) return
+      const path = browserPath(req.url ?? '')
+      if (assets === undefined && path !== undefined && !/^\/v1(?:\/|$)/.test(path)) return
       // Node relinquishes HTTP error handling as soon as it emits upgrade.
       // Cover pending admission and rejected shutdown, not only admitted tunnels.
       const onError = () => socket.destroy()

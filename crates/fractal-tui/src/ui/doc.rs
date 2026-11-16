@@ -34,6 +34,8 @@ pub enum Hit {
     Voice,
     /// Start a plain shell in a new tab.
     NewTerminal,
+    /// Show or hide the sidebar, exactly as Ctrl+S.
+    SidebarToggle,
     /// A row of the Ctrl+S sidebar's list: select it and open it.
     SidebarRow(usize),
     ResourceRow(usize),
@@ -55,6 +57,7 @@ pub enum Hit {
     Subject,
     /// A split border: drag resizes, a second press evens its split.
     Resize,
+    SidebarResize,
     Key(char),
     Enter,
     Escape,
@@ -65,6 +68,8 @@ pub enum Hit {
     Pane(fractal_conversation_ui::PaneIntent),
     JumpLatest,
     Composer,
+    ChatComposer,
+    ChatEnter,
     Help,
     Open(String),
     /// Show a popover card for a graph subject.
@@ -101,6 +106,8 @@ pub enum Hit {
     PaletteChoice(usize),
     /// A document page's or the documents list's own button: back, try again, more.
     Document(super::documents::Tap),
+    /// An Availability pane button: pressing its key.
+    Availability(char),
 }
 
 pub type Target = fractal_conversation_ui::doc::Target<Hit>;
@@ -111,6 +118,7 @@ pub trait DocExt {
     fn field(&mut self, label: &str, value: &str, width: usize, value_style: Style);
     fn section(&mut self, title: &str, count: Option<usize>, width: usize);
     fn buttons(&mut self, buttons: &[(&str, &str, Hit, Color)]);
+    fn buttons_fit(&mut self, buttons: &[(&str, &str, Hit, Color)], width: usize);
     fn card(&mut self, title: &str, color: Color, heavy: bool, inner: Doc, width: usize);
 }
 
@@ -175,6 +183,24 @@ impl DocExt for Doc {
         }
         self.lines.push(Line::from(spans));
     }
+    /// Place whole buttons on the same row when the available cells allow it.
+    fn buttons_fit(&mut self, buttons: &[(&str, &str, Hit, Color)], width: usize) {
+        let mut start = 0;
+        let mut used = 0;
+        for (index, (key, label, _, _)) in buttons.iter().enumerate() {
+            let button_width = text::width(key) + text::width(label) + 4;
+            if index > start && used + 2 + button_width > width {
+                self.buttons(&buttons[start..index]);
+                start = index;
+                used = 0;
+            }
+            used += usize::from(index > start) * 2 + button_width;
+        }
+        if start < buttons.len() {
+            self.buttons(&buttons[start..]);
+        }
+    }
+
     /// A card in deck's style: a rounded frame with its title in the top edge. A heavy
     /// card (thick frame, coloured) is reserved for the thing that needs a person.
     fn card(&mut self, title: &str, color: Color, heavy: bool, inner: Doc, width: usize) {
@@ -262,6 +288,24 @@ mod tests {
                 .map(|target| &target.hit),
             Some(&Hit::Key('a'))
         );
+    }
+
+    #[test]
+    fn buttons_fit_wraps_whole_click_targets_at_the_available_width() {
+        let buttons = [
+            ("a", "Choose an answer", Hit::Key('a'), theme::ACCENT),
+            ("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1),
+        ];
+        let mut wide = Doc::new();
+        wide.buttons_fit(&buttons, 53);
+        assert_eq!(wide.lines.len(), 1);
+        assert_eq!((wide.targets[1].line, wide.targets[1].column), (0, 23));
+
+        let mut narrow = Doc::new();
+        narrow.buttons_fit(&buttons, 52);
+        assert_eq!(narrow.lines.len(), 2);
+        assert_eq!((narrow.targets[1].line, narrow.targets[1].column), (1, 0));
+        assert_eq!(narrow.targets[1].hit, Hit::Key('x'));
     }
 
     #[test]

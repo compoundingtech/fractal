@@ -3,7 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { Agent, RuntimeId, decodeUnknownSync } from '@fractal/client/schema'
+import { Agent, Attention, RuntimeId, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -98,6 +98,38 @@ it('closes the drawer when an agent is selected and supports its explicit close 
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
 })
 
+it('closes the phone drawer when an alert opens its mission', async () => {
+  const attention = decodeUnknownSync(Attention)({
+    id: 'attention/deploy', kind: 'attention', revision: 'r1', attention_kind: 'human-gate',
+    title: 'Approve deployment', detail: '', priority: 'normal', state: 'open', alert: true,
+    person_id: 'person/avery', source_id: 'step-run/release/deploy', mission_id: 'mission/release',
+    requested_at: '2026-11-01T11:00:00Z', updated_at: '2026-11-01T11:00:00Z', actions: ['review.approve'],
+    presentation: { tier: 'stopped', kind: 'review', agent: null, raised_by: null, waiting: null },
+  })
+  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [agent], missions: [], attention: [attention], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
+  await act(async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }))
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'l', bubbles: true }))
+  })
+  const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Expand sidebar"]')!
+  expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  await act(async () => vi.dynamicImportSettled())
+  await vi.waitFor(async () => {
+    await act(async () => {})
+    expect(host.querySelector('[aria-label="Actions for Approve deployment"]')).not.toBeNull()
+  })
+  const actions = host.querySelector<HTMLButtonElement>('[aria-label="Actions for Approve deployment"]')!
+  expect(actions).not.toBeNull()
+  await act(async () => actions.click())
+  const destination = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Open mission')!
+  expect(destination).not.toBeUndefined()
+  await act(async () => destination.click())
+  expect(new URLSearchParams(window.location.search).get('open')).toBe('mission/release:detail')
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
+})
+
 it('keeps conversation actions in the header and gives the Details sheet only one close control', async () => {
   const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Agent details"]')!
   await act(async () => trigger.click())
@@ -110,20 +142,20 @@ it('keeps conversation actions in the header and gives the Details sheet only on
     expect(sheet.querySelectorAll('button[aria-label^="Close"]')).toHaveLength(1)
     expect(sheet.querySelector('button[aria-label="Close agent details"]')).not.toBeNull()
     expect(sheet.querySelector('[data-narrow-actions]')).toBeNull()
-    expect(sheet.querySelector('button[aria-label="Conversation menu"]')).toBeNull()
-    expect(host.querySelector('[data-testid="thread-header"] button[aria-label="Conversation menu"]')).not.toBeNull()
+    expect(sheet.querySelector('button[aria-label="More actions"]')).toBeNull()
+    expect(host.querySelector('[data-testid="thread-header"] button[aria-label="More actions"]')).not.toBeNull()
   }, { timeout: 15_000 })
 })
 
 // The tab row holds the Workspace views tab list and, fixed after it, the labelled Terminal toggle.
 const workspaceTabs = () => host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace views"]')!
-const phoneTerminal = () => workspaceTabs().parentElement!.querySelector<HTMLButtonElement>('button[aria-label="Terminal"]')!
-const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Toggle terminal drawer', 'Agent details'].includes(name ?? ''))
-const phoneHeaderNames = ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Agent details']
+const phoneTerminal = () => workspaceTabs().parentElement!.querySelector<HTMLButtonElement>('button[aria-label="Show terminal"], button[aria-label="Show conversation"]')!
+const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'More actions', 'Agent details', 'Resources', 'Conversation menu'].includes(name ?? ''))
+const phoneHeaderNames = ['Expand sidebar', 'More actions', 'Agent details']
 /** One Terminal on the phone: outside the header and outside the tab list, beside it in the tab row. */
 const assertTerminalInTabRow = () => {
   expect(headerOrder()).toEqual(phoneHeaderNames)
-  expect(host.querySelectorAll('button[aria-label="Terminal"]')).toHaveLength(1)
+  expect(host.querySelectorAll('button[data-narrow-terminal]')).toHaveLength(1)
   expect(phoneTerminal()).not.toBeNull()
   expect(workspaceTabs().contains(phoneTerminal())).toBe(false)
   expect(phoneTerminal().getAttribute('role')).toBeNull()
@@ -134,7 +166,7 @@ it('keeps a labelled Terminal toggle in the phone tab row that stays described a
   const terminal = phoneTerminal()
   expect(terminal.textContent).toBe('Terminal')
   expect(terminal.hasAttribute('title')).toBe(false)
-  expect(terminal.getAttribute('aria-pressed')).toBe('false')
+  expect(terminal.getAttribute('aria-label')).toBe('Show terminal')
   expect(terminal.getAttribute('aria-disabled')).toBe('true')
   expect(terminal.disabled).toBe(false)
   expect(document.getElementById(terminal.getAttribute('aria-describedby')!)?.textContent).toBe('This agent has no terminal.')
@@ -143,29 +175,32 @@ it('keeps a labelled Terminal toggle in the phone tab row that stays described a
   expect(reason).not.toBeNull()
   expect(reason.textContent).toBe('This agent has no terminal.')
   expect(new URLSearchParams(window.location.search).get('open')).toBeNull()
-  expect(terminal.getAttribute('aria-pressed')).toBe('false')
   expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
   await vi.waitFor(() => expect(reason.contains(document.activeElement)).toBe(true))
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Terminal unavailable"]')).toBeNull())
 })
 
-it('toggles the terminal drawer from the phone tab row Terminal button and reports its pressed state', async () => {
+it('swaps conversation and terminal from the phone tab row, keeps the toggle focused and hides the tabs meanwhile', async () => {
   const withTerminal = { ...agent, runtime_ids: [decodeUnknownSync(RuntimeId)('runtime/metric-track')] }
   const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/example-reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
   await vi.waitFor(() => expect(phoneTerminal().hasAttribute('aria-disabled')).toBe(false))
-  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')
+  expect(phoneTerminal().getAttribute('aria-label')).toBe('Show terminal')
   expect(phoneTerminal().getAttribute('aria-describedby')).toBeNull()
   await act(async () => phoneTerminal().click())
   expect(new URLSearchParams(window.location.search).get('open')).toBe('terminal/metric-track:detail')
-  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('true')
-  expect(host.querySelector('[data-testid="terminal-pane"]')).not.toBeNull()
+  expect(phoneTerminal().getAttribute('aria-label')).toBe('Show conversation')
+  expect(phoneTerminal().textContent).toBe('Conversation')
+  expect(phoneTerminal().hasAttribute('aria-pressed')).toBe(false)
+  expect(host.querySelector('[data-testid="terminal-pane"]')?.getAttribute('data-terminal-shown')).toBe('true')
+  expect(host.querySelector('[role="tabpanel"][id$="-panel"]')).toBeNull()
   assertTerminalInTabRow()
   await act(async () => phoneTerminal().click())
   expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
-  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')
-  expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
+  expect(phoneTerminal().getAttribute('aria-label')).toBe('Show terminal')
+  expect(host.querySelector('[data-testid="terminal-pane"]')?.getAttribute('data-terminal-shown')).toBe('false')
+  expect(host.querySelector('[role="tabpanel"][id$="-panel"]')).not.toBeNull()
   assertTerminalInTabRow()
 })
 

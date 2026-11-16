@@ -9,7 +9,7 @@ pub async fn publish(
     Json(request): Json<Publication>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let Some(peer) = peer else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unbound-harness-event",
             "harness events require a local native driver",
         )));
@@ -18,7 +18,7 @@ pub async fn publish(
         || request.claim.actor.as_deref() != Some(&peer.agent)
         || !peer.archives_inbox && peer.transport != "pi-channel" && peer.transport != "omp-channel"
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-harness-event",
             "only this seat's native driver can publish its observations",
         )));
@@ -48,7 +48,7 @@ pub async fn prompt_state(
     let prompt = blocking_action(move || {
         store
             .native_prompt_state(&query.agent, query.ownership, query.transition)
-            .map_err(|error| St3Error::new("internal", format!("{error:#}")))
+            .map_err(|error| FractalError::new("internal", format!("{error:#}")))
     })
     .await?;
     Ok(Json(prompt))
@@ -72,13 +72,13 @@ pub async fn prompt_answer(
         // Only an episode of this seat answers its hook.
         let claim = store
             .claim_by_id(&query.episode)
-            .map_err(|error| St3Error::new("internal", format!("{error:#}")))?;
+            .map_err(|error| FractalError::new("internal", format!("{error:#}")))?;
         if claim.is_none_or(|claim| claim.subject != query.agent) {
             return Ok(crate::store::PromptAnswer { answer: None });
         }
         store
             .prompt_answer(&query.episode)
-            .map_err(|error| St3Error::new("internal", format!("{error:#}")))
+            .map_err(|error| FractalError::new("internal", format!("{error:#}")))
     })
     .await?;
     Ok(Json(answer))

@@ -46,7 +46,7 @@ wait_until() {
 }
 
 import_items() {
-  st3 import ls --all --limit 200 --json 2>/dev/null | jq -c '.value.items'
+  fractal import ls --all --limit 200 --json 2>/dev/null | jq -c '.value.items'
 }
 
 new_saved_session() {
@@ -80,7 +80,7 @@ select_new_saved_session() {
 
 exact_running_session() {
   local session_id=$1
-  st3 import show "$session_id" --json 2>/dev/null \
+  fractal import show "$session_id" --json 2>/dev/null \
     | jq -e '
         .value.state == "running"
         and .value.importable == true
@@ -152,7 +152,7 @@ launch_resume() {
 
 agent_reachable() {
   local agent=$1 driver=$2
-  st3 agents show "$agent" --all --json 2>/dev/null \
+  fractal agents show "$agent" --all --json 2>/dev/null \
     | jq -e --arg driver "$driver" '
         .value.state == "running"
         and .value.reachability == "reachable"
@@ -166,7 +166,7 @@ managed_process_has_native_id() {
   local driver=$1 native=$2
   ps -axo command= \
     | grep -F "$native" \
-    | grep -E "(^|[/ ])(st3 driver $driver|$driver)( |$)" \
+    | grep -E "(^|[/ ])(fractal driver $driver|$driver)( |$)" \
     | grep -v '[g]rep' >/dev/null
 }
 
@@ -191,11 +191,11 @@ for driver in codex claude pi omp opencode; do
 
   launch_resume "$driver" "$pty_id" "$native"
   wait_until "$driver exact running discovery" 120 exact_running_session "$session_id"
-  live="$(st3 import show "$session_id" --json | jq -er .value)"
+  live="$(fractal import show "$session_id" --json | jq -er .value)"
   raw_pid="$(jq -er .process.pid <<<"$live")"
   revision="$(jq -er .revision <<<"$live")"
 
-  receipt="$(st3 import run "$session_id" --as "$REQUESTER" --json)"
+  receipt="$(fractal import run "$session_id" --as "$REQUESTER" --json)"
   agent="$(jq -r '.. | strings | select(startswith("agent/import/"))' <<<"$receipt" | head -n 1)"
   test -n "$agent"
   wait_until "$driver imported seat" 180 agent_reachable "$agent" "$driver"
@@ -204,7 +204,7 @@ for driver in codex claude pi omp opencode; do
     printf '%s raw process %s survived fenced import\n' "$driver" "$raw_pid" >&2
     exit 1
   fi
-  incarnation="$(st3 agents show "$agent" --all --json | jq -er .value.incarnation_id)"
+  incarnation="$(fractal agents show "$agent" --all --json | jq -er .value.incarnation_id)"
   state="$(jq \
     --arg driver "$driver" --arg session "$session_id" --arg native "$native" \
     --arg revision "$revision" --arg agent "$agent" --arg incarnation "$incarnation" \

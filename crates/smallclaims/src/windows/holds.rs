@@ -57,6 +57,7 @@ struct Asked {
     observer: Option<Arc<Observed>>,
     /// The `Stages` scope this thread was in when it asked.
     stages: Option<Arc<Mutex<StageClock>>>,
+    receive: Option<crate::receive_metrics::Context>,
 }
 
 impl Holder {
@@ -83,7 +84,12 @@ impl Holder {
             asked: Instant::now(),
             observer,
             stages,
+            receive: crate::receive_metrics::capture(),
         }))
+    }
+
+    pub(crate) fn receive(&self) -> Option<&crate::receive_metrics::Context> {
+        self.0.receive.as_ref()
     }
 
     fn json(&self) -> Value {
@@ -366,6 +372,7 @@ pub struct WriterHold {
     stages: Option<Vec<(&'static str, Duration)>>,
     /// A staged lend's rebuilt aggregates, taken when the hold ends.
     rebuilt: Vec<(&'static str, Rebuilt)>,
+    receive_shared_batch: Option<u64>,
 }
 
 impl WriterHold {
@@ -387,7 +394,12 @@ impl WriterHold {
             writes: 0,
             stages: None,
             rebuilt: Vec::new(),
+            receive_shared_batch: None,
         }
+    }
+
+    pub(crate) fn shared_receive_batch(&mut self, batch_id: u64) {
+        self.receive_shared_batch = Some(batch_id);
     }
 
     /// A batched write from `holder` begins in this hold.
@@ -426,6 +438,13 @@ impl WriterHold {
         tracing::warn!(
             holder = &*holder.label,
             client = holder.client.as_deref().unwrap_or("-"),
+            correlation_id = if self.kind == HoldKind::Lend {
+                holder.receive.as_ref().map(crate::receive_metrics::Context::correlation_id)
+            } else { None },
+            receive_phase = if self.kind == HoldKind::Lend {
+                holder.receive.as_ref().map(|context| context.stage().name())
+            } else { None },
+            shared_batch_id = self.receive_shared_batch,
             at = %format_args!("{}:{}", holder.at.file(), holder.at.line()),
             kind = self.kind.name(),
             held_ms = ms(held).round() as u64,
@@ -848,6 +867,7 @@ mod tests {
             asked: Instant::now(),
             observer: None,
             stages: None,
+            receive: None,
         }))
     }
 
@@ -861,6 +881,7 @@ mod tests {
             writes: 0,
             stages: None,
             rebuilt: Vec::new(),
+            receive_shared_batch: None,
         }
     }
 
@@ -1162,6 +1183,7 @@ mod tests {
                     claims: 40,
                 },
             )],
+            receive_shared_batch: None,
         };
         record.held(now, 1_000_000, &mut lend, Duration::from_millis(200), true);
         std::mem::forget(lend);

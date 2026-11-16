@@ -58,6 +58,7 @@ pub struct DefinitionFields {
     pub queue_position: Option<u32>,
     pub timeout_ms: Option<u64>,
     pub fresh_context: bool,
+    pub retry: Option<crate::model::RetrySpec>,
 }
 
 #[derive(Default)]
@@ -74,7 +75,7 @@ impl DefinitionIndex {
     }
 
     // Match find_step's display-order depth-first traversal and its first matching path.
-    // Store only the four fields this reader uses; nested mission trees are never cloned.
+    // Store only the metadata this reader uses; nested mission trees are never cloned.
     fn visit(&mut self, mission: &MissionSpec) -> bool {
         for id in &mission.display_order {
             let Some(step) = mission.steps.get(id) else {
@@ -88,6 +89,7 @@ impl DefinitionIndex {
                     queue_position: step.queue_position,
                     timeout_ms: step.timeout_ms,
                     fresh_context: step.fresh_context,
+                    retry: (step.retry != crate::model::RetrySpec::default()).then(|| step.retry.clone()),
                 });
             if let Some(nested) = &step.nested_mission
                 && !self.visit(nested)
@@ -165,6 +167,7 @@ pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
             view.queue_position = step.queue_position;
             view.timeout_ms = step.timeout_ms;
             view.fresh_context = step.fresh_context;
+            view.retry.clone_from(&step.retry);
         }
     }
     // Match work_at_snapshot_selected's order and filtering, including terminal work used to
@@ -175,13 +178,13 @@ pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
             .get(view.run.strip_prefix("mission-run/").unwrap_or(&view.run))
             .is_some_and(|phase| phase == "revision-draining");
         (!draining || matches!(view.status.as_str(), "claimed" | "working" | "verifying"))
-            && (view.assigned_to.as_deref() == Some(actor.as_str())
-                || view.claimant.as_deref() == Some(actor.as_str())
+            && (work_actor_matches(view.assigned_to.as_deref(), &actor)
+                || work_actor_matches(view.claimant.as_deref(), &actor)
                 || (matches!(view.status.as_str(), "ready" | "blocked")
                     && view
                         .available_to
                         .iter()
-                        .any(|candidate| candidate == &actor)))
+                        .any(|candidate| work_actor_matches(Some(candidate), &actor))))
     });
     Ok(inputs.views)
 }
@@ -190,7 +193,7 @@ pub fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
     let connection = store.readers.get();
     let mut views = connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha3063a1f5575 owner=fractal_store::store::reconcile_work_context TODO=trace-statement-and-value-representation */ &seat_work_at_snapshot_query(false))?
-        .query_map(params![actor, true, false], step_run_from_row)?
+        .query_map(params![work_actor_spellings_json(actor), true, false], step_run_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let carried = carried_claimants_tx(
         &connection,

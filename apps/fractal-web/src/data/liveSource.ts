@@ -1,5 +1,6 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
-import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
+import { sidebarPins } from './sidebarPins.ts'
+import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
   Fractal,
@@ -14,8 +15,9 @@ import {
   type FractalOptions,
   type SyncStatus,
   syncStatusFromFailure,
-  openPtySession,
-} from '@fractal/sdk/effect'
+  decodeConversationChunk,
+} from '@fractal/sdk/read'
+import { loadMutations, loadPty } from './lazySdk.ts'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -25,9 +27,9 @@ import { incrDebug, setDebug } from '../telemetry/meters.tsx'
 
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import type { TextItem } from '../conversation/model.ts'
-import { undeclared } from '../monitor/source.ts'
+import { RELAY_PREFIX, relayUsageSource } from '../monitor/source.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
-import { instrumentFetch } from '../telemetry/transport.ts'
+import { instrumentFetch, recordSocketState } from '../telemetry/transport.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
@@ -37,11 +39,14 @@ import { gatewayAgentControls } from '../agents/agent-control-port.ts'
 import { gatewayPromptAnswers } from '../conversation/alerts/prompt-answer-port.ts'
 import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts'
 import { gatewayDocuments } from '../documents/document-port.ts'
+import { gatewayAvailability } from '../availability/availability-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { readAuthorization } from './source.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
+import { browserPtySocket, browserSocket } from './sdk-browser/trace.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
   initialFeedSync,
@@ -70,10 +75,14 @@ import { gatewaySubjectReads, SubjectReadPort, subjectReaderFromAtom } from './s
 import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
 import { gatewayNativeDetails } from './nativeDetailsSource.ts'
+import { gatewayObjectives } from './objectivesSource.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
 export const ROSTER_FIRST_SNAPSHOT_DEADLINE_MS = 3_000
+
+/** Generated page framing with the SDK's tolerant decoder owning individual entries. */
+const historyPage = Schema.Struct({ ...TimelinePage.fields, items: Schema.Array(Schema.Unknown) })
 
 /** The owned source registry and runtime teardown handle. */
 export interface LiveSource {
@@ -104,6 +113,7 @@ interface RetainedFeed<A> {
 
 interface RetainedConversation extends RetainedFeed<ConversationPage> {
   readonly send: AttachmentPort['send']
+  readonly loadOlder: () => Promise<void>
 }
 
 interface PendingSend {
@@ -144,14 +154,32 @@ export const liveSource = ({
   readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider> | undefined
 }): LiveSource => {
   const { baseUrl } = options
+  const clientName = options.client
   const origin = typeof location === 'undefined' ? new URL(baseUrl).origin : location.origin
+  const transportFetch = options.fetch ?? globalThis.fetch.bind(globalThis)
   const fetch = instrumentFetch({
-    fetchImpl: nativeAgentFetch({ origin, fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis) }),
+    fetchImpl: nativeAgentFetch({ origin, fetchImpl: async (input, init) => {
+      const response = await transportFetch(input, init)
+      const url = new URL(input instanceof Request ? input.url : String(input), baseUrl)
+      const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+      if (method.toUpperCase() === 'GET' && url.origin === new URL(baseUrl).origin && url.pathname.startsWith('/v1/client/') &&
+        response.status === 403) {
+        const body: unknown = await response.clone().json().catch(() => undefined)
+        if (readAuthorization({ status: response.status, response: body }) === 'unauthorized') {
+          credentialExpired = true
+          readRejection = 'Browser credential expired or revoked'
+          registry.set(readRefusal, readRejection)
+          for (const deny of deniedReaders) deny(readRejection)
+        }
+      }
+      return response
+    } }),
     origin,
     traceContext: options.traceContext,
   })
   const deniedReaders = new Set<(message: string) => void>()
   let readRejection: string | undefined
+  let credentialExpired = false
   let connectionAttempt = 1
   const noGrants: Grants = {
     actions: 'ungranted',
@@ -172,8 +200,10 @@ export const liveSource = ({
   setDebug('Wf.freshnessConsumers', 0)
   const client = new FractalClient({
     baseUrl,
+    ...(options.client === undefined ? {} : { client: options.client }),
     // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
+    socket: options.socket ?? browserSocket,
   })
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
@@ -185,14 +215,17 @@ export const liveSource = ({
   const resources = gatewayResources({
     baseUrl,
     fetchImpl: fetch,
+    ...(options.client === undefined ? {} : { client: options.client }),
   })
   const subjectReads = gatewaySubjectReads({
-    options: { baseUrl, fetchImpl: fetch },
+    options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) },
     resource: subjectReaderFromAtom({ feed: resources.byId, registry }),
     discovery: client,
     registry,
   })
-  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const followInterests = new Map<string, () => boolean>()
+  const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
@@ -220,6 +253,7 @@ export const liveSource = ({
             }
             if (event.state._tag === 'Reconnecting') connectionAttempt = event.state.attempt
             setDebug('Wf.socketLive', event.state._tag === 'Live' ? 1 : 0)
+            recordSocketState(event.state)
             if (event.state._tag === 'Rejected') {
               readRejection = event.state.message
               registry.set(readRefusal, event.state.message)
@@ -256,7 +290,10 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
-      Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections })),
+      Layer.provide(BrowserFractalPlatform({
+        adoptEarlyCollections,
+        hasInterest: (key) => followInterests.get(key)?.(),
+      })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(
@@ -354,6 +391,9 @@ export const liveSource = ({
     const syncData = Atom.keepAlive(Atom.make<FeedSync<A>>(syncLatest))
     let unmount: (() => void) | undefined
     const data = Atom.make<Feed<A>>(latest)
+    // Registry disposal is deferred. Admission must use current demand, not wait
+    // for the outgoing interest's finalizer before freeing its warm socket slot.
+    const hasInterest = () => visible && !registry.ensureNode(interest).canBeRemoved
     const following = Atom.make((get): Feed<A> => {
       let active = true
       if (readRejection !== undefined)
@@ -403,12 +443,17 @@ export const liveSource = ({
       const resolving = resolve(get)
       const previous = previousFiber
       spec = undefined
+      let boundKey: string | undefined
       let freshnessFiber: Fiber.Fiber<void, unknown> | undefined
       let initialReadFiber: Fiber.Fiber<void> | undefined
       let initialReadDeadlineFiber: Fiber.Fiber<void> | undefined
       let initialReadConnectionFiber: Fiber.Fiber<void> | undefined
       const fiber = runtime.runFork(
         Effect.gen(function* () {
+          // Finish atom acquisition before transport callbacks can reenter the registry.
+          // In particular, eviction must not unsubscribe while the new interest's mount
+          // is still installing its ownership and has not returned its release handle.
+          yield* Effect.yieldNow
           // Release the old socket slot before binding the replacement owner.
           if (previous !== undefined) yield* Fiber.interrupt(previous)
           if (readRejection !== undefined) {
@@ -427,6 +472,8 @@ export const liveSource = ({
           const boundSpec = yield* resolving
           spec = boundSpec
           const key = followKey(boundSpec)
+          boundKey = key
+          followInterests.set(key, hasInterest)
           const startInitialRead = () => {
             if (initialRead === undefined || initialReadFiber !== undefined || !active
               || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
@@ -567,13 +614,15 @@ export const liveSource = ({
                     initialReadFiber?.interruptUnsafe()
                     initialReadDeadlineFiber?.interruptUnsafe()
                     initialReadConnectionFiber?.interruptUnsafe()
+                    if (boundKey !== undefined && followInterests.get(boundKey) === hasInterest)
+                      followInterests.delete(boundKey)
                     if (!active) return
                     ended = true
                     // Interest can return between SDK eviction and this finalizer. Its
                     // acquisition saw ended=false, so completion must hand demand back
                     // to a new run too. Wait until this fiber finishes before refreshing.
-                    if (visible && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
-                      if (!active || !visible || !ended || terminalFailure || readRejection !== undefined) return
+                    if (hasInterest() && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
+                      if (!active || !hasInterest() || !ended || terminalFailure || readRejection !== undefined) return
                       ingest.flush()
                       registry.refresh(following)
                     })
@@ -627,7 +676,7 @@ export const liveSource = ({
       // Snapshot-only readers have no follow controller, but still lose read authority on rejection.
       const loss = get(networkLoss)
       const refusal = get(readRefusal)
-      if (refusal !== undefined) return unavailable({ reason: 'ungranted', detail: refusal, ...(telemetryKind === 'terminal' ? { retryable: false } : {}) })
+      if (refusal !== undefined) return unavailable({ reason: credentialExpired ? 'unauthorized' : 'ungranted', detail: refusal, ...(telemetryKind === 'terminal' ? { retryable: false } : {}) })
       return loss !== undefined && latest._tag === 'Observed' ? { ...latest, freshness: 'stale' as const } : latest
     })
     retained = {
@@ -672,44 +721,60 @@ export const liveSource = ({
     return retained
   }
 
-  const rosterDecode = Atom.keepAlive(Atom.make<RosterDecode>(decodedRoster))
-  /** Decode metadata belongs to an observation and is published only with its accepted rows. */
-  const rosterEvidence = new WeakMap<readonly DecodedAgent[], RosterDecode>()
   const sameUndecodable = (left: readonly Undecodable[], right: readonly Undecodable[]) =>
     left.length === right.length && left.every((entry, index) => {
       const other = right[index]!
       return entry._tag === other._tag && entry.id === other.id && entry.path === other.path && entry.reason === other.reason
     })
-  const recordRosterDecode = (next: RosterDecode) => {
-    const current = registry.get(rosterDecode)
-    if (current.decodeStale === next.decodeStale && sameUndecodable(current.undecodable, next.undecodable)) return
-    registry.set(rosterDecode, next.undecodable.length === 0 && !next.decodeStale ? decodedRoster : next)
+  /** Decode metadata belongs to an observation and is published only with its accepted rows. */
+  const decodeEvidence = <TRow,>() => {
+    const atom = Atom.keepAlive(Atom.make<RosterDecode>(decodedRoster))
+    const evidence = new WeakMap<readonly TRow[], RosterDecode>()
+    return {
+      atom,
+      record: (value: readonly TRow[], decode: RosterDecode) => evidence.set(value, decode),
+      prepareObservation: (value: readonly TRow[], previous: Feed<readonly TRow[]>) => {
+        const decode = evidence.get(value) ?? decodedRoster
+        if (!decode.decodeStale || value.length > 0 || previous._tag !== 'Observed') return value
+        const retained = [...previous.value]
+        evidence.set(retained, decode)
+        return retained
+      },
+      onCommit: (value: readonly TRow[]) => {
+        const next = evidence.get(value) ?? decodedRoster
+        const current = registry.get(atom)
+        if (current.decodeStale === next.decodeStale && current.hasMore === next.hasMore && sameUndecodable(current.undecodable, next.undecodable)) return
+        registry.set(atom, next.undecodable.length === 0 && !next.decodeStale && next.hasMore !== true ? decodedRoster : next)
+      },
+      observedFreshness: (value: readonly TRow[]): 'stale' | 'live' =>
+        evidence.get(value)?.decodeStale ? 'stale' : 'live',
+    }
   }
+  const rosterEvidence = decodeEvidence<DecodedAgent>()
+  const rosterDecode = rosterEvidence.atom
+  const missionsEvidence = decodeEvidence<Mission>()
+  const missionsDecode = missionsEvidence.atom
+  const attentionEvidence = decodeEvidence<Attention>()
+  const attentionDecode = attentionEvidence.atom
   const agentsRetained = retain<readonly DecodedAgent[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
     initialRead: (fractal) => fractal.readAgents.pipe(
       Effect.map(({ value, hasMore, undecodable, decodeStale }) => {
         const rows = [...value]
-        rosterEvidence.set(rows, { undecodable, decodeStale })
+        rosterEvidence.record(rows, { undecodable, decodeStale })
         return { value: rows, hasMore }
       }),
     ),
-    prepareObservation: (value, previous) => {
-      const evidence = rosterEvidence.get(value) ?? decodedRoster
-      if (!evidence.decodeStale || value.length > 0 || previous._tag !== 'Observed') return value
-      const retained = [...previous.value]
-      rosterEvidence.set(retained, evidence)
-      return retained
-    },
-    onCommit: (value) => recordRosterDecode(rosterEvidence.get(value) ?? decodedRoster),
-    observedFreshness: (value) => rosterEvidence.get(value)?.decodeStale ? 'stale' : 'live',
+    prepareObservation: rosterEvidence.prepareObservation,
+    onCommit: rosterEvidence.onCommit,
+    observedFreshness: rosterEvidence.observedFreshness,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
         Stream.map((event) => {
           if (event._tag !== 'Observed') return event
           const { items, undecodable, decodeStale } = event.value
           const value = items.filter((row): row is DecodedAgent => row.kind === 'agent')
-          rosterEvidence.set(value, { undecodable, decodeStale })
+          rosterEvidence.record(value, { undecodable, decodeStale })
           return { _tag: 'Observed' as const, value }
         }),
       ),
@@ -717,39 +782,47 @@ export const liveSource = ({
   const agents = agentsRetained.atom
   const missionsRetained = retain<readonly Mission[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'missions', limit: 100 }),
+    prepareObservation: missionsEvidence.prepareObservation,
+    onCommit: missionsEvidence.onCommit,
+    observedFreshness: missionsEvidence.observedFreshness,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter((row): row is Mission => row.kind === 'mission'),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, undecodable, decodeStale, hasMore } = event.value
+          const value = items.filter((row): row is Mission => row.kind === 'mission')
+          missionsEvidence.record(value, { undecodable, decodeStale, hasMore })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const missions = missionsRetained.atom
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
+    prepareObservation: attentionEvidence.prepareObservation,
+    onCommit: attentionEvidence.onCommit,
+    observedFreshness: attentionEvidence.observedFreshness,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter(
-                  (row): row is Attention => row.kind === 'attention',
-                ),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, undecodable, decodeStale } = event.value
+          const value = items.filter((row): row is Attention => row.kind === 'attention')
+          attentionEvidence.record(value, { undecodable, decodeStale })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const attention = attentionRetained.atom
   const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
+        const loaded = yield* loadMutations.pipe(Effect.result)
+        if (loaded._tag === 'Failure') return {
+          _tag: 'Refused' as const, reason: 'snapshot-unavailable' as const,
+          detail: loaded.failure.message,
+        }
+        const { makeMutations } = loaded.success
         const fractal = yield* Fractal
         const statuses = yield* SubscriptionRef.get(fractal.syncStatuses)
         let freshest: typeof Snapshot.Type | undefined
@@ -763,7 +836,7 @@ export const liveSource = ({
             freshest = decoded.value
         }
         if (freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
-        return yield* fractal.snapshot.pipe(
+        return yield* makeMutations({ ...options, fetch }).snapshot.pipe(
           Effect.map((value): ConversationPortResult<string> => ({ _tag: 'Success', value })),
           Effect.catch((failure) => Effect.succeed<ConversationPortResult<string>>({
             _tag: 'Refused', reason: 'snapshot-unavailable',
@@ -790,6 +863,10 @@ export const liveSource = ({
     let painted = false
     let publishedItems: ConversationPage['items'] = []
     let changedFrom = Infinity
+    let older: ConversationPage['older']
+    let olderRequest: Promise<void> | undefined
+    let sessionId: string | undefined
+    let generation = 0
     const projectPage = (): ConversationPage => {
       const projection = timeline.project()
       const hadPending = pending.size > 0
@@ -809,6 +886,8 @@ export const liveSource = ({
         ...(timeline.header === undefined ? {} : { header: timeline.header }),
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
+        ...(timeline.olderCursor === undefined ? {} : { olderCursor: timeline.olderCursor }),
+        ...(older === undefined ? {} : { older }),
         change: { from: publishedItems, index: changedFrom },
         ...(timeline.observation === undefined ? {} : { observation: timeline.observation }),
       }
@@ -834,6 +913,12 @@ export const liveSource = ({
             if (event._tag !== 'Observed') return event
             ux?.().switchDataReady(ref)
             const previousSize = timeline.size
+            if (event.value.replace) {
+              generation += 1
+              older = undefined
+              olderRequest = undefined
+              sessionId = event.value.sessionId
+            }
             timeline.apply(event.value)
             // Entries are identity-deduplicated by the retained timeline, not counted per chunk.
             incrDebug('Wf.conversationEntries', timeline.size - previousSize)
@@ -846,6 +931,40 @@ export const liveSource = ({
       if (!retained.publish(page)) return
       publishedItems = page.items
       changedFrom = Infinity
+    }
+    const loadOlder = (): Promise<void> => {
+      if (olderRequest !== undefined) return olderRequest
+      const cursor = timeline.olderCursor
+      if (cursor === undefined || sessionId === undefined) return Promise.resolve()
+      const requestedGeneration = generation
+      const requestedSession = sessionId
+      older = { _tag: 'Loading' }
+      publishPending()
+      olderRequest = (async () => {
+        try {
+          // Opaque continuations retain the server's cursor-bound page size.
+          const response = await client.timelineList(requestedSession, { cursor })
+          // Keep entries raw for the SDK's tolerant per-entry/block decoder.
+          const page = decodeUnknownSync(historyPage)(response.value)
+          if (generation !== requestedGeneration) return
+          timeline.prepend(decodeConversationChunk({
+            kind: 'conversation', collection: 'conversation', id: ref,
+            session_id: page.session_id, replace: false, items: page.items,
+            has_more: page.page.has_more,
+            ...(Option.isNone(page.page.next_cursor) ? {} : { older_cursor: page.page.next_cursor.value }),
+          }))
+          older = undefined
+        } catch (cause) {
+          if (generation !== requestedGeneration) return
+          older = { _tag: 'Failed', detail: cause instanceof Error ? cause.message : String(cause) }
+        } finally {
+          if (generation === requestedGeneration) {
+            olderRequest = undefined
+            publishPending()
+          }
+        }
+      })()
+      return olderRequest
     }
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
@@ -920,7 +1039,7 @@ export const liveSource = ({
         return { _tag: 'Refused', reason: 'failed', detail }
       }
     }
-    return { ...retained, send }
+    return { ...retained, send, loadOlder }
   })
   const recentConversations = new Map<string, RetainedConversation>()
   const retainConversation = (ref: string) => {
@@ -1127,8 +1246,10 @@ export const liveSource = ({
     },
     source: {
       mode: 'live',
+      pins: sidebarPins(client),
       subjectReads,
       nativeDetails,
+      objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
       now: wallClock,
@@ -1145,7 +1266,9 @@ export const liveSource = ({
       rosterDecode,
       retryAgents: () => agentsRetained.retry(),
       missions,
+      missionsDecode,
       attention,
+      attentionDecode,
       conversation,
       conversationInterest: (ref) => retainConversation(ref).interest,
       prefetchConversation: (ref) => {
@@ -1157,6 +1280,7 @@ export const liveSource = ({
         retainConversation(ref).prefetch()
       },
       retryConversation: (ref) => retainConversation(ref).retry(),
+      loadOlder: (ref) => retainConversation(ref).loadOlder(),
       resources,
       terminal,
       terminalInterest: (ref) => retainTerminal(ref).interest,
@@ -1171,15 +1295,26 @@ export const liveSource = ({
       prompts: gatewayPromptAnswers(client),
       alertActions: gatewayAlertActions(client),
       documents: gatewayDocuments(client),
+      availability: gatewayAvailability(client),
       // Same origin and transport as `client`; the gateway injects the credential and keeps the
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
-        open: (options) => openPtySession({ ...options, baseUrl, fetch }),
+        open: (options) => loadPty.pipe(
+          Effect.flatMap(({ openPtySession }) => openPtySession({
+            ...options, baseUrl,
+            fetch: (input, init) => {
+              const headers = new Headers(init?.headers)
+              if (clientName !== undefined) headers.set('x-st3-client', clientName)
+              return fetch(input, { ...init, headers })
+            },
+            socket: browserPtySocket(clientName),
+          })),
+        ),
       },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.
-        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl }),
+        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl, ...(options.client === undefined ? {} : { client: options.client }) }),
         transport: fetch,
         snapshot: async () => {
           const current = await messageSnapshot()
@@ -1206,7 +1341,7 @@ export const liveSource = ({
           }),
         ),
       ),
-      usage: undeclared,
+      usage: { _tag: 'declared', source: relayUsageSource({ label: 'Gateway usage', prefix: `${origin}${RELAY_PREFIX}`, fetchImpl: fetch }) },
       sync: {
         gateway: gatewaySync,
         agents: agentsRetained.sync,

@@ -15,6 +15,7 @@ const presentation: { readonly [Tag in HarnessNoticeData['_tag']]: { readonly ic
   Interjection: { icon: 'pencil', kind: 'Interjection', noun: 'message' },
   SkillInvocation: { icon: 'gear', kind: 'Skill', noun: 'details' },
   Delivery: { icon: 'send', kind: 'Delivery', noun: 'message' },
+  SystemRecord: { icon: 'gear', kind: 'System', noun: 'details' },
 }
 
 /** Outcome overrides the kind icon: alert only for failure, check only for completion; every other outcome keeps the neutral kind icon. */
@@ -32,7 +33,7 @@ const pillText = (notice: HarnessNoticeData, kind: string): string => {
  * Neutral presentation of typed harness facts; the app alone owns q101 transport recognition.
  * `weight` is the q106 pairing choice: 'row' is a quiet inline row, 'card' a compact bordered card.
  */
-export function HarnessNotice({ item, weight = 'card' }: { readonly item: EventItem & { readonly notice: HarnessNoticeData }; readonly weight?: HarnessWeight }) {
+export function HarnessNotice({ item, weight = 'card', showTime = true }: { readonly item: EventItem & { readonly notice: HarnessNoticeData }; readonly weight?: HarnessWeight; /** False inside a transcript episode, whose head carries the one timestamp. */ readonly showTime?: boolean }) {
   const notice = item.notice
   const compacted = notice._tag === 'Compaction'
   const time = item.at === undefined ? NaN : Date.parse(item.at)
@@ -44,7 +45,7 @@ export function HarnessNotice({ item, weight = 'card' }: { readonly item: EventI
   const payload = /^[\s]*[\[{]/.test(notice.payload) ? `\`\`\`json\n${notice.payload}\n\`\`\`` : notice.payload
   const row = weight === 'row'
   return <Disclosure isExpanded={expanded} onExpandedChange={setExpanded} data-testid="harness-notice" data-harness-kind={item.kind} data-harness-weight={weight} data-item-id={item.id} {...stylex.props(styles.base, row ? styles.row : styles.card)}>
-    <div {...stylex.props(styles.header)}><span {...stylex.props(styles.headerIcon)}><Icon name={(tone === undefined ? undefined : toneIcon[tone]) ?? shown.icon} size={headerIconSize} /></span><span data-testid="harness-title" {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{pillText(notice, shown.kind)}</span>{Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
+    <div {...stylex.props(styles.header)}><span {...stylex.props(styles.headerIcon)}><Icon name={(tone === undefined ? undefined : toneIcon[tone]) ?? shown.icon} size={headerIconSize} /></span><span data-testid="harness-title" {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{pillText(notice, shown.kind)}</span>{showTime && Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
     <p data-testid="harness-excerpt" {...stylex.props(styles.excerpt, row && styles.rowIndent)}>{item.text}</p>
     <Button slot="trigger" data-testid="harness-trigger" {...stylex.props(styles.trigger, row && styles.rowIndent)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={headerIconSize} />{expanded ? `Hide ${noun}` : `Read ${noun}`}</Button>
     {/* The frame lives inside the panel: a collapsed hidden=until-found panel still keeps its own box in Chromium. */}

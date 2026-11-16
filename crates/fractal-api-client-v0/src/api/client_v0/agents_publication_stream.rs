@@ -123,7 +123,7 @@ pub(super) async fn prepare(
         let _permit = permit;
         frames::prepare(publication, snapshot, &request.id, previous.as_ref(), CLIENT_MAX_RESPONSE_BYTES)
             .map(|prepared| Delivery::Frames(Box::new(prepared)))
-            .map_err(|_| ApiError::bad(St3Error::new("agents-publication-row-too-large",
+            .map_err(|_| ApiError::bad(FractalError::new("agents-publication-row-too-large",
                 "a complete agents row cannot fit in the frame budget")))
     }).await.map_err(ApiError::internal)?
 }

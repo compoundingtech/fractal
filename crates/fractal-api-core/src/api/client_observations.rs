@@ -28,7 +28,7 @@ pub struct Validated {
 }
 
 pub fn invalid(message: &'static str) -> ApiError {
-    ApiError::bad(St3Error::new("validation-failed", message))
+    ApiError::bad(FractalError::new("validation-failed", message))
 }
 pub fn unavailable() -> ApiError {
     ApiError {
@@ -632,6 +632,7 @@ mod tests {
     async fn observation_paired_session_transport_reader_doctor_and_body_limits() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(
@@ -640,6 +641,7 @@ mod tests {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0u64).0,
             node: "observations-test".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: root.path().join("unused"),
@@ -656,7 +658,7 @@ mod tests {
         let credential = "observation-credential";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: grant.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/test".into()),
@@ -772,7 +774,7 @@ mod tests {
         );
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: grant.into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/test".into()),

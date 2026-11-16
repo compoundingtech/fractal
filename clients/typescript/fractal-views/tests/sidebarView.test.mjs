@@ -5,8 +5,13 @@ import { build, nodeKey, canPlace, planMove, rollup } from '@fractal/views/sideb
 import { build as publicBuild } from '@fractal/views';
 import { project } from '../../../../apps/fractal-web/src/folders/core.mts';
 import * as Schema from '@fractal/client/schema';
+import { checkEnvelope, checkFixtures } from '../../../../scripts/check-sidebar-fixtures.mjs';
 
-const fixtures = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/sidebar-v2.json', import.meta.url), 'utf8'));
+const fixtures = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/sidebar/behavior-v1.json', import.meta.url), 'utf8'));
+checkFixtures();
+test('behavior schema rejects unknown fields, versions, cardinalities and invalid scalar bounds', () => {
+  for (const mutate of [v => { v.cases[0].unknown = true; }, v => { v.schemaVersion = 2; }, v => { v.cases[0].events.push(v.cases[0].events[0]); }, v => { v.cases[0].checkpoints.push(v.cases[0].checkpoints[0]); }, v => { v.cases[0].name = ''; }, v => { Object.values(v.cases[1].checkpoints[0].rollup)[0].needsYou = -1; }]) { const invalid = structuredClone(fixtures); mutate(invalid); assert.throws(() => checkEnvelope(invalid)); }
+});
 const folder = id => ({ _tag: 'Folder', id });
 const subject = subject => ({ _tag: 'Subject', subject });
 const root = { _tag: 'Root' };
@@ -15,7 +20,7 @@ const built = (arrangement, inventory = []) => {
   assert.equal(result._tag, 'Built');
   return result.tree;
 };
-const empty = () => structuredClone(fixtures.cases.find(value => value.name === 'empty').arrangement);
+const empty = () => structuredClone(fixtures.cases.find(value => value.name === 'empty').initial.arrangement);
 const addFolder = (arrangement, id, parent = null, key = 'a0') => {
   arrangement.body.folders[id] = {
     name: { value: id, revision: 'claim/name' },
@@ -25,25 +30,25 @@ const addFolder = (arrangement, id, parent = null, key = 'a0') => {
   arrangement.resolved.parents[id] = parent;
 };
 
-assert.equal(fixtures.scope, 'folder-only-v1');
 for (const fixture of fixtures.cases) {
+  const { initial: { arrangement }, catalog, events: [event], checkpoints: [checkpoint] } = fixture;
   test(`shared sidebar strict Arrangement schema: ${fixture.name}`, () => {
-    assert.doesNotThrow(() => Schema.decodeUnknownSync(Schema.Arrangement, 'strict')(fixture.arrangement));
+    assert.doesNotThrow(() => Schema.decodeUnknownSync(Schema.Arrangement, 'strict')(arrangement));
   });
   test(`shared sidebar: ${fixture.name}`, () => {
-    const tree = built(fixture.arrangement, fixture.inventory);
-    assert.deepEqual({ ...tree, nodes: Object.fromEntries(tree.nodes) }, fixture.expected);
+    const tree = built(arrangement, catalog);
+    assert.deepEqual({ ...tree, nodes: Object.fromEntries(tree.nodes) }, checkpoint.tree);
     // Fixed synthetic stamps are fixture adapters, never production revision chronology.
     const at = [1, 0, 'writer'];
     const doc = {
-      folders: Object.fromEntries(Object.entries(fixture.arrangement.body.folders).map(([id, value]) => [id, {
+      folders: Object.fromEntries(Object.entries(arrangement.body.folders).map(([id, value]) => [id, {
         name: { value: value.name.value, at },
         position: { ...value.position.value, at },
         ...(value.tombstone === null ? {} : { deleted: at }),
       }])),
-      placements: Object.fromEntries(Object.entries(fixture.arrangement.body.placements).map(([id, value]) => [id, { ...value.value, at }])),
+      placements: Object.fromEntries(Object.entries(arrangement.body.placements).map(([id, value]) => [id, { ...value.value, at }])),
     };
-    const subjects = new Set([...fixture.inventory, ...Object.keys(doc.placements)]);
+    const subjects = new Set([...catalog, ...Object.keys(doc.placements)]);
     const current = project(doc, subjects, { rootOrder: 'placement' });
     const currentFolder = value => ({ id: value.id, folders: value.folders.map(currentFolder), members: value.members });
     const seamFolder = node => {
@@ -58,11 +63,14 @@ for (const fixture of fixtures.cases) {
       folders: tree.roots.filter(node => node._tag === 'Folder').map(seamFolder),
       unfiled: tree.roots.filter(node => node._tag === 'Subject').map(node => node.subject),
     }, { folders: current.folders.map(currentFolder), unfiled: current.unfiled });
-    for (const move of fixture.moves) {
-      assert.deepEqual(planMove(tree, move.intent), move.result);
-      assert.deepEqual(canPlace(tree, move.intent), move.result._tag === 'Planned' ? { _tag: 'Allowed' } : move.result);
+    assert.equal(event.type, 'ProjectAndPlanV1');
+    assert.equal(event.moves.length, checkpoint.moves.length);
+    for (const [index, intent] of event.moves.entries()) {
+      const result = checkpoint.moves[index];
+      assert.deepEqual(planMove(tree, intent), result);
+      assert.deepEqual(canPlace(tree, intent), result._tag === 'Planned' ? { _tag: 'Allowed' } : result);
     }
-    assert.deepEqual(Object.fromEntries(rollup(tree, new Set(fixture.needsYou))), fixture.rollup);
+    assert.deepEqual(Object.fromEntries(rollup(tree, new Set(event.needsYou))), checkpoint.rollup);
   });
 }
 

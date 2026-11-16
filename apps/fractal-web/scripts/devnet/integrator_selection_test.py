@@ -2,6 +2,7 @@
 """Filesystem/API-boundary coverage for bounded, cached PR selection."""
 import contextlib
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -56,6 +57,450 @@ class SelectionTest(unittest.TestCase):
             (build / 'build-receipt.json').write_text(json.dumps({'buildIdentity': {'rev': sha}}))
         self.module.recovery_select_build('b' * 40)
         return str(self.module.P / 'builds' / ('a' * 40))
+
+    @contextlib.contextmanager
+    def metadata_repository(self, empty=False):
+        """Use real git patches; only external member/install/generator work is stubbed."""
+        module = self.module
+        module.C.mkdir(parents=True)
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+
+        def git(*args, capture=False, check=True, stable_messages=False):
+            git_env = {**env, 'LC_ALL': 'C', 'LANGUAGE': 'C'} if stable_messages else env
+            return subprocess.run(['git', '-C', str(module.C), *map(str, args)],
+                                  capture_output=True, text=True, check=check, env=git_env)
+
+        git('init')
+        git('config', 'user.name', 'Metadata Test')
+        git('config', 'user.email', 'metadata@example.invalid')
+        outputs = ('.github/workflows/fleet.yml', '.github/workflows/main-upkeep.yml')
+        (module.C / 'megarepo.kdl').write_text('members {}\n')
+        (module.C / 'megarepo.lock').write_text('{"members": {}}\n')
+        for name in outputs:
+            target = module.C / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('base\n')
+        git('add', '.')
+        git('commit', '-m', 'base')
+        base = git('rev-parse', 'HEAD', capture=True).stdout.strip()
+
+        def regenerate():
+            # A stale cache must not change even the still-applicable first file.
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            if not empty:
+                for name in outputs:
+                    self.assertNotEqual((module.C / name).read_text(), 'generated\n')
+                    (module.C / name).write_text('generated\n')
+                git('add', '.')
+                git('commit', '-m', 'regenerated')
+            module.install()
+
+        with patch.object(module, 'git', side_effect=git), \
+                patch.object(module, 'run'), \
+                patch.object(module, 'install') as install, \
+                patch.object(module, 'regenerate', side_effect=regenerate) as generator:
+            module.prepare_dependencies()
+            cache, = (module.L / 'metadata-cache').iterdir()
+            git('restore', '--source', base, '--staged', '--worktree', '--', *outputs)
+            if not empty:
+                git('commit', '-m', 'restore generator base')
+            generator.reset_mock()
+            install.reset_mock()
+            yield git, outputs, cache, generator, install
+
+    def test_stale_metadata_check_forces_c_messages_under_foreign_locale(self):
+        real_git, real_run = self.module.git, self.module.run
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            (self.module.C / outputs[1]).write_text('main changed output only\n')
+            git('add', '.')
+            git('commit', '-m', 'output change')
+            checked = []
+
+            def dispatch(*args, **kwargs):
+                if args[:3] == ('apply', '--check', '--index'):
+                    # Exercise the real git -> run -> host-git.py -> Git chain.
+                    with patch.object(self.module, 'run', side_effect=real_run):
+                        result = real_git(*args, **kwargs)
+                    checked.append(result)
+                    return result
+                return git(*args, **kwargs)
+
+            # C is always available; the inherited German locale need not be
+            # installed because this check must override it before launching Git.
+            with patch.dict(os.environ, LANG='de_DE.UTF-8', LC_ALL='de_DE.UTF-8', LANGUAGE='de'), \
+                    patch.object(self.module, 'git', side_effect=dispatch), \
+                    patch.object(subprocess, 'run', wraps=subprocess.run) as processes:
+                self.module.prepare_dependencies()
+                with patch.object(self.module, 'run', side_effect=real_run):
+                    real_git('status', '--porcelain', capture=True)
+                self.assertEqual(os.environ['LC_ALL'], 'de_DE.UTF-8')
+                self.assertEqual(os.environ['LANGUAGE'], 'de')
+            self.assertEqual(len(checked), 1)
+            self.assertIn('patch does not apply', checked[0].stderr)
+            host_calls = [call for call in processes.call_args_list
+                          if 'host-git.py' in str(call.args[0])]
+            host_check, = [call for call in host_calls if '--check' in call.args[0]]
+            self.assertEqual(host_check.kwargs['env']['LC_ALL'], 'C')
+            self.assertEqual(host_check.kwargs['env']['LANGUAGE'], 'C')
+            host_status, = [call for call in host_calls if 'status' in call.args[0]]
+            self.assertEqual(host_status.kwargs['env']['LC_ALL'], 'de_DE.UTF-8')
+            self.assertEqual(host_status.kwargs['env']['LANGUAGE'], 'de')
+            generator.assert_called_once_with()
+            install.assert_called_once_with()
+            self.assertIn('-main changed output only', cache.read_text())
+
+    def test_stale_metadata_patch_regenerates_and_replaces_cache(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            old_patch = cache.read_text()
+            (self.module.C / outputs[1]).write_text('main changed output only\n')
+            git('add', '.')
+            git('commit', '-m', 'output change with unchanged generator inputs')
+            row = {'included': [], 'skipped': []}
+            with patch.object(self.module, 'stamp'), \
+                    patch.object(self.module, 'build', return_value=subprocess.CompletedProcess([], 0)) as build:
+                self.assertTrue(self.module.build_candidate(row, 'overlay', []))
+            build.assert_called_once_with('live-r3')
+            self.assertEqual(row['sha'], git('rev-parse', 'HEAD', capture=True).stdout.strip())
+            generator.assert_called_once_with()
+            install.assert_called_once_with()
+            self.assertNotEqual(cache.read_text(), old_patch)
+            self.assertIn('-main changed output only', cache.read_text())
+            for name in outputs:
+                self.assertEqual((self.module.C / name).read_text(), 'generated\n')
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            self.assertEqual(list(cache.parent.iterdir()), [cache])
+
+    def test_valid_metadata_patch_reuses_cache(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            old_patch = cache.read_text()
+            self.module.prepare_dependencies()
+            generator.assert_not_called()
+            install.assert_called_once_with()
+            self.assertEqual(cache.read_text(), old_patch)
+            for name in outputs:
+                self.assertEqual((self.module.C / name).read_text(), 'generated\n')
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            self.assertIn('reuse generated dependency metadata',
+                          git('log', '-1', '--format=%s', capture=True).stdout)
+
+    def test_empty_metadata_patch_still_installs_without_regeneration(self):
+        with self.metadata_repository(empty=True) as (git, outputs, cache, generator, install):
+            before = git('rev-parse', 'HEAD', capture=True).stdout
+            self.module.prepare_dependencies()
+            generator.assert_not_called()
+            install.assert_called_once_with()
+            self.assertEqual(cache.read_text(), '')
+            self.assertEqual(git('rev-parse', 'HEAD', capture=True).stdout, before)
+
+    def test_stale_metadata_patch_does_not_hide_regeneration_failure(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            old_patch = cache.read_text()
+            (self.module.C / outputs[1]).write_text('main changed output only\n')
+            git('add', '.')
+            git('commit', '-m', 'output change')
+            generator.side_effect = subprocess.CalledProcessError(1, ['generator'])
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.module.prepare_dependencies()
+            self.assertEqual(cache.read_text(), old_patch)
+            self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            install.assert_not_called()
+
+    def failed_metadata_tick(self):
+        """Exercise metadata errors inside the tick's persisted failure boundary."""
+        with patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                patch.object(self.module, 'run', return_value=self.response([])), \
+                patch.object(self.module, 'prepare_clone', side_effect=self.module.prepare_dependencies), \
+                patch.object(self.module, 'observe_served'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(row['build'], 'failed')
+        self.assertIsNone(row['sha'])
+        return row
+
+    def test_corrupt_metadata_patch_fails_tick_with_git_diagnostics(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            valid = cache.read_text()
+            for content, message in (
+                    ('not a patch\n', 'No valid patches in input'),
+                    (valid.rsplit('\n', 2)[0] + '\n', 'corrupt patch at'),
+                    ('@@ -1 +1 @@\n-base\n+generated\n', 'patch fragment without header')):
+                with self.subTest(message=message):
+                    cache.write_text(content)
+                    checked = git('apply', '--check', '--index', cache, capture=True, check=False)
+                    self.assertNotEqual(checked.returncode, 0)
+                    self.assertIn(message, checked.stderr)
+                    row = self.failed_metadata_tick()
+                    self.assertIn(checked.stderr, row['error'])
+                    self.assertIn('stdout:', row['error'])
+                    self.assertEqual(cache.read_text(), content)
+                    self.assertEqual(git('status', '--porcelain', capture=True).stdout, '')
+            generator.assert_not_called()
+            install.assert_not_called()
+
+    def test_unreadable_metadata_entry_fails_tick_without_regeneration(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            cache.unlink()
+            cache.mkdir()
+            row = self.failed_metadata_tick()
+            self.assertIn('Is a directory', row['error'])
+            self.assertTrue(cache.is_dir())
+            self.assertEqual(list(cache.iterdir()), [])
+            generator.assert_not_called()
+            install.assert_not_called()
+
+    def test_mixed_metadata_check_diagnostics_are_fatal(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            original = cache.read_text()
+            for stdout, stderr in (
+                    ('', 'error: file: patch does not apply\nerror: unknown failure\n'),
+                    ('unexpected stdout\n', 'error: file: patch does not apply\n')):
+                def mixed_git(*args, **kwargs):
+                    if args[:3] == ('apply', '--check', '--index'):
+                        return subprocess.CompletedProcess(args, 1, stdout, stderr)
+                    return git(*args, **kwargs)
+
+                with self.subTest(stdout=stdout), patch.object(self.module, 'git', side_effect=mixed_git):
+                    row = self.failed_metadata_tick()
+                self.assertIn(stderr, row['error'])
+                self.assertIn(stdout, row['error'])
+                self.assertEqual(cache.read_text(), original)
+            generator.assert_not_called()
+            install.assert_not_called()
+
+    def test_capacity_sandbox_cli_preserves_nix_tempfail(self):
+        sandbox = self.module.candidate_sandbox
+        for code in (75, 1):
+            with self.subTest(code=code), \
+                    patch('sys.argv', ['candidate_sandbox.py', '--worktree', str(self.root), '--', 'true']), \
+                    patch.object(sandbox, 'validate_configuration'), \
+                    patch.object(sandbox, 'run',
+                                 side_effect=subprocess.CalledProcessError(code, ['nix', 'build'])), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                sandbox.main()
+            self.assertEqual(raised.exception.code, code)
+
+    @contextlib.contextmanager
+    def capacity_tick(self, codes, preparation_error=None):
+        """Exercise real build/probe/cache handling inside the tick error boundary."""
+        self.activation_builds()
+        previous = (self.module.P / 'current').resolve()
+        info = self.module.C / '.git/info'
+        info.mkdir(parents=True)
+        (info / 'exclude').write_text('')
+        build_root = self.root / 'build-root'
+        build_root.mkdir()
+        codes = iter(codes)
+        commands = []
+
+        def run(args, **kwargs):
+            if args[0] == 'gh':
+                return self.response([])
+            commands.append(args)
+            return subprocess.CompletedProcess(args, next(codes))
+
+        def candidate():
+            row = {'included': [{'pr': 10}], 'skipped': []}
+            self.candidate_row = row
+            if self.module.build_candidate(row, 'overlay',
+                    [{'sha': 'a' * 40, 'pr': None}, {'sha': 'b' * 40, 'pr': 10}]):
+                # End the tick after the real candidate path, without deployment.
+                raise RuntimeError('candidate completed')
+
+        with patch.dict(os.environ, FRACTAL_BUILD_ROOT=str(build_root),
+                        FRACTAL_BUILD_SNAPSHOT_ROOT=str(self.root / 'snapshots')), \
+                patch.object(self.module, 'run', side_effect=run), \
+                patch.object(self.module, 'prepare_clone', side_effect=candidate), \
+                patch.object(self.module, 'prepare_dependencies', side_effect=preparation_error), \
+                patch.object(self.module, 'stamp'), \
+                patch.object(self.module, 'text', return_value='b' * 40), \
+                patch.object(self.module, 'candidate_key', return_value='same-tree'), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            yield commands
+        self.assertEqual((self.module.P / 'current').resolve(), Path(previous))
+
+    def capacity_row(self):
+        row = json.loads((self.module.L / 'live-r3.jsonl').read_text().splitlines()[-1])
+        self.assertEqual(row['build'], 'capacity-refused')
+        self.assertEqual(row['reason'], 'capacity-refused')
+        self.assertTrue(row['retryable'])
+        self.assertIn('previous build retained', row['error'])
+        self.assertFalse((self.module.L / 'live-r3-tree-cache.json').exists())
+        self.assertEqual(row['skipped'], [])
+        return row
+
+    def test_capacity_precheck_refuses_before_selection_or_candidate_writes(self):
+        self.activation_builds()
+        previous = (self.module.P / 'current').resolve()
+        self.module.atomic_json(self.module.S / 'steward/last-skips.json', {'previous': 'selection'})
+        self.module.atomic_json(self.module.L / 'live-r3-state.json', {'previous': 'state'})
+        before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        error = subprocess.CalledProcessError(75, ['nix', 'eval', '--expr', 'null'],
+                                             stderr='memory pressure')
+        responses = [
+            subprocess.CompletedProcess([], 0, 'https://example.test', ''),
+            self.response({'rev': 'b' * 40}),
+        ] * 2
+        with patch.object(self.module.candidate_sandbox, 'capacity_precheck', side_effect=error), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration') as configuration, \
+                patch.object(self.module, 'run') as run, \
+                patch.object(self.module, 'git') as git, \
+                patch.object(self.module, 'prepare_clone') as prepare, \
+                patch.object(self.module, 'publish_skips') as publish, \
+                patch.object(self.module.subprocess, 'run', side_effect=responses), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.module.tick()
+        row = self.capacity_row()
+        self.assertEqual(row['servedSha'], 'b' * 40)
+        self.assertEqual(row['localServedSha'], 'b' * 40)
+        self.assertIsNone(row['current'])
+        self.assertIsNone(row['sha'])
+        self.assertIsNone(row['main'])
+        self.assertEqual(row['selection'], [])
+        for operation in (configuration, run, git, prepare, publish):
+            operation.assert_not_called()
+        self.assertEqual((self.module.P / 'current').resolve(), previous)
+        after = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        self.assertEqual(set(after) - set(before),
+                         {self.module.L / 'live-r3.lock', self.module.L / 'live-r3.jsonl'})
+        self.assertEqual({path: after[path] for path in before}, before)
+        self.assertEqual(after[self.module.L / 'live-r3.lock'], b'')
+
+    def test_healthy_unchanged_build_followed_by_repeated_precheck_refusals(self):
+        self.activation_builds()
+        sha = 'b' * 40
+        info = self.module.C / '.git/info'
+        info.mkdir(parents=True)
+        (info / 'exclude').write_text('')
+        signature = hashlib.sha256(json.dumps([
+            self.module.INTEGRATOR_VERSION, sha, [], 'overlay', [], None, None,
+        ]).encode()).hexdigest()
+        self.module.atomic_json(self.module.L / 'live-r3-state.json', {
+            'signature': signature, 'sha': sha, 'included': [], 'skipped': [],
+            'pinnedBase': None,
+        })
+        error = subprocess.CalledProcessError(75, ['nix', 'eval', '--expr', 'null'])
+        responses = [
+            subprocess.CompletedProcess([], 0, 'https://example.test', ''),
+            self.response({'rev': sha}),
+        ] * 8  # recovery_previous also observes both served identities.
+        with patch.object(self.module.candidate_sandbox, 'capacity_precheck',
+                          side_effect=[None, error, error]), \
+                patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
+                patch.object(self.module, 'run', return_value=self.response([])), \
+                patch.object(self.module, 'git'), \
+                patch.object(self.module, 'prepare_clone'), \
+                patch.object(self.module, 'text', return_value=sha), \
+                patch.object(self.module, 'digest', return_value='overlay'), \
+                patch.object(self.module, 'activate', return_value='https://example.test'), \
+                patch.object(self.module.subprocess, 'run', side_effect=responses), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(3):
+                self.module.tick()
+        rows = [json.loads(line) for line in
+                (self.module.L / 'live-r3.jsonl').read_text().splitlines()]
+        self.assertEqual(rows[0]['reason'], 'unchanged')
+        self.assertTrue(rows[0]['current'])
+        self.assertEqual(rows[0]['sha'], sha)
+        for row in rows[1:]:
+            self.assertEqual(row['build'], 'capacity-refused')
+            self.assertEqual(row['reason'], 'capacity-refused')
+            self.assertTrue(row['retryable'])
+            self.assertIsNone(row['sha'])
+            self.assertIsNone(row['main'])
+            self.assertIsNone(row['current'])
+            self.assertEqual(row['servedSha'], sha)
+            self.assertEqual(row['localServedSha'], sha)
+
+    def test_in_build_refusal_preserves_observed_current(self):
+        observe = self.module.observe_served
+
+        def observe_candidate(row):
+            # capacity_tick runs the candidate on a separate row at prepare_clone.
+            row['sha'] = self.candidate_row['sha']
+            observe(row)
+
+        responses = [
+            subprocess.CompletedProcess([], 0, 'https://example.test', ''),
+            self.response({'rev': 'b' * 40}),
+        ] * 2
+        with self.capacity_tick([75]), \
+                patch.object(self.module, 'observe_served', side_effect=observe_candidate), \
+                patch.object(self.module.subprocess, 'run', side_effect=responses):
+            self.module.tick()
+        row = self.capacity_row()
+        self.assertIs(row['current'], False)
+        self.assertEqual(row['sha'], 'b' * 40)
+        self.assertEqual(row['servedSha'], 'b' * 40)
+        self.assertEqual(row['localServedSha'], 'b' * 40)
+
+    def test_capacity_precheck_pass_preserves_candidate_build_path(self):
+        with self.capacity_tick([0]) as commands, \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck') as precheck:
+            self.module.tick()
+        precheck.assert_called_once_with()
+        self.assertEqual(len(commands), 1)
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['same-tree']['outcome'], 'built')
+
+    def test_capacity_precheck_uses_bootstrap_nix_wrapper_without_filesystem_setup(self):
+        sandbox = self.module.candidate_sandbox
+        with patch.object(sandbox.shutil, 'which', return_value='/policy-bin/nix'), \
+                patch.object(sandbox.subprocess, 'run', return_value=self.response(None)) as run:
+            sandbox.capacity_precheck()
+        args, kwargs = run.call_args
+        self.assertEqual(args[0], ['/policy-bin/nix', 'eval', *sandbox.NIX_OPTIONS, '--expr', 'null'])
+        self.assertEqual(kwargs['cwd'], sandbox.TRUSTED_CHECKOUT)
+        self.assertEqual(kwargs['env']['PATH'], '/policy-bin')
+        self.assertEqual(kwargs['env']['HOME'], '/nonexistent')
+        self.assertTrue(kwargs['check'])
+
+    def test_capacity_helper_exit_is_retryable_without_cache_or_attribution(self):
+        with self.capacity_tick([75, 1, 75]), patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+            self.capacity_row()
+            attribution.assert_not_called()
+            # A later refusal while rebuilding an attributed/reduced tree is also
+            # capacity, and must not persist the tentative failure or PR ejection.
+            attribution.return_value = 1
+            with patch.object(self.module, 'candidate_key', side_effect=['full', 'reduced']):
+                self.module.tick()
+            self.capacity_row()
+            self.assertEqual(self.candidate_row['included'], [{'pr': 10}])
+            self.assertEqual(self.candidate_row['skipped'], [])
+
+    def test_capacity_candidate_nix_exception_is_retryable_without_cache_or_attribution(self):
+        error = subprocess.CalledProcessError(75, ['/policy-bin/nix', 'build', 'bubblewrap'])
+        with self.capacity_tick([], preparation_error=error) as commands, \
+                patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+        self.capacity_row()
+        self.assertEqual(commands, [])
+        attribution.assert_not_called()
+
+    def test_capacity_same_tree_retries_on_later_tick(self):
+        with self.capacity_tick([75, 0]) as commands, \
+                patch.object(self.module, 'first_break') as attribution:
+            self.module.tick()
+            self.capacity_row()
+            self.module.tick()
+        self.assertEqual(len(commands), 2)
+        cached = json.loads((self.module.L / 'live-r3-tree-cache.json').read_text())
+        self.assertEqual(cached['same-tree']['outcome'], 'built')
+        attribution.assert_not_called()
+
+    def test_capacity_probe_aborts_attribution_without_caching_or_ejecting(self):
+        with self.capacity_tick([1, 75]) as commands:
+            self.module.tick()
+        self.capacity_row()
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(commands[-1][-1].startswith('live-r3-probe-'))
 
     def test_existing_main_probe_ejects_breaking_pr_and_keeps_later_pr(self):
         main, broken, later = ('a' * 40, 'b' * 40, 'c' * 40)
@@ -152,6 +597,38 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(len(set(names)), 2)
         self.assertTrue(all(not (build_root / name).exists() for name in names))
         self.assertTrue(receipt.exists())
+
+    def test_probe_relative_roots_use_build_helper_cwd(self):
+        script_dir = self.root / 'helper'
+        process_cwd = self.root / 'caller'
+        for directory in (script_dir, process_cwd):
+            (directory / 'build-root').mkdir(parents=True)
+            (directory / 'snapshots').mkdir()
+        names = []
+
+        def build(name):
+            names.append(name)
+            self.assertTrue(name.startswith('live-r3-probe-'))
+            self.assertTrue((script_dir / 'build-root' / name).is_dir())
+            self.assertFalse((process_cwd / 'build-root' / name).exists())
+            (script_dir / 'snapshots' / name).mkdir()
+            (process_cwd / 'snapshots' / name).mkdir()
+            return subprocess.CompletedProcess([], 0)
+
+        with contextlib.chdir(process_cwd), \
+                patch.object(self.module, 'SCRIPT_DIR', script_dir), \
+                patch.dict(os.environ, FRACTAL_BUILD_ROOT='build-root',
+                           FRACTAL_BUILD_SNAPSHOT_ROOT='snapshots'), \
+                patch.object(self.module, 'git') as git, \
+                patch.object(self.module, 'prepare_dependencies') as prepare, \
+                patch.object(self.module, 'build', side_effect=build) as build_probe:
+            self.assertTrue(self.module.probe_revision('a' * 40))
+        git.assert_called_once_with('checkout', '--detach', 'a' * 40)
+        prepare.assert_called_once_with()
+        build_probe.assert_called_once_with(names[0])
+        self.assertFalse((script_dir / 'build-root' / names[0]).exists())
+        self.assertFalse((script_dir / 'snapshots' / names[0]).exists())
+        self.assertTrue((process_cwd / 'snapshots' / names[0]).is_dir())
 
     def test_tree_cache_identity_changes_with_integrator_version(self):
         with patch.object(self.module, 'text', return_value='tree'):
@@ -408,6 +885,7 @@ class SelectionTest(unittest.TestCase):
         with patch.object(self.module, 'run', side_effect=self.module.SelectionDeadline('expired')), \
                 patch.object(self.module, 'observe_served', side_effect=observed), \
                 patch.object(self.module, 'prepare_clone', side_effect=AssertionError('candidate mutated')), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.module.tick()
@@ -436,6 +914,7 @@ class SelectionTest(unittest.TestCase):
                              side_effect=[None, None, 'https://old.invalid']), \
                 patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
                 patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.module.tick()
@@ -470,6 +949,7 @@ class SelectionTest(unittest.TestCase):
                 log = io.StringIO()
                 with patch.object(self.module, 'run', side_effect=run), \
                         patch.object(self.module, 'observe_served'), \
+                        patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                         patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                         contextlib.redirect_stdout(log):
                     self.module.tick()
@@ -509,6 +989,7 @@ class SelectionTest(unittest.TestCase):
                 patch.object(self.module, 'prepare_clone',
                              side_effect=lambda: self.module.git('checkout', 'missing-branch')), \
                 patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -545,6 +1026,7 @@ class SelectionTest(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), \
                 patch.object(self.module, 'run', side_effect=run), \
                 patch.object(self.module, 'observe_served'), \
+                patch.object(self.module.candidate_sandbox, 'capacity_precheck'), \
                 patch.object(self.module.candidate_sandbox, 'validate_configuration'), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.module.tick()
@@ -557,6 +1039,105 @@ class SelectionTest(unittest.TestCase):
             self.module.prepare_clone()
         self.assertEqual(self.module.text('config', '--local', 'user.name'), 'Deployment Bot')
         self.assertEqual(self.module.text('config', '--local', 'user.email'), 'bot@example.invalid')
+        self.assertEqual(self.module.text('config', '--local', 'gc.auto'), '0')
+        self.assertEqual(self.module.text('config', '--local', 'maintenance.auto'), 'false')
+
+    def test_clone_maintenance_is_daily_and_failures_are_nonfatal(self):
+        row = {}
+        failure = subprocess.CalledProcessError(1, ['git', 'gc'], stderr='fixture gc failure')
+        with patch.object(self.module, 'git', side_effect=[self.response([]), failure, self.response([]), self.response([])]) as git, \
+                patch.object(self.module.time, 'time', return_value=100000):
+            self.module.maintain_clone(row)
+            self.module.maintain_clone(row)
+        self.assertEqual(git.call_count, 4)
+        self.assertEqual(git.call_args_list[0].args, ('prune', '--expire=2.weeks.ago'))
+        self.assertEqual(git.call_args_list[1].args, ('gc', '--cruft', '--prune=2.weeks.ago'))
+        self.assertEqual(git.call_args_list[2].args, ('repack', '-d', '--geometric=2'))
+        self.assertEqual(git.call_args_list[3].args[-2:], ('rerere', 'gc'))
+        self.assertEqual(row['maintenanceErrors'][0]['detail'], 'fixture gc failure')
+        with patch.object(self.module, 'git') as git, \
+                patch.object(self.module.time, 'time', return_value=186400):
+            self.module.maintain_clone(row)
+        self.assertEqual(git.call_count, 3)
+        self.assertNotIn(('gc', '--cruft', '--prune=2.weeks.ago'), [call.args for call in git.call_args_list])
+        with patch.object(self.module, 'git') as git, \
+                patch.object(self.module.time, 'time', return_value=100000 + 30 * 86400):
+            self.module.maintain_clone(row)
+        self.assertEqual(git.call_count, 4)
+
+    def test_real_maintenance_preserves_base_pack_and_prunes_old_rerere(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            self.module.atomic_json(self.module.L/f'{self.module.C.name}-git-full-gc.json',
+                                    {'attemptedAt': self.module.time.time()})
+            git('repack', '-ad')
+            packs = list((self.module.C / '.git/objects/pack').glob('*.pack'))
+            self.assertEqual(len(packs), 1)
+            base = packs[0]
+            before = (base.stat().st_ino, base.stat().st_mtime_ns, base.read_bytes())
+            git('commit', '--allow-empty', '-m', 'small increment')
+            rr = self.module.C / '.git/rr-cache'
+            for name, age, resolved in (('a', 8, False), ('b', 61, True), ('c', 1, True)):
+                record = rr / (name * 40)
+                record.mkdir(parents=True)
+                for image in ('preimage', 'postimage') if resolved else ('preimage',):
+                    target = record / image
+                    target.write_text('fixture\n')
+                    old = self.module.time.time() - age * 86400
+                    os.utime(target, (old, old))
+            row = {}
+            self.module.maintain_clone(row)
+            self.assertNotIn('maintenanceErrors', row)
+            self.assertEqual(before, (base.stat().st_ino, base.stat().st_mtime_ns, base.read_bytes()))
+            self.assertFalse((rr / ('a' * 40)).exists())
+            self.assertFalse((rr / ('b' * 40)).exists())
+            self.assertTrue((rr / ('c' * 40) / 'postimage').exists())
+
+    def test_monthly_collection_expires_packed_garbage_but_keeps_fresh_objects(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            stale = self.module.C / 'stale-input'
+            stale.write_text('stale unreachable blob\n')
+            old_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            pack_root = self.module.C / '.git/objects/pack'
+            pack_root.mkdir(exist_ok=True)
+            packed = subprocess.run(['git', '-C', str(self.module.C), 'pack-objects',
+                                     str(pack_root / 'pack')], input=old_oid + '\n',
+                                    text=True, capture_output=True, check=True).stdout.strip()
+            old = self.module.time.time() - 30 * 86400
+            os.utime(pack_root / f'pack-{packed}.pack', (old, old))
+            git('prune-packed')
+            stale.write_text('fresh unreachable blob\n')
+            fresh_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            stale.write_text('stale loose blob\n')
+            loose_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            loose = self.module.C / '.git/objects' / loose_oid[:2] / loose_oid[2:]
+            os.utime(loose, (old, old))
+            row = {}
+            self.module.maintain_clone(row)
+            self.assertNotIn('maintenanceErrors', row)
+            for oid in (old_oid, loose_oid):
+                self.assertNotEqual(git('cat-file', '-e', oid, check=False).returncode, 0)
+            self.assertEqual(git('cat-file', '-e', fresh_oid, check=False).returncode, 0)
+
+    def test_abandoned_merge_clears_unresolved_rerere_variants(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            git('config', 'rerere.enabled', 'true')
+            git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+            target = self.module.C / 'conflict.txt'
+            target.write_text('base\n')
+            git('add', 'conflict.txt'); git('commit', '-m', 'conflict base')
+            git('branch', 'other')
+            target.write_text('ours\n')
+            git('add', 'conflict.txt'); git('commit', '-m', 'ours')
+            ours = git('rev-parse', 'HEAD', capture=True).stdout.strip()
+            git('checkout', 'other')
+            target.write_text('theirs\n')
+            git('add', 'conflict.txt'); git('commit', '-m', 'theirs')
+            git('checkout', '--detach', ours)
+            self.assertNotEqual(git('merge', 'other', check=False).returncode, 0)
+            rr = self.module.C / '.git/rr-cache'
+            self.assertTrue(list(rr.glob('*/preimage*')))
+            self.module.prepare_clone()
+            self.assertFalse(list((self.module.L / 'live-r3-rerere').glob('*/preimage*')))
 
     def test_oversized_pr_is_skipped_without_api_or_cache_and_selection_continues(self):
         oversized = dict(self.pr, changedFiles=4058)

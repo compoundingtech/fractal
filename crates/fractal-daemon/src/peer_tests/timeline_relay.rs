@@ -260,11 +260,12 @@ gateway_store
 let secret = root.path().join("fleet-secret");
 fs::write(&secret, [4_u8; 32]).unwrap();
 fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
-let state = crate::api::AppState { seat_admission: Default::default(), owning_person: None,
+let state = crate::api::AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
 store: gateway_store,
 notify: Arc::new(tokio::sync::Notify::new()),
 event_notify: watch::channel(0_u64).0,
 node: "gateway".into(),
+api_socket: root.path().join("api.sock"),
 state_dir: root.path().into(),
 pty_root: root.path().join("pty"),
 pty_binary: "unused-pty".into(),

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
 import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
-import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
+import { frozenTranscript, mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
 
 const at = (seconds: number) => `2026-10-08T12:00:${String(seconds).padStart(2, '0').slice(-2)}.000Z`
 const sender = { kind: 'human', label: 'Reader' } as const
@@ -59,6 +59,12 @@ describe('kit transcript turn mapping', () => {
     ], { firstTurnComplete: true })
     expect(turns[0]!.work.calls[0]).toMatchObject({ kind: 'run', title: 'Checking generated output', argsSummary: undefined })
     expect(turns[0]!.items[0]).toMatchObject({ input: { command: 'echo /srv/example/private\npwd' } })
+  })
+  it('reads an event notice without its kind, and keeps the kind on notices that need it', () => {
+    const text = (kind: 'event' | 'redaction' | 'truncation') => convertConversationItem({ _tag: 'Notice', id: 'notice', kind, text: 'Words' }).content
+    expect(text('event')).toEqual([{ type: 'text', text: 'Words' }])
+    expect(text('redaction')).toEqual([{ type: 'text', text: 'redaction · Words' }])
+    expect(text('truncation')).toEqual([{ type: 'text', text: 'truncation · Words' }])
   })
   it('hides unfamiliar events after answers by default while allowing explicit event inspection', () => {
     const event: ConversationItem = { _tag: 'UnknownEvent', id: 'event', eventType: 'future', data: { payload: 'private-event' } }
@@ -275,6 +281,14 @@ describe('kit transcript turn mapping', () => {
       expect(message.id).toBe(item.id)
       expect(message.metadata?.custom?.item).toBe(item)
     }
+  })
+})
+
+describe('frozen transcript', () => {
+  it('stops streaming thinking so no ring spins in a last-observed snapshot', () => {
+    const live = transcriptTurnsForItems([{ _tag: 'Reasoning', id: 'thinking', text: 'Still thinking', streaming: true, at: at(4) }], { firstTurnComplete: true })
+    const frozen = frozenTranscript(live).turns.flatMap(turn => turn.items)
+    expect(frozen.filter(item => item._tag === 'Reasoning').map(item => item.streaming)).toEqual([false])
   })
 })
 

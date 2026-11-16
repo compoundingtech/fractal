@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-WORKFLOWS = ('Workspace CI', 'Performance', 'Public repository check',
+WORKFLOWS = ('Workspace CI', 'Performance', 'Public repository check', 'Public repository history',
              'Nix', 'macOS CI', 'Fractal tag release', 'fractal-web')
 
 
@@ -93,7 +93,22 @@ def cancel_draft(api, repository, run_id):
     if pull_numbers(api, repository, current) != numbers or not drafts(api, repository, current, numbers):
         return {'decision': 'association-or-readiness-changed', 'run_id': run_id}
     requested_at = time.strftime('%FT%TZ', time.gmtime())
-    api(path + '/cancel', 'POST')
+    try:
+        api(path + '/cancel', 'POST')
+    except HTTPError as error:
+        if error.code != 409:
+            raise
+        # Completion can race the final metadata read. A conflict alone does
+        # not prove closure: reread the same qualified run, without retrying.
+        current = api(path)
+        if identity(current, repository, run_id) != original:
+            raise ValueError('workflow run identity changed after cancellation conflict') from None
+        if current.get('status') != 'completed':
+            raise RuntimeError(
+                f'cancellation conflict: HTTP 409; run {run_id} remains '
+                f'{current.get("status")!r}; terminal completion was not confirmed') from None
+        return {'decision': 'completed-during-request', 'run_id': run_id,
+                'conclusion': current.get('conclusion')}
     return {'decision': 'cancel-request-accepted', 'run_id': run_id,
             'pull_requests': numbers, 'head_sha': run['head_sha'], 'requested_at': requested_at,
             'closure': 'asynchronous; accepted request is not terminal cancellation proof'}
@@ -123,6 +138,8 @@ def main():
                     return None
                 return json.load(response)
         except HTTPError as error:
+            if method == 'POST' and error.code == 409:
+                raise
             raise RuntimeError(f'metadata API {method} failed: HTTP {error.code}') from None
 
     result = cancel_draft(api, repository, int(value))

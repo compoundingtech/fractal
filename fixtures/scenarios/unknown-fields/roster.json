@@ -54,6 +54,7 @@
         "reachability": "local",
         "revision": "ag14",
         "runtime_ids": [
+          "runtime/example-atlas-builder-shell",
           "runtime/example-atlas-builder"
         ],
         "since": "2030-01-01T11:58:00.000Z",

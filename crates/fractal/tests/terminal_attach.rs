@@ -27,12 +27,14 @@ const SCREEN: &[u8] = b"the worker's screen";
 
 pub(crate) fn state(root: &Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("attach-node").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "attach-node".into(),
+        api_socket: root.join("daemon").join("api.sock"),
         state_dir: root.join("daemon"),
         pty_root: root.join("pty"),
         pty_binary: root.join("bin/pty"),

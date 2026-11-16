@@ -39,7 +39,7 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };
@@ -144,6 +144,7 @@ pub mod operations;
 pub mod person_work;
 pub mod reconcile_work_context;
 pub mod resource_preparation;
+pub mod stop_intake;
 pub mod usage_period;
 pub mod work_list;
 pub mod work_summaries_ivm;
@@ -157,6 +158,8 @@ pub mod card_fold_tests;
 pub mod checkpoint_tests;
 #[cfg(test)]
 pub mod convergence;
+#[cfg(test)]
+mod eta_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod delegation_tests_shared_seats;
 #[cfg(test)]
@@ -179,6 +182,8 @@ pub mod tests;
 mod terminal_step_guard_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared_seats;
+#[cfg(test)]
+mod work_claim_production_copy_tests;
 #[cfg(test)]
 pub mod work_renew_tests;
 #[cfg(test)]
@@ -294,9 +299,9 @@ fn item_data_types(
 /// A pull request is reviewed once for each head it is ready at: when it first appears open and
 /// ready, when a draft becomes ready, and when a new head replaces one that was known. Nothing
 /// else starts a review. A closure, a merge, a reopening at the same head, a title edit, and a
-/// field that an older build did not record never do, because st would review a head it already
-/// saw or one nobody can act on. A known item with no known head proves nothing, so a head first
-/// recorded for it is a baseline.
+/// field an older build did not record never do. A positively marked creation receipt has not
+/// observed a head: only its first ready head needs a review. Unmarked head-less priors remain
+/// a baseline, including observations made by older builds.
 fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
     // An item resource names the head `head_sha`; a listing names it `head`.
     let head_of = |item: &Value| {
@@ -319,6 +324,7 @@ fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
     };
     let prior_head = head_of(prior);
     prior.get("draft").and_then(Value::as_bool) == Some(true)
+        || (prior_head.is_none() && prior.get("receipt_only") == Some(&Value::Bool(true)))
         || prior_head.is_some_and(|prior_head| Some(prior_head) != head)
 }
 
@@ -371,6 +377,7 @@ fn item_facts(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    facts.remove("receipt_only");
     for (name, value) in seen.as_object().into_iter().flatten() {
         let name = match name.as_str() {
             "new" => continue,
@@ -559,7 +566,7 @@ pub fn watch_ended_tx(
     connection: &Connection,
     subject: &str,
     watch: &crate::model::WatchSpec,
-) -> Result<Option<Value>, St3Error> {
+) -> Result<Option<Value>, FractalError> {
     smallclaims::touched::note_read(|| subject.to_owned());
     let since = watch.since_unix_ms.to_string();
     let mut statement = connection
@@ -589,7 +596,7 @@ pub fn end_watch_tx(
     watch: &crate::model::WatchSpec,
     reason: &str,
     message: Option<&str>,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     if watch_ended_tx(transaction, subject, watch)?.is_some() {
         return Ok(false);
     }
@@ -620,7 +627,7 @@ pub fn github_post_agent_tx(
     locator: &str,
     kind: &str,
     id: u64,
-) -> Result<Option<String>, St3Error> {
+) -> Result<Option<String>, FractalError> {
     let subject = crate::github_watch::github_post_subject(locator, kind, id);
     let body = connection
         .prepare_cached("SELECT body FROM claims WHERE subject=?1 AND kind='github.posted' LIMIT 1")
@@ -819,7 +826,7 @@ fn agent_working_since_at(
     Ok(since.and_then(|time| time.parse().ok()))
 }
 
-/// The current generation's steps of actor `?1` (every actor when null), with finished and
+/// The current generation's steps of actor spelling JSON `?1` (every actor when null), with finished and
 /// pending ones when `?2`, and agentless ones when `?3` and no actor is named. With `open_only`
 /// the finished steps are left out in SQL, word for word the predicate of
 /// `step_runs_open_index`, so the read covers the fleet's open steps and not every step it ran.
@@ -845,9 +852,9 @@ fn work_at_snapshot_query_of(open_only: bool, selected: &str) -> String {
          WHERE {selected} (agentless=0 OR (?3 AND ?1 IS NULL))
            AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
            AND (?1 IS NULL
-                OR assignee=?1
-                OR lease_owner=?1
-                OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1))
+                OR assignee IN (SELECT value FROM json_each(?1))
+                OR lease_owner IN (SELECT value FROM json_each(?1))
+                OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1))))
            AND (?2 OR status NOT IN ('pending','completed','failed','cancelled'))
            {open}
          ORDER BY created_at_unix_ms, step_path"
@@ -955,14 +962,14 @@ pub trait MissionsStoreCore {
     fn apply_drained_revision(
             &self,
             run: &str,
-        ) -> Result<Option<RevisionSubmissionView>, St3Error>;
+        ) -> Result<Option<RevisionSubmissionView>, FractalError>;
     /// Every reference in a publication that resolves neither in the publication nor here: a
     /// pinned mission revision that is not stored, or a mission, agent or observer that nothing
     /// declares. The publication routes refuse them, and their previews list them as blockers.
     fn unresolved_references(
             &self,
             intent: &NormalizedIntent,
-        ) -> Result<Vec<String>, St3Error>;
+        ) -> Result<Vec<String>, FractalError>;
     /// Drop the history an agreed checkpoint at `cut` would drop on this node.
     #[cfg(any(test, feature = "test-support"))]
     fn trim_checkpoint_for_test(&self, cut: u128) -> usize;
@@ -983,7 +990,7 @@ impl MissionsStoreCore for Store {
     fn apply_drained_revision(
             &self,
             run: &str,
-        ) -> Result<Option<RevisionSubmissionView>, St3Error> {
+        ) -> Result<Option<RevisionSubmissionView>, FractalError> {
         let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
         let proposal = {
             let connection = self.connection.write();
@@ -1069,7 +1076,7 @@ impl MissionsStoreCore for Store {
     fn unresolved_references(
             &self,
             intent: &NormalizedIntent,
-        ) -> Result<Vec<String>, St3Error> {
+        ) -> Result<Vec<String>, FractalError> {
         let connection = self.readers.get();
         crate::references::publication(
             intent,

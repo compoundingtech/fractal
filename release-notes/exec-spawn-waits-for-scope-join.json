@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "An exec started in a systemd user scope now survives a kill of the service that started it from the moment its spawn returns. Before, the spawn returned as soon as `systemd-run` was forked, while it was still in the service's cgroup waiting for the user manager to start its scope, so a control-group SIGKILL of the daemon in that window ended the exec even though its generation was recorded as scoped. Fixes #5493.\n\nIn scope mode, `ExecRuntime::spawn` writes the generation record and then waits until the leader has joined its scope (its /proc cgroup names the unit) or has exited, before it returns. A leader that has not joined within 30s, longer than `systemd-run`'s own 25s bus timeout for requesting the scope (its wait for the start job has none), is still `systemd-run` in its own session: it is SIGKILLed and the spawn fails, so a spawn never returns an exec that can still die with its parent. Detached and degraded modes are unchanged, and PTY spawns already returned only after their server published from inside its scope.\n\nCost: each scoped exec spawn now includes the scope join, measured on a fleet host at load 11-15 over 50 scopes at 5.0ms median, 9.1ms p90 and 34.2ms worst. Start jobs run off the reconcile pass, so the pass itself does not wait.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No store or exec generation record change. The record is written at the same point as before."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or fleet coordination change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Interoperates with the previous release in a mixed-version fleet. The change is local to the host that starts the exec, and nothing on the wire or in the store changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No step is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back restores the window: a spawn returns before its exec has joined its scope."
+  }
+}

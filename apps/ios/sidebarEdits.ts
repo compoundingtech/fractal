@@ -1,4 +1,75 @@
 import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementBodyV1, type ArrangementOperation } from '../../clients/typescript/fractal-client';
+import { nodeKey, sameNode, spread, type Intent, type NodeRef, type Parent, type ProjectionError, type Tree } from './sidebarPlanning';
+
+export type MoveRefusal =
+  | { _tag: 'NodeMissing' | 'Self'; node: NodeRef }
+  | { _tag: 'ParentNotAllowed'; parent: Parent; cause: 'SubjectParentUnsupported' }
+  | { _tag: 'ParentMissing'; parent: Parent; cause: 'Unknown' | 'FolderDeleted' }
+  | { _tag: 'Cycle'; node: NodeRef; parent: Parent; path: { node: NodeRef; source: 'person' | 'fallback' }[] }
+  | { _tag: 'AnchorMoved'; before: NodeRef; parent: Parent; foundUnder?: Parent }
+  | { _tag: 'NoChange'; node: NodeRef; parent: Parent };
+export type V2Plan = { folders: ArrangementOperation[]; memberships: { op: 'place'; member: string; bucket: string | null; key: string }[] };
+export type PlanningError = { _tag: 'Projection'; error: ProjectionError } | { _tag: 'Move'; refusal: MoveRefusal } | { _tag: 'OrderingUnavailable' } | { _tag: 'TooManyOperations'; count: number } | { _tag: 'TooManyBytes'; bytes: number };
+/** Shared move checks also apply to v1; no-change compares both raw and effective parents. */
+export const validateSidebarMove = (tree: Tree, intent: Intent): MoveRefusal | undefined => {
+  const { node, parent, before } = intent, current = tree.nodes[nodeKey(node)];
+  if (!current) return { _tag: 'NodeMissing', node };
+  if (parent._tag === 'Subject') return { _tag: 'ParentNotAllowed', parent, cause: 'SubjectParentUnsupported' };
+  if (sameNode(node, parent)) return { _tag: 'Self', node };
+  const destination = parent._tag === 'Folder' ? tree.nodes[nodeKey(parent)] : undefined;
+  if (parent._tag === 'Folder' && !destination) return { _tag: 'ParentMissing', parent, cause: tree.deletedFolders.includes(parent.id) ? 'FolderDeleted' : 'Unknown' };
+  if (node._tag === 'Folder') {
+    const path: { node: NodeRef; source: 'person' | 'fallback' }[] = [{ node, source: current.source }];
+    let cursor = destination;
+    while (cursor) {
+      path.push({ node: cursor.node, source: cursor.source });
+      if (sameNode(cursor.node, node)) return { _tag: 'Cycle', node, parent, path };
+      cursor = cursor.shownUnder._tag === 'Folder' ? tree.nodes[nodeKey(cursor.shownUnder)] : undefined;
+    }
+  }
+  if (before) {
+    const anchor = tree.nodes[nodeKey(before)];
+    if (sameNode(before, node) || before._tag !== node._tag || !anchor || !sameNode(anchor.shownUnder, parent))
+      return { _tag: 'AnchorMoved', before, parent, ...(anchor ? { foundUnder: anchor.shownUnder } : {}) };
+  }
+  if (sameNode(current.parent, parent) && sameNode(current.shownUnder, parent)) {
+    const siblings = destination?.children ?? tree.roots, at = siblings.findIndex(sibling => sameNode(sibling, node));
+    const next = siblings.slice(at + 1).find(sibling => sibling._tag === node._tag);
+    if (next ? before && sameNode(next, before) : !before) return { _tag: 'NoChange', node, parent };
+  }
+  return undefined;
+};
+/** Exact Place operations; widen the nearest one-sided gap, preferring forward on a tie. */
+export const planSidebarV2 = (tree: Tree | { error: ProjectionError }, intent: Intent): V2Plan | { error: PlanningError } => {
+  if ('error' in tree) return { error: { _tag: 'Projection', error: tree.error } };
+  const refusal = validateSidebarMove(tree, intent);
+  if (refusal) return { error: { _tag: 'Move', refusal } };
+  const siblings = (intent.parent._tag === 'Folder' ? tree.nodes[nodeKey(intent.parent)].children : tree.roots)
+    .filter(node => node._tag === intent.node._tag && !sameNode(node, intent.node));
+  const index = intent.before ? siblings.findIndex(node => sameNode(node, intent.before!)) : siblings.length;
+  const keys = siblings.map(node => tree.nodes[nodeKey(node)].key!);
+  let chosen: { key: string; rekeys: [number, string][] } | undefined;
+  for (let end = index; end <= keys.length; end++) {
+    const placed = spread(keys[index - 1] ?? null, keys[end] ?? null, end - index + 1);
+    if (placed) { chosen = { key: placed[0], rekeys: placed.slice(1).map((key, at) => [index + at, key]) }; break; }
+  }
+  const forward = chosen?.rekeys.length ?? Infinity;
+  for (let start = index - 1; start >= 0 && index - start < forward; start--) {
+    const placed = spread(keys[start - 1] ?? null, keys[index] ?? null, index - start + 1);
+    if (placed) { chosen = { key: placed.at(-1)!, rekeys: placed.slice(0, -1).map((key, at) => [start + at, key]) }; break; }
+  }
+  if (!chosen) return { error: { _tag: 'OrderingUnavailable' } };
+  const count = 1 + chosen.rekeys.length;
+  if (count > 1024) return { error: { _tag: 'TooManyOperations', count } };
+  const parent = intent.parent._tag === 'Folder' ? intent.parent.id : null, plan: V2Plan = { folders: [], memberships: [] };
+  const changes: [NodeRef, string][] = [[intent.node, chosen.key], ...chosen.rekeys.map(([at, key]): [NodeRef, string] => [siblings[at], key])];
+  for (const [node, key] of changes) {
+    if (node._tag === 'Folder') plan.folders.push({ op: 'folder.move', id: node.id, parent, key });
+    else plan.memberships.push({ op: 'place', member: node.subject, bucket: parent, key });
+  }
+  const bytes = new TextEncoder().encode(JSON.stringify(plan.folders.length ? plan.folders : plan.memberships)).length;
+  return bytes > 1048576 ? { error: { _tag: 'TooManyBytes', bytes } } : plan;
+};
 
 /** The sidebar edits version 1 layouts; version 2 arrangements are folder-only and ordered by membership. */
 export type SidebarArrangement = Arrangement & { body: ArrangementBodyV1 };

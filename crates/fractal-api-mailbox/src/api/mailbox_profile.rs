@@ -105,7 +105,7 @@ async fn daemon(root: &Path) {
                                 "content":"Fixture pending mail. ".repeat(16)
                             })))?;
                     }
-                    Ok::<_, St3Error>(())
+                    Ok::<_, FractalError>(())
                 }).await?;
                 signal_visible_change(&state);
                 Ok::<_, ApiError>(Json(json!({"seeded":per_seat})))

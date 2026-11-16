@@ -38,7 +38,9 @@ fn a_second_connection_commit_is_detected_by_the_same_writer_data_version() {
 #[test]
 fn preparation_fence_accepts_only_exact_native_queue_notifier_definitions() {
     let directory = tempfile::tempdir().unwrap();
-    for name in ["preparation_work_pending", "preparation_work_dirty"] {
+    let names = ["preparation_work_pending", "preparation_work_dirty"].into_iter()
+        .chain(custom::work_notifier_definitions().keys().map(String::as_str));
+    for name in names {
         let store = Store::open(&directory.path().join(format!("{name}.sqlite")), "example-notifier-fence").unwrap();
         let writer = store.connection.write();
         assert!(temporary_schema_safe(&writer), "the installed body-free notifiers are eligible");
@@ -53,7 +55,7 @@ fn preparation_fence_accepts_only_exact_native_queue_notifier_definitions() {
 
 // Use the public client admission and the same local AUTOINCREMENT publication as log_diet.
 // Warm up its actor key before pinning so a key-creation failure cannot imitate the lock.
-fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), St3Error> {
+fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), FractalError> {
     let subject = "agent/invented.sequence-writer";
     store.append_client_claim_outcome(&ClaimInput {
         subject: subject.into(),
@@ -80,7 +82,7 @@ fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool
     })
 }
 
-fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), St3Error> {
+fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), FractalError> {
     // A separate thread exercises an unrelated caller, not a write through the pinned reader.
     // Join before returning; no task or guard escapes on the error path.
     std::thread::scope(|scope| {

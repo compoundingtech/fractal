@@ -471,6 +471,9 @@ pub struct CheckpointStatusView {
     /// Display metadata only; this may differ from the build named by a checkpoint seal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub machine_version: BTreeMap<String, String>,
+    /// Latest local verification attempt, including phases completed before a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_attempt: Option<super::checkpoint_accounting::Attempt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -605,6 +608,7 @@ pub(super) fn checkpoint_executable_digest() -> Result<&'static str> {
 /// order as well as the plan. A build change may fix reader/projection semantics without
 /// changing the drop rules. Rowids, live projections and later claims are not proof inputs.
 fn proof_input_digest(staged: &StagedSet, plan: &StagedPlan) -> Result<String> {
+    let _phase = super::checkpoint_accounting::Phase::start("input_digest", "checkpoint.input_digest");
     staged.proof_input_digest(plan, checkpoint_executable_digest()?, &checkpoint_build(), CHECKPOINT_PROTOCOL)
 }
 
@@ -1086,6 +1090,7 @@ impl Store {
             return Ok(());
         }
         let _completion = super::checkpoint_completion::Completion::outer();
+        let _accounting = super::checkpoint_accounting::Scope::start(&self.checkpoint_verify_latest, checkpoint);
         let staged = self.checkpoint_staged_set(terms.cut_unix_ms, Some(seal_rowid), &context.scratch)?;
         let plan = self.plan_staged_checkpoint(&staged)?;
         if plan.sealed_digest != terms.sealed_digest {
@@ -1102,6 +1107,7 @@ impl Store {
             return Ok(());
         }
         let proof = self.prove_staged_checkpoint_plan(&staged, &plan, &context.scratch)?;
+        let _finish = super::checkpoint_accounting::Phase::start("finish", "checkpoint.finish");
         if !proof.passed {
             let input_digest = match input_digest {
                 Some(input) => input,
@@ -1177,7 +1183,7 @@ impl Store {
 
     /// A person looked at a trim that stopped because the graph would change. The rows stay
     /// as they are, and checkpoints go on from the next one.
-    pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+    pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), FractalError> {
         self.resume_checkpoints_allowing(actor, reason, None)
     }
 
@@ -1189,12 +1195,12 @@ impl Store {
         actor: &str,
         reason: &str,
         agent: Option<&str>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let actor = normalize_actor(actor, "person");
         let allowed = actor.starts_with("person/") || (self.trims_locally() && agent == Some(actor.as_str()));
         if !allowed || reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-resume",
                 "a person resumes checkpoints, with a reason (or, where trim is local, the [trim] notify agent)",
             ));
@@ -1340,6 +1346,7 @@ impl Store {
             participants,
             left,
             machine_version: BTreeMap::new(),
+            verification_attempt: self.checkpoint_verify_latest.lock().as_ref().map(|attempt| attempt.lock().clone()),
         })
     }
 
@@ -1349,22 +1356,22 @@ impl Store {
     pub fn excuse_checkpoint_writer(
         &self,
         request: &CheckpointExcuseRequest,
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<ClaimRecord, FractalError> {
         let actor = normalize_actor(&request.actor, "person");
         if !actor.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-excusal",
                 "only a person can excuse a writer from checkpoints",
             ));
         }
         if request.writer.trim().is_empty() || request.reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-excusal",
                 "an excusal needs a writer and a reason",
             ));
         }
         if request.writer == self.origin {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-checkpoint-excusal",
                 "a node cannot excuse itself; excuse it from another machine",
             ));

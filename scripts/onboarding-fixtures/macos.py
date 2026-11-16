@@ -218,7 +218,7 @@ print(json.dumps({"app":str(app),"cli_realpath":str(st.resolve()),"executable":i
         r=self.cli('Ordinary Mac doctor','doctor')
         self.check('doctor-healthy',r['exit']==0,'ordinary doctor succeeds without gh or a toolchain')
         r=self.cli('Mac service permissions guidance','service','permissions')
-        self.check('permissions-guidance',r['exit']==0 and all(x in self.text(r) for x in ('Full Disk Access','Developer Tools','st service restart',APP+'/Contents/MacOS/fractal')),'guidance names actual app executable and manual approvals; no approval is inferred')
+        self.check('permissions-guidance',r['exit']==0 and all(x in self.text(r) for x in ('Do not grant Full Disk Access','Developer Tools','Accessibility','Screen Recording','Desktop','Documents','Downloads','iCloud Drive','removable volumes','Operation not permitted','allowlist is empty',APP+'/Contents/MacOS/fractal')) and 'Open System Settings' not in self.text(r),'guidance names the actual binary and protected-folder boundary without requesting broad approvals')
         r=self.cli('No harness setup explanation','setup','--person','ada','--node','studio','--yes','--service','true')
         self.check('no-harness-explained',r['exit']==0 and 'No supported harness is installed' in self.text(r) and 'No onboarding seat was created' in self.text(r),'missing providers are explained without creating onboarding')
         for kind,subject in [('agents','agent/st/assistant'),('missions','mission/st/onboarding')]:

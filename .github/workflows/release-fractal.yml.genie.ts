@@ -8,14 +8,15 @@ import { readFileSync } from 'node:fs'
 
 const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-version', import.meta.url), 'utf8').trim()
 
-// Preserve release triggers, source verification and publishing permissions. Every commit on main
-// also builds and verifies both archives and keeps them as short-lived artifacts, so release
-// breakage fails on main instead of at tag time (the daily release publishes those artifacts).
+// Preserve release triggers and source verification; tag builds cannot draft or publish releases.
+// Every commit on main also builds and verifies both archives and keeps short-lived artifacts,
+// so release breakage fails on main instead of at tag time. Daily candidates dispatch isolated exact-source builds.
 // After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
-// the tag trigger above, and a tag made with the workflow token starts no workflow in any case.
+// the tag trigger below. Only the daily workflow prepares untagged stable candidates and publishes with explicit product GO.
 export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Fractal tag release",
+  "run-name": "${{ github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('Fractal candidate {0} {1}', inputs.sha, inputs.request_id) || format('Fractal tag release {0}', github.ref_name) }}",
   "on": {
     "push": {
       "branches": [
@@ -25,11 +26,18 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "**",
         "!edge",
         "!embed-*",
+        "!fleet-*",
         // Evidence records may live under refs/tags/evidence/ (one immutable tag per signed note); pushing one must never release.
         "!evidence/**"
       ]
     },
-    "workflow_dispatch": null,
+    "workflow_dispatch": {
+      inputs: {
+        sha: { description: 'Exact first-parent main source SHA for an isolated candidate build', required: false, type: 'string' },
+        request_id: { description: 'Caller correlation ID for this candidate build', required: false, type: 'string' },
+        purpose: { description: 'Candidate requires main first-parent history; compatibility builds any deployed source without publication', required: false, type: 'choice', default: 'candidate', options: ['candidate', 'compatibility'] },
+      },
+    },
     "pull_request": {
       types: readyPullRequestTypes,
       "paths": [
@@ -45,8 +53,16 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/release-build-stamp.py",
         "scripts/release-rust-version",
         "scripts/fixtures/install-release-v0.3.17",
+        "scripts/release-zig-preseed*",
+        "vendor/libghostty-vt-sys/**",
         "scripts/release-fractal*",
+        "scripts/release_artifact.py",
+        "scripts/release_draft_recovery.py",
+        "scripts/release_gh.py",
+        "scripts/release_tag.py",
+        "scripts/release-publish-embed*",
         "scripts/release-fractal-embed.mjs",
+        "scripts/release_gh.py",
         "apps/fractal-web/**",
         "scripts/release_notes*",
         "scripts/compat-baseline-release*",
@@ -69,13 +85,63 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
     "actions": "read"
   },
   "concurrency": {
-    "group": "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
+    "group": "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('candidate-{0}', inputs.sha)) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
+    "validate-source": {
+      name: 'Validate the requested release source',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      steps: [
+        ...fullHistoryCheckoutSteps(
+          { ref: '${{ github.sha }}', 'persist-credentials': false },
+          { name: 'Check out the trusted dispatch ref, never the unvalidated candidate', if: "github.event_name == 'workflow_dispatch'" },
+          "github.event_name == 'workflow_dispatch'",
+        ),
+        {
+          name: 'Validate exact source and preserve the stable candidate main gate',
+          if: "github.event_name == 'workflow_dispatch'",
+          shell: 'bash',
+          env: { REQUESTED_SHA: '${{ inputs.sha }}', DISPATCH_REF: '${{ github.ref }}', PURPOSE: '${{ inputs.purpose }}' },
+          run: `set -euo pipefail
+if [[ "$PURPOSE" != compatibility && "$DISPATCH_REF" != refs/heads/main ]]; then
+  echo "::error::Release builds must be dispatched from main."
+  exit 1
+fi
+if [[ "$PURPOSE" == compatibility && -z "$REQUESTED_SHA" ]]; then
+  echo "::error::Compatibility archives require an exact source SHA."
+  exit 1
+fi
+if [[ -n "$REQUESTED_SHA" ]]; then
+  if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::error::The candidate source must be a full lowercase 40-character SHA."
+    exit 1
+  fi
+  if [[ "$PURPOSE" == compatibility ]]; then
+    # Full history is fetched from origin before inspecting this exact commit.
+    git cat-file -e "$REQUESTED_SHA^{commit}"
+    refs=$(git for-each-ref --contains "$REQUESTED_SHA" --format='%(refname)' refs/remotes/origin refs/tags)
+    if [[ -z "$refs" ]]; then
+      echo "::error::Compatibility source must be reachable from an origin ref."
+      exit 1
+    fi
+    printf 'Compatibility archive source=%s reachable-from:\\n%s\\n' "$REQUESTED_SHA" "$refs"
+  else
+    # Read the whole stream: pipefail must not mistake an early reader exit for invalid history.
+    if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$REQUESTED_SHA"; then
+      echo "::error::The candidate source must belong to origin/main first-parent history."
+      exit 1
+    fi
+  fi
+fi`,
+        },
+      ],
+    },
     "pick-runner": priorityRunnerJob,
     "installer": {
       "name": "installer (${{ matrix.runner }})",
+      "needs": "validate-source",
       "strategy": {
         "fail-fast": false,
         "matrix": {
@@ -86,17 +152,19 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         }
       },
       "runs-on": "${{ matrix.runner }}",
-      "timeout-minutes": 5,
+      "timeout-minutes": "${{ matrix.runner == 'macos-15' && 10 || 5 }}",
       "steps": [
         {
+          // Exercise the workflow's current publication automation, including tests absent from historical candidates.
           "uses": "actions/checkout@v4",
           "with": {
-            "persist-credentials": false
+            "persist-credentials": false,
+            "ref": "${{ github.sha }}"
           }
         },
         {
           "name": "Test release names, install entry points and isolated app transactions",
-          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-publish-embed-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/compat-baseline-release-test\n"
+          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-publish-embed-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/release-fractal-publish-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {
           "name": "Test the daily release failure path",
@@ -106,10 +174,11 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
     },
     embed: {
       name: 'release-web-embed',
+      needs: 'validate-source',
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false, ref: '${{ inputs.sha || github.sha }}' } },
         { uses: 'actions/cache@v4', with: { path: '${{ runner.temp }}/pnpm-store', key: "web-embed-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-source-inputs.json') }}" } },
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         megarepoApplyStep,
@@ -122,11 +191,15 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       if: "github.event_name == 'push' && github.ref == 'refs/heads/main'",
       needs: 'embed',
       'runs-on': 'ubuntu-latest',
+      concurrency: {
+        group: 'fractal-release-mutation',
+        'cancel-in-progress': false,
+      },
       permissions: { contents: 'write' },
       env: { GH_TOKEN: '${{ github.token }}', GH_REPO: '${{ github.repository }}', SOURCE_SHA: '${{ github.sha }}' },
       steps: [
         // The publish script, at the commit this run releases.
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false, ref: '${{ inputs.sha || github.sha }}' } },
         { uses: 'actions/download-artifact@v4', with: { name: 'release-web-embed', path: 'dist' } },
         {
           name: 'Publish once under a source-addressed release, never the rolling edge tag',
@@ -137,8 +210,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       ],
     },
     "build": {
-      "needs": ["pick-runner"],
-      "if": "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
+      "needs": ["pick-runner", "validate-source"],
+      "if": "${{ !cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
       "name": "release-build (${{ matrix.target }})",
       "strategy": {
         "fail-fast": false,
@@ -166,7 +239,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         {
           "uses": "actions/checkout@v4",
           "with": {
-            "persist-credentials": false
+            "persist-credentials": false,
+            "ref": "${{ inputs.sha || github.sha }}"
           }
         },
         {
@@ -199,6 +273,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
             "use-cache": false
           }
         },
+        // Snapshot preparation and release-build-stamp.py both derive their source revision from checked-out HEAD.
         buildSnapshotPrepare,
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         {
@@ -211,7 +286,11 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         },
         {
           "name": "Test installer",
-          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-fractal-test\npython3 scripts/release_notes_test.py\n"
+          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-fractal-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-zig-preseed-test.py\n"
+        },
+        {
+          name: 'Preseed hash-verified Zig GitHub archives',
+          run: 'python3 scripts/release-zig-preseed.py --github-env "$GITHUB_ENV"',
         },
         {
           "name": "Build, package, and test extracted tools",
@@ -237,11 +316,13 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "installer"
       ],
       "runs-on": "ubuntu-latest",
+      "outputs": { "artifact-id": "${{ steps.release.outputs.artifact-id }}" },
       "steps": [
         {
           "uses": "actions/checkout@v4",
           "with": {
-            "persist-credentials": false
+            "persist-credentials": false,
+            "ref": "${{ inputs.sha || github.sha }}"
           }
         },
         {
@@ -255,14 +336,15 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         {
           "name": "Verify both targets and record exact sources",
           "env": {
-            "SOURCE_SHA": "${{ github.sha }}"
+            "SOURCE_SHA": "${{ inputs.sha || github.sha }}"
           },
-          "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
+          "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\n# Markdown backticks are literal, not command substitution.\n# shellcheck disable=SC2016\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
         },
         {
+          "id": "release",
           "uses": "actions/upload-artifact@v4",
           "with": {
-            "name": "fractal-release",
+            "name": "fractal-release-attempt-${{ github.run_attempt }}",
             "path": "dist/*",
             "if-no-files-found": "error",
             "retention-days": 7
@@ -273,12 +355,12 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
     "publishEdge": {
       "name": "release-publish-edge",
       "if": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
-      "needs": "assemble",
+      "needs": ["assemble", "publishEmbed"],
       "runs-on": "ubuntu-latest",
       "timeout-minutes": 15,
-      // One edge at a time; a superseded pending run is dropped, and the script never moves edge backwards.
+      // Wait for embed publication before entering the shared mutation lock; never queue two publishers from this run.
       "concurrency": {
-        "group": "fractal-edge-publish",
+        "group": "fractal-release-mutation",
         "cancel-in-progress": false
       },
       "permissions": {
@@ -291,11 +373,12 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       },
       "steps": [
-        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false, ref: '${{ inputs.sha || github.sha }}' }),
         {
           "uses": "actions/download-artifact@v4",
           "with": {
-            "name": "fractal-release",
+            "artifact-ids": "${{ needs.assemble.outputs.artifact-id }}",
+            "merge-multiple": true,
             "path": "dist"
           }
         },
@@ -305,54 +388,31 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         }
       ]
     },
-    "publish": {
-      "name": "release-publish",
-      "if": "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
-      "needs": "assemble",
-      "runs-on": "ubuntu-latest",
-      "permissions": {
-        "contents": "write"
-      },
-      "env": {
-        "GH_TOKEN": "${{ github.token }}",
-        "GH_REPO": "${{ github.repository }}",
-        "TAG": "${{ github.ref_name }}",
-        "SOURCE_SHA": "${{ github.sha }}"
-      },
-      "steps": [
-        ...fullHistoryCheckoutSteps(),
-        {
-          "uses": "actions/download-artifact@v4",
-          "with": {
-            "name": "fractal-release",
-            "path": "dist"
-          }
-        },
-        {
-          "name": "Publish the verified tag artifacts",
-          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/compat-baseline-release check --source \"$SOURCE_SHA\" --require-latest\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --draft --title \"Fractal $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json\ngh release edit \"$TAG\" --draft=false\n"
-        }
-      ]
-    },
-    advance: {
-      name: 'advance-compatibility-baselines',
-      if: "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
-      needs: 'publish',
+    observePublishers: {
+      name: 'report-cancelled-release-publishers',
+      needs: ['publishEmbed', 'publishEdge'],
+      if: "always() && contains(needs.*.result, 'cancelled')",
       'runs-on': 'ubuntu-latest',
-      'timeout-minutes': 20,
-      permissions: { contents: 'write', actions: 'write', 'pull-requests': 'write' },
+      'timeout-minutes': 5,
+      permissions: { contents: 'read', actions: 'read' },
       env: {
         GH_TOKEN: '${{ github.token }}',
-        GH_REPO: '${{ github.repository }}',
-        TAG: '${{ github.ref_name }}',
+        CANCELLED_RUN: '${{ github.run_id }}',
+        REPOSITORY: '${{ github.repository }}',
       },
-      steps: [
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
-        {
-          name: 'Propose compatibility baselines after publication',
-          run: 'python3 scripts/compat-baseline-release advance "$TAG"',
-        },
-      ],
+      steps: [{
+        name: 'Fail visibly with cancelled publisher job-ID recovery commands',
+        run: `set -euo pipefail
+echo "::error::A release publisher was cancelled. Check edge/embed state, then run only the cancelled publisher job IDs printed below; do not rebuild successful embed artifacts."
+gh api --paginate --slurp "repos/$REPOSITORY/actions/runs/$CANCELLED_RUN/jobs?filter=latest&per_page=100" |
+  jq -er --arg repo "$REPOSITORY" '
+    [.[].jobs[]
+      | select(.conclusion == "cancelled")
+      | select(.name == "release-publish-web-embed" or .name == "release-publish-edge")
+      | "gh run rerun --job " + (.id | tostring) + " --repo " + $repo]
+    | if length == 0 then error("No cancelled publisher job IDs found; inspect the original run before retrying.") else .[] end'
+exit 1`,
+      }],
     }
   }
-}, {"publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing.", "advance": "Verifies published archives and proposes the baseline maintenance PR; builds nothing."}))))
+}, {"validate-source": "Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.", "publishEmbed": "Publishes the verified immutable web archive; builds nothing.", "pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer and publication-gate fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.", "publishEdge": "Moves the rolling edge pre-release after embed publication in the shared mutation lock; builds nothing.", "observePublishers": "Fails visibly on cancelled publishers and explains re-dispatch of the original push event; performs no release mutations."}))))

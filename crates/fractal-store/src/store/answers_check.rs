@@ -228,7 +228,7 @@ impl Store {
 
     /// Open each distinct disagreement once, record repeat occurrences locally, or recover all
     /// the pair's open faults when the answers agree.
-    pub fn record_answers_check(&self, check: &AnswersCheck) -> Result<(), St3Error> {
+    pub fn record_answers_check(&self, check: &AnswersCheck) -> Result<(), FractalError> {
         let local = self.origin().to_owned();
         let subject = format!("daemon/{local}");
         let pair = episode(&local, &check.peer);

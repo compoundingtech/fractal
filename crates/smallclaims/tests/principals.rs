@@ -172,6 +172,17 @@ fn seal(store: &Store) {
     store.replication_snapshot().unwrap();
 }
 
+/// The daemon's paced job owns historical reconciliation; exchanges judge fresh IDs only.
+fn drain_verdicts(store: &Store) {
+    for _ in 0..10_000 {
+        store.advance_signature_judgment().unwrap();
+        if !store.verdicts_pending().unwrap() {
+            return;
+        }
+    }
+    panic!("the paced signature worker must converge");
+}
+
 fn verdict(store: &Store, claim: &ClaimRecord) -> Verdict {
     store.claim_verdict(&claim.id).unwrap()
 }
@@ -315,6 +326,7 @@ fn a_forged_replayed_or_swapped_signature_is_invalid_and_the_genuine_one_stays_v
 
     sync(b, a);
     for store in [a, b] {
+        drain_verdicts(store);
         assert_eq!(verdict(store, &genuine), Verdict::Verified);
         assert_eq!(verdict(store, &swapped_claim), Verdict::Verified);
         for claim in [&forged_claim, &replayed_claim, &tampered] {
@@ -632,6 +644,7 @@ fn late_root_rejudges_a_retained_nonwinning_candidate_in_every_schedule() {
                 4
             );
             receive_carriers(&target, &roots);
+            drain_verdicts(&target);
             assert_eq!(verdict(&target, &fixture.claim), Verdict::Verified);
             assert_eq!(
                 target.claim_signature(&fixture.claim.id).unwrap(),
@@ -727,6 +740,7 @@ fn late_delegations_make_a_retained_person_signature_verified_after_split_delive
                 page.envelopes = chunk.to_vec();
                 receive_carriers(&target, &page);
             }
+            drain_verdicts(&target);
             assert_eq!(verdict(&target, &claim), Verdict::Verified);
             assert_eq!(
                 target.claim_signature(&claim.id).unwrap(),
@@ -824,6 +838,7 @@ fn nonce_inventory_transition(online: bool, snapshot_overlap: bool, remove_earli
         push_signature_carrier(&mut carriers, original, &carried, &anchor);
     }
     receive_carriers(&source, &carriers);
+    drain_verdicts(&source);
     assert!(
         matches!(verdict(&source,&later),Verdict::Invalid(reason) if reason.contains("earlier claim"))
     );
@@ -2044,6 +2059,7 @@ fn revoking_a_key_invalidates_what_it_signs_afterwards_and_everything_below_a_re
     let after = note(b, Some("person/ada"), "after");
     sync(b, a);
     for store in [a, b] {
+        drain_verdicts(store);
         assert_eq!(verdict(store, &before), Verdict::Verified);
         assert!(
             matches!(verdict(store, &after), Verdict::Invalid(reason) if reason.contains("revoked"))
@@ -2069,6 +2085,7 @@ fn revoking_a_key_invalidates_what_it_signs_afterwards_and_everything_below_a_re
     let later = note(b, Some("person/robin"), "later");
     sync(b, a);
     for store in [a, b] {
+        drain_verdicts(store);
         assert_eq!(verdict(store, &first), Verdict::Verified);
         assert!(
             matches!(verdict(store, &later), Verdict::Invalid(reason) if reason.contains("revoked"))

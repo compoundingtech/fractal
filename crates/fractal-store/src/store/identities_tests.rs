@@ -43,12 +43,12 @@ fn desired_reads_fence_pending_lifecycle_without_a_naming_head() {
             ).unwrap();
             let expected = if state == "invalid" { "conflict" } else { "pending-replication" };
             let error = current_desired_row(&connection, ORIGINAL).err().unwrap();
-            let error = error.downcast_ref::<St3Error>().unwrap();
+            let error = error.downcast_ref::<FractalError>().unwrap();
             assert_eq!(error.code, "lifecycle-unavailable");
             assert_eq!(error.details["reason"], expected);
             drop(connection);
             let error = store.selected_desired_tokens(&[ORIGINAL]).unwrap_err();
-            let error = error.downcast_ref::<St3Error>().unwrap();
+            let error = error.downcast_ref::<FractalError>().unwrap();
             assert_eq!(error.code, "lifecycle-unavailable");
             assert_eq!(error.details["reason"], expected);
             }
@@ -408,5 +408,57 @@ proptest! {
             let error = store.rename_identity(IdentityKind::Agent, &request(names.last().unwrap(), ORIGINAL, &format!("reject-{index}")), &[]).unwrap_err();
             prop_assert_eq!(error.code, "identity-cycle");
         }
+    }
+}
+
+#[test]
+fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders() {
+    for neutral_first in [false, true] {
+        let source = node("node-a", None, None);
+        let store = node("node-b", None, None);
+        declare(&source, ORIGINAL);
+        sync(&source, &store);
+        store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap();
+        let receipt = source.rename_identity(
+            IdentityKind::Agent, &request(ORIGINAL, RENAMED, "mixed-operation"), &[],
+        ).unwrap();
+        let rename = source.claim_by_id(&receipt.claim_id).unwrap().unwrap();
+        let (operation, _) = operation_parts(&rename.body).unwrap();
+        let neutral_body = json!({"fields": {}, "_operation": {
+            "id": operation, "request_digest": "invented-neutral-digest"
+        }});
+        for neutral in [neutral_first, !neutral_first] {
+            {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                let (subject, kind, actor, body) = if neutral {
+                    ("github-event/github/acme/garden/pull-request/7/checks/failed",
+                        "github.event", None, &neutral_body)
+                } else {
+                    (rename.subject.as_str(), rename.kind.as_str(), rename.actor.as_deref(), &rename.body)
+                };
+                append_claim_record_tx(&tx, source.origin(), subject, kind, actor, body, &[], None).unwrap();
+                tx.commit().unwrap();
+            }
+            if neutral != neutral_first {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                let result = try_project_simple_replication_tx(
+                    &tx, store.origin(), current_index_tx(&tx).unwrap(),
+                ).unwrap();
+                assert!(matches!(result, IncrementalProjection::ReplayWithContext {
+                    reason: "operation-conflict", ..
+                }), "neutral_first={neutral_first}");
+                tx.rollback().unwrap();
+            }
+            store.project_replication_backlog().unwrap();
+        }
+        assert_eq!(operation_tx(&store.readers.get(), operation).unwrap().unwrap().2, "conflict");
+        let error = store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err();
+        assert_eq!(error.code, "lifecycle-unavailable");
+        assert_eq!(error.details["reason"], "conflict");
+        let digests = store.replication_snapshot().unwrap().projection_digests.clone();
+        store.replay_replication_graph().unwrap();
+        assert_eq!(store.replication_snapshot().unwrap().projection_digests, digests);
     }
 }

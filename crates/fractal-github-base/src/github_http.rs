@@ -68,14 +68,6 @@ impl GithubAuth {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn test(token: &str) -> Self {
-        Self::Local {
-            token: Arc::new(token.into()),
-            cache: None,
-        }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub fn local_token(&self) -> &Arc<String> {
         match self {
             Self::Local { token, .. } => token,
@@ -288,12 +280,41 @@ fn token_cache() -> &'static Arc<TokenCache> {
 
 static SOURCE: OnceLock<Arc<crate::config::Config>> = OnceLock::new();
 
-pub fn configure(config: &crate::config::Config) -> Result<()> {
+/// Observes every actual HTTP response, before replay or redirect handling.
+pub struct ResponseObserver(fn(reqwest::StatusCode, &reqwest::header::HeaderMap));
+
+impl ResponseObserver {
+    pub const fn new(record: fn(reqwest::StatusCode, &reqwest::header::HeaderMap)) -> Self {
+        Self(record)
+    }
+
+    fn record(&self, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+        (self.0)(status, headers);
+    }
+}
+
+static RESPONSE_OBSERVER: OnceLock<&'static ResponseObserver> = OnceLock::new();
+
+/// Install the process-wide observer; accounting cannot be replaced after construction.
+pub fn observe_responses(observer: &'static ResponseObserver) -> Result<()> {
+    let known = RESPONSE_OBSERVER.get_or_init(|| observer);
+    anyhow::ensure!(
+        std::ptr::eq(*known, observer),
+        "GitHub response observer was already configured"
+    );
+    Ok(())
+}
+
+pub fn configure(
+    config: &crate::config::Config,
+    observer: &'static ResponseObserver,
+) -> Result<()> {
     let mut config = config.clone();
     if let Some(root) = std::env::var_os("ST3_GITHUB_APP_TOKEN_ROOT") {
         config.github.app_token_root = Some(root.into());
     }
     config.github.validate()?;
+    observe_responses(observer)?;
     if let Some(known) = SOURCE.get() {
         anyhow::ensure!(
             known.as_ref() == &config,
@@ -406,13 +427,22 @@ fn request_resource(path: &str) -> &'static str {
     }
 }
 
-/// Select from the supplied root only. Token files are reopened for each read batch.
-pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
-    let root = match pat {
+fn token_root(pat: &GithubAuth) -> Option<&std::path::Path> {
+    match pat {
         GithubAuth::Read { source, .. } => Some(source.root.as_path()),
         _ => SOURCE.get().and_then(|config| config.github.app_token_root.as_deref()),
-    };
-    app_read::select(root, owner, app, pat.pat())
+    }
+}
+
+/// Select from the supplied root only. Token files are reopened for each read batch.
+pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
+    app_read::select(token_root(pat), owner, app, pat.pat())
+}
+
+/// The installation that may read `owner`'s commit statuses, if its token grants them.
+pub fn statuses_auth(owner: &str, pat: &GithubAuth) -> Option<GithubAuth> {
+    let source = app_read::statuses_source(token_root(pat)?, owner)?;
+    Some(GithubAuth::Read { source, pat: Box::new(pat.pat().clone()) })
 }
 
 impl GithubAuth {
@@ -460,6 +490,9 @@ pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
         return auth.pat().clone();
     };
     if statuses {
+        if let Some(selected) = statuses_auth(owner, auth) {
+            return selected;
+        }
         if matches!(auth, GithubAuth::Read { .. }) || SOURCE.get().is_some_and(|config| config.github.app_token_root.is_some()) {
             app_read::fallback(owner, app, "statuses");
         }
@@ -481,6 +514,29 @@ pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> R
     let request_auth = auth.request_scope();
     let mut response = send_selected_read(request, &mut request_auth.clone()).await?;
     response.extensions_mut().insert(ReadCacheEligibility(!request_auth.used_fallback()));
+    Ok(response)
+}
+
+/// One admitted, credentialed read hop that never follows a redirect: a 3xx comes back as itself,
+/// for a caller that maps it (the client GitHub plugin reads report `moved` and never fetch it).
+pub async fn send_read_once(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+    let url = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .map(|request| request.url().to_string())
+        .context("GitHub read request cannot be built")?;
+    let request_auth = auth.request_scope();
+    let mut selected = if url.ends_with("/graphql") { request_auth.clone() } else { read_auth_for_url(&url, &request_auth) };
+    let fallback = match &selected {
+        GithubAuth::Read { source, .. } => Some(source.used_fallback.clone()),
+        _ => None,
+    };
+    let principal = selected.cache_principal().to_owned();
+    let mut response = send_selected_read(request, &mut selected).await?;
+    let ineligible = request_auth.used_fallback()
+        || fallback.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        || selected.cache_principal() != principal;
+    response.extensions_mut().insert(ReadCacheEligibility(!ineligible));
     Ok(response)
 }
 
@@ -578,6 +634,9 @@ async fn send_once(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
+    let observer = RESPONSE_OBSERVER
+        .get()
+        .context("GitHub response observer was not configured; no request was sent")?;
     // Admission precedes both the credential-bearing local send and the
     // authorized RPC. A failed send remains spent; there is no HTTP retry.
     let reservation = if let Some(config) = SOURCE.get() {
@@ -616,7 +675,7 @@ async fn send_once(
         }
     }}.await;
     if let Ok(response) = &result {
-        crate::resource::record_github_response(response.status(), response.headers());
+        observer.record(response.status(), response.headers());
     }
     if let Some(reservation) = reservation {
         crate::github_admission::after_send(
@@ -1192,6 +1251,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthorized_mutation_is_sent_once_and_invalidates_its_cache() {
+        let _ = GithubAuth::test("fixture-observer");
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
         let app = axum::Router::new().fallback(move |request: axum::extract::Request| {

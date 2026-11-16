@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read-only pairings can now read the person's sidebar arrangements. They still cannot change them.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "New read-only pairings include read.arrangements; read.declarations and control.arrangements remain excluded. Existing device grants are unchanged."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No existing pairing is changed automatically."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

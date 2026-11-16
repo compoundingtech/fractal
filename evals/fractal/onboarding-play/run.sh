@@ -6,7 +6,7 @@
 #   evals/fractal/onboarding-play/run.sh --paid --max-runs 2 --harness claude \
 #     --claude-config-dir /path/to/a/login/you/made --st-bin target/debug/fractal
 #
-# Each run starts a throwaway st (own HOME, own daemon, no service) from the candidate binary,
+# Each run starts a throwaway fractal (own HOME, own daemon, no service) from the candidate binary,
 # lets the Assistant play the onboarding with a person who never types (the `silent` variant) or
 # who says "skip" during act one (`skip`), collects the evidence from the graph, and judges it.
 # Nothing is copied from your real home: the harness login comes only from the directory you name,
@@ -40,11 +40,11 @@ done
 "$here/self-test.sh"
 
 if $plumbing; then
-  # Model-free, live: a throwaway st with no harness, so no Assistant ever starts and nothing is
+  # Model-free, live: a throwaway fractal with no harness, so no Assistant ever starts and nothing is
   # spent. Proves the collector runs against a real graph and that the judge fails an empty play.
   [ -x "${st_bin:-}" ] || { echo "--plumbing needs --st-bin" >&2; exit 2; }
   root="$(mktemp -d)"; mkdir -p "$root/home/.config" "$root/home/.local/state" "$root/home/.local/bin" "$root/run"
-  # What `st setup --install` would put in ~/.local/bin, linked rather than copied: the candidate
+  # What `fractal setup --install` would put in ~/.local/bin, linked rather than copied: the candidate
   # binary and the pty on this machine's PATH.
   ln -s "$st_bin" "$root/home/.local/bin/st3"; ln -s "$st_bin" "$root/home/.local/bin/st"
   ln -s "$(command -v pty)" "$root/home/.local/bin/pty"
@@ -76,7 +76,7 @@ fi
 
 # ---- guards before any spend ------------------------------------------------------------------
 [ "$max_runs" -ge 1 ] 2>/dev/null || { echo "--paid needs --max-runs N with N >= 1" >&2; exit 2; }
-[ -x "${st_bin:-}" ] || { echo "--st-bin must name the candidate st binary" >&2; exit 2; }
+[ -x "${st_bin:-}" ] || { echo "--st-bin must name the candidate fractal binary" >&2; exit 2; }
 case "$harness" in
   claude) [ -d "$claude_dir" ] || { echo "--claude-config-dir must name a directory you logged in to" >&2; exit 2; } ;;
   codex) [ -d "$codex_home" ] || { echo "--codex-home must name a directory you logged in to" >&2; exit 2; } ;;
@@ -110,26 +110,26 @@ for variant in "${plan[@]}"; do
     FRACTAL_BIN="$st_bin" ST_BIN="$st_bin" EVAL_PERSON="$person")
   [ -n "$claude_dir" ] && run_env+=(CLAUDE_CONFIG_DIR="$claude_dir")
   [ -n "$codex_home" ] && run_env+=(CODEX_HOME="$codex_home")
-  st() { "${run_env[@]}" "$st_bin" "$@"; }
+  fractal() { "${run_env[@]}" "$st_bin" "$@"; }
   echo "== run $ran/${#plan[@]}: $variant (throwaway $root)"
   started="$(now_ms)"; skip_ms=none; verdict=""
-  st setup --person "${person#person/}" --node evalbox --yes --install false --service false \
+  fractal setup --person "${person#person/}" --node evalbox --yes --install false --service false \
     --start true --harness "$harness" "${harness_args[@]}" >"$out/$variant.setup.log" 2>&1 || verdict="setup failed"
   deadline=$(( $(date +%s) + overall_s ))
   while [ -z "$verdict" ] && [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 5
     # Stop everything at the first login or rate-limit trouble; never retry a paid run.
-    seen="$(st agents show agent/st/assistant --json 2>/dev/null | jq -r '[.value.state, .value.harness_state] | map(. // "") | join(" ")' || true)"
+    seen="$(fractal agents show agent/st/assistant --json 2>/dev/null | jq -r '[.value.state, .value.harness_state] | map(. // "") | join(" ")' || true)"
     if grep -Eqi "login|auth|rate|limit" <<<"$seen" || grep -Eqi "$trouble" "$out/$variant.setup.log"; then
       verdict="stopped: login or rate-limit trouble ($seen)"; stop_all=true; break
     fi
-    run_state="$(st missions ls --all --json 2>/dev/null | jq -r '[.. | objects | select((.id? // "") | test("^st/onboarding(/|$)"))] | first | .status // .state // empty' || true)"
+    run_state="$(fractal missions ls --all --json 2>/dev/null | jq -r '[.. | objects | select((.id? // "") | test("^st/onboarding(/|$)"))] | first | .status // .state // empty' || true)"
     case "$variant" in
       skip)
-        if [ "$skip_ms" = none ] && st agents show agent/st/demo --json 2>/dev/null \
+        if [ "$skip_ms" = none ] && fractal agents show agent/st/demo --json 2>/dev/null \
             | jq -e '(.value.operational.reasons // []) | index("undeclared") | not' >/dev/null; then
           sleep 5; skip_ms="$(now_ms)"
-          st conversations send agent/st/assistant --from "$person" --body skip >/dev/null 2>&1 || true
+          fractal conversations send agent/st/assistant --from "$person" --body skip >/dev/null 2>&1 || true
         fi
         [ "$skip_ms" != none ] && [ "$run_state" = cancelled ] && break ;;
       silent) case "$run_state" in completed|cancelled|failed) break ;; esac ;;
@@ -144,7 +144,7 @@ for variant in "${plan[@]}"; do
       if "$here/judge.sh" "$out/$variant.json" | tee "$out/$variant.txt"; then verdict=pass; else verdict=fail; fi
     fi
   fi
-  st agents stop agent/st/assistant >/dev/null 2>&1 || true
+  fractal agents stop agent/st/assistant >/dev/null 2>&1 || true
   stop_throwaway "$root"
   echo "   -> $variant: $verdict"; echo "$variant: $verdict" >>"$out/summary.txt"
   [ "$verdict" = pass ] || failures=$((failures + 1))

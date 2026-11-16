@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
 """Exercise cancellation groups from generated workflows with real event distinctions."""
 import ast
+import json
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import tempfile
+import textwrap
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def policy(workflow, event, run_id, pr=None, ref='refs/heads/main', action='synchronize', label=''):
+def policy(workflow, event, run_id, pr=None, ref='refs/heads/main', action='synchronize', label='', sha=''):
     text = (ROOT / '.github/workflows' / workflow).read_text()
     block = re.search(r'^concurrency:\n((?:  .+\n)+)', text, re.M)
     assert block, (workflow, 'missing concurrency policy')
     fields = {}
-    context = {'event': event, 'run_id': run_id, 'pr': pr, 'ref': ref, 'action': action, 'label': label}
+    context = {'event': event, 'run_id': run_id, 'pr': pr, 'ref': ref, 'action': action,
+               'label': label, 'sha': sha, 'format': str.format}
 
     def expression(value):
         for source, name in [('github.event.pull_request.number', 'pr'),
                              ('github.event.action', 'action'), ('github.event.label.name', 'label'),
                              ('github.event_name', 'event'), ('github.run_id', 'run_id'),
-                             ('github.ref', 'ref')]:
+                             ('github.ref', 'ref'), ('inputs.sha', 'sha')]:
             value = value.replace(source, name)
         value = value.replace('&&', ' and ').replace('||', ' or ').strip()
         value = re.sub(r'!(?!=)', 'not ', value)
         tree = ast.parse(value, mode='eval')
         allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare,
-                   ast.Eq, ast.NotEq, ast.UnaryOp, ast.Not, ast.Name, ast.Load, ast.Constant)
+                   ast.Eq, ast.NotEq, ast.UnaryOp, ast.Not, ast.Name, ast.Load, ast.Constant, ast.Call)
         assert all(isinstance(node, allowed) for node in ast.walk(tree)), value
         assert all(node.id in context for node in ast.walk(tree) if isinstance(node, ast.Name)), value
+        assert all(isinstance(node.func, ast.Name) and node.func.id == 'format'
+                   for node in ast.walk(tree) if isinstance(node, ast.Call)), value
         return eval(compile(tree, '<generated-concurrency>', 'eval'), {'__builtins__': {}}, context)
 
     for line in block.group(1).splitlines():
@@ -81,6 +90,35 @@ assert policy('fleet.yml', 'merge_group', 100) == ('workspace-100-merge_group', 
 assert not policy('main-upkeep.yml', 'push', 100, ref='refs/heads/other')[1]
 assert not policy('perf.yml', 'push', 100, ref='refs/heads/other')[1]
 
+# Required-workflow admission must select protected source identity, never an Actions
+# commit-status context. These local topology checks do not assert live enforcement.
+history = (ROOT / '.github/workflows/public-repo-history.yml').read_text()
+history_source = (ROOT / '.github/workflows/public-repo-history.yml.genie.ts').read_text()
+assert re.search(r'^on:\n  pull_request:\n    types:', history, re.M), history
+assert re.search(r'^  merge_group: null$', history, re.M), history
+assert re.search(r'^permissions:\n  contents: read\n\n', history, re.M), history
+assert 'github-script' not in history and not re.search(r'^\s+\w+: write$', history, re.M)
+assert 'createCommitStatus' not in history and 'createCommitStatus' not in history_source
+assert 'statuses:' not in history and 'pull_request_target:' not in history
+assert 'persist-credentials: false' in history
+assert 'ref: ${{ github.workflow_sha }}' in history
+assert 'HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}' in history
+assert 'git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA"' in history
+assert 'python3 "$PWD/scripts/check-public-repo" --repo "$PWD" --base "$BASE_SHA" --head "$HEAD_SHA"' in history
+assert 'ref: ${{ github.event.pull_request.head.sha' not in history
+for event in ('pull_request', 'merge_group'):
+    first, second = policy('public-repo-history.yml', event, 100, 42), policy(
+        'public-repo-history.yml', event, 101, 42)
+    assert not first[1] and not second[1] and first[0] != second[0], (event, first, second)
+settings = json.loads((ROOT / '.github/repo-settings.json').read_text())
+required_contexts = [check['context'] for ruleset in settings['rulesets']
+                     for rule in ruleset['rules'] if rule['type'] == 'required_status_checks'
+                     for check in rule['parameters']['required_status_checks']]
+assert 'public-repo-history' not in required_contexts, 'the shared Actions app is not a trusted producer identity'
+assert not any(rule['type'] == 'workflows' for ruleset in settings['rulesets'] for rule in ruleset['rules']), (
+    'required workflows belong in the separate organization ruleset, not repository settings')
+print('passed: read-only history topology preserves independent runs and rejects forgeable Actions status admission')
+
 for action in ['labeled', 'unlabeled']:
     unrelated = policy('perf.yml', 'pull_request', 100, 42, action=action, label='reviewed')
     assert unrelated[0] != 'perf-42' and not unrelated[1], (action, 'unrelated labels must not cancel or replace PR work')
@@ -96,6 +134,107 @@ for event, ref in [('push', 'refs/tags/v1.2.3'), ('workflow_dispatch', 'refs/hea
     assert first[0] != second[0] and not first[1] and not second[1]
 assert policy('release-fractal.yml', 'pull_request', 100, 42, ref='refs/pull/42/merge')[1]
 release = (ROOT / '.github/workflows/release-fractal.yml').read_text()
+release_paths = release.split('  pull_request:\n', 1)[1].split('\npermissions:', 1)[0]
+release_source = (ROOT / '.github/workflows/release-fractal.yml.genie.ts').read_text()
+assert '\n      - scripts/release_gh.py\n' in release_paths, 'gh retry changes must exercise release PR fixtures'
+assert '"scripts/release_gh.py",' in release_source, 'the owning generator must retain the release helper filter'
+print('passed: release-fractal PR filter includes release_gh.py in workflow and generator')
+# Shared provenance changes must trigger native release/installer PR checks.
+pr_filter = re.search(r'^  pull_request:\n(.*?)(?=^  \S|\Z)', release, re.M | re.S).group(1)
+assert re.search(r'^      - scripts/release_artifact\.py$', pr_filter, re.M), pr_filter
 assert release.index('nix build .#release-cc^out') < release.index('name: Test installer')
 assert 'packages.release-cc = pkgs.stdenv.cc;' in (ROOT / 'flake.nix').read_text()
 print('passed: newest pending main release retained; active, tag and pinned manual releases preserved; host compiler provided')
+
+# Every release-mutating job shares the same lock, including development release publishers.
+def jobs(workflow):
+    text = (ROOT / '.github/workflows' / workflow).read_text().split('\njobs:\n', 1)[1]
+    return dict(re.findall(r'^  ([\w-]+):\n((?:    .*\n|\n)+)', text, re.M))
+
+daily_jobs = jobs('release-daily.yml')
+native_jobs = jobs('release-fractal.yml')
+assert re.search(r"^    timeout-minutes: \$\{\{ matrix.runner == 'macos-15' && 10 \|\| 5 \}\}$",
+                 native_jobs['installer'], re.M), native_jobs['installer']
+print('passed: macOS installer receives ten minutes while Linux retains five')
+for block in (daily_jobs['release'], daily_jobs['publish'],
+              native_jobs['publishEmbed'], native_jobs['publishEdge']):
+    assert re.search(r'^      group: fractal-release-mutation$', block, re.M), block
+    assert re.search(r'^      cancel-in-progress: false$', block, re.M), block
+
+# One run can never queue both development publishers on the single pending mutex slot.
+edge_needs = re.search(r'^    needs: \[([^\]]+)\]$', native_jobs['publishEdge'], re.M).group(1)
+assert set(edge_needs.split(', ')) == {'assemble', 'publishEmbed'}
+# Immutable archive selection survives rerunning only a downstream publisher:
+# the successful assembler's output remains its original artifact ID.
+assert 'name: "fractal-release-attempt-${{ github.run_attempt }}"' in native_jobs['assemble']
+assert 'artifact-id: ${{ steps.release.outputs.artifact-id }}' in native_jobs['assemble']
+assert 'id: release' in native_jobs['assemble']
+assert 'artifact-ids: ${{ needs.assemble.outputs.artifact-id }}' in native_jobs['publishEdge']
+# ID selection does not imply the named-artifact flat layout in download-artifact.
+# Both consumers read root files in dist/, never dist/<artifact-name>/.
+for job in ('assemble', 'publishEdge'):
+    download = re.search(
+        r'^      - uses: actions/download-artifact@v4\n(.*?)(?=^      - |\Z)',
+        native_jobs[job], re.M | re.S).group(1)
+    assert re.search(r'^          merge-multiple: true$', download, re.M), download
+    assert re.search(r'^          path: dist$', download, re.M), download
+assert '--dist dist' in native_jobs['publishEdge']
+assert 'fractal-release-attempt-' not in native_jobs['publishEdge']
+for name in ('publishEmbed', 'publishEdge'):
+    assert "github.event_name == 'push'" in native_jobs[name]
+    assert "github.ref == 'refs/heads/main'" in native_jobs[name]
+observer = native_jobs['observePublishers']
+assert re.search(r'^    needs: \[publishEmbed, publishEdge\]$', observer, re.M), observer
+assert 'always()' in observer and "contains(needs.*.result, 'cancelled')" in observer
+assert not re.search(r'^    concurrency:', observer, re.M)
+assert not re.search(r'^      [\w-]+: write$', observer, re.M)
+assert 'exit 1' in observer and 'gh run rerun --job ' in observer
+assert 'actions: read' in observer
+assert 'gh run rerun $CANCELLED_RUN' not in observer
+recovery = textwrap.dedent(re.search(r'^        run: \|\n((?:          .*\n|\n)+)', observer, re.M).group(1))
+with tempfile.TemporaryDirectory() as temporary:
+    fake = Path(temporary) / 'gh'
+    fake.write_text(f'#!{sys.executable}\nimport os, sys\n'
+                    'assert sys.argv[1:] == ["api", "--paginate", "--slurp", '
+                    '"repos/example/project/actions/runs/987/jobs?filter=latest&per_page=100"], sys.argv\n'
+                    'print(os.environ["RECOVERY_JOBS"])\n')
+    fake.chmod(0o755)
+    cancelled = [
+        {'id': 1123, 'name': 'release-publish-web-embed', 'conclusion': 'cancelled'},
+        {'id': 1124, 'name': 'release-publish-edge', 'conclusion': 'cancelled'}]
+    ignored = [
+        {'id': 1125, 'name': 'release-publish-web-embed', 'conclusion': 'success'},
+        {'id': 1126, 'name': 'unrelated-job', 'conclusion': 'cancelled'}]
+    for selected in (cancelled, cancelled[1:], []):
+        result = subprocess.run(['bash', '-c', recovery], text=True, capture_output=True, env=dict(
+            os.environ, PATH=temporary + os.pathsep + os.environ['PATH'], REPOSITORY='example/project',
+            CANCELLED_RUN='987', RECOVERY_JOBS=json.dumps([{'jobs': selected + ignored}])))
+        commands = [line for line in result.stdout.splitlines() if line.startswith('gh run rerun')]
+        assert commands == [f'gh run rerun --job {job["id"]} --repo example/project' for job in selected], result
+        assert result.returncode != 0, result
+        if selected:
+            assert result.returncode == 1 and not result.stderr, result
+        else:
+            assert 'No cancelled publisher job IDs found' in result.stderr, result
+print('passed: ordered publishers; read-only observer prints exact cancelled job-ID reruns without rebuilding successful jobs')
+
+# A non-main dispatch must not execute any daily job holding write permission.
+for job, block in daily_jobs.items():
+    if not re.search(r'^      [\w-]+: write$', block, re.M):
+        continue
+    condition = re.search(r'^    if: (.+)$', block, re.M).group(1)
+    assert "github.ref == 'refs/heads/main'" in condition, (job, condition)
+    for mode in ('candidate', 'publish'):
+        for build_result in ('success', 'skipped'):
+            expression = condition.removeprefix('${{').removesuffix('}}').strip()
+            for name, value in (
+                    ('github.event_name', 'workflow_dispatch'), ('github.ref', 'refs/heads/other'),
+                    ('inputs.mode', mode), ('inputs.sha', 'a' * 40), ('inputs.run', ''),
+                    ('needs.build.result', build_result)):
+                expression = expression.replace(name, repr(value))
+            expression = expression.replace('!cancelled()', 'True').replace('always()', 'True')
+            expression = expression.replace('&&', ' and ').replace('||', ' or ')
+            assert not eval(expression, {'__builtins__': {}}, {}), (job, mode, build_result)
+assert policy('release-fractal.yml', 'workflow_dispatch', 100, sha='a' * 40) == (
+    'fractal-release-candidate-' + 'a' * 40, False)
+print('passed: stable/edge/embed share mutation lock; every daily writer rejects non-main dispatch')

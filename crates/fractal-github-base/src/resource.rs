@@ -13,6 +13,7 @@ mod github_repository;
 mod github_poll;
 pub use github_poll::{BudgetContinuation, completed_poll_cursor};
 pub mod github_workflows;
+pub use github_workflows::WorkflowRunLedger;
 pub use github_repository::{
     RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
 };
@@ -34,6 +35,12 @@ pub struct ObservationRequest {
     /// A declared refresh asked for this observation. It revalidates with GitHub instead of
     /// reusing a cached response; a conditional request costs nothing when nothing changed.
     pub refresh: bool,
+    /// A verified webhook delivery refreshed this observer recently, so this poll is a backstop
+    /// and a repository observer waits the settled interval between GraphQL reads.
+    pub webhook_covered: bool,
+    /// Where a `github.repository` observation with `main_performance_failures` records each
+    /// recent completed Workspace CI run, once. Without one, no CI run is read.
+    pub workflow_runs: Option<Arc<dyn WorkflowRunLedger>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -716,7 +723,7 @@ pub fn github_usage_report() -> GithubUsageReport {
         .report(now)
 }
 
-pub(crate) fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -735,6 +742,21 @@ pub(crate) fn record_github_response(status: reqwest::StatusCode, headers: &reqw
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .record(&spender, status, headers, now);
+}
+
+static GITHUB_RESPONSE_ACCOUNTING: crate::github_http::ResponseObserver =
+    crate::github_http::ResponseObserver::new(record_github_response);
+
+#[cfg(any(test, feature = "test-support"))]
+impl GithubAuth {
+    /// Construct fixture credentials with the same accounting observer as the daemon.
+    pub fn test(token: &str) -> Self {
+        crate::github_http::observe_responses(&GITHUB_RESPONSE_ACCOUNTING).unwrap();
+        Self::Local {
+            token: std::sync::Arc::new(token.into()),
+            cache: None,
+        }
+    }
 }
 
 /// Drop `url`'s cached answer: for a URL read once, whose answer would never be revalidated.
@@ -989,7 +1011,7 @@ pub use crate::github_http::github_auth;
 /// Select the daemon's GitHub source before its first request. Configuration is immutable
 /// for this process; token-file contents are revalidated when the file changes.
 pub fn configure_github(config: &crate::config::Config) -> Result<()> {
-    crate::github_http::configure(config)
+    crate::github_http::configure(config, &GITHUB_RESPONSE_ACCOUNTING)
 }
 
 /// An st agent on this host and the workspace it works in.
@@ -1377,7 +1399,7 @@ mod tests {
         let auth = crate::github_http::app_read::select(
             Some(&config.state_dir), "redirect-fixture", "gh-ci", &GithubAuth::test("fixture"),
         );
-        crate::github_http::configure(&config).unwrap();
+        configure_github(&config).unwrap();
         let payload = spend_as("observer/redirect-test".into(), github_json(
             &github_client(), std::env::var("OBSERVER_REDIRECT_TEST_URL").unwrap(),
             &auth, Duration::ZERO,
@@ -1475,6 +1497,8 @@ mod tests {
             previous_facts: None,
             every_ms: None,
             refresh: false,
+            webhook_covered: false,
+            workflow_runs: None,
         };
         let empty = GithubAuth::test("");
         let blank = GithubAuth::test(" ");
@@ -1520,6 +1544,8 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
+                workflow_runs: None,
             })
             .await
             .unwrap();
@@ -1595,6 +1621,8 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
+                workflow_runs: None,
             })
             .await
             .unwrap();
@@ -1617,6 +1645,8 @@ mod tests {
                 previous_facts: None,
                 every_ms: None,
                 refresh: false,
+                webhook_covered: false,
+                workflow_runs: None,
             })
             .await
             .unwrap();
@@ -1671,6 +1701,8 @@ mod tests {
             previous_facts: None,
             every_ms: None,
             refresh: false,
+            webhook_covered: false,
+            workflow_runs: None,
         };
         let observed = tokio::time::timeout(
             Duration::from_secs(10),
@@ -1706,7 +1738,7 @@ mod tests {
             requests
         });
         let request = || ObservationRequest { provider:"github.ref".into(), locator:"acme/garden@main".into(), fields:BTreeSet::from(["head".into()]),
-            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true };
+            cursor:None, previous_facts:None, every_ms:Some(GITHUB_REF_WATCH_MS), refresh:true, webhook_covered:false, workflow_runs:None };
         let first = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let unchanged = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
         let changed = observe_github_ref_at(request(), &base, &GithubAuth::test("fixture-token")).await.unwrap();
@@ -1799,6 +1831,8 @@ mod tests {
                     previous_facts: None,
                     every_ms: None,
                     refresh: false,
+                    webhook_covered: false,
+                    workflow_runs: None,
                 },
                 &base,
                 Some(&GithubAuth::test("orchid-test-token")),
