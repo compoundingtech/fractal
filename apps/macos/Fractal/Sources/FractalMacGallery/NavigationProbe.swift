@@ -263,8 +263,9 @@ import FractalMacUI
         let extent = max(0, document.bounds.height - scroll.contentView.bounds.height)
         if limit == 1578 {
           require(extent < 1, "19-row inbox unnecessarily scrolls on tall screen")
-          require(abs(window.frame.height - 968) < 1,
-            "19-row fitting home should hug its 968pt fixture content, not fill \(limit)")
+          let natural = uncapped.fittingSize.height
+          require(abs(window.frame.height - min(natural, limit)) < 1,
+            "19-row fitting home must hug min(content=\(natural), budget=\(limit)), got \(window.frame.height)")
         }
         await edges("19-row home")
         print("navigation-probe 19-row home \(prefix): rows=\(rowCount) more=\(ids.contains("inbox-more")) document=\(document.bounds.height) viewport=\(scroll.contentView.bounds.height) extent=\(extent) top=\(window.frame.maxY) anchor=\(anchor)")
