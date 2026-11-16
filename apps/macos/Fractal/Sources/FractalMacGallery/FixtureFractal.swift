@@ -88,10 +88,6 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter, InboxActivityAdapte
     return try serve(value)
   }
 
-  func readInboxActivity(_ period: InboxActivity.Period, now: Date) async throws -> InboxActivity {
-    guard let value = activity[period] else { throw FixtureFailure(description: "No activity fixture") }
-    return try serve(value)
-  }
 
   func readSloHistory(_ request: SloHistoryRequest) async throws -> SloHistory {
     let steps = histories[request.id] ?? Array(repeating: nil, count: request.steps)
