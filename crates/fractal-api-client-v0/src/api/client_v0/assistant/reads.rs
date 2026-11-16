@@ -140,7 +140,7 @@ async fn thread_read(
                     if history {
                         // The retained-history cursor is owned and scoped by the store.
                         // Do not translate it into an assistant transcript cursor.
-                        let page = fractal_missions::store::missions::thread_request_history(
+                        let page = crate::store::missions::thread_request_history(
                             &state.store, &person, id, cursor.as_deref(), limit,
                         ).map_err(store_error)?;
                         return Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?));

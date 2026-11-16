@@ -126,7 +126,7 @@ pub(super) async fn request_history(
     Query(query): Query<RequestHistoryQuery>,
 ) -> ReadResult<thread_metadata::request_history::RequestHistoryPage> {
     with_owner(state, session, id, move |store, person, subject, _| {
-        fractal_missions::store::missions::thread_request_history(
+        crate::store::missions::thread_request_history(
             store, person, subject, query.cursor.as_deref(), query.limit.unwrap_or(40),
         )
         .map_err(store_error)
@@ -825,7 +825,7 @@ mod tests {
             let body: Value = serde_json::from_slice(
                 &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap(),
             ).unwrap();
-            let expected = fractal_missions::store::missions::thread_request_history(
+            let expected = crate::store::missions::thread_request_history(
                 &state.store, person, thread, None, limit,
             ).unwrap();
             assert_eq!(body["value"], json!(expected));
@@ -841,7 +841,7 @@ mod tests {
                 let next: Value = serde_json::from_slice(
                     &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap(),
                 ).unwrap();
-                let expected = fractal_missions::store::missions::thread_request_history(
+                let expected = crate::store::missions::thread_request_history(
                     &state.store, person, thread, Some(cursor), 1,
                 ).unwrap();
                 assert_eq!(next["value"], json!(expected));

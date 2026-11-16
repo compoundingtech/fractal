@@ -768,7 +768,7 @@ agent "reads-codex" { workspace "/tmp"; command "true"; restart always; }
             predecessor: &origins[0].source_id, episode: &origins[0].episode, reason: "Related decision",
         }),
     }).unwrap();
-    let expected = fractal_missions::store::missions::thread_request_history(
+    let expected = crate::store::missions::thread_request_history(
         &fixture.state.store, OWNER, thread, None, 1,
     ).unwrap();
     let cursor = expected.next_cursor.as_deref().expect("two retained asks paginate");
@@ -781,7 +781,7 @@ agent "reads-codex" { workspace "/tmp"; command "true"; restart always; }
     assert_eq!(value["value"], serde_json::to_value(&expected).unwrap());
     assert_eq!(value["value"]["items"].as_array().unwrap().len(), 1);
     assert!(bytes <= MAX_RESPONSE_BYTES);
-    let next = fractal_missions::store::missions::thread_request_history(
+    let next = crate::store::missions::thread_request_history(
         &fixture.state.store, OWNER, thread, Some(cursor), 1,
     ).unwrap();
     let (status, value, _) = fixture.request(
