@@ -195,8 +195,20 @@ def observer_json(raw):
 
 
 def health_source(raw):
-    """Raw /v1/health shape only; cleanliness still needs activation provenance."""
+    """Known gateway/native envelope or legacy raw health, not activation provenance."""
     health = observer_json(raw)
+    markers = {"api_version", "request_id", "snapshot_host", "value"}
+    if markers.intersection(health):
+        if (set(health) != {"api_version", "request_id", "snapshot_host", "store_index", "value"}
+                or health["api_version"] != "st3.v1"
+                or not isinstance(health["request_id"], str) or not health["request_id"]
+                or type(health["store_index"]) is not int or health["store_index"] < 0
+                or not isinstance(health["value"], dict)
+                or not isinstance(health["snapshot_host"], str)
+                or health["snapshot_host"] != health["value"].get("node")):
+            raise ValueError("Invalid st3.v1 serving health envelope")
+        health = health["value"]
+        # Outer and inner indexes may differ during concurrent writes.
     if (health.get("status") != "ready" or not isinstance(health.get("node"), str)
             or not health["node"] or not isinstance(health.get("build"), dict)
             or health["build"].get("dirty", False) is not False):

@@ -2249,6 +2249,16 @@ class CompatibilityDataTests(unittest.TestCase):
             with self.subTest(encoding=encoding), self.assertRaises(ValueError):
                 observer_json('{"node":"fixture"}'.encode(encoding))
         self.assertEqual(observer_json('{"node":"é"}'.encode("utf-8")), {"node": "é"})
+        envelope = {"api_version": "st3.v1", "request_id": "fixture", "snapshot_host": "fixture-node-a",
+                    "store_index": 2, "value": {"status": "ready", "node": "fixture-node-a", "store_index": 3,
+                                               "build": {"commit": self.serving}}}
+        self.assertEqual(health_source(json.dumps(envelope).encode())["commit"], self.serving)
+        for change in ({"api_version": "future.v2"}, {"snapshot_host": "fixture-node-b"},
+                       {"status": "ready"}, {"node": "fixture-node-a"}, {"store_index": True}, {"value": []}):
+            altered = copy.deepcopy(envelope)
+            altered.update(change)
+            with self.subTest(envelope=altered), self.assertRaises(ValueError):
+                health_source(json.dumps(altered).encode())
         for change in ({"status": "starting"}, {"build": {"commit": "b80aee9"}},
                        {"build": {"commit": self.serving, "dirty": True}}):
             value = json.loads(raw)
