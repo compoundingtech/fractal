@@ -697,6 +697,7 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
         ("threads", selection.clone()),
         ("thread-detail", format!("{selection}&thread_id=thread%2Fowned")),
         ("thread-timeline", format!("{selection}&thread_id=thread%2Fowned")),
+        ("thread-request-history", format!("{selection}&thread_id=thread%2Fowned")),
     ] {
         let query = format!("?{query}");
         let payload = wrong_principal.payload(route, &query);
@@ -711,12 +712,104 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
 
     let denied = fixture_principal(&SCOPES[..4], true, MCP_PRINCIPAL).await;
     let query = &format!("?{selection}&thread_id=thread%2Fowned");
-    let payload = denied.payload("thread-detail", query);
-    let header = denied.header(&payload, &denied.attestor);
-    let (status, value, _) = denied
-        .request(&format!("/v1/client/assistant/thread-detail{query}"), Some(&header))
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    for route in ["thread-detail", "thread-request-history"] {
+        let payload = denied.payload(route, query);
+        let header = denied.header(&payload, &denied.attestor);
+        let (status, value, _) = denied
+            .request(&format!("/v1/client/assistant/{route}{query}"), Some(&header))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+        assert!(value.get("value").is_none(), "{value}");
+    }
+}
+
+#[tokio::test]
+async fn thread_request_history_returns_store_page_and_preserves_opaque_cursor() {
+    use crate::store::thread_metadata::{self, Edit, InboxOrigin, StartFromInbox};
+    use crate::store::thread_links::{self, AttachAsk, DecisionHistory};
+
+    let mut fixture = fixture_principal(&["read.assistant.conversation"], true, MCP_PRINCIPAL).await;
+    fixture.state.store.configure_thread_write_rollout([]);
+    let intent = crate::graph::parse_internal_intent(
+        r#"version 2
+agent "reads-codex" { workspace "/tmp"; command "true"; restart always; }
+"#, "assistant-history",
+    ).unwrap();
+    fixture.state.store.apply_internal(&intent, "assistant-history").unwrap();
+    let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
+    projection_read_mode(&mut fixture, "caller-bound-allow").await;
+    let mut origins = Vec::new();
+    for key in ["history-first", "history-second"] {
+        let ask = fixture.state.store.ask_person(&serde_json::from_value(json!({
+            "person": OWNER, "actor": "agent/reads-codex", "title": key,
+            "reason": format!("Retained {key}"), "new_run": key, "idempotency_key": key,
+        })).unwrap()).unwrap();
+        let episode = fixture.state.store.latest_claim(&ask.subject, Some("work.person-asked"))
+            .unwrap().unwrap().id;
+        origins.push(InboxOrigin { source_id: ask.subject, episode });
+    }
+    let thread = "thread/assistant-history";
+    let first_message = ClaimInput {
+        subject: "message/assistant-history".into(), kind: "message.sent".into(),
+        actor: Some(OWNER.into()),
+        fields: serde_json::from_value(json!({
+            "from": OWNER, "to": "agent/reads-codex", "content": "Discuss retained asks", "status": "sent",
+        })).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    };
+    thread_metadata::start_from_inbox(&fixture.state.store, StartFromInbox {
+        thread, title: "History", person: OWNER, origin: &origins[0],
+        key: "start-assistant-history", first_message: &first_message,
+    }).unwrap();
+    thread_links::attach_ask(&fixture.state.store, "agent/reads-codex", AttachAsk {
+        thread, ask: &origins[1].source_id, episode: &origins[1].episode,
+        key: "attach-assistant-history",
+        decision: Some(DecisionHistory {
+            predecessor: &origins[0].source_id, episode: &origins[0].episode, reason: "Related decision",
+        }),
+    }).unwrap();
+    let expected = fractal_missions::store::missions::thread_request_history(
+        &fixture.state.store, OWNER, thread, None, 1,
+    ).unwrap();
+    let cursor = expected.next_cursor.as_deref().expect("two retained asks paginate");
+    let endpoint = format!(
+        "/v1/client/assistant/thread-request-history?agent_id=agent%2Freads-codex&session_id={}&thread_id=thread%2Fassistant-history&limit=1&max_response_bytes=16384",
+        urlencoding::encode(&session),
+    );
+    let (status, value, bytes) = fixture.request(&endpoint, None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"], serde_json::to_value(&expected).unwrap());
+    assert_eq!(value["value"]["items"].as_array().unwrap().len(), 1);
+    assert!(bytes <= MAX_RESPONSE_BYTES);
+    let next = fractal_missions::store::missions::thread_request_history(
+        &fixture.state.store, OWNER, thread, Some(cursor), 1,
+    ).unwrap();
+    let (status, value, _) = fixture.request(
+        &format!("{endpoint}&cursor={}", urlencoding::encode(cursor)), None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"], serde_json::to_value(next).unwrap());
+
+    for (id, person, agent) in [
+        ("thread/foreign-history", "person/other", "agent/reads-codex"),
+        ("thread/other-agent-history", OWNER, "agent/other"),
+    ] {
+        thread_metadata::apply(&fixture.state.store, person, id, id,
+            Edit::Create { agent, title: "Private foreign history" }).unwrap();
+        let path = endpoint.replace("thread%2Fassistant-history", &urlencoding::encode(id));
+        let (status, value, _) = fixture.request(&path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+        assert!(value.get("value").is_none(), "{value}");
+    }
+    for path in [
+        endpoint.replace(&urlencoding::encode(&session).to_string(), "session%2Fwrong"),
+        endpoint.replace("agent%2Freads-codex", "agent%2Fother"),
+        format!("{endpoint}&cursor=invalid"),
+    ] {
+        let (status, value, _) = fixture.request(&path, None).await;
+        assert!(!status.is_success(), "{value}");
+        assert!(value.get("value").is_none(), "{value}");
+    }
 }
 
 fn thread_fixture_message(
