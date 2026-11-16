@@ -158,9 +158,12 @@ that instance home.
 
 Every install has one work root, the folder agents work in unless you point one at another folder.
 It is `~/st` for the default install and `~/.st-instance/NAME/work` for an instance. New agents get
-a folder inside it, `agents/NAME`, never the home folder, so an agent that lists its working
-directory does not make macOS ask for access to Documents, Desktop or Downloads. `fractal setup` creates
-the work root and prints it once. Change it with `work_root = "/absolute/path"` in `config.toml`; it
-must be absolute and cannot be the home folder or inside Documents, Desktop or Downloads. Existing
-agents keep their folders, and an agent or mission can still name any folder. `fractal uninstall` never
-removes what is in the work root: it prints `kept` with the path (and `--dry-run` prints `keep`).
+a folder inside it, `agents/NAME`, never the home folder. `fractal setup` creates the work
+root and prints it once. Change it with `work_root = "/absolute/path"` in `config.toml`.
+On macOS, keep every agent's work folder outside Desktop, Documents, Downloads,
+iCloud Drive and removable volumes, including explicitly named agent or mission
+folders. Existing agents retain their folders; move protected work into an
+unprotected workspace rather than granting broad daemon or agent access. Touching
+a protected folder may produce `Operation not permitted` or a macOS privacy prompt.
+`fractal uninstall` never removes work-root contents: it prints `kept` with the path
+(and `--dry-run` prints `keep`).

@@ -30,6 +30,13 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
         raw = match[1]
         condition = ast.literal_eval(raw) if raw.startswith(('"', "'")) else raw
         expression = condition.removeprefix('${{ ').removesuffix(' }}')
+        # A positively main-push-only job cannot allocate a PR runner, draft or
+        # otherwise. Permit only additional conjuncts, not OR/ternary escapes.
+        main_push = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        if expression.startswith(main_push):
+            assert expression == main_push or expression.startswith(main_push + ' && '), (path.name, name, condition)
+            assert '||' not in expression and '?' not in expression, (path.name, name, condition)
+            continue
         prefix = GUARD + ' && ('
         assert expression.startswith(prefix) and expression.endswith(')'), (path.name, name, condition)
         # Evaluate the generated guard with both outcomes of the existing condition.

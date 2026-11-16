@@ -8457,6 +8457,23 @@ async fn dispatch_action(
             signal_changed(state);
             Ok(vec![result.subject])
         }
+        "work.override" => {
+            let result = state.store.override_person_step(&PersonStepResponse {
+                delegation: None,
+                subject: parameter_string(p, "target_id")?,
+                actor: authority_actor.clone(),
+                summary: p.get("summary").map(|_| parameter_string(p, "summary")).transpose()?.unwrap_or_default(),
+                evidence: Vec::new(),
+                episode: Some(parameter_string(p, "episode")?),
+                idempotency_key: request.idempotency_key.clone(),
+                answer: Some(serde_json::from_value(p.get("answer").cloned().ok_or_else(|| validation("answer is required"))?)
+                    .map_err(|_| validation("answer requires a named id and optional text"))?),
+            }).map_err(|error| {
+                if error.code == "forbidden" { forbidden(error.message) } else { ApiError::bad(error) }
+            })?;
+            signal_changed(state);
+            Ok(vec![result.subject])
+        }
         action @ ("work.done" | "work.cancel-ask") => {
             let target = parameter_string(p, "target_id")?;
             let result = state
@@ -16872,9 +16889,10 @@ subscription "watch/source" {
         let mut changed = claim.clone();
         changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
         assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        // Exact withdrawal must not select a completion using the wall clock.
         state.store.append_client_operation_claim(&ClaimInput {
             subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
-            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            actor:Some("person/alex".into()), fields:BTreeMap::from([("completion_id".into(), json!(claim.id))]),
             evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
         }).unwrap();
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());

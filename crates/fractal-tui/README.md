@@ -61,6 +61,12 @@ between splits; `Ctrl+T`, `Ctrl+V`, `Ctrl+X` and `Ctrl+W` open a tab, split righ
 close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox tab; `Ctrl+Q` quits.
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
+Middle-click an Inbox row or its card's `[x]` button to dismiss that item, pressing and
+releasing over the same target. Requests are dismissed immediately without confirmation;
+keyboard `x` still asks for `y`. Updates and messages are marked read, and Recently closed
+items are cleared locally. Decisions and faults refuse dismissal just as `x` does.
+In the TUI, middle-click closes or dismisses items in closable lists; destructive actions
+and answering decisions are excluded.
 
 Documents are read-only. `Ctrl+K` opens one by name (`doc/NAME` or `doc/NAME@HASH`) and the
 **Documents** list (`doc/PREFIX/` for one prefix); a `doc/…` link in a message, a mission card
@@ -152,6 +158,18 @@ it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. 
 their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps its list and
 selected card in a regular, closable tab. Opening it again focuses the existing tab in this
 space. Move it into a split with the tab menu or by dragging; Esc does not close it.
+
+Below what is open, Inbox lists your asks that resolved by themselves at their deadline in the
+last seven days under `Auto-resolved` (`↻`): the title, who asked, the default that applied and
+when. `o` on one (or on a `Recently closed` row of the same ask) uses your answer instead: digits
+choose one of its other answers, Enter sends it as `work.override`, Esc cancels. The chooser says
+what that does: "Your answer replaces the default. Work already done on the default is not
+undone; <asker> is told." An answer that requests changes first opens a box for them: Enter sends
+the answer with the words (empty words are refused), Esc goes back to the answers. Until Fractal
+answers, the row says `sending your answer…` and `o` offers no second answer. `o` is not offered
+once Fractal no longer takes an override or the ask has no other answer. The list is read when
+Inbox opens, when the alerts change and after an override is accepted, never on a timer; a read
+that stopped at its limit says so, even when it found none.
 
 On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
 `✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends

@@ -5,6 +5,7 @@
  * truncation marker — flows through the pane's mapping into the gated kit composition, and the
  * rendered transcript reproduces the Storybook-reference structure on real components.
  */
+import { markdownBlock } from '@fractal/client/markdown'
 import * as React from 'react'
 import { useAui } from '@assistant-ui/react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -865,7 +866,8 @@ describe('ConversationPane composition activation', () => {
 
   it('negative control: without the host opener, kit consent loads the image inline', async () => {
     const image = 'https://images.example.invalid/control.png'
-    await act(async () => { root!.render(<Markdown text={`![Control](${image})`} />) })
+    // markdown-template-reviewed: an invented image URL
+    await act(async () => { root!.render(<Markdown text={markdownBlock(`![Control](${image})`)} />) })
     expect(container.querySelector(`img[src="${image}"]`)).toBeNull()
     const button = container.querySelector<HTMLButtonElement>('[data-testid="deferred-image"] button')
     expect(button?.textContent).toBe('Load image')

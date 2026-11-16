@@ -1373,11 +1373,43 @@ or presses read. Agents post updates with `fractal work update`. An update's opt
 (1 to 300 characters) is set only when the person asked to be told that outcome: a client that
 speaks reads `update.speech` aloud, and speaks no update without it.
 
+The draft [rich content block contract](../content-blocks.md) specifies shared text-change and
+image blocks, daemon checks, content-bound approval, compatibility and per-client rendering.
+Its capabilities are a design contract, not available merely because a request uses version 1.
+
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
 (`step`), what it is for (`goal`) and its `attempt`. A standalone ask (`--new-run`) and an update
 have no `blocked`. Show the step and its goal with the question, so the person can see what
 their answer lets go on, and link the mission.
+
+### Auto-resolved asks
+
+`GET /v1/client/auto-resolved` (`auto-resolved.list`) requires `read.projections`
+and a person session. It accepts no query parameters and returns only that person's
+deadline-resolved asks from the last seven days, excluding person answers,
+cancellations and overrides. Agents receive 403. `AutoResolvedAsks` contains
+`items` (at most 128, newest resolution first) and `complete`. `complete` is false
+when the read returns 128 rows or its bounded scan of 512 recent asks fills, so
+an empty read can still be incomplete.
+
+Each row names `resolution_id`, `title`, `requester_id`, `resolved_at`, `target_id`
+and `episode`. Optional `default_answer`, client-view `request` and
+`action_parameters` are omitted, never null. Only rows with
+`action_parameters["work.override"]` offer override. Pick a named answer other
+than the default from `request.answers`. `work.override` takes `target_id`,
+`episode`, `answer: { id, text? }` and optional nonempty `summary`; the server
+derives the summary when omitted. It requires `control.attention` and only a
+snapshot fence: the asking episode is its work fence. Use the stable key
+`person-override:{episode}:{answer.id}` and action id
+`action/person-override:{episode}:{answer.id}` for exact retries.
+
+Only the ask's person may override. A closed seven-day window or stale episode
+returns non-retryable `stale-fence`; invalid answers are validation refusals.
+Show: "Your answer replaces the default. Work already done on the default is not undone; <asker> is told."
+Re-read on surface open, attention changes and accepted overrides, not on a timer.
+Digest notices stay internal; they will link to these rows once the notices read
+path lands. Override is never offered on open attention rows.
 
 `work.done` takes `target_id`, `episode`, nonempty `summary`, optional string `evidence`, and
 an optional `answer` (`id` and/or `text`). A structured decision or choice needs `answer.id`,
