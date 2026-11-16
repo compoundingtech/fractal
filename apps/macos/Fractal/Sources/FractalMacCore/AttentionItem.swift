@@ -71,8 +71,8 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
   /// Fractal still lists a snoozed row; the tray hides it until its snooze ends.
   public func isSnoozed(at now: Date) -> Bool { snoozedUntil.map { $0 > now } ?? false }
 
-  /// What the tray does with this card. Mirrors Fractal web `data/attention.ts`
-  /// `isWaitingForAnswer`: classify wire discriminants and offered actions, never text.
+  /// What the tray does with this card: classify wire discriminants and offered
+  /// actions, never text. Reviews remain answerable in Fractal, not through work.done.
   public var role: Role {
     guard state == "open" else { return .ignored }
     if update != nil {
@@ -80,6 +80,11 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
     }
     if Self.isPersonStep(kind) { return actions.contains("work.done") ? .ask(.native) : .ignored }
     if kind.hasPrefix("custom.") { return actions.contains("custom.reply") ? .ask(.inFractal) : .ignored }
+    if kind == "human-gate",
+      actions.contains(where: { $0 == "review.approve" || $0 == "review.reject" || $0 == "review.request-changes" })
+    {
+      return .ask(.inFractal)
+    }
     if kind == "harness-prompt", actions.contains("prompt.respond"), !promptAnswers.isEmpty {
       return .ask(.inFractal)
     }
@@ -88,7 +93,7 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
 
   public enum Role: Sendable, Equatable {
     /// An open request waiting on the person. `.native` asks are answered here with
-    /// `work.done`; custom forms and harness prompts are answered in Fractal.
+    /// `work.done`; custom forms, human reviews and harness prompts are answered in Fractal.
     case ask(Answering)
     /// An informational update; reading it completes its person step.
     case update
