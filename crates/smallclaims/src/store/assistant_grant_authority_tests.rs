@@ -330,7 +330,9 @@ fn reference_for(store: &Store, owner: &str, scopes: &[&str]) -> Vec<(String, St
         let f = &claim.body["fields"];
         claim.subject == SUBJECT && claim.actor.as_deref() == Some(owner)
             && f["issuer"] == owner && f["grant_id"] == fields()["grant_id"]
-            && f["principal"] == "assistant/chatgpt" && f["profile"] == "assistant"
+            // Legacy native revocations omit the default assistant profile.
+            && f.get("principal").is_none_or(|value| value == "assistant/chatgpt")
+            && f.get("profile").is_none_or(|value| value == "assistant")
     };
     let policy = |claim: &ClaimRecord| {
         let f = &claim.body["fields"];
