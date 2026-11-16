@@ -54,7 +54,14 @@ fn run_retry_latest_and_same_revision_create_independent_immutable_lineage() {
     assert_eq!(latest.inputs, source.inputs);
     assert_eq!(latest.workspace, source.workspace);
     assert_eq!(latest.retry_of.as_deref(), Some(source.subject.as_str()));
-    assert!(latest.steps.iter().all(|step| step.status == "pending" && step.attempt == 1));
+    assert_eq!(latest.steps.iter().find(|step| step.step == "prepare").unwrap().status, "completed");
+    assert_eq!(latest.steps.iter().find(|step| step.step == "check").unwrap().status, "pending");
+    let carried = latest.steps.iter().find(|step| step.step == "prepare").unwrap();
+    let evidence = store.claims_for(&carried.subject, Some("step-run.carried")).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].body["fields"]["source_step_run"],
+        source.steps.iter().find(|step| step.step == "prepare").unwrap().subject);
+    assert!(store.claims_for(&carried.subject, Some("work.submitted")).unwrap().is_empty());
     assert_eq!(store.retry_mission_run(&source.subject, &options).unwrap().subject, latest.subject);
     let mut changed = options.clone();
     changed.reason = Some("Different request.".into());
@@ -114,7 +121,7 @@ fn run_retry_removed_step_and_human_gate_have_fresh_step_subjects() {
     assert!(retry.steps.iter().any(|step| step.step == "finish"));
     assert!(!retry.steps.iter().any(|step| step.step == "check"));
     for step in &retry.steps {
-        assert_eq!(step.status, "pending");
+        assert_eq!(step.status, if step.step == "prepare" { "completed" } else { "pending" });
         assert!(!source.steps.iter().any(|old| old.subject == step.subject));
         assert!(store.claims_for(&step.subject, Some("gate.requested")).unwrap().is_empty());
     }
@@ -184,4 +191,42 @@ fn run_retry_refuses_active_and_successful_runs() {
     store.set_mission_run_state(&source.id, "completed", "terminal", None).unwrap();
     assert_eq!(store.retry_mission_run(&source.subject, &retry_options("successful", false)).unwrap_err().code, "mission-run-not-retryable");
     assert!(store.mission_run(&source.subject).unwrap().unwrap().retried_by.is_empty());
+}
+
+#[test]
+fn run_retry_changed_contract_invalidates_completed_step_and_dependents() {
+    let store = Store::open_memory("garden").unwrap();
+    publish_mission(&store, ORIGINAL, "original");
+    let source = fail(&store, &start(&store));
+    publish_mission(&store, &ORIGINAL.replace("Prepare.", "Prepare a different effect."), "changed-contract");
+    let successor = store.retry_mission_run(&source.subject, &retry_options("changed-contract-retry", false)).unwrap();
+    for step in &successor.steps {
+        assert_eq!(step.status, "pending");
+        assert!(store.claims_for(&step.subject, Some("step-run.carried")).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn run_retry_same_inputs_and_prose_revision_preserve_evidence_across_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let store = Store::open(&path, "garden").unwrap();
+    publish_mission(&store, ORIGINAL, "original");
+    let source = fail(&store, &start(&store));
+    publish_mission(&store, &ORIGINAL.replace("Retry independent work.", "Clarified mission introduction."), "prose-only");
+    let retry = store.retry_mission_run(&source.subject, &retry_options("prose-retry", false)).unwrap();
+    let prepare = retry.steps.iter().find(|step| step.step == "prepare").unwrap();
+    assert_eq!(prepare.status, "completed");
+    let evidence = store.claims_for(&prepare.subject, Some("step-run.carried")).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].body["fields"]["source_generation"], source.generation);
+    assert!(retry.steps.iter().all(|step| store.claims_for(&step.subject, Some("work.person-asked")).unwrap().is_empty()));
+    let same = store.retry_mission_run(&source.subject, &retry_options("same-input-retry", true)).unwrap();
+    assert_eq!(same.steps.iter().find(|step| step.step == "prepare").unwrap().status, "completed");
+    drop(store);
+    let store = Store::open(&path, "garden").unwrap();
+    let reopened = store.mission_run(&retry.subject).unwrap().unwrap();
+    assert_eq!(reopened.steps.iter().find(|step| step.step == "prepare").unwrap().status, "completed");
+    assert_eq!(store.claims_for(&prepare.subject, Some("step-run.carried")).unwrap().len(), 1);
+    assert!(reopened.steps.iter().all(|step| store.claims_for(&step.subject, Some("work.person-asked")).unwrap().is_empty()));
 }

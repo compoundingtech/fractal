@@ -2,7 +2,7 @@
 use super::*;
 
 pub fn plan_completed_agents_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     current: &MissionRunView,
     next: &MissionSpec,
     compatible: &BTreeSet<String>,

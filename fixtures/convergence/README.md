@@ -425,6 +425,15 @@ all other fixed seeds trim. The per-seed and majority trim-coverage assertions r
 `outcome: "abandoned"` fields on existing native effect receipt kinds. No kind is
 added. Versions 1 through 32 remain byte-identical. Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v33.json`;
-do not hand-edit it. The simulation and audit reports select v33. Ordinary effect
+do not hand-edit it. Ordinary effect
 draws retain their explicit immutable binding and confirmation-evidence mapping;
 human resolution is exercised by focused effect API and reconciliation tests.
+
+`claims-v34.json` adds `mission-run.gate-carried` and the native continuity bindings
+on human requests and carried steps. Versions 1 through 33 remain byte-identical.
+Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v34.json`;
+do not hand-edit it. The simulation and audit reports select v34. The targeted
+`the_corpus_generates_valid_native_continuity_inputs` assertion checks current
+continuity specs and validates generated inputs, in addition to the complete
+registry-kind inventory guard.

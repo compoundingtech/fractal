@@ -12904,3 +12904,5 @@ mission "wake-history" state="ready" {
         assert_eq!(created.wake, read.wake);
     }
 }
+
+mod continuity_recovery;

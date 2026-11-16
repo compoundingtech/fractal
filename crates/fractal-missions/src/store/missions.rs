@@ -3060,7 +3060,11 @@ impl MissionsStore for Store {
             default_selector: None,
             started_by: None,
         });
-        self.create_mission_run_inner(request, child, Some(&subject), None)
+        self.create_declared_workspace_mission_run(request, child, Some(&subject), None,
+            fractal_store::store::missions::MissionWorkspaceDeclaration {
+                subject: schedule.to_owned(),
+                suffix: subject.trim_start_matches("mission-run/")[..16].to_owned(),
+            })
     }
 
     fn record_mission_output(

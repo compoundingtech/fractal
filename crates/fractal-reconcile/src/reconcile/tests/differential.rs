@@ -670,7 +670,11 @@ fn run_sequence(seed: u64, events: usize) -> BTreeSet<String> {
         }
     }
     smallclaims::store::set_thread_clock(None);
-    let mut reached = full
+    reached_states(&full)
+}
+
+fn reached_states(side: &Side) -> BTreeSet<String> {
+    let mut reached = side
         .store
         .changes_since(0, 0)
         .unwrap()
@@ -678,7 +682,7 @@ fn run_sequence(seed: u64, events: usize) -> BTreeSet<String> {
         .into_iter()
         .map(|change| change.kind)
         .collect::<BTreeSet<_>>();
-    for view in full.store.mission_runs().unwrap() {
+    for view in side.store.mission_runs().unwrap() {
         reached.insert(format!("run {}", view.status));
         for step in view.steps {
             reached.insert(format!("{} {}", step.step, step.status));
@@ -687,12 +691,82 @@ fn run_sequence(seed: u64, events: usize) -> BTreeSet<String> {
     reached
 }
 
+/// A standing decision is reused across identical runs, so later random verdict
+/// events cannot manufacture a new review. Exercise refusal and approval on
+/// independent fresh stores, comparing strict full and incremental passes after
+/// every event, including an unchanged run and a reconciler restart.
+fn review_decision_reuse(verdict: &str) -> BTreeSet<String> {
+    let mut full = Side::new(false);
+    let mut incremental = Side::new(true);
+    for event in 0..5_u128 {
+        let now = START + event;
+        smallclaims::store::set_thread_clock(Some(now));
+        if event == 4 {
+            full.restart(false);
+            incremental.restart(true);
+        }
+        for side in [&full, &incremental] {
+            side.store.set_write_clock_at(now).unwrap();
+            match event {
+                0 => observe(&side.store, "config", "ready", "review-config-ready".into()),
+                1 | 3 => start_run(&side.store, now),
+                2 => answer_review(&side.store, verdict, now),
+                4 => {}
+                _ => unreachable!(),
+            }
+        }
+        full.settle();
+        incremental.settle();
+        assert_eq!(full.claims(), incremental.claims(),
+            "{verdict} reuse event {event}: incremental passes diverged from full passes");
+    }
+    for side in [&full, &incremental] {
+        let runs = side.store.mission_runs().unwrap();
+        let reviews = runs.iter().flat_map(|run| &run.steps)
+            .filter(|step| step.step == "review").collect::<Vec<_>>();
+        assert_eq!(reviews.len(), 2);
+        for review in &reviews {
+            assert_eq!(review.status, if verdict == "fail" { "failed" } else { "completed" },
+                "the original and reused decisions must have the same real outcome");
+        }
+        let changes = side.store.changes_since(0, 0).unwrap().changes;
+        assert_eq!(changes.iter().filter(|change| change.kind == "gate.requested").count(), 1,
+            "the identical run and restart must reuse the standing decision without reasking");
+        assert_eq!(changes.iter().filter(|change| change.kind == "gate.result").count(), 1,
+            "reuse must not fabricate a second answer");
+        let carried = changes.iter().filter(|change| change.kind == "step-run.carried").collect::<Vec<_>>();
+        assert_eq!(carried.len(), 1);
+        let body: Value = serde_json::from_str(&carried[0].body).unwrap();
+        let request = side.store.claim_by_id(body["fields"]["source_gate_request"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(request.kind, "gate.requested");
+        assert_ne!(request.body["fields"]["owner"], carried[0].subject,
+            "reuse must reference the other run's original request");
+        let answers = side.store.claims_for(&request.subject, Some("gate.result")).unwrap();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].body["fields"]["verdict"], verdict);
+        assert_eq!(body["evidence"], serde_json::json!([request.id, answers[0].id]));
+        if verdict == "fail" {
+            for change in &changes {
+                if matches!(change.kind.as_str(), "step-run.state" | "step-run.carried")
+                    && reviews.iter().any(|review| review.subject == change.subject)
+                {
+                    let body: Value = serde_json::from_str(&change.body).unwrap();
+                    assert_ne!(body["fields"]["status"], "completed",
+                        "neither the original denial nor its carried refusal may fabricate completion");
+                }
+            }
+        }
+    }
+    smallclaims::store::set_thread_clock(None);
+    reached_states(&full)
+}
+
 #[test]
 fn incremental_passes_write_what_full_passes_write() {
-    // Pull requests run seeds 1..=4, the fewest that reach every kind listed below; the daily run
-    // (ST_TEST_SCALE=full, docs/ci.md) runs 1..=8. If a change stops the four reaching a kind, the
-    // coverage assertion fails, so the smaller set cannot pass by comparing less.
-    // ST3_DIFFERENTIAL_SEEDS overrides both.
+    // Pull requests compare independent refusal/approval-reuse scenarios and seeds
+    // 1..=4; the daily run (ST_TEST_SCALE=full, docs/ci.md) runs 1..=8. The coverage
+    // assertion prevents passing by comparing less. ST3_DIFFERENTIAL_SEEDS overrides
+    // the number of random sequences, not the required standing-decision scenarios.
     let default_seeds = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
         8
     } else {
@@ -702,7 +776,8 @@ fn incremental_passes_write_what_full_passes_write() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default_seeds);
-    let mut reached = BTreeSet::new();
+    let mut reached = review_decision_reuse("fail");
+    reached.extend(review_decision_reuse("pass"));
     for seed in std::env::var("ST3_DIFFERENTIAL_FIRST")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -713,6 +788,7 @@ fn incremental_passes_write_what_full_passes_write() {
     // The sequences must keep reaching what they exist to compare.
     let missing = [
         "gate.result",
+        "step-run.carried",
         "resource.observed",
         "runtime.observed",
         "work.claimed",
