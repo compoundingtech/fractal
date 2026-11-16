@@ -1,11 +1,32 @@
 {
   "version": 1,
   "summary": "Add explicit manual-return Snooze state and compatible read models before enabling writers",
-  "replay": {"status": "changed", "detail": "Optional indefinite on person.attention-snoozed is replayed into a fresh person_attention_controls_v2 projection. Every authoritative legacy seen and timed-snooze claim is replayed. Old projection data is retained but its ready marker is invalidated when controls change; a new open also rebuilds after an older runtime has marked its projection ready."},
-  "schema": {"status": "changed", "detail": "The derived control projection adds snoozed_indefinitely. Attention and control results add an optional read boolean that is emitted only when true; false is absent. The authoritative claim flag requires until_unix_ms null. Existing absent/false plus null still means bring back."},
-  "rules": {"status": "none", "detail": "Person-only authority, request lifecycle, notifications and deadlines are unchanged. This expansion enables no new public write operation."},
-  "compatibility": {"status": "changed", "detail": "This reader expansion precedes manual-return writers. Legacy timed and clear read shapes remain exact because false is omitted. Older tolerant readers ignore the new true flag and can show an unanswered manual-return item as active; strict old readers reject it. Upgrade daemons and read clients before enabling manual-return writers."},
-  "downtime": {"status": "none", "detail": "No planned downtime. The derived control projection replays transactionally when the store opens."},
-  "manual": {"status": "none", "detail": "No new public writer or CLI mode is enabled by this reader expansion."},
-  "recovery": {"status": "changed", "detail": "All claims are retained. Legacy-only timed and clear controls force the old projection to rebuild on downgrade, and the new projection replays after legacy writes on roll-forward. Before reverting a member that has accepted manual-return claims, bring those items back using an updated member; older readers do not represent manual-return state."}
+  "replay": {
+    "status": "changed",
+    "detail": "Optional indefinite on person.attention-snoozed is replayed into a fresh person_attention_controls_v2 projection. Every authoritative legacy seen and timed-snooze claim is replayed. Old projection data is retained but its ready marker is invalidated when controls change; a new open also rebuilds after an older runtime has marked its projection ready."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "The derived control projection adds snoozed_indefinitely. Attention and control results add an optional read boolean that is emitted only when true; false is absent. The authoritative claim flag requires until_unix_ms null. Existing absent/false plus null still means bring back."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Adding the optional claim field changes Registry::digest and the schema_digest advertised by daemon.started. Checkpoint rules version, person authority, request lifecycle, notifications and deadlines remain unchanged. This expansion enables no new public write operation."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "This reader expansion precedes manual-return writers. Legacy timed and clear read shapes remain exact because false is omitted. Older tolerant readers ignore the new true flag and can show an unanswered manual-return item as active; strict old readers reject it. Upgrade daemons and read clients before enabling manual-return writers. Older members retain replicated indefinite claims as retryable unknown-claim-field records until upgraded, so every member must upgrade before writers are enabled."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No planned downtime. The derived control projection replays transactionally when the store opens."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No new public writer or CLI mode is enabled by this reader expansion."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "All claims are retained. Legacy-only timed and clear controls force the old projection to rebuild on downgrade, and the new projection replays after legacy writes on roll-forward. Before reverting a member that has accepted manual-return claims, bring those items back using an updated member; older readers do not represent manual-return state."
+  }
 }
