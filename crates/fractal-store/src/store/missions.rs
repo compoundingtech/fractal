@@ -198,16 +198,31 @@ pub(super) fn carry_completed_run_steps_with_legacy_tx(
         {
             continue;
         }
+        let mut fields = json!({
+            "source_step_run": previous.subject,
+            "source_generation": source.generation,
+            "source_attempt": previous.attempt,
+            "status": "completed",
+            "attempt": previous.attempt,
+            "worker_reported": previous.worker_reported,
+        });
+        let mut evidence = Vec::new();
+        if confirmed_legacy.contains(&previous.subject) {
+            if !actor.starts_with("person/") {
+                return Err(FractalError::new("legacy-confirmation-needs-person",
+                    "only a person can confirm unbound historical person evidence"));
+            }
+            if let Some(confirmation) = person_work::continuity::legacy_step_confirmation_tx(
+                transaction, previous, successor,
+            ).map_err(internal)? {
+                evidence = confirmation["evidence"].as_array().into_iter().flatten()
+                    .filter_map(Value::as_str).map(str::to_owned).collect();
+                fields["person_continuity"] = confirmation;
+            }
+        }
         let claim = append_claim_tx(
             transaction, origin, &successor.subject, "step-run.carried", Some(actor),
-            &json!({"fields": {
-                "source_step_run": previous.subject,
-                "source_generation": source.generation,
-                "source_attempt": previous.attempt,
-                "status": "completed",
-                "attempt": previous.attempt,
-                "worker_reported": previous.worker_reported,
-            }}), &[], None,
+            &json!({"fields":fields,"evidence":evidence}), &evidence, None,
         ).map_err(smallclaims::error::typed)?;
         reconcile_carried_step_tx(transaction, &claim)?;
     }
@@ -1088,6 +1103,9 @@ impl Store {
             let source = mission_run_view_tx(transaction, &source.id).map_err(internal)?;
             let target = mission_run_view_tx(transaction, &run_id).map_err(internal)?;
             carry_completed_run_steps_tx(transaction, &self.origin, &starter, &source, &target)?;
+            person_work::continuity::carry_root_gate_answers_tx(
+                transaction, &self.origin, &source, &target, &starter, &BTreeSet::new(),
+            ).map_err(internal)?;
         }
         stages.enter("view");
         let view = created_mission_run_view_tx(transaction, &run_id).map_err(internal)?;

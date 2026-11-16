@@ -132,6 +132,32 @@ fn direct_person_answer_preview_names_bound_and_legacy_originals() {
         assert_eq!(work["person_evidence"][0]["request"]["id"], answer.id);
         assert_eq!(work["person_evidence"][0]["legacy_unbound"], legacy);
         assert_eq!(work["eligibility"], if legacy { "requires-person-confirmation" } else { "eligible" });
+        if legacy {
+            let result = store.recover_mission_continuity(&source.subject,
+                preview["preview_hash"].as_str().unwrap(), "person/operator", &[original.subject.clone()]).unwrap();
+            let recovered = store.mission_run(result["recovered_run"].as_str().unwrap()).unwrap().unwrap();
+            let recovered_step = recovered.steps.iter().find(|step| step.step == "prepare").unwrap();
+            let confirmation = store.claims_for(&recovered_step.subject, Some("step-run.carried")).unwrap();
+            assert_eq!(confirmation[0].body["fields"]["person_continuity"]["evidence"][0], answer.id);
+            store.set_mission_run_state(&recovered.subject, "failed", "terminal", Some("retry unchanged recovery")).unwrap();
+            let retry = store.retry_mission_run(&recovered.subject, &run_retry::retry_options("confirmed-step-retry", true)).unwrap();
+            let retried_step = retry.steps.iter().find(|step| step.step == "prepare").unwrap();
+            assert_eq!(retried_step.status, "completed");
+            assert_eq!(retried_step.person_answers[0].ask, original.subject);
+            let revised = publish_mission(&store,
+                &authored.replace("Retry independent work.", "Clarified unchanged work."), "confirmed-step-prose");
+            let cutover = store.with_all_runs_fenced_internal(|transaction| {
+                store.supersede_mission_run_at_revision_tx(transaction, &retry, &revised.revision)
+            }).unwrap();
+            let carried = cutover.steps.iter().find(|step| step.step == "prepare").unwrap();
+            assert_eq!(carried.status, "completed");
+            assert_eq!(carried.person_answers[0].ask, original.subject);
+            assert_eq!(store.claims_for(&original.subject, Some("work.person-done")).unwrap().len(), 1);
+            for step in [retried_step, carried] {
+                assert!(store.claims_for(&step.subject, Some("work.person-done")).unwrap().is_empty());
+                assert!(store.claims_for(&step.subject, Some("work.person-asked")).unwrap().is_empty());
+            }
+        }
     }
 }
 
@@ -176,4 +202,25 @@ fn legacy_root_approval_is_previewed_and_recovered_only_by_explicit_reference() 
     assert_eq!(references[0].body["fields"]["source_request"], request.id);
     assert_eq!(references[0].body["fields"]["source_answer"], answer.id);
     assert!(store.claims_for(recovered, Some("gate.result")).unwrap().is_empty());
+    store.set_mission_run_state(recovered, "failed", "terminal", Some("retry unchanged recovery")).unwrap();
+    let retry = store.retry_mission_run(recovered, &run_retry::retry_options("confirmed-root-retry", true)).unwrap();
+    let retry_reference = store.claims_for(&retry.subject, Some("mission-run.gate-carried")).unwrap();
+    assert_eq!(retry_reference.len(), 1);
+    assert_eq!(retry_reference[0].body["fields"]["source_confirmation"], references[0].id);
+    assert_eq!(retry_reference[0].body["fields"]["legacy_confirmed"], false);
+    let mut fields = serde_json::from_value::<BTreeMap<String,Value>>(request.body["fields"].clone()).unwrap();
+    fields.insert("owner".into(), json!(retry.subject));
+    assert_eq!(store.human_gate_continuity(&retry,&retry.subject,&fields).unwrap().1.unwrap().id,request.id);
+    let revised = publish_mission(&store,
+        &authored.replace("Retry independent work.", "Clarified unchanged work."), "confirmed-root-prose");
+    let cutover = store.with_all_runs_fenced_internal(|transaction| {
+        store.supersede_mission_run_at_revision_tx(transaction,&retry,&revised.revision)
+    }).unwrap();
+    fields.insert("owner".into(), json!(cutover.subject));
+    assert_eq!(store.human_gate_continuity(&cutover,&cutover.subject,&fields).unwrap().1.unwrap().id,request.id);
+    let cutover_reference = store.claims_for(&cutover.subject,Some("mission-run.gate-carried")).unwrap();
+    assert_eq!(cutover_reference[0].body["fields"]["source_confirmation"],references[0].id);
+    assert_eq!(store.claims_for(&request.subject,Some("gate.requested")).unwrap().len(),1);
+    assert_eq!(store.claims_for(&request.subject,Some("gate.result")).unwrap().len(),1);
+    assert!(store.claims_for(&cutover.subject,Some("gate.result")).unwrap().is_empty());
 }

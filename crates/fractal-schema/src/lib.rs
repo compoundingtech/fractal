@@ -3618,6 +3618,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("target_generation", required_reference_to(&["run-generation"])),
             ("continuity", required_object()),
             ("legacy_confirmed", boolean()),
+            ("source_confirmation", string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -3702,6 +3703,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source_generation", reference()),
             ("source_attempt", integer()),
             ("source_gate_request", string()),
+            ("person_continuity", object()),
             ("definition_hash", string()),
             ("status", string()),
             ("attempt", integer()),

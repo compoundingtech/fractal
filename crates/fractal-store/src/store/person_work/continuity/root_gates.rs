@@ -15,20 +15,55 @@ pub fn root_gate_evidence_tx(connection: &Connection, source: &MissionRunView) -
         .collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
-pub(super) fn root_reference_matches_tx(connection: &Connection, run: &MissionRunView, request: &ClaimRecord, answer: &ClaimRecord, binding: &Value) -> Result<bool> {
+fn original_confirmation_matches_tx(connection: &Connection, id: &str, request: &ClaimRecord, answer: &ClaimRecord, binding: &Value) -> Result<bool> {
+    let receipt = connection.query_row(
+        "SELECT actor,body FROM claims WHERE id=?1 AND kind='mission-run.gate-carried'",
+        [id], |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,String>(1)?)),
+    ).optional()?;
+    let Some((actor,body)) = receipt else { return Ok(false); };
+    let body: Value = serde_json::from_str(&body)?;
+    Ok(actor.as_deref().is_some_and(|actor| actor.starts_with("person/"))
+        && body["fields"]["legacy_confirmed"] == true
+        && body["fields"]["source_request"] == request.id
+        && body["fields"]["source_answer"] == answer.id
+        && body["fields"]["continuity"] == *binding)
+}
+
+fn root_confirmation_tx(connection: &Connection, run: &MissionRunView, request: &ClaimRecord, answer: &ClaimRecord, binding: &Value) -> Result<Option<String>> {
     let mut query = connection.prepare_cached(
-        "SELECT actor,body FROM claims WHERE subject=?1 AND kind='mission-run.gate-carried'
+        "SELECT id,body FROM claims WHERE subject=?1 AND kind='mission-run.gate-carried'
            AND json_extract(body,'$.fields.target_generation')=?2
            AND json_extract(body,'$.fields.source_request')=?3
            AND json_extract(body,'$.fields.source_answer')=?4"
     )?;
-    for row in query.query_map(params![run.subject,run.generation,request.id,answer.id], |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,String>(1)?)))? {
-        let (actor, body) = row?;
+    for row in query.query_map(params![run.subject,run.generation,request.id,answer.id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
+        let (id,body) = row?;
         let body: Value = serde_json::from_str(&body)?;
         if body["fields"]["continuity"] != *binding { continue; }
-        if request.body["fields"]["continuity"].is_null()
-            && (body["fields"]["legacy_confirmed"] != true || !actor.as_deref().is_some_and(|actor| actor.starts_with("person/"))) { continue; }
-        return Ok(true);
+        if original_confirmation_matches_tx(connection,&id,request,answer,binding)? {
+            return Ok(Some(id));
+        }
+        if let Some(original) = body["fields"]["source_confirmation"].as_str()
+            && original_confirmation_matches_tx(connection,original,request,answer,binding)? {
+            return Ok(Some(original.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn root_reference_matches_tx(connection: &Connection, run: &MissionRunView, request: &ClaimRecord, answer: &ClaimRecord, binding: &Value) -> Result<bool> {
+    if request.body["fields"]["continuity"].is_null() {
+        return Ok(root_confirmation_tx(connection,run,request,answer,binding)?.is_some());
+    }
+    let mut query = connection.prepare_cached(
+        "SELECT body FROM claims WHERE subject=?1 AND kind='mission-run.gate-carried'
+           AND json_extract(body,'$.fields.target_generation')=?2
+           AND json_extract(body,'$.fields.source_request')=?3
+           AND json_extract(body,'$.fields.source_answer')=?4"
+    )?;
+    for body in query.query_map(params![run.subject,run.generation,request.id,answer.id], |row| row.get::<_,String>(0))? {
+        let body: Value = serde_json::from_str(&body?)?;
+        if body["fields"]["continuity"] == *binding { return Ok(true); }
     }
     Ok(false)
 }
@@ -53,13 +88,18 @@ pub fn eligible_root_gate_requests_tx(connection: &Connection, source: &MissionR
     Ok(eligible)
 }
 
-pub(super) fn record_root_gate_carry_tx(tx: &Transaction<'_>, origin: &str, target: &MissionRunView, actor: &str, request: &ClaimRecord, answer: &ClaimRecord, binding: &Value, legacy_confirmed: bool) -> Result<()> {
+pub(super) fn record_root_gate_carry_tx(tx: &Transaction<'_>, origin: &str, target: &MissionRunView, actor: &str, request: &ClaimRecord, answer: &ClaimRecord, binding: &Value, legacy_confirmed: bool, source_confirmation: Option<&str>) -> Result<()> {
     if root_reference_matches_tx(tx,target,request,answer,binding)? { return Ok(()); }
-    append_claim_tx(tx,origin,&target.subject,"mission-run.gate-carried",Some(actor),
-        &json!({"fields":{"source_run":request.body["fields"]["owner"],"source_request":request.id,
-            "source_answer":answer.id,"target_generation":target.generation,"continuity":binding,
-            "legacy_confirmed":legacy_confirmed},"evidence":[request.id,answer.id]}),
-        &[request.id.clone(),answer.id.clone()],None)?;
+    let mut body = json!({"fields":{"source_run":request.body["fields"]["owner"],"source_request":request.id,
+        "source_answer":answer.id,"target_generation":target.generation,"continuity":binding,
+        "legacy_confirmed":legacy_confirmed}});
+    let mut evidence = vec![request.id.clone(),answer.id.clone()];
+    if let Some(confirmation) = source_confirmation {
+        body["fields"]["source_confirmation"] = json!(confirmation);
+        evidence.push(confirmation.to_owned());
+    }
+    body["evidence"] = json!(evidence);
+    append_claim_tx(tx,origin,&target.subject,"mission-run.gate-carried",Some(actor),&body,&evidence,None)?;
     Ok(())
 }
 
@@ -72,8 +112,13 @@ pub fn carry_root_gate_answers_tx(tx: &Transaction<'_>, origin: &str, source: &M
         let fields = serde_json::from_value::<BTreeMap<String,Value>>(request.body["fields"].clone())?;
         let binding = serde_json::to_value(gate_binding_tx(tx,target,&target.subject,&fields)?)?;
         let legacy = request.body["fields"]["continuity"].is_null();
-        if legacy && !actor.starts_with("person/") { anyhow::bail!("legacy root gate recovery requires a person confirmation"); }
-        record_root_gate_carry_tx(tx,origin,target,actor,&request,&answer,&binding,legacy)?;
+        let confirmed_here = legacy && confirmed_request_ids.contains(&request.id);
+        if confirmed_here && !actor.starts_with("person/") { anyhow::bail!("legacy root gate recovery requires a person confirmation"); }
+        let source_confirmation = if legacy && !confirmed_here {
+            Some(root_confirmation_tx(tx,source,&request,&answer,&binding)?
+                .ok_or_else(|| anyhow::anyhow!("the original person confirmation is no longer retained"))?)
+        } else { None };
+        record_root_gate_carry_tx(tx,origin,target,actor,&request,&answer,&binding,confirmed_here,source_confirmation.as_deref())?;
         carried.push(request.id);
     }
     Ok(carried)

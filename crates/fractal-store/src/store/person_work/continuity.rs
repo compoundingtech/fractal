@@ -22,6 +22,53 @@ pub struct AskContinuityBinding {
     pub default_answer: Option<String>,
 }
 
+/// A person's one-time recovery confirmation, bound to the recovered step's native context.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StepPersonConfirmation {
+    version: u32,
+    step: String,
+    contract_hash: String,
+    input_digest: String,
+    authority_digest: String,
+    evidence: Vec<String>,
+}
+
+pub fn legacy_step_confirmation_tx(connection: &Connection, source: &StepRunView, target: &StepRunView) -> Result<Option<Value>> {
+    let evidence = person_evidence_tx(connection, source)?.into_iter()
+        .filter(|record| record.body["fields"]["continuity"].is_null())
+        .map(|record| record.id).collect::<Vec<_>>();
+    if evidence.is_empty() { return Ok(None); }
+    let (contract_hash, input_digest, authority_digest) = continuity_step_binding_tx(connection, target)?;
+    Ok(Some(serde_json::to_value(StepPersonConfirmation {
+        version: 1, step: target.step.clone(), contract_hash, input_digest, authority_digest, evidence,
+    })?))
+}
+
+fn inherited_step_confirmations_tx(connection: &Connection, source: &StepRunView, target: &StepRunView) -> Result<BTreeSet<String>> {
+    let expected = continuity_step_binding_tx(connection, target)?;
+    let mut query = connection.prepare_cached(
+        "WITH RECURSIVE sources(subject,attempt) AS (
+           SELECT ?1,?2 UNION SELECT json_extract(c.body,'$.fields.source_step_run'),
+             coalesce(json_extract(c.body,'$.fields.source_attempt'),sources.attempt)
+           FROM sources JOIN claims c ON c.subject=sources.subject AND c.kind='step-run.carried'
+             AND json_extract(c.body,'$.fields.attempt')=sources.attempt)
+         SELECT c.body FROM sources JOIN claims c ON c.subject=sources.subject
+           AND c.kind='step-run.carried' AND json_extract(c.body,'$.fields.attempt')=sources.attempt
+           AND c.actor LIKE 'person/%' AND json_type(c.body,'$.fields.person_continuity')='object'"
+    )?;
+    let mut confirmed = BTreeSet::new();
+    for body in query.query_map(params![source.subject,source.attempt], |row| row.get::<_,String>(0))? {
+        let body: Value = serde_json::from_str(&body?)?;
+        let Ok(receipt) = serde_json::from_value::<StepPersonConfirmation>(body["fields"]["person_continuity"].clone()) else { continue; };
+        if receipt.version == 1 && receipt.step == target.step
+            && (receipt.contract_hash,receipt.input_digest,receipt.authority_digest) == expected {
+            confirmed.extend(receipt.evidence);
+        }
+    }
+    Ok(confirmed)
+}
+
 pub fn continuity_step_binding_tx(connection: &Connection, step: &StepRunView) -> Result<(String, String, String)> {
     continuity_context_binding_tx(connection, &step.run, &step.generation, Some(&step.step))
 }
@@ -133,13 +180,14 @@ pub fn step_answers_eligible_tx(connection: &Connection, source: &StepRunView, t
     let asks = person_evidence_tx(connection, source)?;
     if asks.is_empty() { return Ok(true); }
     let (contract, inputs, authority) = continuity_step_binding_tx(connection, target)?;
+    let inherited = inherited_step_confirmations_tx(connection, source, target)?;
     for ask in asks {
         if ask.kind == "gate.requested" {
             let Some(answer) = crate::store::human_review_answer_tx(connection, &ask.id)? else { return Ok(false); };
             if answer.body["fields"]["verdict"] != "pass" { return Ok(false); }
         } else if !reusable_answer_tx(connection, &ask)? { return Ok(false); }
-        let Some(value) = ask.body["fields"].get("continuity") else {
-            if allow_legacy { continue; }
+        let Some(value) = ask.body["fields"].get("continuity").filter(|value| !value.is_null()) else {
+            if allow_legacy || inherited.contains(&ask.id) { continue; }
             return Ok(false);
         };
         let Ok(binding) = serde_json::from_value::<AskContinuityBinding>(value.clone()) else { return Ok(false); };
