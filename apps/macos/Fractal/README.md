@@ -468,6 +468,13 @@ kept successful-read timestamps preserve accurate subsequent stale errors. Closi
 panel removes its page observation subscriptions, preserving only a lightweight sized
 placeholder and visibility reporter.
 
+The menu-bar template has an equality boundary keyed by ask count, urgency, connection
+health and display scale. Poll freshness alone does not rerun its `ImageRenderer`.
+Rendering that small image on every refresh caused transient RenderBox/Metal allocations:
+the observed ~288 MB footprint was dominated by ~258 MB of owned unmapped graphics,
+not JSON decoding or resident malloc growth. Changes to the displayed state still redraw
+the same template image, including its accessibility label.
+
 Run from the repository root on an authorized Mac, with the compatible FractalClient
 package supplied by the development shell (record its exact SHA):
 
@@ -490,11 +497,13 @@ and back first frame <100 ms; at 120 Hz, 8.333 ms/frame with zero drops/hitches.
 `NavigationFirstFrame` signposts measure first AppKit draw submission; the reviewer must
 also correlate actual presentation in Instruments. Missing data is not a passing result.
 `memory` captures `footprint -p "$TRAY_PID"` and `vmmap -summary "$TRAY_PID"` at roughly
-one-second cadence for three minutes to investigate the previously observed transient
-~289 MB spikes every 30–60 seconds. This remains an unproven perf suspect, not a claimed
-memory fix.
+one-second cadence for three minutes. Inspect category totals, not RSS alone: owned
+unmapped graphics can dominate a transient footprint spike. For a periodic-refresh
+regression check, also sample at ten-second cadence for at least six minutes and record
+the process peak so short spikes between samples are not missed.
 
-Build, tests, probe, UI/TCC, frame-time and memory validation for this change:
-**NOT RUN (needs Mac)**. Linux cannot compile or exercise AppKit/SwiftUI. The V4 base's
-flake client may also fail on `AvailabilityRule.word`; use and record the compatible
-client revision rather than treating a mismatched dependency build as a tray result.
+Release build, Swift tests and all four offscreen scroll probes passed on macOS for the
+menu-bar refresh fix. Screen presentation/120 Hz behavior was not remeasured: the panel
+and its navigation paths are unchanged. The V4 base's flake client may fail on
+`AvailabilityRule.word`; use and record the compatible client revision rather than
+treating a mismatched dependency build as a tray result.

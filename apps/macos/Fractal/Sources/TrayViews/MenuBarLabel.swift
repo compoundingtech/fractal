@@ -15,9 +15,8 @@ public struct TrayMenuBarLabel: View {
 
   public var body: some View {
     let state = MenuBarState(model: model)
-    Image(nsImage: Self.image(state, scale: scale))
-      .accessibilityElement(children: .ignore)
-      .accessibilityLabel(state.accessibilityLabel)
+    MenuBarImage(state: state, scale: scale)
+      .equatable()
   }
 
   @MainActor static func image(_ state: MenuBarState, scale: CGFloat) -> NSImage {
@@ -26,6 +25,20 @@ public struct TrayMenuBarLabel: View {
     let image = renderer.nsImage ?? NSImage()
     image.isTemplate = true
     return image
+  }
+}
+
+/// Freshness timestamps change on every poll, but the template depends only on these
+/// pixels. Keep ImageRenderer behind an equality boundary: even a tiny offscreen render
+/// can create hundreds of MB of transient RenderBox/Metal resources on macOS.
+private struct MenuBarImage: View, Equatable {
+  let state: MenuBarState
+  let scale: CGFloat
+
+  var body: some View {
+    Image(nsImage: TrayMenuBarLabel.image(state, scale: scale))
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(state.accessibilityLabel)
   }
 }
 
