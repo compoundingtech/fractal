@@ -54,7 +54,10 @@ fn retained_literal_and_retry_episodes_ignore_poison_and_accept_delayed_exact_an
         "attempt":2,"status":"pending","goals":["Original question","Retained feedback"]}));
     claim(&store, &first.source_id, "step-run.state", json!({"status":"ready","readiness_epoch":2}));
     let second = SourceEpisode { source_id: first.source_id.clone(), episode: format!("{generation}:2:2") };
-    store.connection.write().execute("UPDATE step_runs SET title='CURRENT POISON',goals='[\"CURRENT POISON\"]' WHERE subject=?1", [&first.source_id]).unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h1f45e6a5ac2b owner=fractal_missions::store::missions::retained_person_history_tests TODO=bound-or-reference-values-and-reclamation */
+        "UPDATE step_runs SET title='CURRENT POISON',goals='[\"CURRENT POISON\"]' WHERE subject=?1", [&first.source_id],
+    ).unwrap();
     claim(&store, &first.source_id, "work.person-done", json!({
         "attempt":1,"status":"completed","episode":first.episode,"summary":"Delayed old answer","key":"old-answer"}));
     let old = read(&store, &first);
@@ -90,10 +93,16 @@ fn missing_definition_opening_and_wrong_generation_fail_closed() {
     let mut wrong = key.clone();
     wrong.episode = "run-generation/not-this-source:1:1".into();
     assert!(retained_person_episode(&store.readers.get(), "person/test", &wrong, u64::MAX).unwrap().is_none());
-    store.connection.write().execute("DELETE FROM claims WHERE subject=?1 AND kind='step-run.state'", [&key.source_id]).unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hb9e6da379626 owner=fractal_missions::store::missions::retained_person_history_tests TODO=prepare-body-and-predecessor-values */
+        "DELETE FROM claims WHERE subject=?1 AND kind='step-run.state'", [&key.source_id],
+    ).unwrap();
     assert!(retained_person_episode(&store.readers.get(), "person/test", &key, u64::MAX).unwrap().is_none());
     let (store, key) = fixture();
-    store.connection.write().execute("DELETE FROM mission_revisions", []).unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h183342751f10 owner=fractal_missions::store::missions::retained_person_history_tests TODO=bound-or-reference-values-and-reclamation */
+        "DELETE FROM mission_revisions", [],
+    ).unwrap();
     assert!(retained_person_episode(&store.readers.get(), "person/test", &key, u64::MAX).unwrap().is_none());
 }
 
@@ -175,6 +184,7 @@ fn retained_materialized_retry_goals_preserve_literal_and_escaped_templates() {
 fn retained_definition_with_tampered_revision_content_cannot_prove_recipient() {
     let (store, key) = fixture();
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h1d9b8f7ed61a owner=fractal_missions::store::missions::retained_person_history_tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE mission_revisions SET body=replace(body,'Original question','Tampered question')", [],
     ).unwrap();
     assert!(retained_person_episode(&store.readers.get(), "person/test", &key, u64::MAX).unwrap().is_none());
@@ -189,10 +199,12 @@ fn retained_historical_interpolation_uses_creation_context_not_current_materiali
     let initial = crate::store::tests::publish_mission(&store, &definition, "history-definition");
     let key = run_initial(&store, &initial);
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h2521fbe7a12d owner=fractal_missions::store::missions::retained_person_history_tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE step_runs SET goals='[\"CURRENT MATERIALIZED POISON\"]' WHERE subject=?1",
         [&key.source_id],
     ).unwrap();
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hb919d6131460 owner=fractal_missions::store::missions::retained_person_history_tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE mission_runs SET requester='person/other'", [],
     ).unwrap();
     assert!(matches!(read(&store, &key).payload, HistoricalPayload::Available { title: Some(title), text, .. }
@@ -232,6 +244,7 @@ fn carried_ready_opening_recovers_actual_ready_epoch_for_history_and_inventory()
     // Removing the predecessor's actual READY evidence must not fall back to the
     // successor's current projection or to the syntactically valid episode.
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h6b15e35e002a owner=fractal_missions::store::missions::retained_person_history_tests TODO=prepare-body-and-predecessor-values */
         "DELETE FROM claims WHERE subject=?1 AND kind='step-run.state'",
         [&original.source_id],
     ).unwrap();

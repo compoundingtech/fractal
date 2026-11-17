@@ -717,7 +717,7 @@ async fn browser_retained_discussion_rechecks_revocation_and_exact_expiry() {
     assert!(paired_client_session_at(&state, &completion, "fabric-loopback", false, u128::from(expiry)).is_err());
     let first = retained_discussion::request(&state, &origin, "thread/browser-retained", "browser-retained");
     retained_discussion::start(&state, &browser, first.clone()).await.unwrap();
-    revoke_current(State(state.clone()), Extension(browser.clone())).await.unwrap();
+    let _ = revoke_current(State(state.clone()), Extension(browser.clone())).await.unwrap();
     for request in [first, retained_discussion::request(&state, &origin,
         "thread/browser-retained-denied", "browser-retained-denied")] {
         let denied = retained_discussion::start(&state, &browser, request).await.unwrap_err();
@@ -771,7 +771,7 @@ async fn browser_discussion_terminal_retirement_creates_a_new_recipient_thread_w
             ThreadContext::Inbox { source:&origin.source_id, episode:&origin.episode }, None, 20).unwrap().items.len(), 2);
         assert_eq!(state.store.attention_items(Some("person/operator")).unwrap().iter()
             .any(|item| item.subject == origin.source_id), !resolved);
-        revoke_current(State(state.clone()), Extension(browser.clone())).await.unwrap();
+        let _ = revoke_current(State(state.clone()), Extension(browser.clone())).await.unwrap();
         let denied = retained_discussion::start(&state, &browser, fallback_request).await.unwrap_err();
         assert_eq!(denied.status, StatusCode::FORBIDDEN);
     }

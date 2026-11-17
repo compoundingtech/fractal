@@ -8,7 +8,7 @@ use metadata_snapshot::MetadataSnapshot;
 
 pub(super) fn install_indexes(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
-         /* sqlite-large-value: allow-for-now lv-h94fc80261c45 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+         /* sqlite-large-value: allow-for-now lv-h6a3f9c9e7395 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
 ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
 WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index

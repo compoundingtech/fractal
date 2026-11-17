@@ -13,7 +13,7 @@ fn internal(error: impl std::fmt::Display) -> FractalError {
 }
 
 fn canonical_request_id(conn: &Connection, source: &str) -> Result<Option<String>, FractalError> {
-    conn.query_row(&canonical_sql(
+    conn.query_row(/* sqlite-large-value: allow-for-now lv-hf08b64fbbc13 owner=fractal_store::store::person_work_history TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id FROM claims WHERE subject=?1 AND kind='work.person-asked'
          ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [source], |row| row.get(0))
         .optional().map_err(internal)
@@ -71,7 +71,7 @@ fn retained_state(
     conn: &Connection, key: &SourceEpisode, ask: &ClaimRecord, cut: i64,
 ) -> Result<EpisodeState, FractalError> {
     // CASE bounds values before crossing SQLite's boundary; one extra row proves truncation.
-    let mut query = conn.prepare(&canonical_sql(
+    let mut query = conn.prepare(/* sqlite-large-value: allow-for-now lv-h86326f6e2d00 owner=fractal_store::store::person_work_history TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,
           CASE WHEN length(CAST(body AS BLOB))<=262144 THEN body ELSE NULL END,
           predecessors,accepted_at_unix_ms
@@ -125,7 +125,7 @@ fn retained_state(
         && let Some(person) = ask.body["fields"]["person"].as_str()
     {
         // Reuse the existing clock fold, but exclude later claims from this content cut.
-        let mut clock_query = conn.prepare(&canonical_sql(
+        let mut clock_query = conn.prepare(/* sqlite-large-value: allow-for-now lv-hca314f305a19 owner=fractal_store::store::person_work_history TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id,store_index,batch_id,subject,kind,origin,actor,
               CASE WHEN length(CAST(body AS BLOB))<=262144 THEN body ELSE NULL END,
               predecessors,accepted_at_unix_ms FROM claims
@@ -347,10 +347,10 @@ mod tests {
         let store = fixture();
         let conn = store.connection.write();
         assert!(matches!(read(&conn, 0).payload, HistoricalPayload::Unavailable { .. }));
-        conn.execute("UPDATE claims SET body='{\"fields\":{\"reason\":\"retained reason\"}}' WHERE id='opening'", []).unwrap();
+        conn.execute("UPDATE claims SET body='{\"fields\":{\"person\":\"person/avery\",\"attempt\":1,\"reason\":\"retained reason\"}}' WHERE id='opening'", []).unwrap();
         assert!(matches!(read(&conn, u64::MAX).payload,
             HistoricalPayload::Unavailable { reason: PayloadUnavailable::PayloadUnavailable }));
-        conn.execute("UPDATE claims SET body='{\"fields\":{}}' WHERE id='opening'", []).unwrap();
+        conn.execute("UPDATE claims SET body='{\"fields\":{\"person\":\"person/avery\",\"attempt\":1,\"title\":\"Retained title\"}}' WHERE id='opening'", []).unwrap();
         assert!(matches!(read(&conn, u64::MAX).payload,
             HistoricalPayload::Unavailable { reason: PayloadUnavailable::PayloadUnavailable }));
         let body = json!({"fields":{"reason":"x".repeat(MAX_BODY_BYTES + 1)}}).to_string();

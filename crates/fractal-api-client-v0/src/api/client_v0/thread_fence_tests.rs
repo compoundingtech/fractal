@@ -237,7 +237,7 @@ pub(crate) mod retained_discussion {
         state.store.apply_internal(&intent, "retained-declare").unwrap();
         state.store.configure_thread_write_rollout([]);
         state.store.register_custom_kind(&crate::store::custom::RegistrationRequest {
-            manifest: serde_json::from_str(include_str!("../../../../../examples/fractal/custom-review.json")).unwrap(),
+            manifest: serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h3b1364f4650e owner=fractal_api_client_v0::api::client_v0::thread_fence_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../examples/fractal/custom-review.json")).unwrap(),
             actor: AGENT.into(),
         }).unwrap();
         let opening = state.store.append_claim(&ClaimInput {
@@ -560,7 +560,7 @@ pub(crate) mod retained_discussion {
         ).unwrap();
         state.store.apply_internal(&intent, "non-claim-declare").unwrap();
         state.store.configure_thread_write_rollout([]);
-        let mut manifest: Value = serde_json::from_str(include_str!("../../../../../examples/fractal/custom-review.json")).unwrap();
+        let mut manifest: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9cebb1c8e2d9 owner=fractal_api_client_v0::api::client_v0::thread_fence_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../examples/fractal/custom-review.json")).unwrap();
         manifest["attention"]["episode"] = json!({"op":"field","slot":"request","field":"title"});
         state.store.register_custom_kind(&crate::store::custom::RegistrationRequest {
             manifest:serde_json::from_value(manifest).unwrap(), actor:AGENT.into(),
@@ -812,7 +812,7 @@ pub(crate) mod retained_discussion {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert!(body["request_id"].as_str().is_some_and(|id| id.starts_with("request/")));
         body["request_id"] = json!("request/normalized");
-        let fixtures: Value = serde_json::from_str(include_str!(
+        let fixtures: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hf5d474418b48 owner=fractal_api_client_v0::api::client_v0::thread_fence_tests TODO=trace-statement-and-value-representation */ include_str!(
             "../../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json")).unwrap();
         assert_eq!(body, fixtures[name], "{name}");
         assert!(body["details"].get("reason").is_none());
@@ -958,6 +958,7 @@ pub(crate) mod retained_discussion {
                 }).unwrap();
             }
             let fixture: Value = serde_json::from_str(
+                /* sqlite-large-value: allow-for-now lv-h374311c02b6a owner=fractal_api_client_v0::api::client_v0::thread_fence_tests TODO=trace-statement-and-value-representation */
                 include_str!("../../../../../docs/st3/client-v0/fixtures/notice-conformance.json")).unwrap();
             let mut fields = fixture["snapshot"]["input"].clone();
             fields["recipient"] = json!(PERSON);
