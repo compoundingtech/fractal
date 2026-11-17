@@ -1,5 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type Ref } from 'react';
 import * as Crypto from 'expo-crypto';
+import * as Clipboard from 'expo-clipboard';
 import { AccessibilityInfo, findNodeHandle, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { BottomTabBarHeightContext } from '@react-navigation/bottom-tabs';
@@ -14,6 +15,7 @@ import { ContextMenu } from '../menu';
 import type { RootScreen } from '../navigation';
 import { threadReadErrorText as errorText, threadEditScope, threadDraftKey, threadStartScope, useStore, type ThreadStartOrigin } from '../store';
 import type { ThreadEditResult } from '../threadEdits';
+import { savedThreadStarts, startRecoveryKey, type SavedThreadStart } from '../threadStartRecovery';
 import { threadClock, threadExactTime, threadRelativeTime } from '../threadClock';
 import { visibleThreadMessages, type ThreadBounds } from '../threadVisibility';
 import { measureThreadBounds, measureThreadViewport, threadViewportChanged, ThreadViewport, useThreadViewports } from '../threadViewport';
@@ -493,37 +495,56 @@ export function InboxThread({ sourceId, origin, agentId, initialTitle, onOpen, p
   sourceId: string; origin?: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
   initialTitle: string; onOpen: OpenThread; pendingScope?: string;
 }) {
-  const { threadClient, threadActions, threadDeliveries } = useStore();
+  const { threadClient, threadActions, threadDeliveries, draftCache } = useStore();
   if (!threadClient) return null;
-  const retained = [...(threadDeliveries?.values() ?? [])].find(delivery => delivery.start
-    && delivery.start.origin.sourceId === sourceId && (!pendingScope || threadStartScope(delivery.start.origin) === pendingScope));
-  const shownOrigin = retained?.start?.origin ?? origin;
+  const retained = pendingScope ? threadDeliveries?.get(pendingScope) : undefined;
+  const restored = pendingScope && !retained && draftCache
+    ? savedThreadStarts(draftCache.current).find(start => threadStartScope(start.target) === pendingScope) : undefined;
+  if (restored) return <RestoredThreadStart start={restored} />;
+  const shownOrigin = pendingScope ? retained?.start?.origin : origin;
   if (!shownOrigin) return <T dim>Thread context is unavailable for this Inbox item.</T>;
-  return <InboxThreadStart key={threadStartScope(shownOrigin)} client={threadClient}
-    origin={shownOrigin} agentId={retained?.start?.origin.agentId ?? agentId}
-    initialTitle={retained?.start?.title ?? initialTitle} onOpen={onOpen} showHistory={!!origin}
-    canStart={!retained && !!origin && !!agentId && threadActions.has('thread.start')} />;
+  return <InboxThreadStart key={pendingScope ?? JSON.stringify([shownOrigin.sourceId, shownOrigin.episode])} client={threadClient}
+    origin={shownOrigin} agentId={pendingScope ? retained?.start?.origin.agentId : agentId}
+    initialTitle={pendingScope ? retained?.start?.title ?? initialTitle : initialTitle} onOpen={onOpen}
+    pendingTarget={retained?.target} showHistory={!pendingScope}
+    canStart={!pendingScope && !!origin && !!agentId && threadActions.has('thread.start')} />;
+}
+
+function RestoredThreadStart({ start }: { start: SavedThreadStart }) {
+  const { draftCache, saveDrafts } = useStore();
+  const [discarded, setDiscarded] = useState(false);
+  if (discarded) return null;
+  const key = threadDraftKey(threadStartScope(start.target));
+  const draft = readThreadDraft(draftCache.current.get(key));
+  return <View style={{ gap: 6 }}>
+    <T bold>{start.title}</T>
+    <T dim>Delivery status unknown after restart. This saved draft cannot retry the original send. Copy it into a new Start to send a separate message; the original may already have arrived.</T>
+    {draft.quote ? <T dim>Quoted · {draft.quote.from} · {draft.quote.text}</T> : null}
+    <T selectable>{draft.text}</T>
+    <Button label="Copy message" onPress={() => { void Clipboard.setStringAsync(draft.text); }} />
+    <Button label="Discard saved draft" onPress={() => {
+      draftCache.current.delete(key);
+      draftCache.current.delete(startRecoveryKey(start.target));
+      saveDrafts();
+      setDiscarded(true);
+    }} />
+  </View>;
 }
 
 export function PendingInboxThreads({ onOpen }: { onOpen: OpenThread }) {
-  const { threadClient, threadDeliveries, data } = useStore();
+  const { threadClient, threadDeliveries, draftCache } = useStore();
   if (!threadClient) return null;
-  const listed = new Set(data.attention.map(item => item.source_id));
-  const seen = new Set<string>();
-  const pending = [...(threadDeliveries?.values() ?? [])].flatMap(delivery => {
-    const start = delivery.start;
-    if (!start || listed.has(start.origin.sourceId)) return [];
-    const scope = threadStartScope(start.origin);
-    if (seen.has(scope)) return [];
-    seen.add(scope);
-    return [start];
-  });
-  if (!pending.length) return null;
+  const pending = new Map([...(threadDeliveries?.entries() ?? [])].flatMap(([scope, delivery]) =>
+    delivery.start ? [[delivery.target, { scope, target: delivery.target, ...delivery.start }] as const] : []));
+  if (draftCache) for (const start of savedThreadStarts(draftCache.current)) {
+    if (!pending.has(start.target)) pending.set(start.target, { ...start, scope: threadStartScope(start.target) });
+  }
+  if (!pending.size) return null;
   return <View style={{ padding: 12, gap: 6 }}>
     <T bold>Unconfirmed thread starts</T>
-    {pending.map(start => <View key={threadStartScope(start.origin)} style={{ gap: 4 }}>
+    {[...pending.values()].map(start => <View key={start.scope} style={{ gap: 4 }}>
       <T dim>Original recipient · {start.origin.agentId}</T>
-      <InboxThread sourceId={start.origin.sourceId} pendingScope={threadStartScope(start.origin)} initialTitle={start.title} onOpen={onOpen} />
+      <InboxThread sourceId={start.origin.sourceId} pendingScope={start.scope} initialTitle={start.title} onOpen={onOpen} />
     </View>)}
   </View>;
 }
@@ -531,24 +552,42 @@ export function PendingInboxThreads({ onOpen }: { onOpen: OpenThread }) {
 type ThreadStartDraft = {
   target?: string; cacheKey: string; origin: ThreadStartOrigin; title: string; accepted: boolean;
   onAccepted: (id: string) => void; onCancel: () => void;
+  onSubmitted?: (id: string, serialized: string) => void;
 };
 
-function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canStart, showHistory = true }: {
+function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canStart, showHistory = true, pendingTarget }: {
   client: ThreadClient; origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
-  initialTitle: string; onOpen: OpenThread; canStart: boolean; showHistory?: boolean;
+  initialTitle: string; onOpen: OpenThread; canStart: boolean; showHistory?: boolean; pendingTarget?: string;
 }) {
   const { status, threadRefresh, threadDeliveries, draftCache, draftsReady, saveDrafts } = useStore();
-  const scope = threadStartScope(origin);
-  const cacheKey = threadDraftKey(scope);
+  const scope = JSON.stringify([origin.sourceId, origin.episode]);
+  const cacheKey = threadDraftKey(pendingTarget ? threadStartScope(pendingTarget) : scope);
   const [local, setLocal] = useState<{ client: ThreadClient; target?: string; accepted: boolean; generation: number }>();
-  const delivery = threadDeliveries?.get(scope);
   const current = local?.client === client ? local : undefined;
-  const target = current?.target ?? delivery?.target;
+  const target = current?.target ?? pendingTarget;
+  const delivery = target ? threadDeliveries?.get(threadStartScope(target)) : undefined;
   const accepted = current?.accepted === true;
   const show = !!current || !!delivery || draftsReady && draftCache.current.has(cacheKey);
   const draft: ThreadStartDraft | undefined = show && agentId ? {
     target, cacheKey, origin: { ...origin, agentId }, accepted, title: threadTitleFromAsk(initialTitle),
-    onAccepted: id => setLocal({ client, target: id, accepted: true, generation: current?.generation ?? 0 }),
+    onAccepted: id => {
+      if (pendingTarget) {
+        draftCache.current.delete(cacheKey);
+        draftCache.current.delete(startRecoveryKey(pendingTarget));
+        saveDrafts();
+      }
+      setLocal({ client, target: id, accepted: true, generation: current?.generation ?? 0 });
+    },
+    onSubmitted: (id, serialized) => {
+      // Use the dispatch snapshot, never later typing from a remounted composer.
+      if (!pendingTarget) {
+        draftCache.current.set(threadDraftKey(threadStartScope(id)), serialized);
+        draftCache.current.set(startRecoveryKey(id), JSON.stringify({ target: id, origin: { ...origin, agentId }, title: threadTitleFromAsk(initialTitle) }));
+        if (draftCache.current.get(cacheKey) === serialized) draftCache.current.delete(cacheKey);
+      }
+      saveDrafts();
+      setLocal(undefined);
+    },
     onCancel: () => {
       draftCache.current.delete(cacheKey);
       saveDrafts();
@@ -560,7 +599,7 @@ function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canSt
     {draft ? <InlineThread key={`${scope}:${current?.generation ?? 0}`} client={client} id={target} placement={`inbox:${scope}:${current?.generation ?? 0}`} refresh={threadRefresh}
       onOpen={target && accepted ? () => onOpen(target, draft.title) : undefined} start={draft} embedded /> : null}
     {!agentId ? <T dim>No agent is assigned to this Inbox item.</T> : null}
-    {canStart && (!draft || accepted) ? <Button label={accepted ? 'Start another thread' : 'Start thread'} disabled={status !== 'online' || !!delivery}
+    {canStart && (!draft || accepted || !!delivery) ? <Button label={accepted || delivery ? 'Start another thread' : 'Start thread'} disabled={status !== 'online'}
       onPress={() => setLocal(previous => ({ client, accepted: false, generation: (previous?.generation ?? 0) + 1 }))} /> : null}
   </View>;
 }
@@ -933,7 +972,7 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   const [sending, setSending] = useState(false);
   const sentTarget = useRef<string | undefined>(undefined);
   const [failure, setFailure] = useState<ThreadEditResult>();
-  const delivery = threadDeliveries?.get(!thread && start ? threadStartScope(start.origin) : id!);
+  const delivery = threadDeliveries?.get(!thread && start ? id ? threadStartScope(id) : '' : id!);
   const feedback = delivery?.retry ? { how: 'unconfirmed' as const, retry: delivery.retry } : failure;
   const enabled = canReply && status === 'online' && !sending && !delivery;
   const content = draft.text.trim();
@@ -969,10 +1008,12 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
 
   const send = async (run: () => Promise<ThreadEditResult>) => {
     setSending(true);
+    const submittedDraft = start && !thread ? JSON.stringify(draft) : undefined;
     try {
       const next = await run();
+      if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
       if (next.how === 'sent') {
-        storeDraft({ text: '' });
+        if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
         if (start && !thread) {
           start.onAccepted(sentTarget.current!);
         }

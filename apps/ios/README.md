@@ -60,6 +60,25 @@ Inline thread read and timeline errors offer an in-place Retry button; a success
 Thread action failures, validation issues, changed read errors and quote selection are explicitly announced to VoiceOver; revoked read access moves focus to the error. Expandable thread rows and the Threads header expose expanded/collapsed values and hints. Embedded composers name their thread in the message and Send labels; Retry names the failed thread or thread list. Standalone composers keep their existing Message thread and Send labels. Thread action hints identify the affected title without changing the visible button text.
 Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
 
+First Starts are independent, even for the same Inbox source and episode. Each
+attempt owns its thread UUID, action key and delivery slot; only its own retry
+recovers that result. Unconfirmed starts appear separately in Inbox recovery,
+including when their source remains listed. They never replace the current
+source/episode or disable a fresh Start. Listing existing discussions is navigation,
+not Start deduplication.
+Before releasing an unconfirmed first composer, the rendered draft used to build
+its submitted content and quote is serialized into the attempt's own durable key.
+Only a matching origin snapshot is removed: shared-cache edits before invocation
+or while the send is pending remain independent.
+Minimal target/origin/title discovery metadata is saved beside the draft, never a
+bound action, operation key or signature. Inbox discovers these drafts after restart.
+With the live ledger, recovery retries the original signed request. Without it, the
+saved message explicitly has unknown delivery status and offers Copy message and
+Discard saved draft, never Retry or a send to its old target. The person may paste
+into a current Inbox Start to deliberately send a separate message with a fresh
+UUID/key and current recipient; the warning explains the original may have arrived.
+Recovery acceptance/discard touches only that attempt's draft, not later typing.
+
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.
 The body must have full width, its trailing end visible, and visible height of at
