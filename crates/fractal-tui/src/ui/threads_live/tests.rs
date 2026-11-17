@@ -4478,6 +4478,76 @@ fn auto_resolved_sources_start_through_their_typed_key_and_canonical_recipient()
 }
 
 #[test]
+fn post_start_recipient_retired_keeps_the_draft_without_resending_or_refreshing() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/resolved";
+    let pane = Pane::Home(Some(item.into()));
+    let host = pane.key();
+    threads.saved_origins.insert(
+        item.into(),
+        origin(resolved_source(), Some("agent/atlas"), "Original request"),
+    );
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/chief-of-staff",
+        retired("agent/atlas"),
+    );
+    let input = threads.start_input(item).unwrap();
+    let mut texts = HashMap::new();
+    threads
+        .start_with_text(&host, item, "Please keep this draft", &mut texts)
+        .unwrap();
+    let write = threads
+        .writes()
+        .pop()
+        .expect("the explicit Send posts Start");
+    assert!(matches!(&write.mutation, Mutation::Start(_)));
+    assert!(threads.writes().is_empty());
+    assert!(threads.take_start_context_reads().is_empty());
+    let notice = threads
+        .complete(
+            Receipt {
+                write,
+                confirmation: Confirmation::Failed(refused(
+                    fractal_client::ErrorCode::RecipientRetired,
+                    "recipient-retired",
+                    "The selected recipient is permanently retired.",
+                )),
+            },
+            &mut texts,
+        )
+        .unwrap();
+    assert!(notice.contains("recipient is retired"), "{notice}");
+    assert!(notice.contains("draft is kept"), "{notice}");
+    assert!(threads.start_context(item).is_none());
+    assert!(
+        threads
+            .drafts
+            .get(&input.key())
+            .and_then(|draft| draft.delivery.as_ref())
+            .is_none(),
+        "a definitively refused POST is not retained as an unknown delivery"
+    );
+    for _ in 0..3 {
+        threads.submit(&host, input.clone(), &texts);
+        assert!(
+            threads.writes().is_empty(),
+            "no automatic or stale-recipient POST"
+        );
+        assert!(
+            threads.take_start_context_reads().is_empty(),
+            "no automatic preview re-read"
+        );
+    }
+    let visible = wide_rendering(&threads, &pane, &texts);
+    assert!(visible.contains(&notice), "{visible}");
+    assert!(!visible.contains("Checking recipient"), "{visible}");
+    assert!(!visible.contains("New discussion to "), "{visible}");
+    assert_eq!(texts[&input.key()], "Please keep this draft");
+}
+
+#[test]
 fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_send() {
     for (stale, stale_basis, fresh, fresh_basis) in [
         (
@@ -4508,6 +4578,7 @@ fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_
             .start_with_text(&host, item, "Please follow up", &mut texts)
             .unwrap();
         let refused_write = threads.writes().pop().unwrap();
+        assert!(matches!(&refused_write.mutation, Mutation::Start(_)));
         assert_eq!(refused_write.agent, stale);
         let notice = threads
             .complete(
@@ -5095,88 +5166,76 @@ fn start_recipient_layout_evidence() {
 }
 
 #[test]
-fn unassigned_and_retired_start_refusals_are_visible_distinct_and_never_send_or_loop() {
-    let mut notices = Vec::new();
-    for (code, message, expected) in [
-        (
-            "thread-responsibility-unassigned",
-            "no configured responsible agent",
-            "configured",
+fn retired_start_preview_refusal_is_visible_and_never_sends_or_loops() {
+    let (code, message, expected) = (
+        "recipient-retired",
+        "recipient retired",
+        "recipient is retired",
+    );
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/system-notice";
+    threads.saved_origins.insert(
+        item.into(),
+        origin(
+            ThreadInterest::Inbox {
+                source: "notice/system".into(),
+                episode: "claim/opening".into(),
+            },
+            None,
+            "System notice",
         ),
-        (
-            "recipient-retired",
-            "recipient retired",
-            "recipient is retired",
-        ),
-    ] {
-        let mut threads = observed_threads(ThreadState::Open);
-        let item = "attention/system-notice";
-        threads.saved_origins.insert(
-            item.into(),
-            origin(
-                ThreadInterest::Inbox {
-                    source: "notice/system".into(),
-                    episode: "claim/opening".into(),
-                },
-                None,
-                "System notice",
-            ),
+    );
+    let pane = Pane::Home(Some(item.into()));
+    let mut texts = HashMap::new();
+    assert!(threads.begin(&pane.key(), item, &mut texts));
+    let read = take_start_context_read(&mut threads, item);
+    let envelope: fractal_client::ErrorEnvelope = serde_json::from_value(serde_json::json!({
+        "api_version":fractal_client::API_VERSION, "error_version":"st3.client.error.v0",
+        "request_id":"request/no-recipient", "code":code, "message":message,
+        "retryable":false, "applied":"none", "details":{}
+    }))
+    .unwrap();
+    let notice = start_context_error(ClientError::Api(
+        envelope.code.clone(),
+        envelope.message.clone(),
+        Box::new(envelope),
+    ));
+    assert!(notice.contains(expected), "{notice}");
+    threads.start_context_loaded(&read.item, &read.key, Err(notice.clone()));
+    let input = threads.start_input(item).unwrap();
+    texts.insert(
+        input.key(),
+        "Keep this message until there is a recipient.".into(),
+    );
+    for _ in 0..3 {
+        threads.submit(&pane.key(), input.clone(), &mut texts);
+        assert!(threads.writes().is_empty());
+        assert!(
+            threads.take_start_context_reads().is_empty(),
+            "no retry loop after a refusal"
         );
-        let pane = Pane::Home(Some(item.into()));
-        let mut texts = HashMap::new();
-        assert!(threads.begin(&pane.key(), item, &mut texts));
-        let read = take_start_context_read(&mut threads, item);
-        let envelope: fractal_client::ErrorEnvelope = serde_json::from_value(serde_json::json!({
-            "api_version":fractal_client::API_VERSION, "error_version":"st3.client.error.v0",
-            "request_id":"request/no-recipient", "code":code, "message":message,
-            "retryable":false, "applied":"none", "details":{}
-        }))
-        .unwrap();
-        let notice = start_context_error(ClientError::Api(
-            envelope.code.clone(),
-            envelope.message.clone(),
-            Box::new(envelope),
-        ));
-        assert!(notice.contains(expected), "{notice}");
-        threads.start_context_loaded(&read.item, &read.key, Err(notice.clone()));
-        let input = threads.start_input(item).unwrap();
-        texts.insert(
-            input.key(),
-            "Keep this message until there is a recipient.".into(),
+        assert!(
+            threads.start_context(item).is_none(),
+            "no invented recipient"
         );
-        for _ in 0..3 {
-            threads.submit(&pane.key(), input.clone(), &mut texts);
-            assert!(threads.writes().is_empty());
-            assert!(
-                threads.take_start_context_reads().is_empty(),
-                "no retry loop after a refusal"
-            );
-            assert!(
-                threads.start_context(item).is_none(),
-                "no invented recipient"
-            );
-        }
-        let doc = threads.mount(
-            &pane,
-            120,
-            &edit::Cursor::default(),
-            &super::super::demo::test_world(),
-            &texts,
-        );
-        let visible = doc
-            .lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(visible.contains(&notice), "{visible}");
-        assert!(!visible.contains("New discussion to "), "{visible}");
-        assert_eq!(
-            texts[&input.key()],
-            "Keep this message until there is a recipient."
-        );
-        notices.push(notice);
     }
-    assert_ne!(notices[0], notices[1]);
-    assert!(!notices[0].contains("retired"));
+    let doc = threads.mount(
+        &pane,
+        120,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    let visible = doc
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(visible.contains(&notice), "{visible}");
+    assert!(!visible.contains("New discussion to "), "{visible}");
+    assert_eq!(
+        texts[&input.key()],
+        "Keep this message until there is a recipient."
+    );
 }
