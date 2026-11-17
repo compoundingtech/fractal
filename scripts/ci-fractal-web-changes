@@ -267,7 +267,6 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/threads/ThreadPanel.tsx",
     "apps/fractal-web/src/threads/ThreadRefusalAlert.tsx",
     "apps/fractal-web/src/threads/threadSource.ts",
-    "apps/fractal-web/src/threads/threadStartContext.stub.ts",
     "apps/fractal-web/src/threads/UnreadReminderControls.tsx",
     "apps/fractal-web/src/threads/unread-action-port.ts",
     "apps/fractal-web/src/threads/unreadVisit.ts",
