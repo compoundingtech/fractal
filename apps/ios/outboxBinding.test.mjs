@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { outboxProfileMode, pairingDeploymentId, acknowledgeOutboxNotice, restoreBoundAttempt, REPAIR_OUTBOX_NOTICE } from './outboxBinding.ts';
-import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox } from '../../clients/typescript/fractal-client/outbox.ts';
+import { outboxProfileMode, acknowledgeOutboxNotice, restoreBoundAttempt, REPAIR_OUTBOX_NOTICE } from './outboxBinding.ts';
+import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, outboxDeploymentId } from '../../clients/typescript/fractal-client/outbox.ts';
 import { prepareMessageSendPacket, prepareThreadStartPacket, prepareThreadReplyPacket, expectedPreparedPacketIdentities } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import { createMemoryOutboxRepository } from '../../clients/typescript/fractal-client/testSupport.ts';
 
@@ -31,7 +31,7 @@ const identitiesFor = packet => expectedPreparedPacketIdentities(packet, 'person
 
 test('deployment tuple encoding is injective across delimiters, escapes and Unicode', () => {
   const inputs = [['host/a', 'b:c'], ['host/a:b', 'c'], ['host/a', 'b"c'], ['host/a', 'b\\c'], ['host/é', '雪'], ['host/é', '雪']];
-  const encoded = inputs.map(([issuer, issuerKey]) => pairingDeploymentId({ issuer, issuerKey }));
+  const encoded = inputs.map(([issuer, issuerKey]) => outboxDeploymentId(issuer, issuerKey));
   assert.equal(new Set(encoded).size, inputs.length);
   encoded.forEach((value, index) => assert.deepEqual(JSON.parse(value), inputs[index]));
   assert.deepEqual(mode().scope, { principalId: profile.profileId, memberId: 'member/original', deploymentId: JSON.stringify([issuer.issuer, issuer.issuerKey]) });

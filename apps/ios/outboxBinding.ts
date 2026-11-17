@@ -1,4 +1,4 @@
-import { restoreOutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
+import { outboxDeploymentId, restoreOutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { OutboxRecord, OutboxRepository, OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { PairingIssuer } from './pairingProof.ts';
 
@@ -12,20 +12,13 @@ export type OutboxProfileMode =
   | { mode: 'bound'; scope: OutboxScope }
   | { mode: 'unprotected'; notice: typeof REPAIR_OUTBOX_NOTICE | undefined };
 
-/**
- * JSON's ordered two-string tuple encoding is injective: parsing recovers exactly both
- * strings, including delimiters, escapes and Unicode. No concatenation or hash collisions.
- * This identifies the host authority, NOT a distinct store incarnation.
- */
-export const pairingDeploymentId = ({ issuer, issuerKey }: PairingIssuer): string => JSON.stringify([issuer, issuerKey]);
-
 /** Legacy mode never authorizes a durable record; existing nonpersistent sends stay available. */
 export const outboxProfileMode = (profile: OutboxProfileIdentity, memberId: string): OutboxProfileMode => {
   const issuer = profile.pairingIssuer;
   if (!profile.profileId || !memberId || !issuer?.issuer.startsWith('host/') || !issuer.issuerKey) {
     return { mode: 'unprotected', notice: profile.outboxNoticeSeen ? undefined : REPAIR_OUTBOX_NOTICE };
   }
-  return { mode: 'bound', scope: { principalId: profile.profileId, memberId, deploymentId: pairingDeploymentId(issuer) } };
+  return { mode: 'bound', scope: { principalId: profile.profileId, memberId, deploymentId: outboxDeploymentId(issuer.issuer, issuer.issuerKey) } };
 };
 
 /** Caller persists this metadata with the profile; acknowledgement confers no binding. */

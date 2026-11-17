@@ -130,7 +130,8 @@ Fresh pairing saves the verified root-grant issuer and issuer key with a new loc
 profile incarnation in the same secure profile write. Renewal preserves that
 incarnation only when its verified authority tuple matches. `outboxBinding.ts`
 maps profile ID to `principalId`, the original member to `memberId`, and the exact
-JSON two-string tuple `[issuer, issuerKey]` to `deploymentId`. JSON escaping and
+JSON two-string tuple `[issuer, issuerKey]` to `deploymentId` through the shared
+client's `outboxDeploymentId`, with no local encoding implementation. JSON escaping and
 ordered tuple parsing make this encoding injective; concatenation and URLs do not.
 This tuple identifies the host authority, **not a distinct store incarnation**.
 The person-root fingerprint pins a different key and cannot reconstruct the tuple.
