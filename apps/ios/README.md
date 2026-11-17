@@ -66,9 +66,11 @@ recovers that result. Unconfirmed starts appear separately in Inbox recovery,
 including when their source remains listed. They never replace the current
 source/episode or disable a fresh Start. Listing existing discussions is navigation,
 not Start deduplication.
-Before a fresh send, the generated Start context selects the exact displayed and
-signed recipient (`original`, `configured`, or `fallback`). A source with neither
-an original agent nor a configured recipient remains visibly unavailable: no
+Before a fresh send, the generated Start context selects the exact signed recipient.
+The preview says "To <name>" or "New discussion with <name>", reusing `agentName`
+only for an existing exact-ID roster match, otherwise showing the canonical ID.
+Display metadata never selects routing; accessibility retains the canonical identity.
+A source with neither an original agent nor a configured recipient remains visibly unavailable: no
 recipient is guessed, and the composer cannot submit. GET `recipient-unassigned`
 shows a blocked setup refusal with no Retry; GET `recipient-retired` is a distinct
 blocked retirement refusal. Both preserve the draft.
