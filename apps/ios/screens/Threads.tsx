@@ -1144,11 +1144,12 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   };
 
   return <View style={{ gap: 6 }}>
-    {canReply && draft.quote ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+    {canReply ? <ThreadComposeField contextualTitle={contextualTitle} inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
+      before={draft.quote ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
       <T dim numberOfLines={1} style={{ flex: 1 }}>Replying to {draft.quote.from} · {draft.quote.text}</T>
       <Button label="Remove quote" disabled={!enabled} onPress={() => storeDraft({ text: draft.text })} />
     </View> : null}
-    {canReply ? <ThreadComposeField contextualTitle={contextualTitle} inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
+      after={issue ? <T color={theme.waiting} style={{ marginTop: 6 }}>{issue}</T> : null}
       onSend={() => {
         if (!enabled || !content || issue || !thread && (!start?.origin || start.accepted)) return;
         void send(() => {
@@ -1159,7 +1160,6 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
         });
       }} enabled={enabled} canSend={(!!thread || !start?.accepted) && !staleAttempt && !!content && !issue}
       autoFocus={!!start && !thread} onCancel={start && !thread && !start.accepted && !delivery && !sending ? start.onCancel : undefined} /> : null}
-    {canReply && issue ? <T color={theme.waiting}>{issue}</T> : null}
     {staleAttempt ? <View style={{ gap: 6 }}>
       <T dim>This send's recipient changed, so it cannot be retried. Copy the message into a new Start to send it separately.</T>
       <Button label="Copy message" onPress={() => { void Clipboard.setStringAsync(draft.text); }} />
@@ -1170,12 +1170,12 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   </View>;
 }
 
-function ThreadComposeField({ contextualTitle, inputRef, rowRef, onReveal, text, onChange, onSend, onCancel, enabled, canSend, autoFocus }: {
+function ThreadComposeField({ contextualTitle, inputRef, rowRef, onReveal, text, onChange, onSend, onCancel, enabled, canSend, autoFocus, before, after }: {
   contextualTitle?: string; inputRef?: Ref<TextInput>; rowRef?: Ref<View>; onReveal?: () => void; text: string; onChange: (text: string) => void; onSend: () => void;
-  onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean;
+  onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean; before?: ReactNode; after?: ReactNode;
 }) {
   return ConversationComposer({
-    text, onChange, onSend, inputRef, rowRef, onReveal, enabled, canSend, autoFocus, onCancel,
+    text, onChange, onSend, inputRef, rowRef, onReveal, enabled, canSend, autoFocus, onCancel, before, after,
     label: contextualTitle ? `Message ${contextualTitle}` : 'Message thread',
     sendAccessibilityLabel: contextualTitle ? `Send reply to ${contextualTitle}` : undefined,
   });

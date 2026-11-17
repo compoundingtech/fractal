@@ -23,11 +23,12 @@ export type ConversationComposerProps = {
   leading?: ReactNode;
   inputAdornment?: ReactNode;
   status?: ReactNode;
+  after?: ReactNode;
 };
 
 /** Controlled text/send/focus presentation. Capability slots do not select routing or validation. */
 export function ConversationComposer({ text, onChange, onSend, label, enabled, canSend, inputRef, rowRef, onReveal, autoFocus,
-  sendLabel = 'Send', sendAccessibilityLabel, onCancel, style, inputStyle, sendStyle, before, leading, inputAdornment, status }: ConversationComposerProps) {
+  sendLabel = 'Send', sendAccessibilityLabel, onCancel, style, inputStyle, sendStyle, before, leading, inputAdornment, status, after }: ConversationComposerProps) {
   return <View style={{ alignSelf: 'stretch' }}>
     {before}
     {status}
@@ -43,5 +44,6 @@ export function ConversationComposer({ text, onChange, onSend, label, enabled, c
       <Button label={sendLabel} accessibilityLabel={sendAccessibilityLabel} disabled={!enabled || !canSend} onPress={onSend} style={sendStyle} />
       {onCancel ? <Button label="Cancel" disabled={!enabled} onPress={onCancel} /> : null}
     </View>
+    {after}
   </View>;
 }

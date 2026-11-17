@@ -57,8 +57,9 @@ Observation reporting holds one send slot during both batch preparation and tran
 
 Ordinary conversations and thread placements use `conversationComposer.tsx` for the controlled
 text field, focus/reveal hooks, Send/Cancel and disabled presentation. Ordinary image selection,
-image tray and dictation occupy capability slots; threads retain their text/quote and canonical
-recipient policy. The shared component does not add thread attachments or choose send authority.
+image tray and dictation occupy capability slots; threads supply quote/removal and validation slots
+while retaining their canonical recipient policy. The shared component does not add thread
+attachments or choose send authority.
 
 `conversationAttempts.ts` owns process-lifetime draft snapshots, send/result phases and guarded
 original-retry ownership for both contexts. Ordinary rows adapt its results to image restoration,

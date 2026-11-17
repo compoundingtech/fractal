@@ -67,3 +67,23 @@ test('static layout contract: width flex stays on the wrapper, never on its colu
     assert.equal(input.props.multiline, true);
   }
 });
+
+test('thread adapter routes quote removal and validation through the common composer slots', () => {
+  const threadSource = readFileSync(new URL('./screens/Threads.tsx', import.meta.url), 'utf8');
+  const start = threadSource.indexOf('function ThreadComposeField(');
+  const { outputText } = ts.transpileModule(threadSource.slice(start) + '\nexports.field = ThreadComposeField;', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React },
+  });
+  const adapter = {};
+  new Function('exports', 'ConversationComposer', outputText)(adapter, exports.ConversationComposer);
+  let removed = 0;
+  const quote = React.createElement('Quote', { onRemove: () => removed++ });
+  const validation = React.createElement('Validation');
+  const tree = adapter.field({ ...base, before: quote, after: validation });
+  assert.equal(find(tree, 'Quote'), quote);
+  assert.equal(find(tree, 'Validation'), validation);
+  find(tree, 'Quote').props.onRemove();
+  assert.equal(removed, 1);
+  assert.match(threadSource, /before=\{draft.quote/);
+  assert.match(threadSource, /after=\{issue/);
+});
