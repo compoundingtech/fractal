@@ -63,6 +63,13 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
         ...actions.map(id => ({ id, version: 0, state: 'granted' })),
       ] },
     })
+    if (url.pathname.endsWith('/request-history')) return Response.json({ ...base, value: {
+      items: [], boundary_items: [], relations: [], source_episodes: [], complete: true, next_cursor: null, source_support: null,
+    } })
+    if (url.pathname === '/v1/client/threads/start-context') return Response.json({ ...base, value: {
+      kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'),
+      start_recipient: { agent_id: agent, basis: { _tag: 'original' } },
+    } })
     return reply(url, init)
   } })
   const registry = AtomRegistry.make()
@@ -275,15 +282,15 @@ it.each(['recovers through Retry', 'closes while stale'] as const)('marks an Inb
   } finally { silence.mockRestore(); await view.dispose() }
 })
 
-it('names an agent the roster has no row for as an agent, never by its id', async () => {
-  // The mounted roster holds no agents, so every agent read is unavailable.
+it('names an unlisted canonical recipient as an agent and displays its exact first-send id', async () => {
+  // The canonical preview grants this recipient even though the mounted roster has no row.
   const view = await mount(<LiveInboxThreads alert={ask} />, { actions: ['thread.start'], reply: () => page([]) })
   try {
     await vi.waitFor(() => expect(view.host.textContent).toContain('Ask an agent about this item without answering it.'))
     await act(async () => view.button('Start thread')?.click())
     expect(view.host.textContent).toContain('To an agent')
-    expect(view.host.textContent).not.toContain(agent)
-    // The exact id stays available as the name's title.
+    expect(view.host.querySelector('[data-start-recipient-id]')?.textContent).toBe(agent)
+    expect(view.host.querySelector('[data-start-recipient-basis]')?.textContent).toBe('Original recipient')
     expect([...view.host.querySelectorAll('[title]')].map(each => [each.textContent, each.getAttribute('title')])).toContainEqual(['an agent', agent])
   } finally { await view.dispose() }
 })

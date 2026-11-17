@@ -627,6 +627,88 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
+## First-Start recipient preview
+
+Before a first send on any exact Inbox source item — a current or resolved ask,
+an authored step, a typed or system notice, with or without a listed agent — the
+web reads `ThreadSource.startContext(source_id, episode)`. The gateway source
+calls the generated `FractalClient.threadStartContext` for
+`/v1/client/threads/start-context` and decodes the answer with the generated
+`ThreadStartContext` schema; there is no hand-written DTO or adapter. Start is
+offered only once that preview returns `start_recipient`, and the first send
+carries exactly its `agent_id`. Nothing else names a recipient: neither the
+item's `conversation_id` nor its `requester_id` is read for it, and a source
+without the preview reader shows a note and no Start.
+
+The Start row and the draft show the recipient's name, its exact agent id and
+its basis: `Original recipient` for a source agent or an agent-run requester;
+`Configured recipient` when no original agent exists, such as a person-requested
+run or a person-owned notice. A terminal-retirement fallback is labelled
+`New recipient`; the retired original agent and its exact id appear separately.
+Runtime offline status never selects a fallback. A `recipient-retired` refusal
+identifies terminal retirement and offers no target, Start or Retry. An ordinary
+GET `409 stale-fence` fails closed with the server's refusal and no recipient.
+Neutral "no recipient configured" classification is NOT DONE: it requires a
+future API-authored typed `details.reason` discriminator, not message matching
+or an internal store error code.
+While the preview loads or after it fails there is no Start either, and a
+failed read offers Retry.
+
+If Start definitively returns `409 stale-fence` or a recipient-mismatch 404,
+the source invalidates the visible recipient, visibly re-reads that exact
+preview, and returns the refusal. The draft stays; a changed recipient needs a
+NEW explicit Send and a refused preview remains refused. Nothing is resent
+silently. An unknown transport outcome retains the original signed intent,
+action/target identities and retry key for explicit receipt recovery. Replies
+continue to use the existing thread's stored
+participants, regardless of later routing policy. Storybook's
+`Fractal/App/Threads/Start recipient` covers every state.
+
+While a first send is pending, the draft remains visible and read-only with a
+`Sending…` status. Send is focusable but announced as disabled using
+`aria-disabled`; pointer and keyboard activation cannot submit another request.
+This preserves the composer's existing focusable, explained blocked-control
+convention rather than removing the control from the keyboard sequence.
+
+## Independent resolved Inbox discussions
+
+Resolved Inbox asks, authored steps and typed notices retain the same Start
+affordance when their exact source episode is available; auto-resolved rows open
+their resolved detail without overriding the default. A selected card retains
+its exact opening when it leaves the live list. This is not a new completed-source
+inventory. Every successful Start creates an independent discussion, even when
+other threads share that source episode; two Starts create two threads. Opening
+an existing discussion remains navigation, never Start coalescing. The daemon
+revalidates source authority and the recipient on each first send; neither the
+original discussion nor its participants are changed.
+
+## Related requests
+
+An open thread shows a small "Related requests" section above its conversation,
+read through the optional `ThreadSource.requestHistory` reader over
+`/v1/client/threads/:id/request-history` (`RequestHistoryPage`); a source without
+that reader, or a Fractal that cannot serve it, shows no section. The section
+renders only what the reader returned: each request's original title and text and
+its own status and standing answers. "Requested after “…”" explains why one
+request followed another, with Fractal's reason, and moves focus to that request;
+it never marks one request a prerequisite of, or an answer to, another, and a
+completed predecessor never changes a later request's status. Visible episodes of
+the same source stay together, each with its own status. Boundary predecessors
+from another page are shown in order, not counted. A relation whose predecessor
+was not returned draws nothing, so hidden requests leave no identifier, reason or
+count.
+
+Missing original wording is labelled "Original request unavailable" with the
+payload reason; today's source text is never substituted. A missing status reads
+"Status unknown", and an incomplete page says requests may be missing. References
+stay references: a pinned revision is named, and a live target is labelled as
+possibly changed. An authorized source of another kind says Fractal keeps no
+request history for it. A lone complete request, which is the thread's own origin,
+shows no section. Loading, paused (with Retry), refused and failed (with Retry)
+reads use the shared system notices. The section never changes unread receipts,
+the timeline's anchors or any action. The component lives in
+`apps/fractal-web/src/threads/RelatedRequests.tsx`; Storybook's
+`Fractal/App/Threads/Related requests` covers every state and a walkthrough.
 ## Fractal web threads connected preview
 
 `node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,

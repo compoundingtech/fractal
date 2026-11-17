@@ -151,7 +151,12 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
                 ))}
               </ul>
             )}
-            <AutoResolvedSection read={autoResolved} now={now} {...(onOverride === undefined ? {} : { onOverride })} />
+            {feed.value.some(item => item.state !== 'open') ? <section aria-label="Resolved Inbox items">
+              <h3 {...stylex.props(styles.empty)}>Resolved</h3>
+              <ul {...stylex.props(styles.list)}>{feed.value.filter(item => item.state !== 'open').map(item =>
+                <li key={item.id} data-resolved-alert-id={item.id}><Aria.Button onPress={() => onSelect?.(item.id)} {...stylex.props(styles.main)}>{item.title}</Aria.Button></li>)}</ul>
+            </section> : null}
+            <AutoResolvedSection read={autoResolved} now={now} {...(onOverride === undefined ? {} : { onOverride })} {...(onSelect === undefined ? {} : { onSelect })} />
           </>
         )}
       {footer}
