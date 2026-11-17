@@ -42,8 +42,8 @@ it('retains the opened marked thread, scroll and draft after dwell clears and re
   const messageId = 'message/retained-anchor'
   const agentId = 'agent/example/atlas'
   const base = fixture.capabilities
-  const mark = { mark_id: 'operation/captured-reminder', anchor_message_id: messageId }
-  const reminderValue = { marks: [mark], anchor_message_id: messageId }
+  const mark: Native.ThreadUnreadMark = { mark_id: 'operation/captured-reminder', anchor_message_id: messageId }
+  const reminderValue: Native.ThreadUnreadReminder = { marks: [mark], anchor_message_id: messageId }
   const summary = {
     id: threadId, agent_id: agentId, title: 'Retained marked conversation', state: 'open', unread: true,
     title_revision: 'revision/title', revision: 'revision/thread', unread_reminder: reminderValue,
@@ -90,7 +90,7 @@ it('retains the opened marked thread, scroll and draft after dwell clears and re
   const source = {
     ...fixtureSource({ world: { now: 1, events: [], agents: [], missions: [], attention: [],
       conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }),
-    threads: { ...threads, list: (query: Parameters<typeof threads.list>[0]) => query.marked_unread ? markedList : emptyList, unreadActions },
+    threads: { ...threads, list: (query: Parameters<typeof threads.list>[0]) => 'marked_unread' in query && query.marked_unread ? markedList : emptyList, unreadActions },
   }
   const host = document.createElement('div'); document.body.append(host)
   const root = createRoot(host)
