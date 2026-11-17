@@ -107,6 +107,8 @@ impl Store {
 
     /// The only launch admission predicate; do not release until physical spawn has returned.
     pub fn admit_launch(&self) -> Result<Option<LaunchPermit>, FractalError> {
+        // Even the in-memory drain is a dependency: its completion wakes parked effects.
+        smallclaims::touched::note_read(|| dependency(self.origin()));
         let generation = {
             let state = self.launch_admission.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.setting { return Ok(None); }
@@ -121,6 +123,12 @@ impl Store {
     }
 
     pub fn set_launch_freeze(&self, owner: &str, id: &str, reason: &str, duration_ms: u64, wait_ms: u64) -> Result<LaunchFreeze, FractalError> {
+        let result = self.set_launch_freeze_inner(owner, id, reason, duration_ms, wait_ms);
+        self.launch_admission_changed(owner)?;
+        result
+    }
+
+    fn set_launch_freeze_inner(&self, owner: &str, id: &str, reason: &str, duration_ms: u64, wait_ms: u64) -> Result<LaunchFreeze, FractalError> {
         if id.is_empty() || id.len() > 256 || reason.trim().is_empty() || reason.len() > 4096
             || !(1..=MAX_DURATION_MS).contains(&duration_ms) || wait_ms > MAX_WAIT_MS {
             return Err(FractalError::new("launch-freeze-invalid", "id (1..256 bytes), reason (1..4096 bytes), duration (1..1800000 ms) and wait (0..10000 ms) are required"));
@@ -153,6 +161,27 @@ impl Store {
     }
 
     pub fn clear_launch_freeze(&self, owner: &str, id: &str) -> Result<(), FractalError> {
+        let result = self.clear_launch_freeze_inner(owner, id);
+        self.launch_admission_changed(owner)?;
+        result
+    }
+
+    /// Called after the exclusion guard drops, including on every bounded refusal.
+    /// HTTP cancellation cannot stop the synchronous blocking producer midway through this.
+    fn launch_admission_changed(&self, owner: &str) -> Result<(), FractalError> {
+        let mut writer = self.connection.write();
+        let transaction = writer.transaction().map_err(internal)?;
+        insert_local_observation_tx(&transaction, self.origin(), &ClaimInput {
+            subject: dependency(self.origin()), kind: "runtime.reconcile-decision".into(),
+            actor: Some(owner.into()),
+            fields: BTreeMap::from([("decision".into(), json!("launch-admission-drain-ended"))]),
+            evidence: Vec::new(), idempotency_key: None, expected_subject: None,
+        }, now_ms())?;
+        transaction.commit().map_err(internal)?;
+        Ok(())
+    }
+
+    fn clear_launch_freeze_inner(&self, owner: &str, id: &str) -> Result<(), FractalError> {
         let _exclusive = self.launch_admission.exclusive(DEFAULT_WAIT_MS)?;
         if let Some(current) = self.launch_freeze()? {
             if current.owner != owner || current.id != id {

@@ -576,6 +576,15 @@ fn a_replayed_grant_still_visits_native_authority_and_cancellation_wins_the_repl
 
 #[test]
 fn launch_freeze_defers_resource_exec_and_clear_invalidates_the_pending_effect() {
+    frozen_resource_exec(false);
+}
+
+#[test]
+fn launch_freeze_drain_timeout_wakes_resource_exec_without_a_timer() {
+    frozen_resource_exec(true);
+}
+
+fn frozen_resource_exec(timed_out_drain: bool) {
     use crate::reconcile::{NativeRuntime, Reconciler};
     use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
     let dir = tempfile::tempdir().unwrap();
@@ -603,18 +612,39 @@ fn launch_freeze_defers_resource_exec_and_clear_invalidates_the_pending_effect()
     engine.handle(&json!({"t":"resource","step":run.steps[0].subject,"attempt":1,"seq":1,
         "key":"resource.exec/check","operation":"resource.lane.exec","payload":payload}), 1).unwrap();
     let request = engine.requests(&run.subject)[0].clone();
-    let freeze = engine.store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 5_000).unwrap();
+    let prior_permit = timed_out_drain.then(|| engine.store.admit_launch().unwrap().unwrap());
+    let setter = if timed_out_drain {
+        let store = engine.store.clone();
+        let setter = std::thread::spawn(move ||
+            store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 2_000));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while engine.store.admit_launch().unwrap().is_some() {
+            assert!(Instant::now() < deadline, "set must enter its drain");
+            std::thread::yield_now();
+        }
+        Some(setter)
+    } else {
+        engine.store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 5_000).unwrap();
+        None
+    };
+    let expiry = engine.store.launch_freeze().unwrap().map(|freeze| u128::from(freeze.expires_at_unix_ms));
     reconciler.incremental.observe(&engine.store).unwrap();
     let ((changed, due), reads) = smallclaims::touched::record(|| smallclaims::touched::record_due(||
         reconciler.settle_program_resource(&engine, &run, &request, "resource.lane.exec", &payload, false).unwrap()));
     assert!(!changed);
-    assert_eq!(due, Some(u128::from(freeze.expires_at_unix_ms)));
+    assert_eq!(due, expiry);
     assert!(!marker.exists());
     assert!(engine.store.resource_membership_record(&lane.id, &lane.owner).unwrap().roots.is_empty());
     assert_eq!(engine.requests(&run.subject).len(), 1, "the effect must remain pending");
     reconciler.incremental.evaluated("pending-resource-effect", reads, due);
     assert!(!reconciler.incremental.needs("pending-resource-effect", 0));
-    engine.store.clear_launch_freeze("person/operator", "activation").unwrap();
+    if let Some(setter) = setter {
+        assert_eq!(setter.join().unwrap().unwrap_err().code, "launch-freeze-timeout");
+        assert!(engine.store.launch_freeze().unwrap().is_none());
+        drop(prior_permit);
+    } else {
+        engine.store.clear_launch_freeze("person/operator", "activation").unwrap();
+    }
     reconciler.incremental.observe(&engine.store).unwrap();
     assert!(reconciler.incremental.needs("pending-resource-effect", 0), "clear must wake the cached run, not just the daemon");
     assert!(reconciler.settle_program_resource(&engine, &run, &request, "resource.lane.exec", &payload, false).unwrap());
