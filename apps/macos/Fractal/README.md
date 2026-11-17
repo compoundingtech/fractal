@@ -31,12 +31,13 @@ collection, but `FractalClient` has no typed attention or availability stream.
   picker and per-bucket hover values. Missing activity data draws no chart; failed
   reads retain the last chart with an offline notice. Gallery scenarios
   `inbox-activity-{busy,quiet}-{home,page}` exercise both appearances at 360 pt.
-- **Asks** (all attention pages, classified as Fractal web's
-  `data/attention.ts` does) are answered on their page: a decision's or
+- **Asks** are classified by the wire kind and offered actions. Person steps
+  are answered on their page: a decision's or
   choice's named answers (recommended first; request-changes takes words), a
   choice's custom words or feedback text, Yes/No for an untyped question, or
-  Nothing to Do when there are no named answers. Custom forms and harness
-  prompts link to Fractal. Every control is always in place, for the keyboard
+  Nothing to Do when there are no named answers. Custom forms, human reviews
+  offering approval, rejection or request changes, and harness prompts link to Fractal.
+  Every control is always in place, for the keyboard
   and VoiceOver as much as the pointer. Each page has at most one prominent
   button: an ask's recommended answer (never a decline, never one that needs
   words) while nothing is being typed, or an update's Mark Read; no answer
