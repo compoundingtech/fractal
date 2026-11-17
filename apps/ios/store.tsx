@@ -154,8 +154,21 @@ export type ThreadStartOrigin = { agentId: string; sourceId: string; episode: st
 export function threadDraftKey(thread: string): string {
   return `thread-draft/${thread}`;
 }
-export function threadStartScope(thread: string): string {
+/** The first-draft identity of one Inbox source episode. */
+export function threadStartScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>): string {
+  return JSON.stringify([origin.sourceId, origin.episode]);
+}
+/** One handed-off Start attempt's persisted draft slot, named by its new thread ID. Restart
+ * discovery (threadStartRecovery.ts) reads this exact `thread-draft/start/<thread>` key.
+ */
+export function threadStartSlot(thread: string): string {
   return `start/${thread}`;
+}
+/** One Start attempt's delivery identity. Starts never coalesce by origin: every attempt has its
+ * own new thread ID and operation key, so attempts for one source episode retain receipts independently.
+ */
+export function threadStartAttemptScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>, thread: string): string {
+  return JSON.stringify([origin.sourceId, origin.episode, thread]);
 }
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
@@ -1102,7 +1115,12 @@ function useAppStore(proof?: FabricProfile) {
       if (result.how === 'sent' || (result.error instanceof ClientError && result.error.status === 409)) {
         setThreadRefresh(previous => previous + 1);
       }
-      return result.how === 'sent' ? { ...result, snapshot: acceptedSnapshot } : { how: 'failed', error: threadActionErrorText(result.error) };
+      if (result.how === 'sent') return { ...result, snapshot: acceptedSnapshot };
+      // r3 stale-recipient admission is a definitive not-found with no append.
+      // Refresh the canonical preview; never rewrite or replay its signed intent to a new agent.
+      const refreshStartContext = kind === 'start' && result.error instanceof ClientError
+        && (result.error.status === 404 || result.error.response.code === 'recipient-retired');
+      return { how: 'failed', error: threadActionErrorText(result.error), ...(refreshStartContext ? { refreshStartContext: true as const } : {}) };
     };
     return finish(await sendBoundAction(member, {
       build: async () => {
@@ -1187,7 +1205,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
       const signingProfile = signingKeyRef.current;
-      return trackThreadDelivery(threadStartScope(thread), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
+      return trackThreadDelivery(threadStartAttemptScope(origin, thread), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
         const signing = await readPhoneSigning(signingProfile);
         if (!signing) throw new Error('Pair this phone again to sign thread messages.');
         const { signature, messageId } = await signThreadMessage(key, signing, {

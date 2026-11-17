@@ -43,7 +43,7 @@ const host = type => function Host({ ref, children, ...props }) {
   return React.createElement('div', { ref, 'data-host': type, 'data-collapsable': props.collapsable === false ? 'false' : undefined }, children);
 };
 const hosts = Object.fromEntries(['View', 'T', 'Text', 'Button', 'Field', 'Pressable', 'ContextMenu', 'Runs',
-  'ThreadComposer', 'ThreadEditFlash', 'ThreadReadIssue'].map(type => [type, host(type)]));
+  'ThreadComposer', 'ThreadEditFlash', 'ThreadReadIssue', 'RequestHistory', 'HistoryStart'].map(type => [type, host(type)]));
 const mounted = () => [...hostProps.values()];
 const button = label => mounted().find(({ type, props }) => type === 'Button' && props.label === label)?.props;
 
