@@ -54,3 +54,16 @@ test('ordinary capabilities and thread quote routing remain production adapters,
   assert.match(threads, /actions\.replyToThread\(thread, content, draft\.quote\?\.id\)/);
   assert.match(threads, /!enabled \|\| !content \|\| issue/);
 });
+
+test('static layout contract: width flex stays on the wrapper, never on its column input (not native height proof)', () => {
+  for (const inputStyle of [undefined, { minHeight: 36, maxHeight: 140 }]) {
+    const tree = exports.ConversationComposer({ ...base, inputStyle });
+    const input = find(tree, 'Field');
+    const parent = node => !node || typeof node !== 'object' ? undefined : node.children?.includes(input) ? node
+      : node.children?.map(parent).find(Boolean);
+    assert.equal(parent(tree).props.style.flex, 1);
+    assert.equal(input.props.style?.flex, undefined);
+    assert.equal(input.props.style, inputStyle, 'context intrinsic min/max heights pass through unchanged');
+    assert.equal(input.props.multiline, true);
+  }
+});

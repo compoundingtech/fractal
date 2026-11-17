@@ -34,9 +34,10 @@ export function ConversationComposer({ text, onChange, onSend, label, enabled, c
     <View ref={rowRef} onLayout={onReveal} style={[{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }, style]}>
       {leading}
       <View style={{ flex: 1 }}>
+        {/* Width belongs to this wrapper; flex on its column child would constrain multiline height. */}
         {/* RCTUITextView appends the placeholder only when empty. Name the input exactly once. */}
         <Field ref={inputRef} onFocus={onReveal} accessibilityLabel={text.length ? label : undefined} placeholder={label}
-          value={text} editable={enabled} onChangeText={onChange} multiline autoFocus={autoFocus} style={[{ flex: 1 }, inputStyle]} />
+          value={text} editable={enabled} onChangeText={onChange} multiline autoFocus={autoFocus} style={inputStyle} />
         {inputAdornment}
       </View>
       <Button label={sendLabel} accessibilityLabel={sendAccessibilityLabel} disabled={!enabled || !canSend} onPress={onSend} style={sendStyle} />
