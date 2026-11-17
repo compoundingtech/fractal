@@ -60,8 +60,14 @@ export const prepareChangelogBuild = async ({ privateBuild, deployment, registri
     deployment: selected,
     entryIds: entries.map(({ id }) => id),
     privateEntries,
-    // Bundlers resolve module identities through symlinks, including the platform temp directory.
-    privateDirectory: hasPrivate ? realpathSync(dirname(registries.private)).replaceAll('\\', '/') : undefined,
+    // Protect configured, canonical and native identities, including a registry file
+    // symlinked outside its directory. Bundlers may retain or resolve either spelling.
+    privateDirectories: hasPrivate ? [...new Set([
+      dirname(registries.private),
+      dirname(realpathSync(registries.private)),
+      dirname(realpathSync.native(registries.private)),
+    ].flatMap((directory) => [directory, realpathSync(directory), realpathSync.native(directory)])
+      .map((directory) => directory.replaceAll('\\', '/')))] : [],
     compile: (build) => compileChangelog({ build, sources, audience, inventory }),
   }
 }
@@ -82,12 +88,14 @@ export const evaluateBuildIdentityModule = async (code) => {
  * from the private changelog directory, and no private entry id, title, summary or link in any
  * emitted chunk or asset.
  */
-export const assertPublicChangelogBoundary = ({ manifest, privateEntries, privateDirectory, modules, texts }) => {
+export const assertPublicChangelogBoundary = ({ manifest, privateEntries, privateDirectories, modules, texts }) => {
   const privateInManifest = manifest?.entries.filter(({ visibility }) => visibility !== 'public') ?? []
   if (privateInManifest.length > 0)
     throw new Error(`${leak} entries into its manifest: ${privateInManifest.map(({ id }) => id).join(', ')}`)
-  const privateModules = privateDirectory === undefined ? []
-    : modules.filter((id) => id.replaceAll('\\', '/').startsWith(`${privateDirectory}/`))
+  const privateModules = modules.filter((id) => {
+    const path = id.replace(/^\0/u, '').replace(/^\/@fs(?=\/)/u, '').replaceAll('\\', '/')
+    return privateDirectories.some((directory) => path.startsWith(`${directory}/`))
+  })
   if (privateModules.length > 0) throw new Error(`${leak} modules: ${privateModules.join(', ')}`)
   const body = texts.join('\n')
   for (const entry of privateEntries)

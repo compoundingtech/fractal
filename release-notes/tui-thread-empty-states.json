@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Name empty thread tabs and explain empty and read-only threads",
+  "replay": { "status": "none", "detail": "Rendering only; no durable data is replayed." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "Thread access and mutation rules are unchanged; read-only connections still get no composer or actions." },
+  "compatibility": { "status": "none", "detail": "Clients and daemons interoperate as before." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "changed", "detail": "Open a thread with no messages in its own tab on a read-only pairing: the tab shows 'Title · to <agent name> · open', 'No messages yet.' and 'Read-only on this device: replies and changes need write access.' An expanded empty thread in a list shows 'No messages yet.' under its heading." },
+  "recovery": { "status": "none", "detail": "No state changes." }
+}
