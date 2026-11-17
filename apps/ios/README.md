@@ -67,7 +67,9 @@ before clearing the submitted draft, prepare and persist the complete signed pac
 then commit the one-shot dispatch marker before a single POST. Their recovery rows
 are projections of SQLite/shared-core state, not retry closures or text matching.
 Acceptance clears only the captured draft revision under the original owner/generation;
-later text, quote or image edits remain in the composer.
+later text, quote or image edits remain in the composer. The store's reply cleanup
+also checks the captured generation before deleting or saving: identical restored
+draft bytes after a cache reset are not the original submitted revision.
 Legacy profiles without a verified persisted issuer tuple keep the existing
 nonpersistent delivery paths and receive the one-time re-pair notice; the notice is
 also explained in connection settings. No protection is silently inferred from a pin.

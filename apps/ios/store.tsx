@@ -1421,10 +1421,10 @@ function useAppStore(proof?: FabricProfile) {
     },
     async replyToThread(thread: ThreadSummary, content: string, quoteId?: string): Promise<ThreadEditResult> {
       try {
-        const owner = draftsOwner.current, saved = draftCache.current.get(threadDraftKey(thread.id));
+        const owner = draftsOwner.current, generation = draftGeneration.current, saved = draftCache.current.get(threadDraftKey(thread.id));
         const accepted = await acceptOutbox({ kind: 'reply', target: thread.id, agentId: thread.agent_id, ...(quoteId ? { quoteId } : {}) }, content);
         if (accepted) {
-          if (draftsOwner.current === owner && draftCache.current.get(threadDraftKey(thread.id)) === saved) {
+          if (draftsOwner.current === owner && draftGeneration.current === generation && draftCache.current.get(threadDraftKey(thread.id)) === saved) {
             draftCache.current.delete(threadDraftKey(thread.id));
             if (!proof) void localDrafts.save(owner, draftCache.current);
           }
@@ -1433,6 +1433,7 @@ function useAppStore(proof?: FabricProfile) {
       } catch (error) { return { how: 'failed', error: errorText(error) }; }
       const signingProfile = signingKeyRef.current;
       const draftOwner = draftsOwner.current;
+      const draftEpoch = draftGeneration.current;
       const draftKey = threadDraftKey(thread.id);
       const sentDraft = draftCache.current.get(draftKey);
       return trackThreadDelivery(thread.id, thread.id, () => submitThreadAction(thread.id, 'reply', {}, async (member, key) => {
@@ -1444,7 +1445,7 @@ function useAppStore(proof?: FabricProfile) {
         });
         return { messageId, send: request => member.threadReply({ ...request, parameters: { target_id: thread.id, content, ...quote, signature } }) };
       }), () => {
-        if (draftsOwner.current !== draftOwner || draftCache.current.get(draftKey) !== sentDraft) return;
+        if (draftsOwner.current !== draftOwner || draftGeneration.current !== draftEpoch || draftCache.current.get(draftKey) !== sentDraft) return;
         draftCache.current.delete(draftKey);
         if (!proof) void localDrafts.save(draftOwner, draftCache.current);
       }, undefined, { text: content, quoteId });

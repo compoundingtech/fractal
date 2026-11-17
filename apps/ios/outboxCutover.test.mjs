@@ -17,7 +17,7 @@ for (const kind of ['chat', 'start', 'reply']) test(`${kind}: production protect
   const calls = [], cache = new Map([['thread-draft/thread/original', 'submitted']]);
   const deps = { client: {}, uploader: {}, status: 'online', proof: undefined, errorText: error => error.message,
     acceptOutbox: async (...args) => { calls.push(args); return accepted; },
-    draftsOwner: { current: 'owner/original' }, draftCache: { current: cache }, threadDraftKey: id => 'thread-draft/' + id,
+    draftsOwner: { current: 'owner/original' }, draftGeneration: { current: 0 }, draftCache: { current: cache }, threadDraftKey: id => 'thread-draft/' + id,
     localDrafts: { save: async () => {} } };
   let result;
   if (kind === 'chat') {
@@ -41,7 +41,7 @@ for (const kind of ['chat', 'start', 'reply']) test(`${kind}: protected storage 
   const cache = new Map([['thread-draft/thread/original', 'kept']]);
   const deps = { client: {}, uploader: {}, status: 'online', proof: undefined, errorText: error => error.message,
     acceptOutbox: async () => { throw new Error('storage unavailable, retry later'); },
-    draftsOwner: { current: 'owner/original' }, draftCache: { current: cache }, threadDraftKey: id => 'thread-draft/' + id };
+    draftsOwner: { current: 'owner/original' }, draftGeneration: { current: 0 }, draftCache: { current: cache }, threadDraftKey: id => 'thread-draft/' + id };
   const result = kind === 'chat' ? await action('send', '    /** Retain unknown delivery', deps)('agent/dotfiles/manager', 'hello', undefined, undefined, [], () => assert.fail('must keep composer'))
     : kind === 'start' ? await action('startThread', '    async replyToThread(', deps)('thread/original', { agentId: 'agent/dotfiles/manager', sourceId: 'notice/original', episode: 'episode/original' }, 'Title', 'hello')
     : await action('replyToThread', '    async saveUrl(', deps)({ id: 'thread/original', agent_id: 'agent/dotfiles/manager' }, 'hello', 'message/quote');
@@ -107,5 +107,27 @@ test('accepted thread reply clears only its captured draft revision and never an
     resolve(accepted); await sending;
     assert.deepEqual(cleared, change === 'none' ? [{ text: '' }] : []);
     if (change === 'later-edit') assert.match(cache.get(key), /message\/later/);
+  }
+});
+
+test('store reply acceptance cannot delete or save an identical restored draft from a newer generation', async () => {
+  const key = 'thread-draft/thread/original', saved = JSON.stringify({ text: 'submitted', quote: { id: 'message/quote' } });
+  for (const restored of [false, true]) {
+    const cache = new Map([[key, saved]]), owner = { current: 'person/avery' }, generation = { current: 0 }, saves = [];
+    let resolve;
+    const deps = { proof: undefined, errorText: error => error.message,
+      draftsOwner: owner, draftGeneration: generation, draftCache: { current: cache }, threadDraftKey: id => 'thread-draft/' + id,
+      localDrafts: { save: async (...args) => { saves.push(args); } },
+      acceptOutbox: () => new Promise(done => { resolve = done; }) };
+    const sending = action('replyToThread', '    async saveUrl(', deps)({ id: 'thread/original', agent_id: 'agent/dotfiles/manager' }, 'submitted', 'message/quote');
+    assert.equal(cache.get(key), saved); assert.equal(saves.length, 0);
+    if (restored) {
+      generation.current++; cache.clear(); owner.current = 'person/avery'; cache.set(key, saved);
+    }
+    resolve(accepted);
+    assert.deepEqual(await sending, accepted);
+    assert.equal(cache.has(key), restored);
+    assert.equal(saves.length, restored ? 0 : 1);
+    if (restored) assert.equal(cache.get(key), saved);
   }
 });
