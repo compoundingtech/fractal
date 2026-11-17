@@ -262,7 +262,7 @@ describe('Fractal.objective validation', () => {
     { name: 'an unknown field', input: { ...base, owner: 'x' }, message: /unknown field `owner`/ },
     { name: 'no about', input: { ...base, about: undefined }, message: /has no `about`/ },
     { name: 'an empty about', input: { ...base, about: '  ' }, message: /`about` is empty/ },
-    { name: 'an unknown indicator', input: { ...base, indicator: { kind: 'ratio' } }, message: /unknown indicator `ratio`/ },
+    { name: 'an unknown indicator', input: { ...base, indicator: { kind: 'histogram' } }, message: /unknown indicator `histogram`/ },
     { name: 'an empty latency', input: { name: 'x', about: 'a', indicator: { kind: 'latency', paths: [] }, targets: [{ stat: 'p99', within: '1s' }] }, message: /needs a `path`/ },
     { name: 'an extra indicator field', input: { name: 'x', about: 'a', indicator: { kind: 'statement', path: 'p' }, targets: [] }, message: /indicator `statement` has an unknown field `path`/ },
     { name: 'a fractional idle minimum', input: { name: 'cpu', about: 'a', indicator: { kind: 'cpu', idleMinMinutes: 1.5, loadMaxCores: 1 }, targets: [] }, message: /idleMinMinutes is not a positive integer/ },
