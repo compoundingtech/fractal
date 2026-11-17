@@ -59,6 +59,10 @@ export type OutboxScope = {
   readonly memberId: string;
 };
 
+/** Stable deployment scope from the captured issuer and issuer key, without delimiter collisions. */
+export const outboxDeploymentId = (issuer: string, issuerKey: string): string =>
+  JSON.stringify([issuer, issuerKey]);
+
 /**
  * Storage contract only. Successful writes resolve after durable transaction completion;
  * storage errors reject (never report a successful in-memory fallback).
