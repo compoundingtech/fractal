@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add native mission and step escalation policy declarations without delivery behavior",
+  "replay": { "status": "none", "detail": "No history rewrite or reconciliation change." },
+  "schema": { "status": "changed", "detail": "Optional mission and step escalation lists participate in canonical mission revisions. Existing declarations remain unchanged." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet rule change." },
+  "compatibility": { "status": "changed", "detail": "Upgrade all readers before publishing escalation nodes; older parsers reject these nodes. No protocol or harness change." },
+  "downtime": { "status": "none", "detail": "Normal binary restart only." },
+  "manual": { "status": "changed", "detail": "For any starting version without escalation support, upgrade all readers before authoring policies. No intermediate migration or backfill is required. Policies do not deliver notifications or asks in this slice." },
+  "recovery": { "status": "changed", "detail": "Remove escalation declarations and republish before rolling back to a reader without escalation support." }
+}
