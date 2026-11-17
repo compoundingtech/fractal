@@ -640,6 +640,68 @@ class Hook(unittest.TestCase):
                  '  mail-redelivery-canaries not covered            no record\n'
                  '  fractal-web              CI runs it             no local command')
 
+    def accept_prepush_policy(self, policies):
+        git(self.work, 'checkout', '-q', 'main')
+        for directory, policy in policies.items():
+            path = self.work / directory / 'prepush-policy.json'
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps(policy))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'accepted pre-push policy')
+        git(self.work, '-c', 'core.hooksPath=/dev/null', 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+
+    def test_hosted_policy_skips_all_local_work_for_everyone_including_a_listed_agent(self):
+        self.accept_prepush_policy({'.st': {'pr-proof': 'hosted'}})
+        for branch, env in (('agent', {'ST_AGENT': 'agent/some/seat'}),
+                            ('person', {}), ('background', {'ST_SKIP_EVIDENCE': '1'})):
+            with self.subTest(branch):
+                done = self.push(f'feature:refs/heads/{branch}', STUB_STATUS='3', **env)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual([line for line in done.stderr.splitlines() if line.startswith('evidence:')],
+                                 ['evidence: PR proof is hosted CI at the exact head (policy on main); no local evidence run'])
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(self.receipts()[-1]['outcome'], 'hosted_proof')
+                self.assertTrue(self.remote_has(f'refs/heads/{branch}'))
+
+    def test_hosted_policy_does_not_bypass_the_content_guard(self):
+        self.accept_prepush_policy({'.st': {'pr-proof': 'hosted'}})
+        (self.work / 'private.txt').write_text('person' + '/unknown-fixture')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'unsafe candidate content')
+        done = self.push(ST_AGENT='agent/some/seat')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertFalse(self.remote_has('refs/heads/feature'))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.receipts(), [])
+
+    def test_hosted_policy_in_the_candidate_tree_cannot_change_the_absent_base_policy(self):
+        for directory in ('.st', '.fractal'):
+            path = self.work / directory / 'prepush-policy.json'
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({'pr-proof': 'hosted'}))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'candidate hosted policy')
+        done = self.push(STUB_STATUS='3', STUB_STATUS_OUT=self.UNCOVERED, ST_AGENT='agent/some/seat')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(self.receipts()[-1]['outcome'], 'refused')
+        self.assertEqual([c['argv'] for c in self.calls()], [['--status', '--base', 'origin/main']])
+        self.assertFalse(self.remote_has('refs/heads/feature'))
+
+    def test_new_layout_hosted_policy_is_read_from_the_base(self):
+        self.accept_prepush_policy({'.fractal': {'pr-proof': 'hosted'}})
+        done = self.push(STUB_STATUS='3', ST_AGENT='agent/some/seat')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.receipts()[-1]['outcome'], 'hosted_proof')
+
+    def test_present_new_layout_policy_does_not_fall_back_to_legacy_hosted_policy(self):
+        self.accept_prepush_policy({'.st': {'pr-proof': 'hosted'}, '.fractal': {}})
+        done = self.push(STUB_STATUS='3', STUB_STATUS_OUT=self.UNCOVERED, ST_AGENT='agent/some/seat')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(self.receipts()[-1]['outcome'], 'refused')
+        self.assertEqual([c['argv'] for c in self.calls()], [['--status', '--base', 'origin/main']])
+
     def test_an_agents_covered_tree_is_pushed_silently_after_asking_about_all_checks(self):
         done = self.push(STUB_STATUS='0', ST_AGENT='agent/some/seat')
         self.assertEqual(done.returncode, 0, done.stderr)
