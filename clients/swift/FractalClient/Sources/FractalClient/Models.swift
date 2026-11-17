@@ -393,6 +393,7 @@ public struct ErrorEnvelope: Codable, Error, Sendable {
 
 public enum ErrorCode: Codable, Sendable, Equatable {
     case recipientRetired
+    case recipientUnassigned
     case identityCycle
     case identityOccupied
     case identityRetiredSource
@@ -485,6 +486,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = switch raw {
         case "recipient-retired": .recipientRetired
+        case "recipient-unassigned": .recipientUnassigned
         case "identity-cycle": .identityCycle
         case "identity-occupied": .identityOccupied
         case "identity-retired-source": .identityRetiredSource
@@ -579,6 +581,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     public func encode(to encoder: Encoder) throws {
         let raw = switch self {
         case .recipientRetired: "recipient-retired"
+        case .recipientUnassigned: "recipient-unassigned"
         case .identityCycle: "identity-cycle"
         case .identityOccupied: "identity-occupied"
         case .identityRetiredSource: "identity-retired-source"

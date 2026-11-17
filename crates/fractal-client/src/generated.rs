@@ -333,6 +333,7 @@ pub enum ErrorCode {
     NotAnswerable,
     AttentionDismissUnsupported,
     RecipientRetired,
+    RecipientUnassigned,
     IdentityCycle,
     IdentityOccupied,
     IdentityRetiredSource,
