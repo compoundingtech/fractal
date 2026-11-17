@@ -25,8 +25,8 @@
     {"name": "inline-and-code", "source": "**bold with *italic* and `literal *code*`**; \\*escaped\\*; unmatched *\n\n```text\n  **literal**\n\n\tkeep tab and  two spaces\n```", "expect": "Combined emphasis, escapes, literal unmatched delimiter; code bytes retained."},
     {"name": "soft-lines", "source": "One paragraph\ncontinues here.\n\nAnother paragraph.", "expect": "Two paragraphs; soft break becomes one space."},
     {"name": "safe-prose-cells", "source": "a\tb\u200b\u001b[31m", "expected_text": "a    b"},
-    {"name": "safe-list-cells", "source": "- a\tb\u200b\u001b[31m", "expected_text": "• a    b"},
-    {"name": "link-list-not-checkbox", "source": "- [label](https://example.com/list)", "expected_text": "• label"},
+    {"name": "safe-list-cells", "source": "- a\tb\u200b\u001b[31m", "expected_blocks": [{"list": "unordered", "items": [[{"text": "a    b"}]]}]},
+    {"name": "link-list-not-checkbox", "source": "- [label](https://example.com/list)", "expected_blocks": [{"list": "unordered", "items": [[{"link": {"label": "label", "url": "https://example.com/list"}}]]}]},
     {"name": "literal-code-backslash", "source": "`C:\\`", "expected_text": "C:\\"},
     {"name": "narrow", "source": "Long unbroken identifier `0123456789abcdef0123456789abcdef0123456789abcdef` and [a long label that wraps](https://example.com/exact-long-destination). 界界 café 👩🏽‍💻", "expect": "Wrap/scroll without content clipping or changed destination."}
   ],

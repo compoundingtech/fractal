@@ -176,6 +176,15 @@ mod tests {
                 if let Some(expected) = case["expected_text"].as_str() {
                     assert_eq!(lines.iter().map(plain).collect::<String>(), expected);
                 }
+                if let Some(blocks) = case["expected_blocks"].as_array() {
+                    assert_eq!(blocks[0]["list"], "unordered");
+                    let item = blocks[0]["items"][0].as_array().unwrap();
+                    let text: String = item.iter().map(|part| part["text"].as_str().or(part["link"]["label"].as_str()).unwrap()).collect();
+                    assert_eq!(lines.iter().map(plain).collect::<String>(), format!("• {text}"));
+                    for part in item {
+                        if let Some(url) = part["link"]["url"].as_str() { assert!(links.iter().any(|link| link.url == url)); }
+                    }
+                }
             }
         }
     }
