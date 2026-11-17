@@ -31,17 +31,58 @@ const setup = () => {
 afterEach(() => { for (const owner of owners.splice(0)) owner.close() })
 
 describe('verified browser outbox scope', () => {
-  it.each(['blocked', 'disabled'] as const)('reports %s opening as unavailable, never a corrupt recovery entry', async failure => {
+  it('reports a real blocked database upgrade as unavailable, never a corrupt recovery entry', async () => {
     const { client } = setup()
     const factory = new IDBFactory()
-    const owner = createScopedChatOutbox(client, { indexedDB: {
-      open: (name, version) => {
-        if (failure === 'disabled') throw new DOMException('Unavailable', 'InvalidStateError')
-        const request = factory.open(name, version)
-        queueMicrotask(() => request.dispatchEvent(new Event('blocked')))
-        return request
-      },
-    } })
+    const name = 'blocked-outbox'
+    const heldResult = Promise.withResolvers<IDBDatabase>()
+    const heldRequest = factory.open(name, 1)
+    heldRequest.onsuccess = () => heldResult.resolve(heldRequest.result)
+    heldRequest.onerror = () => heldResult.reject(heldRequest.error)
+    const held = await heldResult.promise
+    let opening: IDBOpenDBRequest | undefined
+    const owner = createScopedChatOutbox(client, {
+      databaseName: name,
+      indexedDB: { open: databaseName => { opening = factory.open(databaseName, 2); return opening } },
+    })
+    owners.push(owner)
+    owner.observe(base)
+    try {
+      await expect(owner.recovery.list()).rejects.toMatchObject({
+        _tag: 'OutboxStorageError', code: 'disabled', message: 'Outbox database upgrade is blocked.',
+      })
+      // The old database remains untouched while the upgrade cannot acquire it.
+      expect([...held.objectStoreNames]).toEqual([])
+    } finally {
+      const finished = Promise.withResolvers<void>()
+      if (opening === undefined) finished.resolve()
+      else {
+        opening.addEventListener('success', () => finished.resolve(), { once: true })
+        opening.addEventListener('error', () => finished.reject(opening?.error), { once: true })
+      }
+      held.close()
+      await finished.promise
+    }
+    const reopenedResult = Promise.withResolvers<IDBDatabase>()
+    const reopenedRequest = factory.open(name, 2)
+    reopenedRequest.onsuccess = () => reopenedResult.resolve(reopenedRequest.result)
+    reopenedRequest.onerror = () => reopenedResult.reject(reopenedRequest.error)
+    const reopened = await reopenedResult.promise
+    try {
+      const rowsResult = Promise.withResolvers<unknown[]>()
+      const request = reopened.transaction('attempts-v1', 'readonly').objectStore('attempts-v1').getAll()
+      request.onsuccess = () => rowsResult.resolve(request.result)
+      request.onerror = () => rowsResult.reject(request.error)
+      const rows = await rowsResult.promise
+      expect(rows).toEqual([])
+    } finally { reopened.close() }
+  })
+
+  it('reports disabled opening as unavailable, never a corrupt recovery entry', async () => {
+    const { client } = setup()
+    const owner = createScopedChatOutbox(client, {
+      indexedDB: { open: () => { throw new DOMException('Unavailable', 'InvalidStateError') } },
+    })
     owners.push(owner)
     owner.observe(base)
     await expect(owner.recovery.list()).rejects.toMatchObject({ _tag: 'OutboxStorageError', code: 'disabled' })
