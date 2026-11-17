@@ -151,6 +151,7 @@ function deliveryStore(thread) {
   const unreadPorts = { current: undefined };
   const store = {
     actor: 'person/one', data: { agents: [] }, status: 'online', threadRefresh: 0, threadDeliveries: new Map(), reads: [], unreadEnabled: true,
+    draftsOwner: { current: 'person/one' }, draftGeneration: { current: 0 },
     threadActions: new Set(['thread.read', 'thread.clear-unread', 'thread.mark-unread']),
     actions: { markThreadRead: async (_summary, messageIds) => { store.reads.push([...messageIds]); return { how: 'sent' }; } },
   };
