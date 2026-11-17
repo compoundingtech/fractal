@@ -31,18 +31,24 @@ WHERE kind='thread.unread-marked';
 CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
 ON claims(actor, store_index DESC)
 WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
+CREATE INDEX IF NOT EXISTS claims_thread_history_link_index
+ON claims(json_extract(body, '$.fields.thread_id'), json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'), subject)
+WHERE kind='thread.ask-linked';
 ",
     )
 }
 
 
 #[path = "thread_inbox_source.rs"]
-mod inbox_source;
+pub(super) mod inbox_source;
 pub use inbox_source::InboxOrigin;
 
 #[path = "thread_message_window.rs"]
 mod message_window;
 pub use message_window::{ThreadMessage, TimelineAnchor, TimelineAnchorState, TimelineItem, TimelinePage, mark_read, mixed_message_content, mixed_timeline};
+
+#[path = "thread_request_history.rs"]
+pub mod request_history;
 
 pub enum Edit<'a> {
     Create {
@@ -759,6 +765,13 @@ pub fn unread_inbox_positions(
     }
     let conn = store.readers.get();
     let person = identities::resolve_reference_conn(&conn, person)?;
+    let at = now_ms();
+    let source_keys = asks.iter().map(|(source, episode)| request_history::SourceEpisode {
+        source_id: (*source).into(), episode: (*episode).into(),
+    }).collect::<Vec<_>>();
+    // One exact-opening/current-policy lookup for every retained row, not N
+    // single-source calls. Live-only families keep their existing admission.
+    let retained = discussion_source::qualify_batch(&conn, &person, &source_keys, at)?;
     let keys = asks.iter().map(|(ask, episode)| {
         Ok((ask, episode, thread_links::ask_link_subject(ask, episode)?))
     }).collect::<Result<Vec<_>, FractalError>>()?;
@@ -793,9 +806,10 @@ pub fn unread_inbox_positions(
         }
         let qualified = match qualification {
             Some((previous, qualified)) if previous == position => qualified,
+            _ if retained[position].is_some() => true,
             _ => match inbox_source::resolve(store, &conn, &person, &InboxOrigin {
                 source_id: ask.into(), episode: episode.into(),
-            }, now_ms()) {
+            }, at) {
                 Ok(_) => true,
                 Err(error) if error.code == "thread-unavailable" => false,
                 Err(error) => return Err(error),
@@ -850,16 +864,16 @@ fn owns_ask_episode(
     ask: &str,
     episode: &str,
 ) -> Result<bool, FractalError> {
-    let assigned = person_work::step(connection, ask)
-        .map_err(internal)?
-        .and_then(|step| step.assigned_to)
-        .is_some_and(|assignee| {
-            identities::resolve_reference_conn(connection, &assignee)
-                .is_ok_and(|owner| owner == person)
-        });
-    Ok(assigned && person_work::request(connection, ask)
-        .map_err(internal)?
-        .is_some_and(|request| request.id == episode))
+    let key = request_history::SourceEpisode { source_id: ask.into(), episode: episode.into() };
+    if discussion_source::qualify(connection, person, &key, now_ms())?.is_none() {
+        return Ok(false);
+    }
+    // Link discovery remains runtime-ask-only; the shared qualifier has already
+    // established the canonical opening and both recipient checks.
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind='work.person-asked')",
+        params![episode, ask], |row| row.get(0),
+    ).map_err(internal)
 }
 
 /// Qualify the exact ask and person before resolving its private sidecar. Otherwise
@@ -1176,6 +1190,38 @@ pub fn history(
     })())).map_err(internal)?
 }
 
+#[derive(serde::Serialize)]
+pub struct StartContext {
+    pub kind: &'static str,
+    pub source_id: String,
+    pub episode: String,
+    pub start_recipient: inbox::StartRecipient,
+}
+
+/// Preview one already-known exact opening; this is not retained-source discovery.
+pub fn start_context(
+    store: &Store, person: &str, origin: &InboxOrigin,
+) -> Result<StartContext, FractalError> {
+    store.graph.read_snapshot_unindexed(|| Ok((|| {
+        let connection = store.readers.get();
+        let selected = inbox_source::resolve_discussion(
+            store, &connection, person, origin, now_ms(),
+        )?;
+        let start_recipient = inbox::start_recipient_at(&connection, &selected.item)?
+            .ok_or_else(|| FractalError::new(
+                "thread-responsibility-unassigned",
+                "this Inbox source has no configured responsible agent",
+            ))?;
+        selected.require_agent(store, &connection, &start_recipient.agent_id)?;
+        Ok(StartContext {
+            kind: "thread-start-context",
+            source_id: origin.source_id.clone(),
+            episode: origin.episode.clone(),
+            start_recipient,
+        })
+    })())).map_err(internal)?
+}
+
 pub struct StartFromInbox<'a> {
     pub thread: &'a str,
     pub title: &'a str,
@@ -1302,17 +1348,17 @@ pub fn start_from_inbox_as(
                     .ok_or_else(unavailable)?;
                 return Ok((claim, false));
             }
+            let mut creation_body = creation_body.clone();
+            creation_body["fields"]["person"] = json!(identities::resolve_reference_conn(tx, person)?);
+            creation_body["fields"]["agent"] = json!(identities::resolve_reference_conn(tx, agent)?);
+            let selected = inbox_source::resolve_discussion(store, tx, person, origin, now_ms())?;
+            selected.require_agent(store, tx, agent)?;
             if latest_claim_id_tx(tx, thread).map_err(internal)?.is_some() {
                 return Err(FractalError::new(
                     "stale-subject",
                     "the thread already exists",
                 ));
             }
-            let mut creation_body = creation_body.clone();
-            creation_body["fields"]["person"] = json!(identities::resolve_reference_conn(tx, person)?);
-            creation_body["fields"]["agent"] = json!(identities::resolve_reference_conn(tx, agent)?);
-            let selected = inbox_source::resolve(store, tx, person, origin, now_ms())?;
-            selected.require_agent(store, tx, agent)?;
             creation_body["evidence"] = json!(selected.evidence);
             let item = selected.item;
             let mission = if let Some(mission) = item.mission {
@@ -1370,6 +1416,7 @@ pub fn start_from_inbox_as(
         })
         .map_err(internal)?
 }
+
 
 #[cfg(test)]
 mod marked_read_helper_tests {

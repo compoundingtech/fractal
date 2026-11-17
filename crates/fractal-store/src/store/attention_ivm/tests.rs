@@ -60,6 +60,14 @@ fn inbox_fallback_changes_invalidate_materialized_associations() {
             let rows = window(tx, &views, CUSTOM_VIEW, "person/example", u128::MAX, 10)?;
             let cached = rows.iter().find(|row| row["source_id"] == subject).unwrap();
             assert_eq!(cached["conversation_id"].as_str(), fallback);
+            match fallback {
+                Some(agent) => assert_eq!(cached["start_recipient"],
+                    json!({"agent_id":agent,"basis":{"_tag":"configured"}})),
+                None => assert!(cached.get("start_recipient").is_none()),
+            }
+            let original = rows.iter().find(|row| row["source_id"] == "custom/garden/review/v1/agent-origin").unwrap();
+            assert_eq!(original["start_recipient"],
+                json!({"agent_id":"agent/garden/seed","basis":{"_tag":"original"}}));
             assert_eq!(rows.iter().find(|row| row["source_id"] == "custom/garden/review/v1/agent-origin").unwrap()["conversation_id"], "agent/garden/seed");
             Ok(())
         }).unwrap().unwrap();
@@ -104,6 +112,7 @@ fn unavailable_inbox_fallback_keeps_cards_and_actions_visible_but_refuses_discus
             let rows = window(tx, &views, CUSTOM_VIEW, "person/example", u128::MAX, 10)?;
             let cached = rows.iter().find(|row| row["source_id"] == subject).unwrap();
             assert_eq!(cached["conversation_id"], fallback);
+            assert!(cached.get("start_recipient").is_none(), "unresolved lifecycle is not recipient proof");
             assert_eq!(cached["operational"]["actionable"], true);
             assert!(cached["operational"]["reasons"].as_array().unwrap().contains(&json!("discussion-lifecycle-unavailable")));
             assert_eq!(cached["actions"], json!(["custom.reply"]));
@@ -113,6 +122,8 @@ fn unavailable_inbox_fallback_keeps_cards_and_actions_visible_but_refuses_discus
             let rows = window(tx, &views, CUSTOM_VIEW, "person/example", u128::MAX, 10)?;
             let restored = rows.iter().find(|row| row["source_id"] == subject).unwrap();
             assert!(!restored["operational"]["reasons"].as_array().unwrap().contains(&json!("discussion-lifecycle-unavailable")));
+            assert_eq!(restored["start_recipient"],
+                json!({"agent_id":fallback,"basis":{"_tag":"configured"}}));
             // A missing database relation remains an error; the lifecycle exception is narrow.
             tx.execute(/* sqlite-large-value: allow-for-now lv-h6a5073273ece owner=fractal_store::store::attention_ivm::tests TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE identity_names RENAME TO broken_identity_names", [])?;
             assert!(crate::store::inbox::responsible_agent_at(tx, item).is_err());

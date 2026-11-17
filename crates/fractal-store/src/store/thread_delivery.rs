@@ -237,6 +237,26 @@ pub fn append_reply(
                 return Err(invalid());
             }
         }
+        let created = creation(connection)?;
+        if let Some((source, episode)) = thread_metadata::origin_pair(&created) {
+            let person = created.body["fields"]["person"].as_str().ok_or_else(unavailable)?;
+            let agent = created.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
+            let origin = thread_metadata::InboxOrigin {
+                source_id: source.into(), episode: episode.into(),
+            };
+            match thread_metadata::inbox_source::resolve(store, connection, person, &origin, now_ms()) {
+                Ok(_) => {}
+                Err(error) if error.code == "thread-unavailable" => {
+                    let key = thread_metadata::request_history::SourceEpisode {
+                        source_id: source.into(), episode: episode.into(),
+                    };
+                    discussion_source::qualify(connection, person, &key, now_ms())?
+                        .ok_or_else(unavailable)?.into_resolved()
+                        .require_agent(store, connection, agent)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     };
     store.graph.ensure_principal_key(from)?;

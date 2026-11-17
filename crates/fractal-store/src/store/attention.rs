@@ -1,5 +1,19 @@
 use super::*;
 
+/// Capture current discussion metadata from the raw source, before its association is
+/// replaced by projected responsibility. Lifecycle refusals remain presentation reasons.
+pub fn discussion_context_at(connection: &Connection, item: &AttentionItemView) -> Result<serde_json::Map<String, Value>> {
+    let mut context = json!({"operational":{"layer":"current","actionable":true,"reasons":[]}});
+    match inbox::start_recipient_at(connection, item) {
+        Ok(Some(recipient)) => context["start_recipient"] = serde_json::to_value(recipient)?,
+        Ok(None) => {}
+        Err(error) if matches!(error.code, "lifecycle-unavailable" | "recipient-retired") => {}
+        Err(error) => return Err(error.into()),
+    }
+    inbox::annotate_resource_at(connection, item, &mut context)?;
+    context.as_object_mut().map(std::mem::take).context("discussion context is not an object")
+}
+
 impl Store {
     #[cfg(any(test, feature = "test-support"))]
     pub fn count_refolded_cards_for_test(&self, cards: usize) {
@@ -482,6 +496,16 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.attention_snapshot_with_context(person, as_of, |_| Ok(()))
+    }
+
+    /// Visit each raw current source before projecting its discussion association.
+    pub fn attention_snapshot_with_context(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        context: impl FnMut(&AttentionItemView) -> Result<()>,
+    ) -> Result<Vec<AttentionItemView>> {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.host_hold_attention_items(person)?);
         items.extend(self.person_attention_items(person, as_of)?);
@@ -496,7 +520,7 @@ impl Store {
                 .into_iter()
                 .filter(|item| item.person.starts_with("person/")),
         );
-        self.current_attention(items, as_of)
+        self.current_attention_with_context(items, as_of, context)
     }
 
     /// The unique publisher of an item from `attention_snapshot`, resolved at the caller's
@@ -632,8 +656,17 @@ impl Store {
     /// Keep the items requested by `as_of` whose run is still current, then order them.
     pub fn current_attention(
         &self,
+        items: Vec<AttentionItemView>,
+        as_of: u128,
+    ) -> Result<Vec<AttentionItemView>> {
+        self.current_attention_with_context(items, as_of, |_| Ok(()))
+    }
+
+    fn current_attention_with_context(
+        &self,
         mut items: Vec<AttentionItemView>,
         as_of: u128,
+        mut context: impl FnMut(&AttentionItemView) -> Result<()>,
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         items.retain(|item| item.requested_at_unix_ms <= as_of);
@@ -657,6 +690,7 @@ impl Store {
                     .optional()?
                     .unwrap_or_else(|| item.subject.clone());
             }
+            context(&item)?;
             item.conversation = inbox::responsible_agent_at(&connection, &item)?;
             live.push(item);
         }

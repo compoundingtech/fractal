@@ -286,8 +286,16 @@ fn rust_operation_methods(
     }}"#)?;
             continue;
         }
+        if id == "thread.start-context" {
+            writeln!(out, r#"    pub async fn thread_start_context(&self, source_id: &str, episode: &str) -> Result<Envelope<ThreadStartContext>, ClientError> {{ self.get(&format!("/v1/client/threads/start-context?source_id={{}}&episode={{}}", percent_encode(source_id), percent_encode(episode))).await }}"#)?;
+            continue;
+        }
         if id == "thread.get" {
             writeln!(out, r#"    pub async fn thread_get(&self, id: &str) -> Result<Envelope<ThreadSummary>, ClientError> {{ self.get(&format!("/v1/client/threads/{{}}", thread_path_segment(id)?)).await }}"#)?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, r#"    pub async fn thread_request_history(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<RequestHistoryPage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/request-history", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
             continue;
         }
         if id == "thread.timeline" {
@@ -563,8 +571,16 @@ fn swift_operation_methods(
     }}"#)?;
             continue;
         }
+        if id == "thread.start-context" {
+            writeln!(out, r#"    public func threadStartContext(sourceID: String, episode: String) async throws -> Envelope<ThreadStartContext> {{ try await get("v1/client/threads/start-context", query: [.init(name: "source_id", value: sourceID), .init(name: "episode", value: episode)]) }}"#)?;
+            continue;
+        }
         if id == "thread.get" {
             writeln!(out, r#"    public func threadGet(id: String) async throws -> Envelope<ThreadSummary> {{ try await get("v1/client/threads/\(try Self.routedThreadID(id))") }}"#)?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, r#"    public func threadRequestHistory(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<RequestHistoryPage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/request-history", query: query) }}"#)?;
             continue;
         }
         if id == "thread.timeline" {
@@ -994,6 +1010,8 @@ fn validate_surfaces(
         "DocumentReferences",
         "MessageBody",
         "AgentDeclaration",
+        "ThreadStartRecipient",
+        "ThreadStartContext",
         "ThreadSummary",
         "ThreadUnreadMark",
         "ThreadUnreadReminder",
@@ -1002,6 +1020,12 @@ fn validate_surfaces(
         "ThreadSummaryPage",
         "ThreadTimelineAnchor",
         "ThreadTimelinePage",
+        "SourceEpisode",
+        "HistoricalReference",
+        "RequestHistoryItem",
+        "RequestHistoryRelation",
+        "SourceEpisodeGroup",
+        "RequestHistoryPage",
         "ThreadTargetParameters",
         "ThreadRenameParameters",
         "ThreadStartParameters",
@@ -1872,8 +1896,16 @@ fn typescript_operation_methods(
             writeln!(out, "    async threadList(options: ThreadListQuery, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummaryPage>> {{ return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }}")?;
             continue;
         }
+        if id == "thread.start-context" {
+            writeln!(out, "    async threadStartContext(sourceID: string, episode: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadStartContext>> {{ return this.get('/v1/client/threads/start-context' + query({{ source_id: sourceID, episode }}), undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "thread.get" {
             writeln!(out, "    async threadGet(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadSummary>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}`, undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "thread.request-history" {
+            writeln!(out, "    async threadRequestHistory(id: string, options: {{ cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<RequestHistoryPage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/request-history` + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "thread.timeline" {
@@ -2075,6 +2107,37 @@ mod tests {
     use super::*;
     use anyhow::ensure;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn thread_start_context_emits_typed_clients_and_attention_recipient() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let reads = operations["reads"].as_array().unwrap();
+        let actions = operations["actions"].as_object().unwrap();
+        let operation = reads.iter().find(|read| read["id"] == "thread.start-context").unwrap();
+        assert_eq!(operation["response"], "ThreadStartContext");
+        assert_eq!(operation["query"].as_object().unwrap().len(), 2);
+        for (client, signature) in [
+            (rust_operation_methods(reads, actions)?, "thread_start_context(&self, source_id: &str, episode: &str) -> Result<Envelope<ThreadStartContext>"),
+            (swift_operation_methods(reads, actions)?, "threadStartContext(sourceID: String, episode: String) async throws -> Envelope<ThreadStartContext>"),
+            (typescript_operation_methods(reads, actions)?, "threadStartContext(sourceID: string, episode: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadStartContext>>"),
+        ] {
+            assert!(client.contains(signature), "missing typed start-context method");
+            assert!(client.contains("/threads/start-context"));
+            assert!(client.contains("source_id"));
+            assert!(client.contains("episode"));
+        }
+        let models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
+        assert!(models.contains("export type ThreadStartContext"));
+        assert!(models.contains("start_recipient?: ThreadStartRecipient"));
+        assert!(RUST_MODELS_TEMPLATE.contains("pub start_recipient: Option<ThreadStartRecipient>"));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("public let startRecipient: ThreadStartRecipient?"));
+        Ok(())
+    }
 
     #[test]
     fn person_pins_identity_is_shared_by_generated_clients() -> Result<()> {

@@ -20,6 +20,12 @@ crates/fractal-client/src/generated.rs`), and run the generator again; never edi
 hand.
 Generated Effect string length checks count Unicode code points, matching JSON Schema
 `minLength`/`maxLength`, not UTF-16 code units. Separate admission byte limits still apply.
+
+`thread.start-context` reads the exact known `(source_id, episode)` before a first
+Start. All generated clients expose this read and the shared `ThreadStartRecipient`
+basis (`original`, `configured`, or retirement-proven `fallback`); current Attention
+rows optionally carry the same recipient. The preview grants no send authority and
+does not change existing thread participants or request-history pagination.
 URI-reference format checks validate RFC3986 syntax, including relative references,
 without URL-constructor normalization of malformed input.
 
