@@ -1,6 +1,6 @@
 import { defaultDatabaseDirectory, openDatabaseAsync } from 'expo-sqlite';
 import type { SQLiteDatabase } from 'expo-sqlite';
-import { createSqliteOutboxRepository, migrateOutboxDatabase } from './outboxSqlite.ts';
+import { createSqliteOutboxRepository, migrateOutboxDatabase, withOutboxTransaction } from './outboxSqlite.ts';
 import type { OutboxSqlExecutor, OutboxSqlSession } from './outboxSqlite.ts';
 import type { OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
 
@@ -32,17 +32,7 @@ const executorFor = (database: SQLiteDatabase): OutboxSqlExecutor & { close(): P
     run: (sql, parameters) => serialize(() => session.run(sql, parameters)),
     get: (sql, parameters) => serialize(() => session.get(sql, parameters)),
     all: (sql, parameters) => serialize(() => session.all(sql, parameters)),
-    transaction: operation => serialize(async () => {
-      await session.exec('BEGIN IMMEDIATE;');
-      try {
-        const value = await operation(session);
-        await session.exec('COMMIT;');
-        return value;
-      } catch (error) {
-        await session.exec('ROLLBACK;');
-        throw error;
-      }
-    }),
+    transaction: operation => serialize(() => withOutboxTransaction(session, operation)),
   };
 };
 

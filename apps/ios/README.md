@@ -157,10 +157,12 @@ identity observations use the shared core; absence never proves nonapplication.
 database migrates from `user_version = 0` to 1 without dropping records. Scope
 columns plus attempt ID form the primary key; every read/list/write filters the
 same immutable scope. The read, shared transition authorization and conditional
-revision UPDATE occur in one write transaction. Corrupt JSON, invalid packet
-schemas or disagreement with row revision/state throw `OutboxCorruptionError`
-(certainty unknown), never a fabricated sendable row or an empty successful read.
-Unsupported schema versions fail closed instead of resetting storage.
+revision UPDATE occur in one write transaction. `list()` returns shared tagged
+`OutboxEntry` values: valid records plus corrupt-row IDs/revisions, without dropping
+damaged rows or hiding healthy records. Shared restoration makes damage a persistent
+“storage damaged; delivery unknown” entry: Discard only, no Copy/Send/Retry or expiry.
+Direct reads/CAS of damaged rows throw `OutboxCorruptionError`; no sendable packet
+is fabricated. Unsupported schema versions fail closed instead of resetting storage.
 
 `outboxSqliteNative.ts` supplies an Expo SQLite connection with serialized operations,
 `BEGIN IMMEDIATE`/commit/rollback, FULL synchronization and queued close. The path
@@ -175,6 +177,12 @@ The core exports a reference repository but no reusable runnable contract suite.
 One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope
 contracts against both `createMemoryOutboxRepository` and real `node:sqlite`.
 File-reopen, migration, rollback and corrupt-row tests additionally exercise SQLite.
+Transaction errors survive rollback failures: an aggregate retains the original
+error as its cause/first member and the rollback failure as its second member.
+Retention/deletion is planned for step 4 or later: seven days for terminal content
+and 30 days for minimal tombstones, retaining delivered content until exact timeline
+observation. Pending/unknown never automatically expire. No retention/delete worker
+or discard API has been implemented by the repository step.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.

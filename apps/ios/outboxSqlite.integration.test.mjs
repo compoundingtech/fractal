@@ -5,9 +5,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMemoryOutboxRepository } from '../../clients/typescript/fractal-client/testSupport.ts';
-import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox } from '../../clients/typescript/fractal-client/outbox.ts';
+import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, restoreOutboxEntries } from '../../clients/typescript/fractal-client/outbox.ts';
 import { prepareMessageSendPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
-import { createSqliteOutboxRepository, migrateOutboxDatabase, OutboxCorruptionError } from './outboxSqlite.ts';
+import { createSqliteOutboxRepository, migrateOutboxDatabase, OutboxCorruptionError, withOutboxTransaction } from './outboxSqlite.ts';
 import { restoreBoundAttempt } from './outboxBinding.ts';
 
 const scope = { principalId: 'profile/avery', deploymentId: '["host/original","key/original"]', memberId: 'member/original' };
@@ -32,11 +32,7 @@ const nodeDatabase = path => {
     executor: {
       ...session,
       transaction(operation) {
-        const result = pending.then(async () => {
-          db.exec('BEGIN IMMEDIATE;');
-          try { const value = await operation(session); db.exec('COMMIT;'); return value; }
-          catch (error) { db.exec('ROLLBACK;'); throw error; }
-        });
+        const result = pending.then(() => withOutboxTransaction(session, operation));
         pending = result.then(() => undefined, () => undefined);
         return result;
       },
@@ -78,7 +74,7 @@ const contracts = (name, factory) => {
     const dispatched = markOutboxDispatched(ready);
     assert.equal(await repo.compareAndSwap(1, dispatched), true);
     assert.equal(await repo.compareAndSwap(1, dispatched), false);
-    assert.deepEqual(await repo.list(), [dispatched]);
+    assert.deepEqual(await repo.list(), [{ _tag: 'record', record: dispatched }]);
   });
   test(`${name}: forged certainty, packet and intent transitions preserve stored record`, async t => {
     const store = await factory(t), repo = store.repository(scope);
@@ -174,7 +170,36 @@ for (const corruption of ['json', 'revision', 'packet']) test(`SQLite ${corrupti
   }
   const unknown = error => error instanceof OutboxCorruptionError && error.state === 'unknown';
   await assert.rejects(repo.read('attempt/original'), unknown);
-  await assert.rejects(repo.list(), unknown);
+  const entries = await repo.list();
+  assert.deepEqual(entries, [{ _tag: 'corrupt', id: 'attempt/original', revision: corruption === 'revision' ? 99 : corruption === 'packet' ? 1 : 0 }]);
+  const recovery = restoreOutboxEntries(entries)[0];
+  assert.equal(recovery.state, 'unknown');
+  assert.equal(recovery.status, 'storage damaged; delivery unknown');
+  assert.deepEqual(recovery.actions, ['discard']);
+  assert.equal(recovery.expires, false);
+  assert.equal('packet' in recovery, false);
   await assert.rejects(restoreBoundAttempt(repo, { mode: 'bound', scope }, 'attempt/original'), unknown);
   await assert.rejects(repo.compareAndSwap(0, prepared()), unknown);
+});
+
+test('rollback failure retains the original operation error as cause and aggregate member', async () => {
+  const original = new Error('original write failure'), rollback = new Error('rollback failure');
+  const statements = [];
+  const session = { async exec(sql) { statements.push(sql); if (sql === 'ROLLBACK;') throw rollback; } };
+  await assert.rejects(withOutboxTransaction(session, async () => { throw original; }), error =>
+    error instanceof AggregateError && error.cause === original
+      && error.errors[0] === original && error.errors[1] === rollback);
+  assert.deepEqual(statements, ['BEGIN IMMEDIATE;', 'ROLLBACK;']);
+});
+
+test('SQLite list retains good records beside persistent corrupt-row recovery entries', async t => {
+  const store = await sqliteFactory(t), repo = store.repository(scope), { db } = store.connection();
+  await repo.commit(preparing('attempt/good'));
+  await repo.commit(preparing('attempt/damaged'));
+  db.prepare('UPDATE outbox_records SET record_json = ? WHERE id = ?').run('broken', 'attempt/damaged');
+  const expected = [{ _tag: 'corrupt', id: 'attempt/damaged', revision: 0 },
+    { _tag: 'record', record: preparing('attempt/good') }];
+  assert.deepEqual(await repo.list(), expected);
+  await store.reopen();
+  assert.deepEqual(await store.repository(scope).list(), expected);
 });

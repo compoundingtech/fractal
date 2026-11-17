@@ -1,5 +1,5 @@
 import { isAllowedOutboxTransition } from '../../clients/typescript/fractal-client/outbox.ts';
-import type { OutboxRecord, OutboxRepository, OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
+import type { OutboxEntry, OutboxRecord, OutboxRepository, OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import { ActionRequest, ActionResult, decodeUnknownSync } from '../../clients/typescript/fractal-client/Schema.generated.ts';
 
@@ -14,6 +14,24 @@ export interface OutboxSqlSession {
 export interface OutboxSqlExecutor extends OutboxSqlSession {
   transaction<TResult>(operation: (session: OutboxSqlSession) => Promise<TResult>): Promise<TResult>;
 }
+
+/** Preserve the original failure even if rollback itself fails. Caller serializes access. */
+export const withOutboxTransaction = async <TResult>(
+  session: OutboxSqlSession, operation: (session: OutboxSqlSession) => Promise<TResult>,
+): Promise<TResult> => {
+  await session.exec('BEGIN IMMEDIATE;');
+  try {
+    const value = await operation(session);
+    await session.exec('COMMIT;');
+    return value;
+  } catch (error) {
+    try { await session.exec('ROLLBACK;'); }
+    catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], 'Outbox transaction and rollback failed', { cause: error });
+    }
+    throw error;
+  }
+};
 
 /** Missing/corrupt storage is unknown, never a fabricated ready packet or an empty outbox. */
 export class OutboxCorruptionError extends Error {
@@ -147,7 +165,13 @@ export const createSqliteOutboxRepository = (
     },
     async list() {
       const rows = await executor.all<Row>(`SELECT ${columns} FROM outbox_records WHERE ${filter} ORDER BY id;`, parameters);
-      return rows.map(decodeRow);
+      return rows.map<OutboxEntry<PreparedPacket>>(row => {
+        try { return { _tag: 'record', record: decodeRow(row) }; }
+        catch (error) {
+          if (!(error instanceof OutboxCorruptionError)) throw error;
+          return { _tag: 'corrupt', id: row.id, ...(integer(row.revision) ? { revision: row.revision } : {}) };
+        }
+      });
     },
   };
 };
