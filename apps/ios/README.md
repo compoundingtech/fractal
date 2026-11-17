@@ -149,13 +149,21 @@ the shared thread body on that page (older history continues from it; Open threa
 shows the latest); unavailable and pending anchors show their notice and, with the
 current write grant, an explicit Clear reminder. Visible evidence counts whole
 rendered Markdown lines (up to two, including the last), never paragraph spacing.
-An expanded marked row owns its open reading context independently of list membership:
-clearing its reminder removes the real marker and list membership, not the open body,
-composer, draft, focus or scroll. Its ordering stays fixed among neighboring rows
-while open, including when refreshed marked membership drops it. Collapsing the row
+Every expanded contextual row owns its open reading context independently of filter
+membership. Automatic, explicit and remote reminder clears remove the real marker
+and marked membership; reopening removes Recently closed membership. None removes
+the open body, composer, draft, focus or scroll. Counts describe current filter
+members, never retained placements. Selected rows keep their ordering while open.
+The shared selection boundary applies to all contextual thread collections. Collapsing the row
 or section, switching tabs or pushing another screen releases it; refocus cannot
 restore a cleared row from the previous visit. Owner, pairing/session, client and
-read-grant changes still remove the protected context.
+read-grant changes still remove the protected context. A current exact-thread denial
+removes that body; a collection denial releases every selection in that collection.
+A later authorized live window supersedes an earlier HTTP refusal even with unchanged
+membership. It restores the readable collection, not the selections released on denial.
+An accepted inline Start is labeled “Started here”, visibly and for VoiceOver, to
+distinguish it from an existing contextual thread with the same generated title and
+message count. The two placements keep independent collapse controls.
 Loading wrappers (detail, Inbox start, expanded rows) start the
 visit entry with the same placement key before the body mounts, so a reminder that
 loads after entry is never captured. Focused node coverage lives beside the visit
