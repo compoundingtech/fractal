@@ -86,10 +86,22 @@ const finishCode = ts.transpileModule(`const kind = 'start'; const ${finishNode.
 const finishExports = {};
 new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', finishCode)(
   finishExports, ClientError, undefined, String, () => {});
+// Exact serialized shapes: api-client-v0/threads.rs:184-198 maps unassigned to
+// api-core/api/client_v0.rs:803-810 stale(): empty details, no applied.
+// kernel/model.rs:2785-2826 supplies Retired details (absent successor/transfer omitted);
+// api-core/api.rs:579-588 lifts details.applied; :2007-2021 wraps both errors.
 /** @param {'stale-fence' | 'recipient-retired'} code */
 const wireRefusal = code => new ClientError({
   api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
-  code, message: 'The server refused this Start.', retryable: false, applied: 'none', details: {},
+  code, retryable: false,
+  ...(code === 'recipient-retired' ? {
+    message: 'Retired: recipient `agent/A` refuses this first send',
+    applied: 'none',
+    details: { applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/A' } },
+  } : {
+    message: 'this Inbox source has no configured responsible agent',
+    details: {},
+  }),
 }, 409);
 
 /** A Start panel and its composer over one store, one generated client and one draft cache. */

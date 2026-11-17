@@ -62,9 +62,15 @@ test('only definitive canonical Start recipient refusals request a visible conte
   const exports = {}, sent = [];
   new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', 'resendBoundAction', outputText)(
     exports, ClientError, undefined, String, () => {}, async request => { sent.push(request); return { how: 'sent' }; });
+  // 409 wire shapes: api-core/api/client_v0.rs:803-810; kernel/model.rs:2785-2826;
+  // api-core/api.rs:579-588 and :2007-2021 (only Retired carries applied).
   const refusal = (status, code) => new ClientError({
     api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
-    code, message: 'Refused', retryable: false, applied: 'none', details: {},
+    code, retryable: false,
+    ...(code === 'recipient-retired' ? {
+      message: 'Retired: recipient `agent/A` refuses this first send',
+      applied: 'none', details: { applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/A' } },
+    } : { message: code === 'stale-fence' ? 'this Inbox source has no configured responsible agent' : 'Refused', details: {} }),
   }, status);
   const start = exports.make('start');
   for (const error of [refusal(404, 'not-found'), refusal(409, 'recipient-retired'), refusal(409, 'stale-fence')]) {
