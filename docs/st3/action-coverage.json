@@ -488,6 +488,24 @@
   ],
   "cli": [
     {
+      "command": "st missions run continuity preview",
+      "description": "Read original superseded-run evidence and its hash without writing",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Real Unix CLI/API preview remains stable across reopen and records no new claims."
+    },
+    {
+      "command": "st missions run continuity startup-preview",
+      "description": "Read owner-local startup supersession candidates without dispatching work",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Real Unix CLI/API startup preview is read-only before and after reopen."
+    },
+    {
+      "command": "st missions run continuity recover",
+      "description": "Recover original completed evidence by reference using an exact preview hash and explicit actor",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Stale hashes write nothing; accepted recovery creates a linked successor whose carried references survive reopen without fabricated work submissions."
+    },
+    {
       "command": "st effects status",
       "description": "Read durable native-effect state by its full idempotency key without sending",
       "tests": [

@@ -717,6 +717,23 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get(
+        "GET /v1/mission-runs/continuity/startup-preview",
+        "/v1/mission-runs/continuity/startup-preview",
+    ),
+    post(
+        "POST /v1/mission-runs/continuity/preview",
+        "/v1/mission-runs/continuity/preview",
+        |fixture, _| json!({"run": fixture.items["continuity_source"]}),
+    ),
+    post(
+        "POST /v1/mission-runs/continuity/recover",
+        "/v1/mission-runs/continuity/recover",
+        |fixture, _| json!({
+            "run": fixture.items["continuity_source"],
+            "preview_hash": fixture.items["continuity_hash"],
+        }),
+    ),
     get("GET /v1/effects/by-key", "/v1/effects/by-key?key={effect_key}"),
     post("POST /v1/effects/{*subject}", "/v1/effects/{effect_subject}/resolve", |_, attempt| json!({
         "actor": "person/bench-operator",
@@ -3567,6 +3584,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     assert_eq!(page["page"]["has_more"], false);
 
     prepare_custom_fixture(&store, &mut fixture, scale);
+    prepare_continuity(&store, &mut fixture, root);
     let event_page: Value = client
         .get(&fixture.fill("/v1/events/page?after={event_after}&limit=100", 0))
         .await
@@ -3663,6 +3681,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
+                fixture.items.insert("continuity_hash", preview["preview_hash"].as_str().unwrap().into());
+            }
             // Seed a fresh durable uncertainty outside the measured region. In particular,
             // resolution must write a new receipt on every sample, never an idempotent replay.
             if probe.route.contains("/v1/effects/") {
@@ -3733,7 +3755,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
+                } else if path.starts_with("/v1/mission-runs/continuity/")
+                    || path.starts_with("/v1/client/")
+                    || path.starts_with("/v1/effects/")
+                {
                     person.clone()
                 } else {
                     client.clone()
@@ -3757,6 +3782,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route == "GET /v1/mission-runs/continuity/startup-preview" {
+                                anyhow::ensure!(value["runs"].is_array(), "startup preview must return its candidate inventory");
+                            }
+                            if probe.route == "POST /v1/mission-runs/continuity/preview" {
+                                anyhow::ensure!(
+                                    value["preview_hash"].as_str().is_some_and(|hash| hash.len() == 64)
+                                        && value["original_work"][0]["eligibility"] == "eligible",
+                                    "continuity cost probe must inspect eligible original completion evidence",
+                                );
+                            }
+                            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                                anyhow::ensure!(
+                                    value["recovered_run"].as_str().is_some()
+                                        && value["preview_hash"] == body.as_ref().unwrap()["preview_hash"],
+                                    "continuity cost probe must accept its current preview and create a successor",
+                                );
+                            }
                             if probe.route.contains("/v1/effects/") {
                                 anyhow::ensure!(
                                     value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
@@ -3826,6 +3868,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 assert_eq!(source.status, "failed", "retry must leave its source terminal");
                 assert!(source.steps.iter().all(|step| step.status == "failed"));
                 assert_eq!(source.retried_by.len(), attempt + 1, "each sample must write a new retry");
+            }
+            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
+                let target = store.mission_run(preview["target_run"].as_str().unwrap()).unwrap().unwrap();
+                assert_eq!(target.steps[0].status, "completed");
+                let references = store.claims_for(&target.steps[0].subject, Some("step-run.carried")).unwrap();
+                assert_eq!(references.len(), 1, "every sample must adopt original evidence into a fresh successor");
+                let mut source = references[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                let mut seen = std::collections::BTreeSet::from([target.steps[0].subject.clone()]);
+                while source != fixture.items["continuity_step"] {
+                    assert!(seen.insert(source.clone()), "carried evidence must have an acyclic original reference");
+                    assert!(store.claims_for(&source, Some("work.submitted")).unwrap().is_empty());
+                    let previous = store.claims_for(&source, Some("step-run.carried")).unwrap();
+                    assert_eq!(previous.len(), 1, "every intermediate must reference its authentic source");
+                    source = previous[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                }
+                assert!(store.claims_for(&target.steps[0].subject, Some("work.submitted")).unwrap().is_empty());
             }
             if attempt > 0 {
                 samples.push(cost);
@@ -4235,6 +4294,29 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         peer_inventory: Value::Null,
         peer_exchange: Value::Null,
     }
+}
+
+/// A superseded run with late original evidence, independent of generated history size.
+fn prepare_continuity(store: &Store, fixture: &mut Fixture, workspace: &Path) {
+    let definition = "version 2\nmission \"cost-continuity\" state=\"ready\" {\n\
+        goal \"Original goal.\"\nstep \"prepare\" { agentless; }\n}\n";
+    let intent = fractal_daemon::parse_intent(definition, NODE).unwrap();
+    store.apply_internal(&intent, "cost-continuity-original").unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "cost-continuity".into(), revision: None,
+        workspace: workspace.display().to_string(),
+        requester: Some("person/bench-operator".into()), mode: None,
+        inputs: BTreeMap::new(), idempotency_key: "cost-continuity-source".into(),
+    }).unwrap();
+    let updated = definition.replace("Original goal.", "Updated goal.");
+    let intent = fractal_daemon::parse_intent(&updated, NODE).unwrap();
+    store.apply_internal(&intent, "cost-continuity-updated").unwrap();
+    store.supersede_mission_publications().unwrap();
+    let current = store.mission_run(&source.subject).unwrap().unwrap();
+    assert!(current.superseded_by.is_some());
+    store.set_step_state(&source.steps[0].subject, "completed", None).unwrap();
+    fixture.items.insert("continuity_step", source.steps[0].subject.clone());
+    fixture.items.insert("continuity_source", source.subject);
 }
 
 /// Keep the source terminal and permit all four independent retries without bypassing admission.

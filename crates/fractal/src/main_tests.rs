@@ -3741,6 +3741,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
         ("claims", CLAIMS_SOURCE),
+        ("continuity", /* sqlite-large-value: allow-for-now lv-h3eca7c6c5a2f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("continuity_cli.rs")),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),

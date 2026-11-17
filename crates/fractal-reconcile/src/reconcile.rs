@@ -16644,6 +16644,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("attempt".into(), Value::from(attempt)),
         ]);
+        let (binding, original_request) = self.store.human_gate_continuity(run, subject, &fields)?;
+        fields.insert("continuity".into(), binding);
         let request_hash = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&fields)?));
         let operation = format!(
             "gate-operation/{}/{}",
@@ -16651,7 +16653,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &request_hash[..24]
         );
         fields.insert("operation".into(), Value::String(operation.clone()));
-        let request = self.store.append_claim(&ClaimInput {
+        let request = if let Some(original) = original_request { original } else { self.store.append_claim(&ClaimInput {
             subject: operation.clone(),
             kind: "gate.requested".into(),
             actor: None,
@@ -16663,7 +16665,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject,
                 &request_hash[..24]
             )),
-        })?;
+        })? };
         // The reviewer's answer, read by the rule that takes an answered review off the
         // reviewers' list: a later result on the operation (another actor's, an unbound one)
         // cannot hide it and leave a gate nobody can answer.
