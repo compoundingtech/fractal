@@ -17,6 +17,7 @@ struct Content {
   let now: Date
   let url = URL(string: "https://fractal.example/attention")!
 
+  /// `from` is the requester as Fractal sends it (`agent/…`, `daemon/runtime`, a subject).
   func record(
     _ id: String, title: String, detail: String = "", from: String, kind: String = "person-step",
     actions: [String] = ["work.done"], request: RequestForm? = nil, update: UpdateNote? = nil,
@@ -29,7 +30,7 @@ struct Content {
       promptAnswers: [], request: request, update: update,
       workDoneDefaults: update == nil ? nil : WorkDoneAnswer(summary: "Read", answerID: "read"), url: url,
       isUrgent: urgent, snoozedUntil: snoozedFor.map { now + $0 },
-      conversationID: from.hasPrefix("agent/") ? from : nil)
+      conversationID: from.hasPrefix("agent/") ? from : nil, requesterID: from)
   }
 
   var shipDecision: RequestForm {
