@@ -202,8 +202,13 @@ it('offers no Start and names no recipient on a source without the preview reade
 })
 
 it('reads the recipient again after a mismatch, keeps the draft and refusal, and sends to the new recipient only when pressed again', async () => {
+  // How many actions had been sent when each preview read reached Fractal.
+  const readsAfter: number[] = []
   const view = await mount(<LiveInboxThreads alert={ask} />, {
-    preview: (url, actions) => context(url, actions.length === 0 ? originalRecipient : fallbackRecipient),
+    preview: (url, actions) => {
+      readsAfter.push(actions.length)
+      return context(url, actions.length === 0 ? originalRecipient : fallbackRecipient)
+    },
     action: (action, actions) => actions.length === 1 ? refusal('not-found', 404) : receipt(action),
   })
   try {
@@ -217,11 +222,15 @@ it('reads the recipient again after a mismatch, keeps the draft and refusal, and
     expect(view.host.querySelector('[data-start-recipient="fallback"] [data-start-recipient-id]')?.textContent).toBe(fallback)
     expect(view.host.querySelector('[role="alert"]')?.textContent).toContain("Couldn't start this thread.")
     expect(view.host.querySelector('textarea')?.value).toBe('Is the checklist complete?')
-    expect(view.previews).toHaveLength(2)
     // Reading the new recipient never sends on its own.
     await view.settle()
     expect(view.actions).toHaveLength(1)
     expect(startParameters(view.actions[0])?.agent_id).toBe(original)
+    // The composer never reads the preview itself. After the refused Start the source reads the exact key twice: once,
+    // awaited, so the refusal surfaces beside the new recipient, and once more when the settled write invalidates every
+    // projection. Both follow the one refused send, and nothing reads it again while the draft waits for review.
+    expect(readsAfter).toEqual([0, 1, 1])
+    expect(view.previews.every(url => url.searchParams.get('source_id') === ask.source_id && url.searchParams.get('episode') === episode)).toBe(true)
     await act(async () => view.button('Send')?.click())
     await vi.waitFor(() => expect(view.actions).toHaveLength(2))
     expect(startParameters(view.actions[1])?.agent_id).toBe(fallback)

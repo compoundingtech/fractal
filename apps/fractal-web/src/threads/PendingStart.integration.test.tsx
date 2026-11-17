@@ -115,7 +115,12 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
     })
     await act(async () => [...host.querySelectorAll('button')].find(row => row.getAttribute('aria-label') === 'Send')?.click())
     await vi.waitFor(() => expect(writes).toHaveLength(1))
-    expect(button('Retry thread start')?.disabled).toBe(true)
+    // The sending editor stays mounted until the request settles; recovery replaces it only after failure.
+    expect(host.querySelector('textarea')).toBe(input)
+    expect(input?.value).toBe(content)
+    expect(input?.readOnly).toBe(true)
+    expect(host.querySelector<HTMLButtonElement>('button[aria-label="Send"]')?.disabled).toBe(true)
+    expect(button('Retry thread start')).toBeUndefined()
     await act(async () => loseFirst())
     await vi.waitFor(() => expect(button('Retry thread start')?.disabled, host.textContent ?? '').toBe(false))
     expect(host.querySelectorAll('[data-thread-panel]')).toHaveLength(1)

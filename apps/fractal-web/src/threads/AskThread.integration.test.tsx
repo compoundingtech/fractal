@@ -36,7 +36,7 @@ it.each([
   { connection: 'resolved ask', local: true, browserGrant: false, canStart: true, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: 'claim/episode', resolved: true },
   { connection: 'resolved authored step', local: true, browserGrant: false, canStart: true, kind: 'person-step', sourceId: 'step-run/release/review', responsible: true, protocol: 3, episode: 'claim/step-opening', resolved: true },
   { connection: 'resolved typed notice', local: true, browserGrant: false, canStart: true, kind: 'custom.release.notice', sourceId: 'custom/attention/source/release', responsible: true, protocol: 3, episode: 'claim/notice-opening', resolved: true },
-  { connection: 'resolved system notice', local: true, browserGrant: false, canStart: true, kind: 'system-notice', sourceId: 'system/notice/release', responsible: false, protocol: 3, episode: 'claim/system-notice-opening', resolved: true },
+  { connection: 'resolved system notice', local: true, browserGrant: false, canStart: true, kind: 'model-drift', sourceId: 'system/notice/release', responsible: false, protocol: 3, episode: 'claim/system-notice-opening', resolved: true },
   { connection: 'auto-resolved ask', local: true, browserGrant: false, canStart: true, kind: 'person-step', sourceId: 'step-run/release/default', responsible: true, protocol: 3, episode: 'claim/default-opening', resolved: true, autoResolved: true },
 ])('offers an inline Inbox composer only when $connection supports unsigned sends', async ({ local, browserGrant, canStart, kind, sourceId, responsible, protocol, episode, ...scenario }) => {
   const resolved = 'resolved' in scenario && scenario.resolved === true
