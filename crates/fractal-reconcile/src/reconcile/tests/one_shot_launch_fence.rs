@@ -23,10 +23,9 @@ fn native_ordinary_observation_cannot_admit_an_unreleased_launch() {
     // A second gate holds the payload after release, without a timing delay.
     let payload = fractal_runtime::NativeLaunchGate::prepare(&root.path().join("payload"), "payload").unwrap();
     let launch = gate.wrap(&payload.wrap(&fractal_runtime::Launch::Shell("exit 0".into())));
-    let environment = BTreeMap::from([
-        ("PATH".into(), std::env::var("PATH").unwrap()),
-        (start_jobs::OPERATION_ENV.into(), operation.into()),
-    ]);
+    let declared = BTreeMap::from([(start_jobs::OPERATION_ENV.into(), operation.into())]);
+    let mut environment = member_environment(&declared, &launch_executable().unwrap(), None).unwrap();
+    set_lane(&mut environment, None);
     let generation = runtime.exec.spawn("held-native", &launch, root.path(), &environment).unwrap();
     struct Cleanup<'a>(&'a NativeRuntime, &'a str);
     impl Drop for Cleanup<'_> {
@@ -36,7 +35,8 @@ fn native_ordinary_observation_cannot_admit_an_unreleased_launch() {
     }
     let _cleanup = Cleanup(&runtime, &generation.generation_id);
     let ordinary = runtime.observe_exec("held-native").unwrap().unwrap();
-    assert_eq!(ordinary.status, "starting");
+    assert_eq!(ordinary.status, "starting", "native exec log: {:?}",
+        runtime.read_exec_log("held-native").unwrap());
     let physical = runtime.observe_native_exec("held-native", true).unwrap().unwrap();
     assert_eq!(physical.status, "running");
     assert_eq!(physical.incarnation_id.as_deref(), Some(generation.generation_id.as_str()));

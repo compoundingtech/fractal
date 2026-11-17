@@ -338,7 +338,7 @@ async fn wrong_operation_cannot_register_a_launch_or_submit_work() {
     // supplied ID, must prevent a different operation from acquiring running authority.
     assert!(!fixture.register_launch("expected-operation", "other-operation"));
     for kind in ["runtime.action.succeeded", "runtime.observed"] {
-        assert!(fixture.state.store.latest_claim(SEAT, Some(kind)).unwrap().is_none());
+        assert!(fixture.state.store.observations_for(SEAT, kind).unwrap().is_empty());
     }
     fixture.completion_refused(
         fixture.completion(SEAT, "chooser:one", "wrong-operation-launch"),
@@ -355,8 +355,8 @@ async fn proven_current_launch_can_submit_work_with_an_exact_receipt() {
         .unwrap().unwrap();
     assert_eq!(running.body["fields"]["status"], "running");
     assert_eq!(running.body["fields"]["incarnation_id"], "chooser:one");
-    let start = fixture.state.store.latest_claim(SEAT, Some("runtime.action.succeeded"))
-        .unwrap().unwrap();
+    let start = fixture.state.store.observations_for(SEAT, "runtime.action.succeeded")
+        .unwrap().into_iter().find(|claim| claim.body["fields"]["operation"] == "current-operation").unwrap();
     assert_eq!(start.body["fields"]["operation"], "current-operation");
     let body = fixture.completion(SEAT, "chooser:one", "current-launch");
     let submitted: StepRunView = fixture.client.post(
