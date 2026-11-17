@@ -185,7 +185,7 @@ fn schema(name: &str) -> Value {
             } else if name != THREADS_LIST {
                 props["thread_id"] = json!({"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$","maxLength":135});
             }
-            if matches!(name, THREADS_LIST | THREAD_TIMELINE) {
+            if matches!(name, THREADS_LIST | THREAD_TIMELINE | THREAD_REQUEST_HISTORY) {
                 props["cursor"] = json!({"type":"string"});
                 props["limit"] = json!({"type":"integer","minimum":1,"maximum":50});
             }
