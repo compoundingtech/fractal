@@ -71,6 +71,27 @@ const fallback = (agent_id, original_agent_id) => context(agent_id, {
   _tag: 'fallback', original_agent_id, retirement: { claim_id: `claim/${original_agent_id}`, kind: 'agent.retired', state: 'retired' },
 });
 
+// Bind real serialized refusals through the production store's completion mapping.
+const storeSource = ts.createSourceFile('store.tsx', readFileSync(new URL('./store.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+let finishNode;
+const visitFinish = node => {
+  if (ts.isVariableDeclaration(node) && node.name.getText(storeSource) === 'finish' && node.initializer?.getText(storeSource).includes('refreshStartContext')) finishNode = node;
+  ts.forEachChild(node, visitFinish);
+};
+visitFinish(storeSource);
+assert.ok(finishNode);
+const finishCode = ts.transpileModule(`const kind = 'start'; const ${finishNode.getText(storeSource)}; exports.finish = finish;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText;
+const finishExports = {};
+new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', finishCode)(
+  finishExports, ClientError, undefined, String, () => {});
+/** @param {'stale-fence' | 'recipient-retired'} code */
+const wireRefusal = code => new ClientError({
+  api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
+  code, message: 'The server refused this Start.', retryable: false, applied: 'none', details: {},
+}, 409);
+
 /** A Start panel and its composer over one store, one generated client and one draft cache. */
 function harness({ contexts, outcomes = [], status = 'online', ledger = new Map(), draft = 'Hello' }) {
   const reads = [], signed = [];
@@ -87,7 +108,11 @@ function harness({ contexts, outcomes = [], status = 'online', ledger = new Map(
   const store = {
     status, threadRefresh: 0, threadDeliveries: ledger, draftCache, draftsReady: true, saveDrafts() {},
     draftsOwner: { current: 'person/one' }, draftGeneration: { current: 0 },
-    actions: { startThread: async (...args) => { signed.push(args); return outcomes.shift() ?? { how: 'sent' }; } },
+    actions: { startThread: async (...args) => {
+      signed.push(args);
+      const outcome = outcomes.shift() ?? { how: 'sent' };
+      return outcome instanceof ClientError ? finishExports.finish({ how: 'failed', error: outcome }) : outcome;
+    } },
   };
   const panelHooks = instance(), composerHooks = instance();
   const Panel = compile('InboxThreadStart', 'function InlineThread', {
@@ -165,11 +190,7 @@ test('a failed read never implies a recipient: it shows the error and retries th
 });
 
 test('an unconfigured source with no original agent visibly refuses Start and never invents a recipient', async () => {
-  const refusal = new ClientError({
-    api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
-    code: 'thread-responsibility-unassigned', message: 'this Inbox source has no configured responsible agent',
-    retryable: false, applied: 'none', details: {},
-  }, 409);
+  const refusal = wireRefusal('stale-fence');
   const h = harness({ contexts: [refusal] });
   h.panel();
   await settle();
@@ -183,6 +204,44 @@ test('an unconfigured source with no original agent visibly refuses Start and ne
   await settle();
   assert.deepEqual(h.signed, [], 'neither an Inbox agent nor a guessed Chief of Staff authorizes a send');
   assert.equal(h.reads.length, 1);
+});
+
+test('409 stale-fence after removing configured A clears its preview and fails closed without another send', async () => {
+  const h = harness({ contexts: [context('agent/A'), wireRefusal('stale-fence')], outcomes: [wireRefusal('stale-fence')] });
+  h.panel();
+  await settle();
+  let tree = h.panel();
+  assert.equal(find(tree, 'StartRecipientPreview').props.recipient.agent_id, 'agent/A');
+  field(h.composer(startOf(tree))).onSend();
+  await settle();
+  tree = h.panel();
+  assert.equal(h.reads.length, 2, 'a definitive stale-fence rereads canonical context');
+  assert.ok(find(tree, 'ThreadReadIssue'));
+  assert.equal(find(tree, 'StartRecipientPreview'), undefined);
+  assert.equal(startOf(tree).origin, undefined);
+  const composer = h.composer(startOf(tree));
+  assert.equal(field(composer).enabled, false);
+  field(composer).onSend();
+  await settle();
+  assert.equal(h.signed.length, 1, 'a failed reread never resends A or invents a target');
+  assert.equal(h.signed[0][1].agentId, 'agent/A');
+});
+
+test('409 recipient-retired independently refreshes to canonical B and requires a fresh explicit Send', async () => {
+  const h = harness({ contexts: [context('agent/A'), fallback('agent/B', 'agent/A')], outcomes: [wireRefusal('recipient-retired'), { how: 'sent' }] });
+  h.panel();
+  await settle();
+  field(h.composer(startOf(h.panel()))).onSend();
+  await settle();
+  const tree = h.panel();
+  assert.equal(find(tree, 'StartRecipientPreview').props.recipient.agent_id, 'agent/B');
+  assert.equal(find(tree, 'StartRecipientPreview').props.changed, true);
+  assert.equal(h.signed.length, 1, 'a retired refusal never auto-resends');
+  field(h.composer(startOf(tree))).onSend();
+  await settle();
+  assert.deepEqual(h.signed.map(([target, selected]) => [target, selected.agentId]), [
+    ['thread/uuid-1', 'agent/A'], ['thread/uuid-2', 'agent/B'],
+  ]);
 });
 
 test('A→B and B→C stale-recipient refusals reread and show the new recipient; only a fresh user send reaches it', async () => {

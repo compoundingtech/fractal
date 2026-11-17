@@ -67,11 +67,12 @@ test('only definitive canonical Start recipient refusals request a visible conte
     code, message: 'Refused', retryable: false, applied: 'none', details: {},
   }, status);
   const start = exports.make('start');
-  for (const error of [refusal(404, 'not-found'), refusal(409, 'recipient-retired')]) {
+  for (const error of [refusal(404, 'not-found'), refusal(409, 'recipient-retired'), refusal(409, 'stale-fence')]) {
     assert.equal(start({ how: 'failed', error }).refreshStartContext, true);
   }
   assert.equal(start({ how: 'failed', error: refusal(403, 'forbidden') }).refreshStartContext, undefined);
   assert.equal(exports.make('reply')({ how: 'failed', error: refusal(404, 'not-found') }).refreshStartContext, undefined);
+  assert.equal(exports.make('reply')({ how: 'failed', error: refusal(409, 'stale-fence') }).refreshStartContext, undefined);
   const original = Object.freeze({ agent_id: 'agent/A', id: 'action/original', signature: 'signed-original' });
   const unknown = start({ how: 'unconfirmed', request: original });
   assert.equal(unknown.how, 'unconfirmed');
