@@ -12,6 +12,7 @@ use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
 use super::resource_sidebar::ArrangementV1 as _;
+use super::pane::Pane;
 use super::view::Load;
 use super::{AgentControl, Effect, Guard, Ui};
 use crate::feed::{self, Command, Inventories, Inventory, Window};
@@ -395,6 +396,8 @@ enum Fetched {
     ThreadWrite(u64, super::threads_live::Receipt),
     ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),
     ThreadSeek(u64, String, String, Result<fractal_client::ThreadTimelinePage, super::threads_live::SeekFailure>),
+    RequestHistory(u64, String, String, Result<fractal_client::RequestHistoryPage, String>),
+    StartContext(u64, String, String, Result<fractal_client::Envelope<fractal_client::ThreadStartContext>, String>),
     MarkedUnread(u64, u64, Result<Vec<fractal_client::Envelope<fractal_client::ThreadSummary>>, super::marked_unread::Failure>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
@@ -682,6 +685,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut auto_shown = false;
     let mut auto_stale = true;
     let mut auto_reading = false;
+    let mut start_context_asked: Option<(u64, String, String, String)> = None;
     let mut legacy_requested = BTreeSet::new();
     // When each polled inventory first failed on this run of failures: a read that fails for a
     // moment (a daemon catching up) is not said; one that keeps failing is.
@@ -1190,6 +1194,16 @@ pub fn run(context: Context) -> Result<()> {
                         ui.flash_as(super::Severity::Error, error);
                     }
                 }
+                Fetched::StartContext(generation, item, key, result) => {
+                    if generation == resources_generation {
+                        ui.threads.start_context_loaded(&item, &key, result);
+                    }
+                }
+                Fetched::RequestHistory(generation, id, key, page) => {
+                    if generation == resources_generation {
+                        ui.threads.request_history_loaded(&id, &key, page);
+                    }
+                }
                 Fetched::ThreadEarlier(generation, id, page) => {
                     if generation == resources_generation
                         && let Some(error) = ui.threads.earlier_loaded(&id, page) {
@@ -1355,7 +1369,10 @@ pub fn run(context: Context) -> Result<()> {
                     auto_reading = false;
                     if generation != resources_generation { continue; }
                     match outcome {
-                        Ok(asks) => extras.auto_resolved = Load::Ready(asks),
+                        Ok(asks) => {
+                            ui.threads.auto_resolved_sources(&asks);
+                            extras.auto_resolved = Load::Ready(asks);
+                        }
                         // The rows read last stay: a failed refresh is not an empty list.
                         Err(why) if matches!(extras.auto_resolved, Load::Ready(_)) => {
                             ui.flash(format!("Could not read your auto-resolved asks again: {why}"));
@@ -1595,6 +1612,26 @@ pub fn run(context: Context) -> Result<()> {
             }
             _ => {}
         }
+        let selected_start = match ui.main_pane() {
+            Pane::Home(Some(id)) if ui.threads.can_start(&id) => ui.threads.start_source(&id)
+                .map(|origin| (resources_generation, id, origin.source_id, origin.episode)),
+            _ => None,
+        };
+        if selected_start != start_context_asked {
+            start_context_asked = selected_start.clone();
+            if let Some((_, item, _, _)) = selected_start {
+                ui.threads.request_start_context(&item);
+            }
+        }
+        for request in ui.threads.take_start_context_reads() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = request.read(&reader).await;
+                let _ = tx.send(Fetched::StartContext(generation, request.item, request.key, result));
+            });
+        }
         let wanted_threads = ui.threads.interests(&ui.main_pane());
         if wanted_threads != thread_interests {
             ui.threads.keep_windows(&wanted_threads);
@@ -1619,6 +1656,15 @@ pub fn run(context: Context) -> Result<()> {
             runtime.spawn(async move {
                 let result = seek.read(&reader).await;
                 let _ = tx.send(Fetched::ThreadSeek(generation, seek.id, seek.key, result));
+            });
+        }
+        for request in ui.threads.take_request_history_reads() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = request.read(&reader).await;
+                let _ = tx.send(Fetched::RequestHistory(generation, request.id, request.key, result));
             });
         }
         for earlier in ui.threads.take_earlier() {
@@ -2203,6 +2249,9 @@ pub fn run(context: Context) -> Result<()> {
                 last_cache_save = Instant::now();
             }
         }
+        let source_ids: Vec<_> = ui.world.attention.items().iter().map(|item| item.id.clone())
+            .chain(ui.world.auto_resolved.ready().into_iter().flat_map(|list| list.items.iter().map(|item| item.id.clone()))).collect();
+        ui.threads.keep_inbox_sources(&source_ids);
         // The missions window is large, so it is followed only while a mission list or card is on
         // screen, and kept for a while after so flipping between tabs does not fetch it each time.
         let wanted_now = ui.missions_wanted() || open_requests.wants_missions();

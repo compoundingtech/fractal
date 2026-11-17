@@ -353,9 +353,8 @@ fn start_thread_keycap_reads_t_and_both_t_and_shift_t_start_the_draft() {
             item.into(),
             Origin {
                 context: context.clone(),
-                agent: "agent/atlas".into(),
+                agent: Some("agent/atlas".into()),
                 title: "Worker test".into(),
-                snapshot: snapshot().id,
             },
         );
         threads.lists.insert(context.clone(), Vec::new());

@@ -67,6 +67,7 @@ pub mod text;
 pub mod theme;
 pub mod thread;
 mod threads_live;
+mod request_history;
 mod unread_visit;
 mod marked_unread;
 mod objectives;
