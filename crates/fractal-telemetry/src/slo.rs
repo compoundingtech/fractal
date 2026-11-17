@@ -206,8 +206,8 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
                 let value = Divergence { about, max_open: whole(max("open")?, "open maximum")? };
                 one(&mut divergence, "divergence", "projection-divergence", name, value)?;
             }
-            Indicator::Interval(_) | Indicator::Count(_) => {
-                bail!("objective {name} is an interval or count over claims: Fractal ships none; a fleet declares one with `fractal apply`")
+            Indicator::Interval(_) | Indicator::Count(_) | Indicator::GithubMergedCount(_) | Indicator::GithubReadyToMerged(_) => {
+                bail!("objective {name} is fleet-declared: Fractal ships none; declare it with `fractal apply`")
             }
         }
     }

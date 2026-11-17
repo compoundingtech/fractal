@@ -94,6 +94,7 @@ export type {
 
 export { emit, fractalKdl, node } from './kdl.ts'
 export type { KdlFileOutput, KdlValidationIssue, Node, Value } from './kdl.ts'
+export { githubSource, githubScope, type GithubSourceInput, type GithubScopeInput, type GithubScopeMember } from './github.ts'
 
 const child = ({ name, value }: { readonly name: string; readonly value: Value }): Node =>
   node({ name, args: [value] })
