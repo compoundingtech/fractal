@@ -150,4 +150,71 @@ mod tests {
         assert!(decode_cursor(&hex::encode(serde_json::to_vec(&invalid).unwrap()), "definition-a").is_err());
         assert!(decode_cursor(&"0".repeat(4097), "definition-a").is_err());
     }
+
+    fn append(store: &Store, subject: String, kind: &str, record: &impl Serialize) -> crate::model::ClaimRecord {
+        store.append_claim(&crate::model::ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("record".into(), serde_json::to_value(record).unwrap())]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    }
+
+    #[test]
+    fn replay_pins_coverage_and_frontier_and_ignores_staged_facts() {
+        let store = Store::open_memory("node").unwrap();
+        store.bind_fleet("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let source = Source { host: "github.com".into(), id: "example".into(), generation: 1 };
+        let grant = AuthorityGrant { version: VERSION, source: source.clone(), member: "node".into(),
+            epoch: 1, predecessor_grant: None, final_predecessor_commit: None, fencing_receipt: None };
+        let grant = append(&store, "github-source/example".into(), AUTHORITY_KIND, &grant);
+        crate::reconcile::tests::apply_source(&store, &format!(r#"version 2
+github-source "example" {{
+    host "github.com"
+    generation 1
+    authority-grant "{}"
+    repository "acme/garden"
+    enabled true
+    checkpoint-every-ms 60000
+    replicate-private false
+}}"#, grant.id), "declare-replay");
+        let fact = ObservedFact { version: VERSION, source: source.clone(), observed_at_ms: 100,
+            supersedes: None, fact: FactImage::Repository(RepositoryFact {
+                id: "R_example".into(), locator: "acme/garden".into(), is_private: false,
+            }) };
+        let staged = append(&store, fact.subject().unwrap(), FACT_KIND, &fact);
+        let empty = capture_replay(&store, state.path(), "example", None, 1).unwrap().unwrap();
+        assert!(empty.records.is_empty());
+        assert!(empty.snapshot_complete);
+        let mut commit = CaptureCommit { version: VERSION, source, epoch: 1,
+            authority_grant: grant.id, sequence: 1, predecessor: None,
+            facts: vec![FactReference { claim_id: staged.id, digest: fact.digest().unwrap() }],
+            checkpoint: None, coverage: vec![], observed_at_ms: 100 };
+        let first = append(&store, commit.subject().unwrap(), COMMIT_KIND, &commit);
+        commit.sequence = 2;
+        commit.predecessor = Some(first.id);
+        commit.facts.clear();
+        commit.coverage = vec![Coverage { repository_id: "R_example".into(), family: FactFamily::Repository,
+            complete: true, authoritative: true, history_from_ms: 0, through_ms: 100, error: None }];
+        let second = append(&store, commit.subject().unwrap(), COMMIT_KIND, &commit);
+        let page = capture_replay(&store, state.path(), "example", Some(&empty.cursor), 1).unwrap().unwrap();
+        assert_eq!(page.through_sequence, 2);
+        assert_eq!(page.coverage.as_ref().unwrap()[0].through_ms, 100);
+        assert_eq!(page.records[0].facts, vec![fact]);
+        assert!(!page.snapshot_complete);
+        commit.sequence = 3;
+        commit.predecessor = Some(second.id);
+        commit.coverage[0].through_ms = 200;
+        append(&store, commit.subject().unwrap(), COMMIT_KIND, &commit);
+        let continuation = capture_replay(&store, state.path(), "example", Some(&page.cursor), 1).unwrap().unwrap();
+        assert_eq!(continuation.through_sequence, 2);
+        assert_eq!(continuation.records[0].commit.sequence, 2);
+        assert!(continuation.coverage.is_none());
+        assert!(continuation.snapshot_complete);
+        let next = capture_replay(&store, state.path(), "example", Some(&continuation.cursor), 1).unwrap().unwrap();
+        assert_eq!(next.through_sequence, 3);
+        assert_eq!(next.records[0].commit.sequence, 3);
+        assert_eq!(next.coverage.unwrap()[0].through_ms, 200);
+        assert!(next.snapshot_complete);
+    }
 }

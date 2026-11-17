@@ -164,6 +164,10 @@ impl<'a> Index<'a> {
         let mut result = Window { start_ms: start, end_ms: end, calendar_end_ms: None, partial_today, complete: true, observed_merges: 0,
             merged_count: None, ready_to_merged_ms: Vec::new(), unknown_cycles: 0, unknown: Vec::new() };
         if end > self.projection.frontier_ms { result.unknown.push("source frontier precedes requested cut".into()); }
+        if self.projection.roster.members.iter().map(|member| member.effective_from_ms).min()
+            .is_none_or(|earliest| start < earliest) {
+            result.unknown.push("requested window precedes earliest roster evidence".into());
+        }
         // Membership is intersected with each measurement window; historical dates are never invented.
         for member in &self.projection.roster.members {
             let from = start.max(member.effective_from_ms);

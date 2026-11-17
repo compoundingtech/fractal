@@ -93,6 +93,19 @@ fn covered_empty_is_zero_unavailable_member_is_unknown_and_dates_are_effective()
 }
 
 #[test]
+fn before_earliest_roster_evidence_is_unknown_not_a_covered_zero() {
+    let now = at("2026-11-17T12:00:00Z");
+    let mut p = projection(now);
+    p.roster.members[0].effective_from_ms = now - 1_800_000;
+    let m = measure(&p, now, Cut::Now, "UTC", false).unwrap();
+    assert_eq!(m.rolling_hour.merged_count, None);
+    assert!(!m.rolling_hour.complete);
+    assert!(m.days.iter().all(|day| day.merged_count.is_none()));
+    p.roster.members[0].effective_from_ms = now - 3_600_000;
+    assert_eq!(measure(&p, now, Cut::Now, "UTC", false).unwrap().rolling_hour.merged_count, Some(0));
+}
+
+#[test]
 fn civil_bars_honor_both_dst_transitions_and_today_bounds() {
     for (now, day, hours) in [("2026-03-10T16:00:00Z", "2026-03-08T05:00:00Z", 23), ("2026-11-03T17:00:00Z", "2026-11-01T04:00:00Z", 25)] {
         let now = at(now);
