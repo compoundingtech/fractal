@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Use one reusable thread conversation in the native Inbox, agent, mission and tab views",
+  "replay": {
+    "status": "none",
+    "detail": "The TUI reads the daemon history and preserves existing conversation drafts and ordinary agent history."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "This native presentation adds no stored claim format."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Actions use the selected connection authority and shared SDK signing. Ordinary delivery, attachments and outbox behavior are preserved."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The current TUI requires generic Inbox threads-v1 version 2 and the exact summary feed. Start embeds the same composer locally; multiple sibling threads collapse to a single header line. Closed threads still accept ordinary replies and quotes. Rename, Close, Reopen, explicit visible-message read and Recently closed use the same durable thread identity. Original signed requests, keys and fences are retained for visible Retry after an unknown outcome. Old pseudo-chat Inbox sends are replaced by durable threads, including revision feedback; typed approval/rejection remains separate."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Updating the TUI does not restart the daemon."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade with the current daemon and other clients before enabling writes. An older daemon shows the existing upgrade feedback; missing permissions and disabled writes remain distinct."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Keep the original retained Retry for an unconfirmed action instead of starting a replacement. Existing history, pairings and legitimate drafts are preserved; no data reset is required."
+  }
+}

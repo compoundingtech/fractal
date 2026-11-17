@@ -119,7 +119,7 @@ def download(bundle, archive):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("baseline", choices=("fleet", "messaging"))
+    parser.add_argument("baseline", choices=("fleet", "messaging", "thread-floor-v22"))
     parser.add_argument("output", type=Path)
     parser.add_argument("--save-archive", type=Path,
                         help="atomically retain the SHA256/BUILD.json-verified archive for other jobs")
@@ -182,6 +182,10 @@ def main():
                     raise
     if not os.access(binary, os.X_OK):
         raise ValueError(f"baseline executable missing: {binary}")
+    if "elf_sha256" in bundle:
+        with binary.open("rb") as source:
+            if hashlib.file_digest(source, "sha256").hexdigest() != bundle["elf_sha256"]:
+                raise ValueError(f"{pin['tag']} executable SHA-256 mismatch")
     print(binary)
 
 

@@ -20,6 +20,12 @@ crates/fractal-client/src/generated.rs`), and run the generator again; never edi
 hand.
 Generated Effect string length checks count Unicode code points, matching JSON Schema
 `minLength`/`maxLength`, not UTF-16 code units. Separate admission byte limits still apply.
+
+`thread.start-context` reads the exact known `(source_id, episode)` before a first
+Start. All generated clients expose this read and the shared `ThreadStartRecipient`
+basis (`original`, `configured`, or retirement-proven `fallback`); current Attention
+rows optionally carry the same recipient. The preview grants no send authority and
+does not change existing thread participants or request-history pagination.
 URI-reference format checks validate RFC3986 syntax, including relative references,
 without URL-constructor normalization of malformed input.
 
@@ -940,6 +946,16 @@ The following resources have list and detail routes. List routes accept `limit` 
 documented filters. The server clamps `limit` to `capabilities.limits.max_page_items`. Empty values
 sort after present values, strings compare as Unicode scalar sequences, and the final key is always
 the stable `id` ascending. No locale-sensitive ordering is permitted.
+
+Unread reminders require granted `threads-v1` version 3: `thread.mark-unread`,
+`thread.clear-unread`, timeline `around` seeks, and the `marked_unread` list selector.
+Older versions do not advertise this unread contract; natural unread remains independent.
+
+The owner-wide unread-reminder list, `GET /v1/client/threads?marked_unread=true`,
+uses bounded candidate pages. A page can return `items: []` with a non-null
+`next_cursor`; this does **not** mean the collection is empty. Continue with the
+same selector and each returned cursor until `next_cursor` is null before
+presenting an empty collection.
 
 | Resource | List and detail routes | Deterministic list order |
 |---|---|---|

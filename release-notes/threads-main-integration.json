@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correct the canonical threads composition's main-integration adapters for ordinary signed messages and Swift collection sockets",
+  "replay": {"status": "none", "detail": "No stored claims or replay rules change."},
+  "schema": {"status": "none", "detail": "Ordinary device-signed thread messages remain unbound to mission effect owners; signed fields and wire schemas are unchanged."},
+  "rules": {"status": "none", "detail": "No authority or retention rules change. Effect-bound native sends remain restricted to attested workers."},
+  "compatibility": {"status": "none", "detail": "The thread signature adapter explicitly supplies no effect owner, matching the ordinary-message contract added on main. The Swift collection socket factory exposes the existing ClientWebSocket protocol used by both URLSession and local-socket transports."},
+  "downtime": {"status": "none", "detail": "No migration or restart sequence changes."},
+  "manual": {"status": "none", "detail": "No manual upgrade steps."},
+  "recovery": {"status": "none", "detail": "No upgrade state changes to recover."}
+}
