@@ -66,15 +66,23 @@ recovers that result. Unconfirmed starts appear separately in Inbox recovery,
 including when their source remains listed. They never replace the current
 source/episode or disable a fresh Start. Listing existing discussions is navigation,
 not Start deduplication.
-Before a fresh send, the generated Start context selects the exact displayed and
-signed recipient (`original`, `configured`, or `fallback`). A source with neither
-an original agent nor a configured recipient remains visibly unavailable: no
-recipient is guessed, and the composer cannot submit. Definitive Start refusals
-(`stale-fence`, `recipient-retired`, or not-found) reread context and require another
-explicit Send. A refused reread removes the old preview and disables sending;
-unknown-delivery retries retain their original signed recipient and request.
-The client handles `stale-fence` generically: the generated wire types declare no
-specific responsibility reason, and server message text is never parsed.
+Before a fresh send, the generated Start context selects the exact signed recipient.
+The preview says "To <name>" or "New discussion with <name>", reusing `agentName`
+only for an existing exact-ID roster match, otherwise showing the canonical ID.
+Display metadata never selects routing; accessibility retains the canonical identity.
+A source with neither an original agent nor a configured recipient remains visibly unavailable: no
+recipient is guessed, and the composer cannot submit. GET `recipient-unassigned`
+shows a blocked setup refusal with no Retry; GET `recipient-retired` is a distinct
+blocked retirement refusal. Both preserve the draft.
+A signed POST requires explicit `applied: none` under the shared application-certainty
+rules before a refusal can invalidate the recipient context and require a new Send.
+Absent proof remains unknown, even with `retryable: false`: retain the original signed
+packet, recipient and idempotency key, with no automatic resend or retarget. The golden
+`stale-fence` envelope still lacks that proof; `recipient-unassigned` and
+`recipient-retired` carry it. A definitive unassigned POST rereads context once,
+then the unavailable setup blocks further sends without Retry and keeps the draft.
+A later refusal cannot settle an earlier unknown send.
+Server message text is never parsed and `stale-fence` has no responsibility reason.
 Before releasing an unconfirmed first composer, the rendered draft used to build
 its submitted content and quote is serialized into the attempt's own durable key.
 Only a matching origin snapshot is removed: shared-cache edits before invocation

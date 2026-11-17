@@ -7,7 +7,8 @@ import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { overrideRefusal, overrideRequest, overrideRetryable, singleOverride, type OverrideAnswer } from './autoResolved';
 import { resendBoundAction, sendBoundAction, type BoundAction, type DeliveryOutcome } from '../../clients/typescript/fractal-client';
-import { actionReceiptCheck } from '../../clients/typescript/fractal-client';
+import { actionReceiptCheck, appliedAnswer } from '../../clients/typescript/fractal-client';
+import { sendStart } from './startDelivery';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type AutoResolvedAsk, type AvailabilitySet, type Capabilities, type ConversationSearch, type DirectiveNote, type Glass, type Launch, type LaunchVariant, type Mission, type PersonAvailability, type Resource, type ResourceObservation, type Snapshot, type ThreadSummary, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, threadMessageSubject, type ThreadMessageFields, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
@@ -1116,13 +1117,13 @@ function useAppStore(proof?: FabricProfile) {
         setThreadRefresh(previous => previous + 1);
       }
       if (result.how === 'sent') return { ...result, snapshot: acceptedSnapshot };
-      // Definitive admission refusals invalidate the preview, never the original signed intent.
-      // stale-fence has no declared reason field: reread canonical context without message parsing.
-      const refreshStartContext = kind === 'start' && result.error instanceof ClientError
-        && (result.error.status === 404 || result.error.response.code === 'recipient-retired' || result.error.response.code === 'stale-fence');
+      // Only explicit nonapplication can release a once-signed Start's recipient.
+      const refreshStartContext = kind === 'start' && result.error instanceof ClientError && appliedAnswer(result.error) === 'none'
+        && (result.error.status === 404 || result.error.response.code === 'recipient-retired'
+          || result.error.response.code === 'recipient-unassigned' || result.error.response.code === 'stale-fence');
       return { how: 'failed', error: threadActionErrorText(result.error), ...(refreshStartContext ? { refreshStartContext: true as const } : {}) };
     };
-    return finish(await sendBoundAction(member, {
+    return finish(await (kind === 'start' ? sendStart : sendBoundAction)(member, {
       build: async () => {
         ensureOriginalConnection();
         if (!submit) {

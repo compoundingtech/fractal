@@ -6,7 +6,8 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadStartContextReader } from './threadStartContext.ts';
-import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
+import { appliedAnswer, ClientError, resendBoundAction } from '../../clients/typescript/fractal-client/index.ts';
+import { sendStart } from './startDelivery.ts';
 
 const React = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() }) };
 const source = readFileSync(new URL('./screens/Threads.tsx', import.meta.url), 'utf8');
@@ -84,25 +85,10 @@ const finishCode = ts.transpileModule(`const kind = 'start'; const ${finishNode.
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 const finishExports = {};
-new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', finishCode)(
-  finishExports, ClientError, undefined, String, () => {});
-// Exact serialized shapes: api-client-v0/threads.rs:184-198 maps unassigned to
-// api-core/api/client_v0.rs:803-810 stale(): empty details, no applied.
-// kernel/model.rs:2785-2826 supplies Retired details (absent successor/transfer omitted);
-// api-core/api.rs:579-588 lifts details.applied; :2007-2021 wraps both errors.
-/** @param {'stale-fence' | 'recipient-retired'} code */
-const wireRefusal = code => new ClientError({
-  api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
-  code, retryable: false,
-  ...(code === 'recipient-retired' ? {
-    message: 'Retired: recipient `agent/A` refuses this first send',
-    applied: 'none',
-    details: { applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/A' } },
-  } : {
-    message: 'this Inbox source has no configured responsible agent',
-    details: {},
-  }),
-}, 409);
+new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', 'appliedAnswer', 'resendBoundAction', finishCode)(
+  finishExports, ClientError, undefined, String, () => {}, appliedAnswer, resendBoundAction);
+const goldenRefusals = JSON.parse(readFileSync(new URL('../../docs/st3/client-v0/fixtures/thread-start-refusals.json', import.meta.url), 'utf8'));
+const wireRefusal = key => new ClientError(goldenRefusals[key], 409);
 
 /** A Start panel and its composer over one store, one generated client and one draft cache. */
 function harness({ contexts, outcomes = [], status = 'online', ledger = new Map(), draft = 'Hello' }) {
@@ -123,7 +109,11 @@ function harness({ contexts, outcomes = [], status = 'online', ledger = new Map(
     actions: { startThread: async (...args) => {
       signed.push(args);
       const outcome = outcomes.shift() ?? { how: 'sent' };
-      return outcome instanceof ClientError ? finishExports.finish({ how: 'failed', error: outcome }) : outcome;
+      if (!(outcome instanceof ClientError)) return outcome;
+      return finishExports.finish(await sendStart('fixture', {
+        build: async () => ({ fence: {}, target: args[0], origin: args[1], title: args[2], content: args[3] }),
+        fence: async () => ({}), send: async () => { throw outcome; }, wait: async () => {},
+      }));
     } },
   };
   const panelHooks = instance(), composerHooks = instance();
@@ -202,12 +192,12 @@ test('a failed read never implies a recipient: it shows the error and retries th
 });
 
 test('an unconfigured source with no original agent visibly refuses Start and never invents a recipient', async () => {
-  const refusal = wireRefusal('stale-fence');
+  const refusal = wireRefusal('recipient-unassigned');
   const h = harness({ contexts: [refusal] });
   h.panel();
   await settle();
   const tree = h.panel();
-  assert.match(find(tree, 'ThreadReadIssue').props.message, /recipient is unavailable/);
+  assert.match(find(tree, 'ThreadReadIssue').props.message, /No Start recipient is configured/);
   assert.equal(find(tree, 'StartRecipientPreview'), undefined);
   assert.equal(startOf(tree).origin, undefined);
   const composer = h.composer(startOf(tree));
@@ -216,27 +206,61 @@ test('an unconfigured source with no original agent visibly refuses Start and ne
   await settle();
   assert.deepEqual(h.signed, [], 'neither an Inbox agent nor a guessed Chief of Staff authorizes a send');
   assert.equal(h.reads.length, 1);
+  assert.equal(findAll(tree, node => node.type === 'Button' && node.props.label === 'Retry').length, 0);
+  assert.equal(h.store.draftCache.current.get(cacheKey), JSON.stringify({ text: 'Hello' }));
 });
 
-test('409 stale-fence after removing configured A clears its preview and fails closed without another send', async () => {
-  const h = harness({ contexts: [context('agent/A'), wireRefusal('stale-fence')], outcomes: [wireRefusal('stale-fence')] });
+test('golden definitive POST recipient-unassigned invalidates the old preview and blocks setup without Retry or further sends', async () => {
+  const h = harness({
+    contexts: [context('agent/A'), wireRefusal('recipient-unassigned')],
+    outcomes: [wireRefusal('recipient-unassigned')],
+  });
   h.panel();
   await settle();
-  let tree = h.panel();
-  assert.equal(find(tree, 'StartRecipientPreview').props.recipient.agent_id, 'agent/A');
-  field(h.composer(startOf(tree))).onSend();
+  field(h.composer(startOf(h.panel()))).onSend();
   await settle();
-  tree = h.panel();
-  assert.equal(h.reads.length, 2, 'a definitive stale-fence rereads canonical context');
-  assert.ok(find(tree, 'ThreadReadIssue'));
+  const tree = h.panel();
+  assert.equal(h.reads.length, 2, 'one visible canonical reread after definitive failure');
   assert.equal(find(tree, 'StartRecipientPreview'), undefined);
+  assert.match(find(tree, 'ThreadReadIssue').props.message, /No Start recipient is configured/);
+  assert.equal(findAll(tree, node => node.type === 'Button' && node.props.label === 'Retry').length, 0);
   assert.equal(startOf(tree).origin, undefined);
   const composer = h.composer(startOf(tree));
   assert.equal(field(composer).enabled, false);
   field(composer).onSend();
   await settle();
-  assert.equal(h.signed.length, 1, 'a failed reread never resends A or invents a target');
-  assert.equal(h.signed[0][1].agentId, 'agent/A');
+  h.panel();
+  assert.equal(h.reads.length, 2, 'the blocked state has no automatic reread loop');
+  assert.equal(h.signed.length, 1, 'zero further sends after the refused POST');
+  assert.equal(h.store.draftCache.current.get(cacheKey), JSON.stringify({ text: 'Hello' }));
+});
+
+for (const key of ['stale-snapshot']) {
+  test(`POST ${key} without applied proof retains the unknown packet and never refreshes or retargets`, async () => {
+    const h = harness({ contexts: [context('agent/A')], outcomes: [wireRefusal(key)] });
+    h.panel();
+    await settle();
+    field(h.composer(startOf(h.panel()))).onSend();
+    await settle();
+    const tree = h.panel();
+    assert.equal(h.reads.length, 1, 'an unknown POST cannot release its signed recipient');
+    assert.equal(h.signed.length, 1);
+    assert.equal(h.signed[0][1].agentId, 'agent/A');
+    assert.equal(h.store.draftCache.current.get('thread-draft/start/thread/uuid-1'), JSON.stringify({ text: 'Hello' }));
+    assert.equal(find(tree, 'ThreadReadIssue'), undefined);
+  });
+}
+
+test('GET recipient-retired is a distinct terminal refusal with no Retry or send', async () => {
+  const h = harness({ contexts: [wireRefusal('recipient-retired')] });
+  h.panel();
+  await settle();
+  const tree = h.panel();
+  assert.match(find(tree, 'ThreadReadIssue').props.message, /recipient is retired/);
+  assert.equal(findAll(tree, node => node.type === 'Button' && node.props.label === 'Retry').length, 0);
+  assert.equal(startOf(tree).origin, undefined);
+  assert.equal(field(h.composer(startOf(tree))).enabled, false);
+  assert.deepEqual(h.signed, []);
 });
 
 test('409 recipient-retired independently refreshes to canonical B and requires a fresh explicit Send', async () => {

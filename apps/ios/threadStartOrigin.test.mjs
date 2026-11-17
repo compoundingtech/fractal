@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
-import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
+import { appliedAnswer, ClientError } from '../../clients/typescript/fractal-client/index.ts';
 
 test('native start signs the canonical Inbox source and sends the exact generic origin', async () => {
   const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
@@ -60,25 +60,15 @@ test('only definitive canonical Start recipient refusals request a visible conte
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
   const exports = {}, sent = [];
-  new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', 'resendBoundAction', outputText)(
-    exports, ClientError, undefined, String, () => {}, async request => { sent.push(request); return { how: 'sent' }; });
-  // 409 wire shapes: api-core/api/client_v0.rs:803-810; kernel/model.rs:2785-2826;
-  // api-core/api.rs:579-588 and :2007-2021 (only Retired carries applied).
-  const refusal = (status, code) => new ClientError({
-    api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
-    code, retryable: false,
-    ...(code === 'recipient-retired' ? {
-      message: 'Retired: recipient `agent/A` refuses this first send',
-      applied: 'none', details: { applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/A' } },
-    } : { message: code === 'stale-fence' ? 'this Inbox source has no configured responsible agent' : 'Refused', details: {} }),
-  }, status);
+  new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', 'resendBoundAction', 'appliedAnswer', outputText)(
+    exports, ClientError, undefined, String, () => {}, async request => { sent.push(request); return { how: 'sent' }; }, appliedAnswer);
+  const goldens = JSON.parse(readFileSync(new URL('../../docs/st3/client-v0/fixtures/thread-start-refusals.json', import.meta.url), 'utf8'));
   const start = exports.make('start');
-  for (const error of [refusal(404, 'not-found'), refusal(409, 'recipient-retired'), refusal(409, 'stale-fence')]) {
-    assert.equal(start({ how: 'failed', error }).refreshStartContext, true);
+  for (const [key, envelope] of Object.entries(goldens)) {
+    const error = new ClientError(envelope, 409);
+    assert.equal(start({ how: 'failed', error }).refreshStartContext, key === 'stale-snapshot' ? undefined : true);
+    assert.equal(exports.make('reply')({ how: 'failed', error }).refreshStartContext, undefined);
   }
-  assert.equal(start({ how: 'failed', error: refusal(403, 'forbidden') }).refreshStartContext, undefined);
-  assert.equal(exports.make('reply')({ how: 'failed', error: refusal(404, 'not-found') }).refreshStartContext, undefined);
-  assert.equal(exports.make('reply')({ how: 'failed', error: refusal(409, 'stale-fence') }).refreshStartContext, undefined);
   const original = Object.freeze({ agent_id: 'agent/A', id: 'action/original', signature: 'signed-original' });
   const unknown = start({ how: 'unconfirmed', request: original });
   assert.equal(unknown.how, 'unconfirmed');
