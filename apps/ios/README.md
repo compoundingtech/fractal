@@ -150,6 +150,9 @@ while open, including when refreshed marked membership drops it. Collapsing the 
 or section, switching tabs or pushing another screen releases it; refocus cannot
 restore a cleared row from the previous visit. Owner, pairing/session, client and
 read-grant changes still remove the protected context.
+An accepted inline Start is labeled “Started here”, visibly and for VoiceOver, to
+distinguish it from an existing contextual thread with the same generated title and
+message count. The two placements keep independent collapse controls.
 Loading wrappers (detail, Inbox start, expanded rows) start the
 visit entry with the same placement key before the body mounts, so a reminder that
 loads after entry is never captured. Focused node coverage lives beside the visit

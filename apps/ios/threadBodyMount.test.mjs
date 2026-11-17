@@ -421,7 +421,7 @@ test('initial mark and clear deliveries settle from the real unread server recei
 
 // Compile the production collection, exact summary, seek, history and composer together.
 // Only native hosts and transport are ports; no substitute collection/body UI owns retention.
-async function mountMarkedList(harness, initial) {
+async function mountMarkedList(harness, initial, inlineTwin) {
   let summary = initial, listReads = 0, summaryHandlers;
   const StoreContext = React.createContext(harness.store);
   const useStore = () => React.useContext(StoreContext);
@@ -431,6 +431,7 @@ async function mountMarkedList(harness, initial) {
   const appearance = () => ({ system: true, palette: {}, colors: {}, color: value => value });
   const deps = { ...hooks, ...hosts, ClientError, THREAD_WINDOW_SIZE, reminderFromSummary, ACCESSIBILITY_FONT_SCALE: 1.3,
     errorText: error => String(error), theme: {}, useTextAppearance: appearance,
+    useNavigation: () => navigation,
     useWindowDimensions: () => ({ height: 800, width: 400, fontScale: 1 }),
     useThreadViewports: () => viewports, threadViewportChanged: threadViewport.threadViewportChanged,
     ThreadViewport: ({ children }) => children, SystemText: ({ children }) => children,
@@ -452,7 +453,7 @@ async function mountMarkedList(harness, initial) {
     ref, value, onInput: event => onChangeText(event.target.value), 'data-composer': true,
   });
   const composerDeps = { ...deps, Field, ThreadActionFeedback, AccessibilityInfo: { announceForAccessibility() {} },
-    threadDraftKey: id => `thread/${id}`, readThreadDraft: value => value ? JSON.parse(value) : { text: '' },
+    threadDraftKey: id => `thread/${id}`, threadStartScope: id => `start/${id}`, readThreadDraft: value => value ? JSON.parse(value) : { text: '' },
     threadTextIssue: () => undefined };
   composerDeps.ThreadComposeField = compile('./screens/Threads.tsx', 'ThreadComposeField', null, composerDeps);
   const ThreadComposer = compile('./screens/Threads.tsx', 'ThreadComposer', 'function ThreadComposeField', composerDeps);
@@ -467,9 +468,12 @@ async function mountMarkedList(harness, initial) {
   deps.ExpandedContextThread = build('ExpandedContextThread', '/** A marked thread');
   deps.ContextThreadList = build('ContextThreadList', 'function ContextThreadHeader');
   const ThreadGroup = build('ThreadGroup', 'function ContextThreadList');
+  deps.ThreadDetailContent = build('ThreadDetailContent', 'function threadSummaryLine');
+  const InlineThread = build('InlineThread', 'function useThreadSummary');
   Object.assign(harness.store, {
     threadClient: harness.member, draftCache: { current: new Map() }, draftsReady: true, saveDrafts() {},
     feed: { belongsTo: client => client === harness.member,
+      followThreadSummaries: () => undefined, followThreadTimeline: () => undefined,
       followThreadSummary: (_id, handlers) => { summaryHandlers = handlers; return { close() {} }; } },
   });
   harness.store.threadActions.add('thread.reply');
@@ -484,8 +488,13 @@ async function mountMarkedList(harness, initial) {
       ] };
     },
   };
-  harness.member.threadGet = async () => ({ value: summary });
-  harness.member.threadTimeline = async () => ({ value: { items: [{ ...message, thread_quote_id: null }], next_cursor: null, anchor: { state: 'current', message_id: message.id } } });
+  harness.member.threadList = async () => ({ value: { items: [summary], next_cursor: null } });
+  harness.member.threadGet = async id => ({ value: id === inlineTwin?.id ? inlineTwin : summary });
+  harness.member.threadTimeline = async id => ({ value: {
+    items: [{ ...message, id: id === inlineTwin?.id ? 'message/two' : message.id,
+      content: id === inlineTwin?.id ? 'The independently started second message' : message.content, thread_quote_id: null }],
+    next_cursor: null, anchor: { state: 'current', message_id: message.id },
+  } });
   const clear = harness.member.threadClearUnread;
   harness.member.threadClearUnread = async request => {
     const result = await clear(request);
@@ -497,7 +506,12 @@ async function mountMarkedList(harness, initial) {
     const [, update] = React.useState(0);
     React.useEffect(() => { harness.onChange(() => update(value => value + 1)); return () => harness.onChange(() => {}); }, []);
     return React.createElement(StoreContext.Provider, { value: { ...harness.store } },
-      React.createElement(ThreadGroup, { context: { marked_unread: true }, title: 'Marked unread', openThread: () => navigate(false) }));
+      React.createElement(React.Fragment, null,
+        React.createElement(ThreadGroup, { context: inlineTwin ? { origin_source: 'ask/one', origin_episode: 'episode/one' } : { marked_unread: true },
+          title: inlineTwin ? 'Threads' : 'Marked unread', openThread: () => navigate(false), excludeId: inlineTwin?.id }),
+        inlineTwin ? React.createElement(InlineThread, { client: harness.member, id: inlineTwin.id, placement: 'inbox:one',
+          refresh: harness.store.threadRefresh, embedded: true, onOpen: () => navigate(false),
+          start: { target: inlineTwin.id, cacheKey: 'start/one', accepted: true, title: inlineTwin.title } }) : null));
   }
   const root = createRoot(document.getElementById('root'));
   await step(() => root.render(React.createElement(Store)));
@@ -565,3 +579,29 @@ for (const ending of ['collapse', 'owner', 'generation', 'read-grant', 'tab-blur
     } finally { await view.unmount(); navigate(true); }
   });
 }
+
+test('same-title accepted Inbox start is visibly and accessibly distinct; each real row collapses only its own body', async () => {
+  const original = { id: 'thread/one', title: 'Review', message_count: 1, state: 'open', unread: false };
+  const next = { ...original, id: 'thread/two' };
+  const harness = deliveryStore(original);
+  const view = await mountMarkedList(harness, original, next);
+  const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel === label)?.props;
+  const bodies = () => [...document.querySelectorAll('[data-collapsable="false"]')];
+  try {
+    await step(() => row('Threads, 1').onPress());
+    await step(() => row('Review, 1 message, open').onPress());
+    assert.equal(bodies().length, 2);
+    const [oldBody, newBody] = bodies();
+    assert.match(oldBody.closest('[data-host="Pressable"]').getAttribute('aria-label'), /A reply long enough/);
+    assert.match(newBody.closest('[data-host="Pressable"]').getAttribute('aria-label'), /independently started second message/);
+    assert.match(document.querySelector('[aria-label="Review, 1 message, open, started here"]').textContent, /Started here/);
+    await step(() => row('Review, 1 message, open, started here').onPress());
+    assert.deepEqual(bodies(), [oldBody], 'collapsing the accepted start never collapses the original');
+    await step(() => row('Review, 1 message, open, started here').onPress());
+    assert.equal(bodies().length, 2);
+    const reopenedNew = bodies()[1];
+    await step(() => row('Review, 1 message, open').onPress());
+    assert.deepEqual(bodies(), [reopenedNew], 'collapsing the original never collapses the accepted start');
+    assert.equal(row('Review, 1 message, open, started here').accessibilityState.expanded, true);
+  } finally { await view.unmount(); }
+});

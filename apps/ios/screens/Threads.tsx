@@ -474,9 +474,13 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, placement
   useEffect(() => { if (standalone && title) navigation.setOptions({ title }); }, [navigation, standalone, title]);
   if (thread || start) {
     const pending = start?.accepted ? 'Loading history…' : 'draft';
+    // A newly started inline thread can inherit an existing thread's title and
+    // count. Name its placement, visibly and for VoiceOver, not by a shared title.
+    const startedHere = !!start?.accepted && !!displayed;
+    const trailing = [startedHere ? 'Started here' : undefined, displayed?.state === 'closed' ? 'Closed' : undefined].filter(Boolean).join(' · ') || undefined;
     const summary = standalone ? <T dim>{displayed ? threadSummaryLine(displayed, ' · ', displayed.state !== 'closed', unreadEnabled) : pending}</T>
-      : <ThreadRow bold title={title!} label={`${title}, ${displayed ? threadSummaryLine(displayed, ', ', true, unreadEnabled) : pending}`} unread={displayed?.unread} reminder={!!unreadEnabled && !!reminderFromSummary(displayed)}
-        trailing={displayed ? displayed.state === 'closed' ? 'Closed' : undefined : pending} expanded={expanded} toggle={() => setExpanded(value => !value)} />;
+      : <ThreadRow bold title={title!} label={`${title}, ${displayed ? threadSummaryLine(displayed, ', ', true, unreadEnabled) : pending}${startedHere ? ', started here' : ''}`} unread={displayed?.unread} reminder={!!unreadEnabled && !!reminderFromSummary(displayed)}
+        trailing={displayed ? trailing : pending} expanded={expanded} toggle={() => setExpanded(value => !value)} />;
     // A framed (docked) thread puts its summary line at the top of the scrolling history.
     if (frame) return <ThreadBody client={client} thread={thread} start={start} placement={placement} onOpen={onOpen} frame={(content, dock) => frame(<>{summary}{content}</>, dock)} />;
     return <>
