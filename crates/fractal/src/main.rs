@@ -6201,7 +6201,7 @@ fn daemon_is_unreachable(error: &anyhow::Error) -> bool {
 
 async fn run(cli: Cli) -> Result<()> {
     if let Command::ResourcePayload { result, argv } = cli.command {
-        return resources_cli::payload(&result, argv);
+        return resources_cli::payload(&result, argv).await;
     }
     let own = fractal_drivers::contracts::env("ST_AGENT");
     anyhow::ensure!(
@@ -16405,6 +16405,10 @@ async fn send_message(
     args: MessageSendArgs,
     attachments: Vec<fractal_daemon::model::AttachmentInput>,
 ) -> Result<Option<MessageSendReceipt>> {
+    if fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").is_some() {
+        anyhow::ensure!(args.idempotency_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
+            "a program message requires an explicit stable --idempotency-key");
+    }
     let id = uuid::Uuid::now_v7().simple().to_string();
     let mission_id = format!("message/{id}");
     // Before anything else: an agent that sends to a person needs this answer, not another.
