@@ -69,7 +69,7 @@ impl Admission {
 }
 
 pub(super) fn create_schema(connection: &rusqlite::Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS local_launch_freeze (
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h323e0b4f2aa0 owner=fractal_store::store::launch_freeze TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_launch_freeze (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL,
         owner TEXT NOT NULL, reason TEXT NOT NULL, expires_at_unix_ms INTEGER NOT NULL)")?;
     Ok(())
@@ -153,6 +153,7 @@ impl Store {
         let mut writer = self.connection.write();
         let transaction = writer.transaction().map_err(internal)?;
         transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h4a2e34db3d3e owner=fractal_store::store::launch_freeze TODO=bound-or-reference-values-and-reclamation */
             "INSERT OR REPLACE INTO local_launch_freeze(singleton,id,owner,reason,expires_at_unix_ms) VALUES(1,?1,?2,?3,?4)",
             rusqlite::params![freeze.id, freeze.owner, freeze.reason, freeze.expires_at_unix_ms]).map_err(internal)?;
         changed_tx(&transaction, self.origin(), &freeze, "launch-freeze-set")?;
@@ -189,7 +190,7 @@ impl Store {
             }
             let mut writer = self.connection.write();
             let transaction = writer.transaction().map_err(internal)?;
-            transaction.execute("DELETE FROM local_launch_freeze WHERE singleton=1 AND id=?1 AND owner=?2", rusqlite::params![id, owner]).map_err(internal)?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h24dc70bc2f33 owner=fractal_store::store::launch_freeze TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_launch_freeze WHERE singleton=1 AND id=?1 AND owner=?2", rusqlite::params![id, owner]).map_err(internal)?;
             changed_tx(&transaction, self.origin(), &current, "launch-freeze-cleared")?;
             transaction.commit().map_err(internal)?;
         }

@@ -587,6 +587,7 @@ fn launch_freeze_drain_timeout_wakes_resource_exec_without_a_timer() {
 fn frozen_resource_exec(timed_out_drain: bool) {
     use crate::reconcile::{NativeRuntime, Reconciler};
     use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+    use fractal_runtime::Capacity;
     let dir = tempfile::tempdir().unwrap();
     let engine = engine(dir.path());
     let run = scoped_run(&engine, "frozen-resource-exec");
@@ -599,11 +600,14 @@ fn frozen_resource_exec(timed_out_drain: bool) {
     reconciler.ensure_resource_authority().unwrap();
     let lane = LaneRequest {
         id: "freeze-resource-lane".into(), name: "checks".into(), host: "node".into(),
-        max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+        max_members: 1, capacity: Some(Capacity { cores: 1, memory: 256 << 20 }),
+        coverage: Coverage::Logical, admission_timeout_ms: None,
+        class: Default::default(), disk: None, io: None,
         owner: Owner { run: run.subject.clone(), step: run.steps[0].subject.clone(),
             attempt: 1, invocation: Some("program:checks".into()) },
     };
-    let Admission::Admitted(grant) = engine.store.request_resource_membership(&lane, Fit::default(), 1).unwrap() else {
+    let fit = Fit { room: Some(Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() };
+    let Admission::Admitted(grant) = engine.store.request_resource_membership(&lane, fit, 1).unwrap() else {
         panic!("logical membership must be admitted");
     };
     let marker = dir.path().join("executions");

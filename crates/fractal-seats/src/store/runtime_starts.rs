@@ -863,7 +863,7 @@ impl RuntimeStartsStore for Store {
 
     fn adopt_queued_runtime_start(&self, id: &str, owner: &str) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
-            Ok(tx.execute("UPDATE local_runtime_starts SET owner=?2
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h6ff77fe772f5 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET owner=?2
                 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL",
                 params![id, owner])? == 1)
         }).map_err(|error| anyhow::anyhow!("{error}"))?

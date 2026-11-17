@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Add a reversible host-local launch freeze for daemon replacement",
   "replay": {"status": "none", "detail": "No replicated claims or replay changes."},
-  "schema": {"status": "changed", "detail": "Adds the local_launch_freeze singleton table to local store initialization; freeze state is not replicated."},
+  "schema": {"status": "changed", "detail": "Adds the local_launch_freeze singleton table to local store initialization; freeze state is not replicated. Its schema and write sites, plus queued-operation owner adoption, are registered in the source-site large-value debt inventory; registration is not a value-size proof."},
   "rules": {"status": "changed", "detail": "Launch workers and root-absent resource.lane.exec commands retain the same shared admission permit through physical spawn. Setting a freeze waits for earlier admitted workers before acknowledging. New launch operations remain durable and undispatched; finite program resource effects stay pending. Both retry after clear or expiry, retaining existing intent and incarnation fences. A restarted daemon adopts only never-dispatched queued operations; previously dispatched operations keep existing producer-recovery rules."},
   "compatibility": {"status": "changed", "detail": "Adds GET/POST /v1/hosts/launch-freeze and POST /v1/hosts/launch-freeze/clear. Transport identity authenticates the owner using existing host-hold rules. Clear requires the same owner and activation id."},
   "downtime": {"status": "none", "detail": "Existing sessions, handoff delivery, subscriptions and mission runs continue; only new launches defer."},
