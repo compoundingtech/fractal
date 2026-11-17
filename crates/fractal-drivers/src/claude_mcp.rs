@@ -113,6 +113,7 @@ pub fn run_fractal(catalog_root: &Path, identity: &str) -> Result<()> {
                             msg.from.as_deref().unwrap_or_default(),
                             msg.subject.as_deref(),
                             &msg.body,
+                            crate::ding::fractal_delivery_thread(&msg),
                         ),
                         None => channel_content(msg.subject.as_deref(), &msg.body),
                     };
