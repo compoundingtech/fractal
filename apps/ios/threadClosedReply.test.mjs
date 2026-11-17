@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadEdits } from './threadEdits.ts';
 import { LocalDrafts } from './draftsStorage.ts';
+import { savedThreadStarts, startRecoveryKey } from './threadStartRecovery.ts';
 import { ClientError, FractalClient } from '../../clients/typescript/fractal-client/index.ts';
 import { threadClock, threadExactTime, threadRelativeTime } from './threadClock.ts';
 import { anchorPresentation, reminderFromSummary } from './unreadVisit.ts';
@@ -32,6 +33,7 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   // Components rendered as children stay inspectable without mounting a second hook scope.
   dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', threadClock, threadExactTime, threadRelativeTime,
     reminderFromSummary, anchorPresentation, pendingUnreadAPI, useUnreadVisit: nativeVisitPorts().useUnreadVisit,
+    savedThreadStarts, startRecoveryKey,
     useUnreadVisitEntry: nativeVisitPorts().useUnreadVisitEntry,
     renderedLineEvidence: (...args) => (lineEvidence ??= compile('renderedLineEvidence', 'function threadTextIssue', {}))(...args),
     useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(), ...dependencies };
@@ -1501,7 +1503,7 @@ test('an unconfirmed first composer moves to separate recovery and leaves a fres
   button(render(), 'Start thread').props.onPress();
   const first = find(render(), 'InlineThread').props.start;
   threadDeliveries.set('start/thread/first', { target: 'thread/first', start: { origin, title: 'Notice' }, retry() {} });
-  first.onSubmitted('thread/first');
+  first.onSubmitted('thread/first', JSON.stringify({ text: '' }));
   const after = render();
   assert.equal(find(after, 'InlineThread'), undefined, 'the first signed request is recovered separately');
   assert.equal(button(after, 'Start thread').props.disabled, false);
@@ -1537,7 +1539,7 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   };
   const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
   const first = find(panel()(props), 'InlineThread').props.start;
-  first.onSubmitted('thread/first');
+  first.onSubmitted('thread/first', original);
   await Promise.all(writes);
   assert.equal(store.draftCache.current.get(attemptKey), original, 'copy precedes the persisted origin deletion');
   assert.equal(store.draftCache.current.has(originKey), false);
@@ -1555,7 +1557,7 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   // A retry that remains unknown must not delete text typed into a later fresh composer.
   const later = JSON.stringify({ text: 'A separate next Start' });
   store.draftCache.current.set(originKey, later);
-  remounted.onSubmitted('thread/first');
+  remounted.onSubmitted('thread/first', original);
   await Promise.all(writes);
   assert.equal(store.draftCache.current.get(originKey), later);
   assert.equal(store.draftCache.current.get(attemptKey), original);
@@ -1563,6 +1565,77 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   // Simulate process loss: neither a cache nor a bound-delivery closure is reused.
   persistence = new LocalDrafts(storage);
   store = { ...store, draftCache: { current: new Map() }, threadDeliveries: new Map() };
-  assert.equal(await persistence.restore('person/one', store.draftCache.current), 1);
-  assertRemount();
+  assert.equal(await persistence.restore('person/one', store.draftCache.current), 2);
+  store.threadClient = client;
+  const pending = compile('PendingInboxThreads', 'type ThreadStartDraft', {
+    useStore: () => store, threadStartScope: target => `start/${target}`,
+    View: 'View', T: 'T', InboxThread: 'InboxThread',
+  })({ onOpen() {} });
+  const route = find(pending, 'InboxThread');
+  assert.ok(route, 'production PendingInboxThreads discovers the restored attempt without a ledger');
+  const copied = [], state = hooks();
+  const entry = compile('InboxThread', 'type ThreadStartDraft', {
+    ...state, useStore: () => store, threadStartScope: target => `start/${target}`,
+    threadDraftKey: key => `thread-draft/${key}`, readThreadDraft: parse,
+    Clipboard: { setStringAsync: async text => { copied.push(text); } },
+    View: 'View', T: 'T', Button: 'Button', InboxThreadStart: 'InboxThreadStart',
+  })(route.props);
+  const restored = entry.type(entry.props);
+  assert.ok(texts(restored).includes(JSON.parse(original).text));
+  assert.ok(texts(restored).some(text => text.includes('Delivery status unknown after restart')));
+  assert.equal(find(restored, 'ThreadComposeField'), undefined, 'no reconstructed original send or old-target write');
+  button(restored, 'Copy message').props.onPress();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(copied, [JSON.parse(original).text]);
+  const fresh = panel()(props);
+  assert.equal(find(fresh, 'InlineThread'), undefined);
+  assert.equal(button(fresh, 'Start thread').props.disabled, false);
+  button(restored, 'Discard saved draft').props.onPress();
+  await Promise.all(writes);
+  assert.equal(savedThreadStarts(store.draftCache.current).length, 0);
+  assert.equal(store.draftCache.current.has(attemptKey), false);
+});
+
+test('a delayed Start hands off its dispatch snapshot without deleting later remounted origin typing', async () => {
+  const origin = { sourceId: 'notice/delayed', episode: 'episode/one' }, client = {};
+  const originKey = 'thread-draft/["notice/delayed","episode/one"]';
+  const original = JSON.stringify({ text: 'Submitted original', quote: { id: 'message/quote', from: 'Agent', text: 'Original quote' } });
+  const later = JSON.stringify({ text: 'Typed after navigating back' });
+  const pending = Promise.withResolvers(), calls = [];
+  const store = {
+    status: 'online', threadRefresh: 0, draftsReady: true,
+    draftCache: { current: new Map([[originKey, original]]) }, threadDeliveries: new Map(),
+    saveDrafts() {},
+    actions: { startThread: async (...args) => { calls.push(args); return pending.promise; } },
+  };
+  const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
+  const createPanel = () => compile('InboxThreadStart', 'function InlineThread', {
+    ...hooks(), useStore: () => store, threadStartScope: target => `start/${target}`,
+    threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
+    View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+  });
+  const start = find(createPanel()(props), 'InlineThread').props.start;
+  const composer = compile('ThreadComposer', 'function ThreadComposeField', {
+    ...hooks(), useStore: () => store, useRef: current => ({ current }), useEffect() {}, useFocusEffect() {},
+    useCallback: callback => callback,
+    threadDraftKey: key => `thread-draft/${key}`, threadStartScope: target => `start/${target}`,
+    readThreadDraft: JSON.parse, threadTextIssue: () => undefined,
+    Crypto: { randomUUID: () => 'first' }, View: 'View', T: 'T', Button: 'Button',
+    ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
+  })({ start, canReply: true, selectionVersion: 0 });
+  find(composer, 'ThreadComposeField').props.onSend();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][3], 'Submitted original');
+  // Remounting while the network is pending can legitimately create later typing.
+  store.draftCache.current.set(originKey, later);
+  const remounted = find(createPanel()(props), 'InlineThread').props.start;
+  assert.equal(remounted.target, undefined);
+  pending.resolve({ how: 'unconfirmed', retry: async () => ({ how: 'sent' }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.draftCache.current.get('thread-draft/start/thread/first'), original);
+  assert.equal(store.draftCache.current.get(originKey), later);
+  assert.deepEqual(savedThreadStarts(store.draftCache.current), [{
+    target: 'thread/first', origin: { ...origin, agentId: 'agent/one' }, title: 'Notice',
+  }]);
+  assert.equal(calls.length, 1, 'the handoff never reconstructs or re-signs the submitted action');
 });

@@ -66,11 +66,17 @@ recovers that result. Unconfirmed starts appear separately in Inbox recovery,
 including when their source remains listed. They never replace the current
 source/episode or disable a fresh Start. Listing existing discussions is navigation,
 not Start deduplication.
-Before releasing an unconfirmed first composer, its exact serialized text and quote
-move to the attempt's own durable draft key. The next origin composer stays empty;
-recovery retries and acceptance touch only that attempt's draft, not later typing.
-Draft restoration preserves this text across process restart; bound signed retries
-remain in-memory and are not reconstructed or re-signed from restored draft text.
+Before releasing an unconfirmed first composer, its exact dispatch-time serialized
+text and quote move to the attempt's own durable draft key. Only an unchanged
+origin entry is removed: typing after navigation/remount remains independent.
+Minimal target/origin/title discovery metadata is saved beside the draft, never a
+bound action, operation key or signature. Inbox discovers these drafts after restart.
+With the live ledger, recovery retries the original signed request. Without it, the
+saved message explicitly has unknown delivery status and offers Copy message and
+Discard saved draft, never Retry or a send to its old target. The person may paste
+into a current Inbox Start to deliberately send a separate message with a fresh
+UUID/key and current recipient; the warning explains the original may have arrived.
+Recovery acceptance/discard touches only that attempt's draft, not later typing.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.

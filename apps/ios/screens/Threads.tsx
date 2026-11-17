@@ -1,5 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type Ref } from 'react';
 import * as Crypto from 'expo-crypto';
+import * as Clipboard from 'expo-clipboard';
 import { AccessibilityInfo, findNodeHandle, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { BottomTabBarHeightContext } from '@react-navigation/bottom-tabs';
@@ -14,6 +15,7 @@ import { ContextMenu } from '../menu';
 import type { RootScreen } from '../navigation';
 import { threadReadErrorText as errorText, threadEditScope, threadDraftKey, threadStartScope, useStore, type ThreadStartOrigin } from '../store';
 import type { ThreadEditResult } from '../threadEdits';
+import { savedThreadStarts, startRecoveryKey, type SavedThreadStart } from '../threadStartRecovery';
 import { threadClock, threadExactTime, threadRelativeTime } from '../threadClock';
 import { visibleThreadMessages, type ThreadBounds } from '../threadVisibility';
 import { measureThreadBounds, measureThreadViewport, threadViewportChanged, ThreadViewport, useThreadViewports } from '../threadViewport';
@@ -493,9 +495,12 @@ export function InboxThread({ sourceId, origin, agentId, initialTitle, onOpen, p
   sourceId: string; origin?: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
   initialTitle: string; onOpen: OpenThread; pendingScope?: string;
 }) {
-  const { threadClient, threadActions, threadDeliveries } = useStore();
+  const { threadClient, threadActions, threadDeliveries, draftCache } = useStore();
   if (!threadClient) return null;
   const retained = pendingScope ? threadDeliveries?.get(pendingScope) : undefined;
+  const restored = pendingScope && !retained && draftCache
+    ? savedThreadStarts(draftCache.current).find(start => threadStartScope(start.target) === pendingScope) : undefined;
+  if (restored) return <RestoredThreadStart start={restored} />;
   const shownOrigin = pendingScope ? retained?.start?.origin : origin;
   if (!shownOrigin) return <T dim>Thread context is unavailable for this Inbox item.</T>;
   return <InboxThreadStart key={pendingScope ?? JSON.stringify([shownOrigin.sourceId, shownOrigin.episode])} client={threadClient}
@@ -505,15 +510,39 @@ export function InboxThread({ sourceId, origin, agentId, initialTitle, onOpen, p
     canStart={!pendingScope && !!origin && !!agentId && threadActions.has('thread.start')} />;
 }
 
+function RestoredThreadStart({ start }: { start: SavedThreadStart }) {
+  const { draftCache, saveDrafts } = useStore();
+  const [discarded, setDiscarded] = useState(false);
+  if (discarded) return null;
+  const key = threadDraftKey(threadStartScope(start.target));
+  const draft = readThreadDraft(draftCache.current.get(key));
+  return <View style={{ gap: 6 }}>
+    <T bold>{start.title}</T>
+    <T dim>Delivery status unknown after restart. This saved draft cannot retry the original send. Copy it into a new Start to send a separate message; the original may already have arrived.</T>
+    {draft.quote ? <T dim>Quoted · {draft.quote.from} · {draft.quote.text}</T> : null}
+    <T selectable>{draft.text}</T>
+    <Button label="Copy message" onPress={() => { void Clipboard.setStringAsync(draft.text); }} />
+    <Button label="Discard saved draft" onPress={() => {
+      draftCache.current.delete(key);
+      draftCache.current.delete(startRecoveryKey(start.target));
+      saveDrafts();
+      setDiscarded(true);
+    }} />
+  </View>;
+}
+
 export function PendingInboxThreads({ onOpen }: { onOpen: OpenThread }) {
-  const { threadClient, threadDeliveries } = useStore();
+  const { threadClient, threadDeliveries, draftCache } = useStore();
   if (!threadClient) return null;
-  const pending = [...(threadDeliveries?.entries() ?? [])].flatMap(([scope, delivery]) =>
-    delivery.start ? [{ scope, target: delivery.target, ...delivery.start }] : []);
-  if (!pending.length) return null;
+  const pending = new Map([...(threadDeliveries?.entries() ?? [])].flatMap(([scope, delivery]) =>
+    delivery.start ? [[delivery.target, { scope, target: delivery.target, ...delivery.start }] as const] : []));
+  if (draftCache) for (const start of savedThreadStarts(draftCache.current)) {
+    if (!pending.has(start.target)) pending.set(start.target, { ...start, scope: threadStartScope(start.target) });
+  }
+  if (!pending.size) return null;
   return <View style={{ padding: 12, gap: 6 }}>
     <T bold>Unconfirmed thread starts</T>
-    {pending.map(start => <View key={start.scope} style={{ gap: 4 }}>
+    {[...pending.values()].map(start => <View key={start.scope} style={{ gap: 4 }}>
       <T dim>Original recipient · {start.origin.agentId}</T>
       <InboxThread sourceId={start.origin.sourceId} pendingScope={start.scope} initialTitle={start.title} onOpen={onOpen} />
     </View>)}
@@ -523,7 +552,7 @@ export function PendingInboxThreads({ onOpen }: { onOpen: OpenThread }) {
 type ThreadStartDraft = {
   target?: string; cacheKey: string; origin: ThreadStartOrigin; title: string; accepted: boolean;
   onAccepted: (id: string) => void; onCancel: () => void;
-  onSubmitted?: (id: string) => void;
+  onSubmitted?: (id: string, serialized: string) => void;
 };
 
 function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canStart, showHistory = true, pendingTarget }: {
@@ -541,14 +570,20 @@ function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canSt
   const show = !!current || !!delivery || draftsReady && draftCache.current.has(cacheKey);
   const draft: ThreadStartDraft | undefined = show && agentId ? {
     target, cacheKey, origin: { ...origin, agentId }, accepted, title: threadTitleFromAsk(initialTitle),
-    onAccepted: id => setLocal({ client, target: id, accepted: true, generation: current?.generation ?? 0 }),
-    onSubmitted: id => {
-      // Preserve the exact serialized text/quote before persisting the handoff.
-      // Retrying an existing recovery must not touch a later origin draft.
-      if (!pendingTarget) {
-        const original = draftCache.current.get(cacheKey);
-        if (original !== undefined) draftCache.current.set(threadDraftKey(threadStartScope(id)), original);
+    onAccepted: id => {
+      if (pendingTarget) {
         draftCache.current.delete(cacheKey);
+        draftCache.current.delete(startRecoveryKey(pendingTarget));
+        saveDrafts();
+      }
+      setLocal({ client, target: id, accepted: true, generation: current?.generation ?? 0 });
+    },
+    onSubmitted: (id, serialized) => {
+      // Use the dispatch snapshot, never later typing from a remounted composer.
+      if (!pendingTarget) {
+        draftCache.current.set(threadDraftKey(threadStartScope(id)), serialized);
+        draftCache.current.set(startRecoveryKey(id), JSON.stringify({ target: id, origin: { ...origin, agentId }, title: threadTitleFromAsk(initialTitle) }));
+        if (draftCache.current.get(cacheKey) === serialized) draftCache.current.delete(cacheKey);
       }
       saveDrafts();
       setLocal(undefined);
@@ -973,11 +1008,12 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
 
   const send = async (run: () => Promise<ThreadEditResult>) => {
     setSending(true);
+    const submittedDraft = start && !thread ? draftCache.current.get(key) ?? JSON.stringify(draft) : undefined;
     try {
       const next = await run();
-      if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!);
+      if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
       if (next.how === 'sent') {
-        storeDraft({ text: '' });
+        if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
         if (start && !thread) {
           start.onAccepted(sentTarget.current!);
         }
