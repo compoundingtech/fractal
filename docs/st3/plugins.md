@@ -61,6 +61,17 @@ an observer nor an authority. Private replication requires explicit admission.
 The current routing contract supports `github.com` through `https://api.github.com`;
 undeclared enterprise mappings fail closed rather than guessing a credential route.
 
+For a successfully published acquisition page with `F` changed normalized images
+and `C` changed coverage records, growth is `F` fact claims plus
+`ceil(F / 4) + C + 1` capture markers: one per fact batch, one per changed
+coverage record, and one durable scan checkpoint. Unchanged images and coverage
+are not rewritten. A completed pass starts no new pass before the declared
+`checkpoint-every-ms` cadence (at least 60,000 ms); continuation pages still
+checkpoint individually so crashes resume bounded work. There is no fixed
+lifetime history cap. Measurement snapshot reads advance at most 128 indexed
+rows per continuation, retaining a finite SQLite snapshot and explicit pending
+state until complete rather than truncating at 20,000 rows.
+
 The owning local person controls authority through typed routes, outside client-v0:
 
 | Method and route | Request |
