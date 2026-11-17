@@ -3468,17 +3468,37 @@ async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
             family, "rename-id", from, to, "--as", "person/robin",
             "--reason", "Clarify responsibility", "--idempotency-key", &key,
         ];
+        let before_plan = daemon.store().index().unwrap();
+        let mut plan_arguments = arguments.to_vec();
+        plan_arguments.push("--plan");
+        let plan = cli_value(daemon.cli("person/robin", &plan_arguments).await);
+        assert_eq!(plan["admissible"], true);
+        assert_eq!(plan["request"]["from"], from);
+        assert_eq!(plan["request"]["to"], to);
+        assert_eq!(daemon.store().index().unwrap(), before_plan);
+        let digest = plan["request_digest"].as_str().unwrap();
         let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(receipt["identity"], from);
         assert_eq!(receipt["canonical_id"], to);
         assert_eq!(receipt["applied"], "renamed");
         let claims = daemon.store().claims_for(from, None).unwrap();
         assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let proof_arguments = [family, "rename-proof", from, to, "--request-digest", digest];
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["request_digest"], digest);
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["claim"]["body"]["fields"]["request"], plan["request"]);
         let index = daemon.store().index().unwrap();
         daemon.restart().await;
         let replay = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(replay["claim_id"], receipt["claim_id"]);
         assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["request_digest"], digest);
         assert_eq!(daemon.store().index().unwrap(), index);
     }
 }
