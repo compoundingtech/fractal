@@ -37,6 +37,99 @@ pub enum RuntimeStartAdmission {
     Superseded,
 }
 
+/// A shell's explicit first work claim can establish running authority, but only
+/// for its completed, still-current launch and a freshly checked process birth.
+/// The caller must run this inside the work action's writer savepoint.
+pub fn admit_starting_work_claim_tx(
+    store: &Store,
+    tx: &Transaction<'_>,
+    subject: &str,
+    incarnation: &str,
+    host: &str,
+    alive: impl Fn(u32, u64) -> Result<bool>,
+) -> Result<bool> {
+    let current: Option<String> = tx.query_row(
+        &format!("{} LIMIT 1", newest_claims_of_kind_query("claims.id", "runtime.observed")),
+        params![subject, i64::MAX], |row| row.get(0),
+    ).optional()?;
+    let Some(current) = current.map(|id| claim_by_id_tx(tx, &id)).transpose()?.flatten() else {
+        return Ok(false);
+    };
+    let fields = &current.body["fields"];
+    if fields["status"] != "starting" {
+        return work_incarnation_live(tx, subject, incarnation);
+    }
+    if current.origin != store.origin() || fields["incarnation_id"] != incarnation {
+        return Ok(false);
+    }
+    // The completion pins its exact observation. Merely finding some historical
+    // operation with the same incarnation must not grant a new launch authority.
+    let mut statement = tx.prepare(
+        "SELECT * FROM local_runtime_starts
+         WHERE subject=?1 AND finished=1 AND applied=1 AND receipted=1 AND revoked_by IS NULL
+           AND json_extract(result,'$.runtime_observation.receipt.id')=?2"
+    )?;
+    let mut operations = statement.query_map(params![subject, current.id], read)?;
+    let Some(operation) = operations.next().transpose()? else { return Ok(false); };
+    if operations.next().is_some() { return Ok(false); }
+    let Some(result) = operation.result.as_ref() else { return Ok(false); };
+    let member = &operation.body["member"];
+    let selected = current_desired_row_tx(tx, subject)?;
+    if result["operation_id"] != operation.id || result["subject"] != subject
+        || result["phase"] != "completed" || !result["error"].is_null()
+        || result["verification"] != "operation-incarnation"
+        || result["incarnation"] != incarnation
+        || result["runtime_id"] != fields["runtime_id"]
+        || result["terminal"] != fields["terminal"]
+        || member["runtime_id"] != fields["runtime_id"]
+        || member["terminal"] != fields["terminal"]
+        || member["host"] != host || !member["driver"].is_null()
+        || operation.body["subject"]["subject"] != subject
+        || selected.as_ref().is_none_or(|row| {
+            Some(row.claim_id.as_str()) != operation.body["selected_token"].as_str()
+        })
+        || !recovery_intent_current(tx, store.origin(), &operation)?
+        || !mission_publication_current(store, tx, &operation)?
+    {
+        return Ok(false);
+    }
+    let newer: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND id<>?2
+         AND (finished=0 OR applied=0 OR
+           CAST(json_extract(body,'$.start_request_position') AS INTEGER)>?3))",
+        params![subject, operation.id, operation.body["start_request_position"].as_i64().unwrap_or(0)],
+        |row| row.get(0),
+    )?;
+    if newer { return Ok(false); }
+    let Some(receipts) = result["result_receipts"].as_array() else { return Ok(false); };
+    let mut identity = None;
+    for receipt in receipts.iter().filter_map(Value::as_str) {
+        let Some(receipt) = retained_runtime_start_request(tx, store.origin(), receipt)? else { continue; };
+        let fields = &receipt.body["fields"];
+        if receipt.subject == subject && receipt.kind == "runtime.action.succeeded"
+            && fields["action"] == "start" && fields["operation"] == operation.id
+            && fields["runtime_id"] == member["runtime_id"]
+            && fields["incarnation_id"] == incarnation
+        {
+            identity = fields["runtime_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+                .zip(fields["runtime_pid_start_token"].as_str().and_then(|token| token.parse::<u64>().ok()));
+        }
+    }
+    let Some((pid, token)) = identity else { return Ok(false); };
+    // This is intentionally inside the writer: a cached planner observation or a
+    // numeric PID without its kernel birth identity is not sufficient authority.
+    if !alive(pid, token)? { return Ok(false); }
+    let mut fields = fields.clone();
+    fields["status"] = Value::from("running");
+    let predecessors = latest_claim_id_tx(tx, subject)?.into_iter().collect::<Vec<_>>();
+    append_receipt_claim_tx(
+        tx, store.origin(), subject, "runtime.observed", None,
+        &json!({"fields":fields, "evidence":[current.id]}), &predecessors, None,
+        &format!("start-work-running:{}", operation.id),
+    )?;
+    Ok(true)
+}
+
 fn pin_evidence(tx: &Transaction<'_>, operation: &str, origin: &str, evidence: &str) -> Result<()> {
     if let Some(position) =
         evidence.strip_prefix(&format!("{LOCAL_OBSERVATION_ID_PREFIX}{origin}/"))

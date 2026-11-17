@@ -168,6 +168,131 @@ mission "catalog" state="ready" {
     }
 }
 
+/// A completed shell launch is not ready merely because it spawned. Its first
+/// exact-incarnation work claim must be able to establish running authority.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn custom_shell_starting_claim_requires_exact_live_start() {
+    use std::process::{Command, Stdio};
+    struct Process(std::process::Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for mismatch in ["none", "dead", "incarnation", "operation", "subject", "pid-token",
+        "missing", "unbound", "refused-work", "revoked", "incomplete"] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::state(root.path());
+        state.store.apply_internal(&parse_intent(r#"version 2
+agent "garden/chooser" { workspace "/tmp"; command "sleep 60"; restart "never" }
+mission "catalog" state="ready" {
+  goal "Choose a format."
+  step "choose" { assigned-to "agent/garden/chooser"; goal "Choose." }
+}
+"#, "node").unwrap(), "shell-fixture").unwrap();
+        let run = state.store.create_mission_run(&MissionRunRequest {
+            mission: "catalog".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/ada".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "run".into(),
+        }).unwrap();
+        let step = &run.steps[0].subject;
+        state.store.set_step_state(step, "ready", None).unwrap();
+        let desired = state.store.desired_subject_with_writer(SEAT).unwrap().unwrap().0;
+        let member = desired.member.as_ref().unwrap();
+        assert!(member.driver.is_none());
+        let selected = state.store.selected_desired_token(SEAT).unwrap();
+        let mut process = Process(Command::new("sleep").arg("60").stdin(Stdio::null())
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let pid = process.0.id();
+        let token = fractal_runtime::process_start_token(pid).unwrap();
+        if mismatch == "dead" {
+            process.0.kill().unwrap();
+            process.0.wait().unwrap();
+        }
+        let incarnation = "shell:first";
+        let operation = "shell-start";
+        let body = json!({
+            "subject": desired, "member": member, "selected_token": selected,
+            "desired_token": selected,
+        });
+        let mut result = json!({
+            "operation_id": if mismatch == "operation" { "other-start" } else { operation },
+            "subject": if mismatch == "subject" { "agent/garden/other" } else { SEAT },
+            "runtime_id": member.runtime_id, "terminal": member.terminal,
+            "incarnation": incarnation, "verification": "operation-incarnation",
+            "phase": "completed",
+        });
+        state.store.connection.write().execute(
+            "INSERT INTO local_runtime_starts(id,subject,owner,body,finished,result,applied,dispatched,receipted)
+             VALUES(?1,?2,'fixture',?3,1,?4,1,1,1)",
+            rusqlite::params![operation, SEAT, body.to_string(), result.to_string()],
+        ).unwrap();
+        let succeeded = state.store.append_claim(&ClaimInput {
+            subject: SEAT.into(), kind: "runtime.action.succeeded".into(), actor: None,
+            fields: serde_json::from_value(json!({
+                "action":"start", "operation":operation, "runtime_id":member.runtime_id,
+                "incarnation_id":incarnation, "runtime_pid":pid,
+                "runtime_pid_start_token": if mismatch == "pid-token" { token + 1 } else { token }.to_string(),
+                "desired_token": selected,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let starting = state.store.append_claim(&ClaimInput {
+            subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({
+                "status":"starting", "runtime_id":member.runtime_id,
+                "terminal":member.terminal, "incarnation_id":incarnation,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        result["result_receipts"] = json!([succeeded.id, starting.id]);
+        result["runtime_observation"] = json!({"receipt":starting});
+        state.store.connection.write().execute(
+            "UPDATE local_runtime_starts SET result=?2 WHERE id=?1",
+            rusqlite::params![operation, result.to_string()],
+        ).unwrap();
+        if mismatch == "revoked" {
+            state.store.connection.write().execute(
+                "UPDATE local_runtime_starts SET revoked_by='stop' WHERE id=?1", [operation],
+            ).unwrap();
+        }
+        if mismatch == "incomplete" {
+            state.store.connection.write().execute(
+                "UPDATE local_runtime_starts SET finished=0 WHERE id=?1", [operation],
+            ).unwrap();
+        }
+        if mismatch == "refused-work" {
+            state.store.set_step_state(step, "completed", None).unwrap();
+        }
+        let request = WorkRequest {
+            actor: Some(SEAT.into()),
+            incarnation: (mismatch != "missing")
+                .then(|| if mismatch == "incarnation" { "shell:old" } else { incarnation }.into()),
+            wait_ms: None, summary: None, reason: None, evidence: vec![],
+            idempotency_key: "first-claim".into(),
+        };
+        let response = super::work::post_work_action(
+            State(state.clone()), AxumPath(("claim".into(), step.clone())),
+            Query(super::work::WorkActionQuery { view: None }),
+            (mismatch != "unbound").then(|| Extension(BoundAgent(SEAT.into()))), Json(request),
+        ).await;
+        let status = state.store.latest_claim(SEAT, Some("runtime.observed")).unwrap()
+            .unwrap().body["fields"]["status"].clone();
+        if mismatch == "none" {
+            assert!(response.is_ok(), "exact live shell claim refused: {response:?}");
+            assert_eq!(status, "running");
+            assert_eq!(state.store.step_run(step).unwrap().unwrap().status, "claimed");
+        } else {
+            assert!(response.is_err(), "{mismatch} unexpectedly admitted");
+            assert_eq!(status, "starting", "{mismatch} published running");
+            assert_eq!(state.store.step_run(step).unwrap().unwrap().status,
+                if mismatch == "refused-work" { "completed" } else { "ready" });
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn claude_seat_asks_without_an_incarnation() {

@@ -12956,7 +12956,7 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
-    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false, false).await
 }
 
 /// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
@@ -12969,6 +12969,7 @@ async fn work_action_response_viewing(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
     lease_view: bool,
+    starting_claim: bool,
 ) -> Result<Json<StepRunView>, ApiError> {
     let actor = request
         .actor
@@ -13017,7 +13018,7 @@ async fn work_action_response_viewing(
     }
     // The claim's own incarnation is judged, not the seat's newest runtime record: another
     // host can record the end of its own old runtime for a seat that has moved (#4743).
-    if !state
+    if !starting_claim && !state
         .store
         .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
@@ -13029,11 +13030,25 @@ async fn work_action_response_viewing(
     }
     let quiet_renewal = action == "renew";
     let store = state.store.clone();
+    let starting_host = starting_claim.then(|| state.node.clone());
     let response = blocking_action(move || {
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
+            store.work_action_admitting(&subject, &action, &request, extend_ms, None, !lease_view, |tx| {
+                if let Some(host) = starting_host.as_deref() {
+                    let incarnation = request.incarnation.as_deref().expect("explicit claim fence");
+                    let admitted = crate::store::runtime_starts::admit_starting_work_claim_tx(
+                        &store, tx, &actor, incarnation, host,
+                        fractal_runtime::process_generation_alive,
+                    ).map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
+                    if !admitted {
+                        return Err(FractalError::new("inactive-work-incarnation",
+                            format!("`{incarnation}` is not the current live incarnation of `{actor}`")));
+                    }
+                }
+                Ok(())
+            })?
         };
         if !lease_view {
             work_response::enrich_under(&store, &mut response)?;

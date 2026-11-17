@@ -16,6 +16,21 @@ fields, so they cannot disagree.
 | `harness_state: working`, `observation: stale` | A turn can run for hours without a new harness claim, so a `working` report is kept until the harness says otherwise. `silent_since` already says how long the seat has been quiet. |
 | `harness_state: indeterminate`, `observation: stale` | Only a `ready` or `idle` report lapses after the window: Fractal has not heard from the harness. Fractal TUI and the phone app show this as idle for a reachable seat; the card does not claim it. |
 
+## A custom shell's first work claim
+
+Completing a driver-less launch still records `runtime.observed.status: starting`;
+spawning alone is not readiness. A locally bound shell may establish running authority
+with its first work claim, without waiting for another reconcile sweep. The claim must
+explicitly name the exact incarnation in the latest starting receipt. The daemon checks
+the completed current start operation, subject and runtime, then freshly checks the
+launch receipt's PID and kernel process-start identity. Running authority and the work
+claim commit in one writer savepoint; a refused claim publishes neither.
+
+Missing process-birth evidence, a dead or reused PID, a different operation, subject or
+incarnation keeps the existing refusal. Unbound callers and omitted incarnation fences
+do not use this path. Native-driver binding and readiness rules are unchanged. Platforms
+without exact process-generation liveness checks cannot use this bootstrap path.
+
 ## What `down` means, and what it does not
 
 `down` is a statement about Fractal's session for the seat: a declaration exists, the runtime row is not

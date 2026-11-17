@@ -2076,6 +2076,17 @@ pub trait MissionsStore {
             handoff: Option<&crate::model::WorkHandoffRequest>,
             enrich_renewal: bool,
         ) -> Result<StepRunView, FractalError>;
+    /// Run additional claim admission inside the same writer savepoint as the work action.
+    fn work_action_admitting(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+            admit: impl Fn(&Transaction<'_>) -> Result<(), FractalError> + Send + Sync,
+        ) -> Result<StepRunView, FractalError>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
     /// Fill a committed work acknowledgement's wake from a reader, as of `snapshot_unix_ms`, or now.
@@ -6293,6 +6304,19 @@ impl MissionsStore for Store {
             handoff: Option<&crate::model::WorkHandoffRequest>,
             enrich_renewal: bool,
         ) -> Result<StepRunView, FractalError> {
+        self.work_action_admitting(subject, action, request, extend_ms, handoff, enrich_renewal, |_| Ok(()))
+    }
+
+    fn work_action_admitting(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+            admit: impl Fn(&Transaction<'_>) -> Result<(), FractalError> + Send + Sync,
+        ) -> Result<StepRunView, FractalError> {
         if action == "extend" {
             if !extend_ms.is_some_and(|by| (1..=MAX_STEP_EXTENSION_MS).contains(&by)) {
                 return Err(FractalError::new(
@@ -6384,6 +6408,7 @@ impl MissionsStore for Store {
                     }
                     return Ok((serde_json::from_str(&response).map_err(internal)?, None));
                 }
+                admit(transaction)?;
                 if action == "claim" && rollouts::intake_held(transaction, &actor, &subject)? {
                     return Err(FractalError::new("seat-rollout-draining", "the seat holds new work intake while its rollout drains; existing work may finish"));
                 }
