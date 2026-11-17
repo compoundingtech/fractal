@@ -66,6 +66,12 @@ recovers that result. Unconfirmed starts appear separately in Inbox recovery,
 including when their source remains listed. They never replace the current
 source/episode or disable a fresh Start. Listing existing discussions is navigation,
 not Start deduplication.
+Before a fresh send, the generated Start context selects the exact displayed and
+signed recipient (`original`, `configured`, or `fallback`). A source with neither
+an original agent nor a configured recipient remains visibly unavailable: no
+recipient is guessed, and the composer cannot submit. Definitive stale-recipient
+refusals reread context and require another explicit Send; unknown-delivery retries
+retain their original signed recipient and request.
 Before releasing an unconfirmed first composer, the rendered draft used to build
 its submitted content and quote is serialized into the attempt's own durable key.
 Only a matching origin snapshot is removed: shared-cache edits before invocation

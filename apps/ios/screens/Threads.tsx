@@ -1139,12 +1139,15 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
       <Button label="Remove quote" disabled={!enabled} onPress={() => storeDraft({ text: draft.text })} />
     </View> : null}
     {canReply ? <ThreadComposeField contextualTitle={contextualTitle} inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
-      onSend={() => void send(() => {
-        if (thread) return actions.replyToThread(thread, content, draft.quote?.id);
-        const target = start!.target ?? `thread/${Crypto.randomUUID()}`;
-        sentTarget.current = target;
-        return actions.startThread(target, start!.origin!, start!.title, content);
-      })} enabled={enabled} canSend={(!!thread || !start?.accepted) && !staleAttempt && !!content && !issue}
+      onSend={() => {
+        if (!enabled || !content || issue || !thread && (!start?.origin || start.accepted)) return;
+        void send(() => {
+          if (thread) return actions.replyToThread(thread, content, draft.quote?.id);
+          const target = start!.target ?? `thread/${Crypto.randomUUID()}`;
+          sentTarget.current = target;
+          return actions.startThread(target, start!.origin!, start!.title, content);
+        });
+      }} enabled={enabled} canSend={(!!thread || !start?.accepted) && !staleAttempt && !!content && !issue}
       autoFocus={!!start && !thread} onCancel={start && !thread && !start.accepted && !delivery && !sending ? start.onCancel : undefined} /> : null}
     {canReply && issue ? <T color={theme.waiting}>{issue}</T> : null}
     {staleAttempt ? <View style={{ gap: 6 }}>

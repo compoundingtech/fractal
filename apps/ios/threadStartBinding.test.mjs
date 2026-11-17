@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadStartContextReader } from './threadStartContext.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 
 const React = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() }) };
 const source = readFileSync(new URL('./screens/Threads.tsx', import.meta.url), 'utf8');
@@ -161,6 +162,27 @@ test('a failed read never implies a recipient: it shows the error and retries th
   assert.deepEqual(find(tree, 'StartRecipientPreview').props, { recipient: { agent_id: 'agent/original', basis: { _tag: 'original' } }, changed: false });
   assert.equal(h.reads.length, 2);
   assert.deepEqual(h.signed, [], 'reading never sends');
+});
+
+test('an unconfigured source with no original agent visibly refuses Start and never invents a recipient', async () => {
+  const refusal = new ClientError({
+    api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
+    code: 'thread-responsibility-unassigned', message: 'this Inbox source has no configured responsible agent',
+    retryable: false, applied: 'none', details: {},
+  }, 409);
+  const h = harness({ contexts: [refusal] });
+  h.panel();
+  await settle();
+  const tree = h.panel();
+  assert.match(find(tree, 'ThreadReadIssue').props.message, /recipient is unavailable/);
+  assert.equal(find(tree, 'StartRecipientPreview'), undefined);
+  assert.equal(startOf(tree).origin, undefined);
+  const composer = h.composer(startOf(tree));
+  assert.equal(field(composer).enabled, false);
+  field(composer).onSend();
+  await settle();
+  assert.deepEqual(h.signed, [], 'neither an Inbox agent nor a guessed Chief of Staff authorizes a send');
+  assert.equal(h.reads.length, 1);
 });
 
 test('A→B and B→C stale-recipient refusals reread and show the new recipient; only a fresh user send reaches it', async () => {
