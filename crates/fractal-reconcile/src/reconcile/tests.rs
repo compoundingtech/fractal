@@ -1455,7 +1455,8 @@ mission "shell-owner" state="ready" {{
         };
         let lane = LaneRequest {
             id: "shell:outcome".into(), name: "checks".into(), host: "node".into(), max_members: 1,
-            capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
         };
         let now = u64::try_from(now_ms()).unwrap();
@@ -1463,7 +1464,8 @@ mission "shell-owner" state="ready" {{
             id: "outcome".into(), lane: lane.clone(), argv: vec!["true".into()],
             cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
         }, now).unwrap();
-        let Admission::Admitted(grant) = store.request_resource_membership(&lane, Fit::default(), now).unwrap() else {
+        let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit, now).unwrap() else {
             panic!("fixture was not admitted");
         };
         store.prepare_resource_membership(&grant, "outcome").unwrap();
