@@ -8106,6 +8106,7 @@ fn create_declared_mission_run_tx(
             .map_err(internal)?;
     }
     let mut body = json!({
+        "revision_pinned": true,
         "fields": {
             "status": "running",
             "admission_publication": admission_publication,

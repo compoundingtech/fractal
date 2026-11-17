@@ -2,6 +2,43 @@ use super::*;
 use super::identities;
 use crate::model::MissionRunRetryRequest;
 
+/// Read pin intent from immutable creation evidence, not the currently published head.
+pub(super) fn mission_run_revision_pinned(
+    connection: &Connection,
+    source: &MissionRunView,
+) -> Result<bool, FractalError> {
+    let pinned: Option<bool> = connection.query_row(
+        &canonical_sql(
+            "SELECT json_extract(body,'$.revision_pinned') FROM claims
+             WHERE subject=?1 AND kind='mission-run.created'
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+        ),
+        [&source.subject], |row| row.get(0),
+    ).optional().map_err(internal)?.flatten();
+    if let Some(pinned) = pinned {
+        return Ok(pinned);
+    }
+    // Older creation receipts did not retain standalone request pin intent.
+    // A uses-mission child still has its exact contract in its parent's original
+    // generation, even after that parent has adopted another revision.
+    let Some(parent_step) = source.parent_step_run.as_deref() else {
+        return Ok(false);
+    };
+    let parent: Option<(String, String)> = connection.query_row(
+        "SELECT revision.body, step.step_path FROM step_runs step
+         JOIN run_generations generation ON generation.id=step.generation_id
+         JOIN mission_runs run ON run.id=step.run_id
+         JOIN mission_revisions revision ON revision.mission_id=run.mission_id
+           AND revision.revision=generation.revision
+         WHERE step.subject=?1",
+        [parent_step], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(internal)?;
+    let Some((body, path)) = parent else { return Ok(false) };
+    let mission: MissionSpec = serde_json::from_str(&body).map_err(internal)?;
+    Ok(flatten_mission_step_specs(&mission).iter()
+        .any(|step| step.path == path && step.uses_mission.is_some()))
+}
+
 enum RunCreationSource<'a> {
     Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
     Supersession(&'a MissionRunView, &'a str),
@@ -528,7 +565,8 @@ impl Store {
         })?;
         let request = MissionRunRequest {
             mission: source.mission.clone(),
-            revision: options.same_revision.then(|| source.revision.clone()),
+            revision: (options.same_revision || mission_run_revision_pinned(&self.readers.get(), &source)?)
+                .then(|| source.revision.clone()),
             workspace: resolved_supersession_workspace(&self.readers.get(), &source)?,
             requester: Some(source.requester.clone()),
             mode: Some(source.mode.clone()),
@@ -1008,6 +1046,8 @@ impl Store {
         }
         stages.enter("claims");
         let body = json!({
+            // Signed body metadata lets older peers admit the unchanged field schema.
+            "revision_pinned": request.revision.is_some(),
             "fields": {
                 "status": "running",
                 "phase": phase,
