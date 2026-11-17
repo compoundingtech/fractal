@@ -4,6 +4,7 @@ use super::*;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-haba524422e8c owner=fractal_store::store::runtime_cleanup TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS local_runtime_cleanup_settled (
             runtime_id TEXT NOT NULL,
             incarnation TEXT NOT NULL,
@@ -24,6 +25,7 @@ pub fn forget_subject(connection: &Connection, subject: &str) -> Result<()> {
     )?;
     if installed {
         connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h3a3c620624e1 owner=fractal_store::store::runtime_cleanup TODO=bound-or-reference-values-and-reclamation */
             "DELETE FROM local_runtime_cleanup_settled WHERE subject=?1",
             [subject],
         )?;
@@ -37,6 +39,7 @@ pub fn apply_generation(
     connection: &Connection, subject: &str, runtime_id: &str, incarnation: &str,
 ) -> Result<()> {
     connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h355a9421263e owner=fractal_store::store::runtime_cleanup TODO=bound-or-reference-values-and-reclamation */
         "DELETE FROM local_runtime_cleanup_settled
          WHERE runtime_id=?1 AND incarnation<>?2
            AND (subject=?3 OR NOT EXISTS(SELECT 1 FROM desired
@@ -50,12 +53,13 @@ impl Store {
     pub fn runtime_cleanup_settled(&self, runtime_id: &str, incarnation: &str) -> Result<bool> {
         Ok(self.readers.get().prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM local_runtime_cleanup_settled WHERE runtime_id=?1 AND incarnation=?2)",
-        )?.query_row(params![runtime_id, incarnation], |row| row.get(0))?)
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hf597e11eb8de owner=fractal_store::store::runtime_cleanup TODO=trace-statement-and-value-representation */ params![runtime_id, incarnation], |row| row.get(0))?)
     }
 
     /// Call only after native exact-generation whole-scope retirement has been proven.
     pub fn settle_runtime_cleanup(&self, subject: &str, runtime_id: &str, incarnation: &str) -> Result<()> {
         self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-he32bd26469c5 owner=fractal_store::store::runtime_cleanup TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO local_runtime_cleanup_settled(runtime_id,incarnation,subject) VALUES(?1,?2,?3)
              ON CONFLICT(runtime_id,incarnation) DO UPDATE SET subject=excluded.subject",
             params![runtime_id, incarnation, subject],
