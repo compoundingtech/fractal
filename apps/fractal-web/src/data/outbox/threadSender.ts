@@ -17,7 +17,11 @@ export type ThreadOutboxOutcome =
   | { readonly how: 'unconfirmed' }
   | { readonly how: 'failed'; readonly error: unknown }
   | { readonly how: 'not-applied'; readonly error: unknown }
+  /** No dispatch began; retain the previous attempt and retry its deterministic child. */
+  | { readonly how: 'retry-refused'; readonly error: unknown }
 export interface ThreadOutboxSendOptions {
+  /** The caller retains an explicit-not-applied attempt, even before repository discovery. */
+  readonly retry?: boolean
   readonly revalidate?: () => Promise<void>
   readonly expectedActor?: string | undefined
 }
@@ -34,9 +38,10 @@ const unconfirmed = { how: 'unconfirmed' } as const
 export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutbox): ThreadOutboxSender => {
   const session = new Map<string, { packet: ThreadPacket; actor: string; state: 'sending' | 'none' | 'unknown' | 'sent' }>()
   const protectedRepositories = new Map<string, IndexedDbOutbox>()
+  const retryableKeys = new Set<string>()
   return { send: async (input, options) => {
     let dispatched = false
-    let retryRevalidation = false
+    let retryIntent = options?.retry === true || retryableKeys.has(input.key) || session.get(input.key)?.state === 'none'
     try {
       input = structuredClone(input)
       let discovered: EnvelopeOf<Capabilities> | undefined
@@ -97,7 +102,7 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
             session.set(input.key, retained)
           } catch (error) {
             previous.state = 'none'
-            return { how: 'not-applied', error }
+            return { how: 'retry-refused', error }
           }
         } else {
           const intent = Schema.decodeUnknownSync(intentSchema)(JSON.stringify(input))
@@ -110,14 +115,21 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
           const result = await actionReceiptCheck({ kind: 'message', actionId: packet.id, targetId: packet.parameters.target_id })(() => client.submitAction(packet))
           Native.decodeUnknownSync(schema.ActionResult)(result.value)
           retained.state = 'sent'
+          retryableKeys.delete(input.key)
           return { how: 'sent' }
         } catch (error) {
           retained.state = appliedAnswer(error) === 'none' ? 'none' : 'unknown'
+          retryableKeys.delete(input.key)
+          if (retained.state === 'none') retryableKeys.add(input.key)
           return retained.state === 'none' ? { how: 'not-applied', error } : unconfirmed
         }
       }
       let record = await repo.read(input.key)
       const restored = record !== undefined
+      if (record?.state === 'not-applied') {
+        retryIntent = true
+        retryableKeys.add(input.key)
+      }
       if (restored) await requireOutboxScope(client, repo)
       let retryPacket: ThreadPacket | undefined
       // Every retry has its own single-use permit. Concurrent tabs converge on the same child.
@@ -148,12 +160,10 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
       }
       if (intent.type !== input.type) throw new Error('The saved action has a different thread action type.')
       if (retryPacket !== undefined || (restored && intent.type === 'thread.start')) {
-        retryRevalidation = retryPacket !== undefined
-        if (options?.revalidate === undefined) throw new Error(retryRevalidation
+        if (options?.revalidate === undefined) throw new Error(retryPacket !== undefined
           ? 'Revalidate the original thread target before retrying.'
           : 'Revalidate the saved Start recipient before sending.')
         await options.revalidate()
-        retryRevalidation = false
         discovered = undefined
       }
       const { response, value } = await capabilities()
@@ -174,7 +184,9 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
       const result = await dispatchOutbox(client, repo, record, {
         kind: 'message', actionId: record.packet.id, targetId: record.packet.parameters.target_id,
       }, Native.decodeUnknownSync(schema.ActionResult))
+      retryableKeys.delete(input.key)
+      if (result.how === 'not-applied') retryableKeys.add(input.key)
       return result.how === 'sent' ? { how: 'sent' } : result
-    } catch (error) { return dispatched ? unconfirmed : { how: retryRevalidation ? 'not-applied' : 'failed', error } }
+    } catch (error) { return dispatched ? unconfirmed : { how: retryIntent ? 'retry-refused' : 'failed', error } }
   } }
 }

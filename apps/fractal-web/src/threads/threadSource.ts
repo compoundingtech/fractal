@@ -548,6 +548,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       try {
         const outcome = await sendThread(input, {
           expectedActor: attempt.actor,
+          retry: previous?.deliveryState === 'not-applied',
           revalidate: async () => {
             if (input.type === 'thread.start') {
               await reloadStartContext(input.parameters.origin.source_id, input.parameters.origin.episode)
@@ -580,7 +581,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           return reject('Fractal has not confirmed this action. Do not send it again.')
         }
         const error = outcome.error
-        if (outcome.how === 'not-applied') attempt.deliveryState = 'not-applied'
+        if (outcome.how === 'not-applied' || outcome.how === 'retry-refused') attempt.deliveryState = 'not-applied'
         else attempts.delete(destination)
         if (error instanceof ClientError && error.status < 500) {
           if (input.type === 'thread.start' && outcome.how === 'not-applied' && (

@@ -159,11 +159,11 @@ describe('durable thread delivery', () => {
       ? Response.json(refusals['recipient-retired'], { status: 409 }) : Response.json(receipt(body)))
     const sender = bind(client, repo)
     expect(await sender.send(reply)).toMatchObject({ how: 'not-applied' })
-    expect(await sender.send(reply)).toMatchObject({ how: 'not-applied', error: expect.any(Error) })
+    expect(await sender.send(reply)).toMatchObject({ how: 'retry-refused', error: expect.any(Error) })
     const reason = new Error('The original reply thread is closed.')
     const revalidate = vi.fn(async () => { throw reason })
-    expect(await sender.send(reply, { revalidate })).toEqual({ how: 'not-applied', error: reason })
-    expect(await sender.send(reply, { revalidate })).toEqual({ how: 'not-applied', error: reason })
+    expect(await sender.send(reply, { revalidate })).toEqual({ how: 'retry-refused', error: reason })
+    expect(await sender.send(reply, { revalidate })).toEqual({ how: 'retry-refused', error: reason })
     expect(revalidate).toHaveBeenCalledTimes(2)
     expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
     expect(await sender.send(reply, { revalidate: async () => {} })).toEqual({ how: 'sent' })
@@ -183,8 +183,8 @@ describe('durable thread delivery', () => {
     permit.mockRestore()
     const reason = new Error('The original Start recipient retired.')
     const revalidate = vi.fn(async () => { throw reason })
-    expect(await sender.send(start, { revalidate })).toEqual({ how: 'not-applied', error: reason })
-    expect(await sender.send(start)).toMatchObject({ how: 'not-applied' })
+    expect(await sender.send(start, { revalidate })).toEqual({ how: 'retry-refused', error: reason })
+    expect(await sender.send(start)).toMatchObject({ how: 'retry-refused' })
     expect(sends).toBe(1)
     expect(await sender.send(start, { revalidate: async () => {} })).toEqual({ how: 'sent' })
     expect(sends).toBe(2)
@@ -264,8 +264,102 @@ describe('thread sender account and retry ownership', () => {
     const sender = bind(client)
     expect(await sender.send(reply)).toMatchObject({ how: 'not-applied' })
     switched = true
-    expect(await sender.send(reply)).toMatchObject({ how: 'failed' })
+    expect(await sender.send(reply)).toMatchObject({ how: 'retry-refused' })
     expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
+  })
+
+  it('uses declared retry intent before repository discovery can fail', async () => {
+    const reason = new Error('Repository discovery failed')
+    const { client, calls } = transport()
+    const sender = createThreadOutboxSender(client, { repository: async () => { throw reason } })
+    expect(await sender.send(reply, { retry: true })).toEqual({ how: 'retry-refused', error: reason })
+    expect(calls).toEqual([])
+  })
+
+  it.each(['protected', 'unprotected'] as const)('refuses retry actor and grant changes without losing ownership in %s mode', async mode => {
+    const repo = mode === 'protected' ? await open() : undefined
+    let sends = 0
+    let revokeGrant = false
+    const { client, calls } = transport(body => ++sends === 1
+      ? Response.json(refusals['recipient-retired'], { status: 409 }) : Response.json(receipt(body)),
+    () => revokeGrant ? { ...base, value: { ...base.value, capabilities: base.value.capabilities.filter(grant => grant.id !== reply.type) } } : base)
+    const sender = bind(client, repo)
+    expect(await sender.send(reply)).toMatchObject({ how: 'not-applied' })
+    expect(await sender.send(reply, { expectedActor: 'person/other' })).toMatchObject({ how: 'retry-refused' })
+    revokeGrant = true
+    expect(await sender.send(reply, { revalidate: async () => {} })).toMatchObject({ how: 'retry-refused' })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
+    revokeGrant = false
+    expect(await sender.send(reply, { revalidate: async () => {} })).toEqual({ how: 'sent' })
+    expect(sends).toBe(2)
+  })
+
+  it.each(['protected', 'unprotected'] as const)('retains retry ownership through capability failures in %s mode', async mode => {
+    const repo = mode === 'protected' ? await open() : undefined
+    let sends = 0
+    let failCapabilities = false
+    const reason = new Error('Capabilities unavailable')
+    const { client, calls } = transport(body => ++sends === 1
+      ? Response.json(refusals['recipient-retired'], { status: 409 }) : Response.json(receipt(body)),
+    () => { if (failCapabilities) throw reason; return base })
+    const sender = bind(client, repo)
+    expect(await sender.send(reply)).toMatchObject({ how: 'not-applied' })
+    failCapabilities = true
+    expect(await sender.send(reply, { revalidate: async () => {} })).toMatchObject({ how: 'retry-refused' })
+    failCapabilities = false
+    expect(await sender.send(reply, { revalidate: async () => { failCapabilities = true } })).toMatchObject({ how: 'retry-refused' })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
+    failCapabilities = false
+    expect(await sender.send(reply, { revalidate: async () => {} })).toEqual({ how: 'sent' })
+    const actions = calls.filter(call => call.path.endsWith('/actions'))
+    expect(actions).toHaveLength(2)
+    expect(JSON.parse(actions[1]!.body).idempotency_key).toBe(`${reply.key}/retry`)
+    if (repo !== undefined) expect(await repo.read(`${reply.key}/retry/retry`)).toBeUndefined()
+  })
+
+  it('infers a restored explicit-none retry before its initial scope check', async () => {
+    const repo = await open()
+    let switched = false
+    let sends = 0
+    const { client } = transport(body => ++sends === 1
+      ? Response.json(refusals['recipient-retired'], { status: 409 }) : Response.json(receipt(body)),
+    () => switched ? { ...base, value: { ...base.value, session_actor: 'person/other' } } : base)
+    expect(await bind(client, repo).send(reply)).toMatchObject({ how: 'not-applied' })
+    const sender = bind(client, repo)
+    switched = true
+    expect(await sender.send(reply)).toMatchObject({ how: 'retry-refused' })
+    expect(await repo.read(`${reply.key}/retry`)).toBeUndefined()
+    switched = false
+    expect(await sender.send(reply, { revalidate: async () => {} })).toEqual({ how: 'sent' })
+    expect(sends).toBe(2)
+  })
+
+  it('retains the same pending child when preparation or shared dispatch scope refuses a retry', async () => {
+    const repo = await open()
+    let sends = 0
+    let scopeChecks = 0
+    let refuseDispatch = false
+    const { client } = transport(body => ++sends === 1
+      ? Response.json(refusals['recipient-retired'], { status: 409 }) : Response.json(receipt(body)),
+    () => {
+      if (refuseDispatch && ++scopeChecks === 3) return { ...base, value: { ...base.value, session_actor: 'person/other' } }
+      return base
+    })
+    const sender = bind(client, repo)
+    expect(await sender.send(reply)).toMatchObject({ how: 'not-applied' })
+    const reason = new Error('Packet identity preparation failed')
+    const digest = vi.spyOn(crypto.subtle, 'digest').mockRejectedValueOnce(reason)
+    expect(await sender.send(reply, { revalidate: async () => {} })).toEqual({ how: 'retry-refused', error: reason })
+    expect(await repo.read(`${reply.key}/retry`)).toMatchObject({ state: 'pending', phase: 'preparing', mayHaveDispatched: false })
+    digest.mockRestore()
+    refuseDispatch = true
+    expect(await sender.send(reply, { revalidate: async () => {} })).toMatchObject({ how: 'retry-refused' })
+    expect(await repo.read(`${reply.key}/retry`)).toMatchObject({ state: 'pending', phase: 'ready', mayHaveDispatched: false })
+    expect(sends).toBe(1)
+    refuseDispatch = false
+    expect(await sender.send(reply, { revalidate: async () => {} })).toEqual({ how: 'sent' })
+    expect(sends).toBe(2)
+    expect(await repo.read(`${reply.key}/retry/retry`)).toBeUndefined()
   })
 
   it('converges concurrent retry owners on one fresh-packet child permit', async () => {
@@ -300,8 +394,8 @@ it('never creates another retry after the fresh retry child becomes unknown', as
   })
   const sender = bind(client, repo)
   expect(await sender.send(start)).toMatchObject({ how: 'not-applied' })
-  expect(await sender.send(start, { revalidate: async () => {} })).toEqual({ how: 'unconfirmed' })
-  expect(await sender.send(start, { revalidate: async () => {} })).toEqual({ how: 'unconfirmed' })
+  expect(await sender.send(start, { retry: true, revalidate: async () => {} })).toEqual({ how: 'unconfirmed' })
+  expect(await sender.send(start, { retry: true, revalidate: async () => {} })).toEqual({ how: 'unconfirmed' })
   expect(sends).toBe(2)
   expect(await repo.read(`${start.key}/retry`)).toMatchObject({ state: 'unknown' })
   expect(await repo.read(`${start.key}/retry/retry`)).toBeUndefined()
@@ -339,7 +433,7 @@ it('keeps a protected attempt bound to its original repository when cached ident
     const before = await repo?.read(start.key)
     missingIssuer = true
     owner.observe(await client.capabilities())
-    expect(await sender.send(start)).toMatchObject({ how: 'failed' })
+    expect(await sender.send(start)).toMatchObject({ how: 'retry-refused' })
     expect(await repo?.read(start.key)).toEqual(before)
     expect(await repo?.read(`${start.key}/retry`)).toBeUndefined()
     expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
@@ -359,7 +453,7 @@ it('does not rebuild an unprotected retry when the scoped owner gains an issuer'
     owner.observe(await client.capabilities())
     const repo = await owner.repository()
     expect(repo).toBeDefined()
-    expect(await sender.send(start)).toMatchObject({ how: 'failed' })
+    expect(await sender.send(start)).toMatchObject({ how: 'retry-refused' })
     expect(await repo?.read(start.key)).toBeUndefined()
     expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
   } finally { owner.close() }

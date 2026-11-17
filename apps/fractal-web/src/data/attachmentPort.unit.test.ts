@@ -336,6 +336,54 @@ describe('native attachment port', () => {
     expect(actions).toHaveLength(2)
   })
 
+  it.each(['capability', 'snapshot', 'actor', 'grant', 'preparation'] as const)(
+    'retains unprotected retry intent after a pre-dispatch %s refusal',
+    async failure => {
+      const actions: (typeof Native.ActionRequest.Type)[] = []
+      let refusing = false
+      const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
+        if (String(input).endsWith('/capabilities')) {
+          if (refusing && failure === 'capability') throw new TypeError('Capability discovery unavailable')
+          return Response.json(refusing && failure === 'actor'
+            ? { ...recording.capabilities, value: { ...recording.capabilities.value, session_actor: 'person/other' } }
+            : refusing && failure === 'grant'
+              ? { ...recording.capabilities, value: { ...recording.capabilities.value, capabilities: [] } }
+              : recording.capabilities)
+        }
+        const action = Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(init?.body)))
+        actions.push(action)
+        return actions.length === 1 ? Response.json({
+          api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'stale-fence',
+          message: 'Snapshot expired', retryable: true, request_id: 'request/stale', applied: 'none',
+        }, { status: 409 }) : Response.json({
+          api_version: 'st3.client.v0', snapshot: {}, value: acknowledgement(init),
+        })
+      } })
+      const send = gatewayMessageSend(client, async () =>
+        refusing && failure === 'snapshot'
+          ? { _tag: 'Refused', reason: 'snapshot-unavailable', detail: 'Snapshot unavailable.' }
+          : { _tag: 'Success', value: 'snapshot/data-layer' })
+      const key = 'original-unprotected-retry'
+      expect(await send(request, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+      const resend: AttachmentSendRequest = {
+        ...request, _tag: 'Resend', idempotencyKey: key,
+        parameters: { ...request.parameters, content: 'Changed draft', to: 'agent/other', attachments: [], tags: [] },
+      }
+      refusing = true
+      if (failure === 'preparation') loadWriteSchema.mockImplementationOnce(() => { throw new Error('Preparation unavailable') })
+      expect(await send(resend)).toMatchObject({ _tag: 'Refused', reason: 'retry-refused' })
+      expect(actions).toHaveLength(1)
+      refusing = false
+      expect(await send(resend)).toMatchObject({ _tag: 'Success' })
+      expect(actions).toHaveLength(2)
+      expect(actions[1]?.parameters).toEqual(actions[0]?.parameters)
+      expect(actions[1]?.id).not.toBe(actions[0]?.id)
+      expect(actions[1]?.idempotency_key).not.toBe(actions[0]?.idempotency_key)
+      expect(await send(resend)).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+      expect(actions).toHaveLength(2)
+    },
+  )
+
   it('never retries an uncertain send or claims it was delivered', async () => {
     const { port, calls } = attachmentClient({ reply: () => Promise.reject(new Error('Connection lost after submit')) })
     expect(await port.send(request)).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })

@@ -101,6 +101,7 @@ const sendUnprotected = async (
   principals: Map<string, string>,
   discovered?: EnvelopeOf<Capabilities>,
   onPrepared?: (messageIds: readonly string[]) => void,
+  onDispatched?: () => void,
 ): Promise<ConversationPortResult<ActionResult>> => {
   const retained = input._tag === 'Resend' ? unappliedIntents.get(key) : undefined
   if (input._tag === 'Resend' && retained === undefined) return unconfirmed()
@@ -150,6 +151,7 @@ const sendUnprotected = async (
       async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))))
     onPrepared?.(identities)
     dispatched = true
+    onDispatched?.()
     const prepared = packet
     const response = await actionReceiptCheck({ kind: 'message', actionId: prepared.id, messageId: identities[0] })(() => client.submitAction(prepared))
     return { _tag: 'Success', value: Native.decodeUnknownSync(schema.ActionResult)(response.value) }
@@ -177,6 +179,8 @@ export const gatewayMessageSend = (
   const scopes = new Map<string, IndexedDbOutbox['scope'] | 'unprotected'>()
   const principals = new Map<string, string>()
   return async (input: AttachmentSendRequest, chosenKey?: string, onPrepared?: (messageIds: readonly string[]) => void): Promise<ConversationPortResult<ActionResult>> => {
+  let dispatched = false
+  const attempt = async (): Promise<ConversationPortResult<ActionResult>> => {
   let key = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
   let repo: IndexedDbOutbox | undefined
   let discoveredIdentity: EnvelopeOf<Capabilities> | undefined
@@ -193,7 +197,8 @@ export const gatewayMessageSend = (
     return { _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and deployment to send this message.' }
   }
   scopes.set(key, selectedScope)
-  if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedIntents, principals, discoveredIdentity, onPrepared)
+  if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedIntents, principals, discoveredIdentity, onPrepared,
+    () => { dispatched = true })
   let record: OutboxRecord<PreparedPacket> | undefined
   try { record = await repo.read(key) } catch { return storageRefusal() }
   if (record !== undefined) {
@@ -349,6 +354,7 @@ export const gatewayMessageSend = (
     const outcome = await dispatchOutbox(client, repo, currentRecord, {
       kind: 'message', actionId: currentRecord.packet.id, messageId: currentRecord.expectedIdentities[0],
     }, Native.decodeUnknownSync(schema.ActionResult))
+    dispatched = true
     if (outcome.how === 'sent') return { _tag: 'Success', value: outcome.receipt }
     if (outcome.how === 'unconfirmed') return unconfirmed()
     const cause = outcome.error
@@ -361,5 +367,12 @@ export const gatewayMessageSend = (
     }
     return currentRecord.mayHaveDispatched ? unconfirmed() : conversationPortFailure(cause)
   }
+  }
+  const result = await attempt().catch(cause => dispatched ? unconfirmed() : conversationPortFailure(cause))
+  // A refused retry has not relinquished its original intent or optimistic owner.
+  // Durable children and unprotected retained intent remain available to Resend.
+  return input._tag === 'Resend' && !dispatched && result._tag === 'Refused' && result.reason !== 'unconfirmed'
+    ? { ...result, reason: 'retry-refused' }
+    : result
 }
 }

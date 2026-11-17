@@ -306,6 +306,63 @@ describe('chat durable gateway delivery', () => {
     expect(prepared).toEqual([receipt(String(actions[1]?.body)).value.affected_ids])
   })
 
+  it.each(['capability', 'snapshot', 'actor', 'grant', 'preparation', 'dispatch-scope'] as const)(
+    'retains an accepted retry child after a pre-dispatch %s refusal and continues that same child',
+    async failure => {
+      const repo = await open()
+      let posts = 0
+      let refusing = false
+      const { client, calls } = transport(body => ++posts === 1
+        ? Response.json({ ...bare, applied: 'none' }, { status: 409 })
+        : Response.json(receipt(body)))
+      const capabilities = client.capabilities.bind(client)
+      let childCapabilityReads = 0
+      vi.spyOn(client, 'capabilities').mockImplementation(async () => {
+        if (!refusing || await repo.read(`${key}/retry`) === undefined) return capabilities()
+        childCapabilityReads++
+        if (failure === 'capability') throw new TypeError('Capability discovery unavailable')
+        if (failure === 'actor' || failure === 'dispatch-scope' && childCapabilityReads === 2) {
+          return { ...base, value: { ...base.value, session_actor: 'person/other' } }
+        }
+        if (failure === 'grant') return { ...base, value: { ...base.value, capabilities: [] } }
+        return capabilities()
+      })
+      const readSpool = repo.readSpool.bind(repo)
+      vi.spyOn(repo, 'readSpool').mockImplementation(async (id, hash) =>
+        refusing && failure === 'preparation' && id === `${key}/retry` ? undefined : readSpool(id, hash))
+      const send = gatewayMessageSend(client, async () =>
+        refusing && failure === 'snapshot'
+          ? { _tag: 'Refused', reason: 'snapshot-unavailable', detail: 'Snapshot unavailable.' }
+          : snapshot(), { repository: async () => repo })
+      const original = { ...request, images: [{ bytes: new Uint8Array([1, 2, 3]), mediaType: 'image/png' as const, name: 'original.png' }] }
+      expect(await send(original, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+      const first = Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(calls.find(call => call.path.endsWith('/actions'))?.body)))
+      const resend: AttachmentSendRequest = {
+        ...request, _tag: 'Resend', idempotencyKey: key,
+        parameters: { ...request.parameters, content: 'Changed draft', to: 'agent/other', tags: [] },
+      }
+      refusing = true
+      expect(await send(resend)).toMatchObject({ _tag: 'Refused', reason: 'retry-refused' })
+      const child = await repo.read(`${key}/retry`)
+      const intentBytes = await repo.readIntentBytes(`${key}/retry`)
+      expect(child).toMatchObject({ state: 'pending', mayHaveDispatched: false, intent: { text: request.parameters.content } })
+      expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
+      refusing = false
+      expect(await send(resend)).toMatchObject({ _tag: 'Success' })
+      const actions = calls.filter(call => call.path.endsWith('/actions'))
+      const second = Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(actions[1]?.body)))
+      expect(actions).toHaveLength(2)
+      expect(second.idempotency_key).toBe(child?.id)
+      expect(second.id).not.toBe(first.id)
+      expect(second.parameters).toEqual(first.parameters)
+      expect(await repo.readIntentBytes(`${key}/retry`)).toEqual(intentBytes)
+      expect(await repo.read(`${key}/retry`)).toMatchObject({ state: 'delivered' })
+      expect(await repo.read(key)).toMatchObject({ state: 'not-applied' })
+      expect(await repo.read(`${key}/retry/retry`)).toBeUndefined()
+      expect(await repo.list()).toHaveLength(2)
+    },
+  )
+
   it('converges concurrent retries on one child and one dispatch permit', async () => {
     const repo = await open()
     let posts = 0
@@ -339,7 +396,7 @@ describe('chat durable gateway delivery', () => {
     selected = undefined
     const count = calls.length
     expect(await send({ ...request, _tag: 'Resend', idempotencyKey: key }))
-      .toMatchObject({ _tag: 'Refused', reason: 'ungranted' })
+      .toMatchObject({ _tag: 'Refused', reason: 'retry-refused' })
     expect(calls).toHaveLength(count)
     expect(await repo.read(`${key}/retry`)).toBeUndefined()
   })

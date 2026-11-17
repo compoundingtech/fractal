@@ -4,6 +4,8 @@ import { FractalClient } from '@fractal/client'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi, type MockInstance } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
+import { createScopedChatOutbox } from '../data/outbox/scoped.ts'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
 import { credentialExpiredMessage, type Feed } from '../data/source.ts'
 import { gatewayThreads, unreachableSend, type ThreadSource, type ThreadWatches } from './threadSource.ts'
@@ -762,4 +764,67 @@ it.each([
       expect(registry.get(source.pendingStarts!())).toEqual([])
     }
   } finally { stop(); registry.dispose() }
+})
+
+it('retains a protected Start retry and its accepted child when fresh capabilities fail after recipient revalidation', async () => {
+  const bodies: string[] = []
+  let failAfterRevalidation = false
+  let revalidated = false
+  const capabilities = { ...base, value: { ...base.value, issuer: 'person/example', issuer_key: 'issuer-key/a',
+    transport: 'local-web', capabilities: [...base.value.capabilities,
+      { id: 'threads-v1', version: 3, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: 'granted' }],
+  } }
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
+    if (String(input).endsWith('/capabilities')) {
+      if (failAfterRevalidation && revalidated) throw new TypeError('Capabilities unavailable')
+      return Response.json(capabilities)
+    }
+    if (String(input).includes('/start-context')) {
+      revalidated = true
+      return Response.json({ ...base, value: { kind: 'thread-start-context', source_id: 'source/retry',
+        episode: 'episode/original', start_recipient: { agent_id: agent, basis: { _tag: 'original' } } } })
+    }
+    const body = String(init?.body)
+    bodies.push(body)
+    const action = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(body))
+    if (action.type !== 'thread.start') throw new TypeError('Expected Start')
+    if (bodies.length === 1) return Response.json({
+      api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refusal',
+      code: 'forbidden', message: 'Nothing applied.', retryable: false, applied: 'none', details: { applied: 'none' },
+    }, { status: 403 })
+    return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id,
+      operation_id: 'operation/retried', status: 'completed',
+      affected_ids: [action.parameters.target_id, 'message/retried'], snapshot_id: base.snapshot.id } })
+  } })
+  const registry = AtomRegistry.make()
+  const outbox = createScopedChatOutbox(client, { indexedDB: new IDBFactory() })
+  const source = gatewayThreads(client, registry, undefined, undefined, outbox)
+  const stop = registry.mount(source.access)
+  const parameters = { agent_id: agent, origin: { source_id: 'source/retry', episode: 'episode/original' },
+    title: 'Original title', content: 'Original content' }
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    expect(await source.start('draft/retry', parameters)).toMatchObject({ _tag: 'Refused', explanation: 'Nothing applied.' })
+    failAfterRevalidation = true
+    expect(await source.retryStart!('draft/retry')).toMatchObject({ _tag: 'Refused' })
+    expect(revalidated).toBe(true)
+    expect(bodies).toHaveLength(1)
+    expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
+    const repository = await outbox.repository()
+    const accepted = await repository!.list()
+    expect(accepted).toHaveLength(2)
+    const child = accepted.find(entry => entry.id.endsWith('/retry'))!
+    expect(child).toMatchObject({ state: 'pending', phase: 'preparing', mayHaveDispatched: false })
+    failAfterRevalidation = false
+    // The access observer may have seen the same outage; retry refreshes grants without replacing the owner.
+    source.reload?.()
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    expect(await source.retryStart!('draft/retry')).toMatchObject({ _tag: 'Sent' })
+    expect(bodies).toHaveLength(2)
+    expect(await repository!.list()).toHaveLength(2)
+    expect(await repository!.read(child.id)).toMatchObject({ state: 'delivered' })
+    expect(registry.get(source.pendingStarts!())).toEqual([])
+  } finally { stop(); registry.dispose(); outbox.close() }
 })

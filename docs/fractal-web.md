@@ -630,6 +630,8 @@ Only explicit `applied: none` allows a deliberate Retry. It creates a new attemp
 the same immutable intent with a fresh snapshot, action ID and idempotency key, rather
 than replaying the old packet. Protected retries atomically require an undismissed
 not-applied predecessor and converge on one deterministic child permit across tabs.
+If retry preparation or current-identity checks fail before dispatch, the refusal retains
+the existing row and retry owner; a later Retry continues its already accepted child.
 Unprotected retry intent is retained only in-session and provides no crash recovery.
 Unknown outcomes never offer Retry and are never replayed.
 After identity discovery, both modes preserve send preparation order: text acquires its snapshot
@@ -730,7 +732,8 @@ a refused preview stays refused. The canonical unassigned golden carries none in
 metadata locations. Other proven-unapplied sends allow an explicit Retry of the same
 immutable intent, prepared as a new attempt with a fresh snapshot and action identity.
 Before Retry, Start revalidates the exact original recipient and reply rechecks that the
-original thread exists and is open. Failed revalidation keeps the draft and card with
+original thread exists and is open. A failure before dispatch, including fresh capabilities
+after successful recipient revalidation, keeps the draft, card and accepted child with
 the refusal reason; no recipient or thread is silently changed. Unknown retains its
 original packet, recipient and identities without a Retry or automatic replay.
 
