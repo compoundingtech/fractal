@@ -236,12 +236,12 @@ def attached(tui):
                     and status["attached"] and READY in screen(status), "attached terminal")
 
 
-def stays_on_conversation(tui, pane=f"agent:{AGENT}"):
+def stays_on_conversation(tui, pane=f"agent:{AGENT}", opened=0):
     # Longer than the dwell before attaching, so an attach would have happened.
     time.sleep(1.0)
     status = tui.status()
     assert status["pane"] == pane, status["pane"]
-    assert status["opened"] == 0, "a terminal was opened"
+    assert status["opened"] == opened, "an additional terminal was opened"
     return status
 
 
@@ -272,7 +272,7 @@ def case_migration(worker):
 def case_opt_in(tui):
     wait_for(tui.status, lambda status: not status["conversation_first"], "saved choice read")
     tui.action("open")
-    attached(tui)
+    opened = attached(tui)["opened"]
     # The palette's setting, by name.
     tui.send(b"\x0b")
     time.sleep(0.2)
@@ -281,7 +281,7 @@ def case_opt_in(tui):
     tui.send(b"\r")
     wait_for(tui.status, lambda status: status["conversation_first"], "palette turned it on")
     tui.action("open")
-    stays_on_conversation(tui)
+    stays_on_conversation(tui, opened=opened)
     print("opt-in: terminal-first attaches; its palette entry restores conversation-first")
 
 
