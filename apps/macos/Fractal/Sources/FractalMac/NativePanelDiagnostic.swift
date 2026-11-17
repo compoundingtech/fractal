@@ -7,6 +7,11 @@ import ObjectiveC.runtime
 @MainActor enum NativePanelDiagnostic {
   static let enabled = ProcessInfo.processInfo.environment["PANEL_NATIVE_PROBE"] == "1"
   private static var content = CGRect.zero
+  @MainActor private final class Observer: NSObject {
+    @objc func changed(_ note: Notification) {
+      log(note.name.rawValue, window: note.object as? NSWindow, stack: note.name == NSWindow.didMoveNotification)
+    }
+  }
   private static func rect(_ r: CGRect) -> [CGFloat] { [r.minX, r.minY, r.width, r.height] }
   static func recordContent(_ frame: CGRect) {
     guard enabled else { return }
@@ -56,10 +61,9 @@ import ObjectiveC.runtime
       method_exchangeImplementations(class_getInstanceMethod(NSWindow.self, original)!, class_getInstanceMethod(NSWindow.self, replacement)!)
     }
     let center = NotificationCenter.default
-    let tokens = [NSWindow.didMoveNotification, NSWindow.didResizeNotification].map { name in
-      center.addObserver(forName: name, object: nil, queue: .main) { note in
-        MainActor.assumeIsolated { log(name.rawValue, window: note.object as? NSWindow, stack: name == NSWindow.didMoveNotification) }
-      }
+    let observer = Observer()
+    for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+      center.addObserver(observer, selector: #selector(Observer.changed(_:)), name: name, object: nil)
     }
     var failures = 0, samples = 0, opens = 0
     var heights = Set<Int>(), counts = Set<Int>()
@@ -87,7 +91,7 @@ import ObjectiveC.runtime
       }
       try? await Task.sleep(for: .seconds(1))
     }
-    tokens.forEach(center.removeObserver)
+    center.removeObserver(observer)
     let pass = failures == 0 && samples >= 30 && heights.count >= 3 && opens == 5 && counts.contains(19) && counts.contains(3)
     log("probe.result", fields: ["pass": pass, "failures": failures, "samples": samples, "heights": heights.sorted(), "counts": counts.sorted()])
     if !pass { exit(1) }
