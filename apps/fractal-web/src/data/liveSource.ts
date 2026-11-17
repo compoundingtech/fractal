@@ -1,5 +1,5 @@
 import { gatewayThreads } from '../threads/threadSource.ts'
-import { ClientError, FractalClient, isTransient, restoreOutboxEntries, type OutboxScope } from '@fractal/client'
+import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
@@ -42,7 +42,7 @@ import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAvailability } from '../availability/availability-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
-import { openIndexedDbOutbox, type IndexedDbOutbox } from './outbox/indexedDb.ts'
+import { createScopedChatOutbox } from './outbox/scoped.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
@@ -144,7 +144,6 @@ export const liveSource = ({
   telemetryLayer,
   ux,
   sessionTraceLayer,
-  outboxScope,
 }: {
   readonly options: FractalOptions
   /** The live page opts in; replay and other retained sources never take a page-global socket. */
@@ -154,8 +153,6 @@ export const liveSource = ({
   readonly ux?: () => UxTelemetry
   /** Optional independent trace provider; the public default only knows native Fractal meters. */
   readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider> | undefined
-  /** Verified daemon/account identity only. Undefined explicitly selects visible unprotected mode. */
-  readonly outboxScope?: OutboxScope
 }): LiveSource => {
   const { baseUrl } = options
   const clientName = options.client
@@ -849,11 +846,7 @@ export const liveSource = ({
         )
       }),
     )
-  let outboxConnection: Promise<IndexedDbOutbox> | undefined
-  const outbox = {
-    repository: async () => outboxScope === undefined ? undefined
-      : outboxConnection ??= Effect.runPromise(openIndexedDbOutbox({ scope: outboxScope })),
-  }
+  const outbox = createScopedChatOutbox(client)
   const submitMessage = gatewayMessageSend(client, messageSnapshot, outbox)
 
   // Atom.family is weakly memoized. Keep the 24 recent snapshot controllers explicitly.
@@ -1018,7 +1011,7 @@ export const liveSource = ({
           publishPending()
         }
         const result = await submit()
-        if (result._tag === 'Refused' && result.reason === 'storage') {
+        if (result._tag === 'Refused' && (result.reason === 'storage' || result.reason === 'identity-unavailable')) {
           // Failed acceptance is not a queued send; the composer restores the submitted draft.
           pending.delete(id)
           publishPending()
@@ -1026,7 +1019,7 @@ export const liveSource = ({
         }
         if (result._tag === 'Success' && result.value.status === 'rejected') {
           local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.' } }
-        } else if (result._tag === 'Refused' && result.reason !== 'storage') {
+        } else if (result._tag === 'Refused' && result.reason !== 'storage' && result.reason !== 'identity-unavailable') {
           local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
             ? { _tag: 'Unconfirmed', detail: result.detail }
             : { _tag: 'Failed', reason: result.reason, detail: result.detail } }
@@ -1222,8 +1215,10 @@ export const liveSource = ({
       deniedReaders.add(deny)
       const fiber = runtime.runFork(
         Effect.gen(function* () {
-          const fractal = yield* Fractal
-          const discovered = yield* fractal.capabilities
+          const discovered = outbox.observe(yield* Effect.tryPromise({
+            try: () => client.capabilities(),
+            catch: (cause) => cause,
+          }))
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1237,7 +1232,7 @@ export const liveSource = ({
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
             terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
-            sendProtection: outboxScope === undefined ? 'unprotected' : 'durable',
+            sendProtection: outbox.protection(),
           }
           get.setSelf(observedGrants)
         }),
@@ -1292,15 +1287,7 @@ export const liveSource = ({
       grants,
       contentSearch: gatewayContentSearch(client),
       attachments: { ...attachments, send: (request) => retainConversation(request.parameters.to).send(request) },
-      outboxRecovery: {
-        list: async () => {
-          const repository = await outbox.repository()
-          if (repository === undefined) return []
-          return restoreOutboxEntries(await repository.list()).flatMap((entry) =>
-            entry._tag === 'corrupt' ? [{ id: entry.id, status: entry.status, actions: entry.actions }] : [])
-        },
-        discard: async (id) => { await (await outbox.repository())?.dismiss(id) },
-      },
+      outboxRecovery: outbox.recovery,
       sessionTrace: (query) => runtime.runPromise(sessionTrace(query)),
       // credentialExpired is set before readRefusal, so this derived read sees both together.
       credentialRevoked: Atom.make((get) => get(readRefusal) !== undefined && credentialExpired),
@@ -1400,6 +1387,7 @@ export const liveSource = ({
     },
     dispose: async () => {
       disposed = true
+      outbox.close()
       browser?.removeEventListener('offline', onOffline)
       browser?.removeEventListener('online', onOnline)
       documentEvents?.removeEventListener('visibilitychange', onVisible)

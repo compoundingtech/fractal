@@ -270,7 +270,7 @@ export type ConversationPortResult<T> =
   | {
       readonly _tag: 'Refused'
       /** `unconfirmed`: Fractal said `applied: "unknown"`; the identical request may still complete. */
-      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed' | 'storage'
+      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed' | 'storage' | 'identity-unavailable'
       readonly detail: string
       /** Preserve the daemon's complete refusal, including its retry policy. */
       readonly error?: ErrorEnvelope

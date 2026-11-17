@@ -600,25 +600,34 @@ A confirmed Sent row stays visible until its authoritative in-window echo, even 
 read omits remotely owned mail.
 
 Both chat entry paths share `data/attachmentPort.ts` and the client-core outbox transitions.
-With an injected verified principal/deployment/member scope, immutable intent and content-hashed
-image bytes commit to IndexedDB before any send-work request, including attachment uploads.
+The generated capabilities envelope supplies the scope: `session_actor`, the core
+`outboxDeploymentId(issuer, issuer_key)`, and `Snapshot.host_id`. Immutable intent and
+content-hashed image bytes commit to IndexedDB before send work (upload, snapshot or POST).
+The grants observer caches identity; an uncached first send may read capabilities to identify
+its scope before acceptance. Failed identity discovery refuses acceptance and restores the draft.
 The complete authorized unsigned packet is prepared once and committed by revision CAS;
 only the winner of the durable dispatch permit may POST it. A validated completed receipt
 settles delivered, explicit uncontradicted `applied:none` settles not-applied, and every other
 post-dispatch outcome remains unknown. The IndexedDB CAS invokes the core transition validator
 inside its transaction rather than maintaining another delivery state machine.
 
-Until the browser receives a verified daemon issuer identity, it explicitly uses the existing
-unprotected send mode and shows “Unprotected: messages are not saved on this device before
-sending.” This is not a fallback after storage failure. No URL, loopback port or telemetry
-deployment label substitutes for a verified scope. Storage refusal in protected mode makes no
-message request and restores the submitted composer text and images.
+Successful capability answers without a complete issuer pair explicitly select unprotected
+send mode and show “Unprotected: messages are not saved on this device before sending.”
+Storage or identity-read failure never selects that mode. No URL, loopback port, member ID
+or telemetry deployment label substitutes for issuer identity. Before protected recovery,
+status checks, dispatch and outcome retention, current capabilities must match the original
+fixed tuple exactly. Missing, partial or changed identity blocks protected operations; the
+original retained records remain visible for recovery without being rebound or rewritten.
+Storage refusal in protected mode makes no message request and restores text and images.
 In unprotected mode only an explicit `applied: none` retains the exact original packet for
 an in-session retry; ambiguous outcomes are never replayed. This transient exception does
 not provide crash recovery or replace the protected IndexedDB repository.
 Both modes preserve send preparation order: text acquires its snapshot before capability
 discovery; local images check capabilities and upload before acquiring their snapshot.
 Snapshot-acquisition failures retain their distinct `snapshot-unavailable` classification.
+The readwrite permit CAS guarantees one dispatcher across tabs, including after a crash.
+If another tab recovers an in-flight marker as unknown, a receipt CAS conflict re-reads the
+current record and reapplies the core observation, allowing validated delivery to settle.
 
 `src/data/outbox/` implements the core fixed-scope repository with versioned storage envelopes
 and an attachment spool. Transaction completion is the acknowledgement barrier, with strict

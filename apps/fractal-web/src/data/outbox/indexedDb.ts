@@ -36,6 +36,7 @@ export interface IndexedDbOutbox extends OutboxRepository<PreparedPacket> {
   readonly readIntentBytes: (id: string) => Promise<Uint8Array | undefined>
   readonly listQuarantined: () => Promise<readonly QuarantinedAttempt[]>
   readonly cleanupTerminal: () => Promise<void>
+  readonly recover: () => Promise<void>
   readonly dismiss: (id: string) => Promise<void>
   readonly close: () => void
 }
@@ -45,6 +46,8 @@ export interface OpenOutboxOptions {
   readonly indexedDB?: Pick<IDBFactory, 'open'>
   readonly storage?: Pick<StorageManager, 'persist'>
   readonly now?: () => number
+  /** Identity-aware callers explicitly validate current scope before recovery. */
+  readonly recoverOnOpen?: boolean
 }
 interface PacketMetadata { readonly packetBytes: readonly number[]; readonly fingerprint: { readonly version: 1; readonly sha256: string } }
 const transaction = <T>(db: IDBDatabase, mode: IDBTransactionMode, operation: string,
@@ -212,7 +215,7 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
     }, fail)
   })
   // Serialize recovery with dispatch and require core authorization inside this transaction too.
-  yield* Effect.tryPromise({ try: () => run<void>('readwrite', 'recover', (tx, done, fail) => {
+  const recover = (): Promise<void> => run<void>('readwrite', 'recover', (tx, done, fail) => {
     const request = tx.objectStore(attemptsStore).openCursor()
     request.onsuccess = () => {
       try {
@@ -229,10 +232,14 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
         cursor.continue()
       } catch (cause) { fail(cause) }
     }
-  }).catch((cause: unknown) => { db.close(); throw cause }), catch: (cause) => error(cause, 'recover') })
+  })
+  if (options.recoverOnOpen !== false) yield* Effect.tryPromise({
+    try: () => recover().catch((cause: unknown) => { db.close(); throw cause }),
+    catch: (cause) => error(cause, 'recover'),
+  })
   const readBytes = (id: string, field: 'packetBytes' | 'intentBytes'): Promise<Uint8Array | undefined> => run('readonly', field, (tx, done, fail) => get(tx, id, (envelope) => done(envelope?.[field] === undefined ? undefined : new Uint8Array(envelope[field])), fail))
   const repo: IndexedDbOutbox = {
-    scope, persistence, accept, commit: (record) => accept(record), close: () => db.close(),
+    scope, persistence, accept, recover, commit: (record) => accept(record), close: () => db.close(),
     compareAndSwap: async (revision, record) => {
       const owned = decodeRecord(Schema.decodeUnknownSync(json)(encodeJson(record)))
       const metadata = owned.state === 'pending' && owned.phase === 'ready' && !owned.mayHaveDispatched

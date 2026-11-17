@@ -62,8 +62,8 @@ function SeatAtRest({ status, label }: { readonly status: AgentStatus; readonly 
 }
 
 /**
- * Sending works, but this browser keeps no durable copy of a message before it leaves: the daemon's verified
- * issuer identity, which scopes the on-device outbox, is unavailable. Text carries the meaning; the tone only marks it.
+ * A successful capabilities answer without a complete issuer pair selects unprotected sending.
+ * The notice describes that mode, never an identity-read or storage-error fallback.
  */
 function SendUnprotected() {
   return <div {...stylex.props(styles.lane)}>

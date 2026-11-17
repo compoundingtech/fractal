@@ -69,6 +69,7 @@ const sendFailureDetails: Readonly<Record<Extract<SendState, { _tag: 'Failed' }>
     'snapshot-unavailable': 'The conversation could not be loaded for sending. Nothing was sent. Retry when it is available.',
     unconfirmed: 'Fractal may have taken this message and has not confirmed it yet. Do not send it again.',
     storage: 'This browser could not save the message safely. Nothing was sent. Your draft and images have been restored. Free browser storage and try again.',
+    'identity-unavailable': 'Identity unavailable, retry later. Nothing was sent. Your draft and images have been restored.',
   }
 
 /** Send diagnostics are not display copy, including for unclassified failure reasons. */
@@ -131,7 +132,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
       if (result._tag === 'Refused' && result.reason !== 'failed' && result.reason !== 'unconfirmed'
         && result.reason !== 'stale-fence' && result.reason !== 'snapshot-unavailable') onRefused({ reason: result.reason })
       // assistant-ui restores the submitted text AND complete local attachments only for this rejection.
-      if (result._tag === 'Refused' && result.reason === 'storage') throw new MessageNotSentError(sendFailureDetail('storage'))
+      if (result._tag === 'Refused' && (result.reason === 'storage' || result.reason === 'identity-unavailable')) throw new MessageNotSentError(sendFailureDetail(result.reason))
       confirmed = result._tag === 'Success' && result.value.status === 'completed'
     } finally {
       settled?.({ _tag: confirmed ? 'Confirmed' : 'Unconfirmed' })

@@ -12,6 +12,7 @@ export class OutboxStorageError extends Schema.TaggedError<OutboxStorageError>()
   operation: Schema.String,
   message: Schema.String,
 }) {}
+export class OutboxIdentityUnavailable extends Schema.TaggedError<OutboxIdentityUnavailable>()('OutboxIdentityUnavailable', {}) {}
 export class OutboxConflict extends Schema.TaggedError<OutboxConflict>()('OutboxConflict', {
   localAttemptId: Schema.String,
   expectedRevision: Schema.Int,

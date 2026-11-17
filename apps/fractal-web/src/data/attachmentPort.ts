@@ -1,7 +1,7 @@
 import {
   ClientError, appliedAnswer, actionReceiptCheck, createOutboxRecord, expectedPreparedPacketIdentities,
   observeOutbox, prepareMessageSendPacket, prepareOutboxRecord,
-  type FractalClient, type OutboxRecord, type PreparedPacket, type PreparedMessageSendPacket, type OutboxIntent,
+  type FractalClient, type OutboxRecord, type OutboxObservation, type PreparedPacket, type PreparedMessageSendPacket, type OutboxIntent,
 } from '@fractal/client'
 import type { ActionResult } from '@fractal/client/schema'
 import * as Native from '@fractal/client/schema/read'
@@ -11,7 +11,8 @@ import { conversationPortFailure, hasConversationCapability } from './conversati
 import { loadAttachmentSchema } from './lazySdk.ts'
 import type { AttachmentPort, AttachmentSendRequest, ConversationPortResult } from './source.ts'
 import { spoolAttachment, type IndexedDbOutbox } from './outbox/indexedDb.ts'
-import type { SpoolInput } from './outbox/repository.ts'
+import { OutboxIdentityUnavailable, sameScope, type SpoolInput } from './outbox/repository.ts'
+import { scopeFromCapabilities } from './outbox/scoped.ts'
 
 /** Scope selection is local; this callback must not make send-work network requests. */
 export interface ChatOutbox {
@@ -92,7 +93,7 @@ const preparationBlocked = {
 const utf8 = new TextEncoder()
 const text = new TextDecoder()
 
-/** Deliberate legacy mode while the daemon exposes no verified issuer identity. Never selected on storage failure. */
+/** Explicit legacy mode for capability answers without a complete issuer pair. Never selected on failure. */
 const sendUnprotected = async (
   client: FractalClient, snapshot: () => Promise<ConversationPortResult<string>>,
   input: AttachmentSendRequest, key: string, unappliedPackets: Map<string, PreparedMessageSendPacket>,
@@ -170,10 +171,22 @@ export const gatewayMessageSend = (
   return async (input: AttachmentSendRequest, chosenKey?: string): Promise<ConversationPortResult<ActionResult>> => {
   const key = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
   let repo: IndexedDbOutbox | undefined
-  try { repo = await outbox.repository() } catch { return storageRefusal() }
+  try { repo = await outbox.repository() } catch (cause) {
+    return cause instanceof OutboxIdentityUnavailable
+      ? { _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.' }
+      : storageRefusal()
+  }
   if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedPackets)
   let record: OutboxRecord<PreparedPacket> | undefined
   try { record = await repo.read(key) } catch { return storageRefusal() }
+  if (record !== undefined) {
+    try {
+      const current = scopeFromCapabilities(await client.capabilities())
+      if (current === undefined || !sameScope(repo.scope, current)) return {
+        _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and deployment to inspect or send this message.',
+      }
+    } catch { return { _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.' } }
+  }
   // A retained result is authoritative. No retry map and no replay of dispatched bytes.
   if (record !== undefined && (record.mayHaveDispatched || record.state !== 'pending')) {
     if (record.state === 'delivered' && record.evidence.kind === 'receipt') {
@@ -240,8 +253,9 @@ export const gatewayMessageSend = (
     if (textSnapshot?._tag === 'Refused') return textSnapshot
     const discovered = await client.capabilities()
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)(discovered.value)
-    if (capabilities.session_actor !== repo.scope.principalId || discovered.snapshot.host_id !== repo.scope.memberId) {
-      return { _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and member to send this message.' }
+    const currentScope = scopeFromCapabilities(discovered)
+    if (currentScope === undefined || !sameScope(repo.scope, currentScope)) {
+      return { _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and deployment to send this message.' }
     }
     if (!hasConversationCapability(capabilities, 'message.send')
       || currentRecord.intent.attachments.length > 0 && !hasConversationCapability(capabilities, 'control.messages')) {
@@ -272,26 +286,42 @@ export const gatewayMessageSend = (
       catch { return preparationBlocked }
       currentRecord = prepared
     }
+    const dispatchScope = scopeFromCapabilities(await client.capabilities())
+    if (dispatchScope === undefined || !sameScope(repo.scope, dispatchScope)) return {
+      _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and deployment to send this message.',
+    }
     // Only the transaction winner receives the single-use dispatch permission.
     try { currentRecord = await repo.acquireDispatchPermit(key, currentRecord.revision) }
     catch { return unconfirmed() }
     if (!('packet' in currentRecord) || currentRecord.packet.type !== 'message.send') return unconfirmed()
     const retained = currentRecord
+    const retainObservation = async (observation: OutboxObservation): Promise<OutboxRecord<PreparedPacket> | undefined> => {
+      let current: OutboxRecord<PreparedPacket> | undefined = retained
+      while (current !== undefined) {
+        const identity = scopeFromCapabilities(await client.capabilities())
+        if (identity === undefined || !sameScope(repo.scope, identity)) return undefined
+        const outcome = observeOutbox(current, observation)
+        if (outcome === current) return current
+        if (await repo.compareAndSwap(current.revision, outcome)) return outcome
+        current = await repo.read(key)
+      }
+      return undefined
+    }
     try {
       const response = await actionReceiptCheck({ kind: 'message', actionId: retained.packet.id, messageId: retained.expectedIdentities[0] })(
         () => client.submitAction(retained.packet),
       )
       const receipt = Native.decodeUnknownSync(schema.ActionResult)(response.value)
       if (response.value.status !== 'completed') return unconfirmed()
-      const outcome = observeOutbox(retained, { kind: 'delivered', receipt: { ...response.value, status: 'completed' } })
-      if (!await repo.compareAndSwap(retained.revision, outcome)) return unconfirmed()
+      const outcome = await retainObservation({ kind: 'delivered', receipt: { ...response.value, status: 'completed' } })
+      if (outcome?.state !== 'delivered') return unconfirmed()
       return { _tag: 'Success', value: receipt }
     } catch (cause) {
       const applied = appliedAnswer(cause)
-      const outcome = observeOutbox(retained, { kind: 'failure', applied })
-      try { if (!await repo.compareAndSwap(retained.revision, outcome)) return unconfirmed() }
+      let outcome: OutboxRecord<PreparedPacket> | undefined
+      try { outcome = await retainObservation({ kind: 'failure', applied }) }
       catch { return unconfirmed() }
-      if (outcome.state !== 'not-applied') return unconfirmed()
+      if (outcome?.state !== 'not-applied') return unconfirmed()
       return cause instanceof ClientError && cause.response.code === 'stale-fence'
         ? { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
         : conversationPortFailure(cause)

@@ -176,6 +176,16 @@ describe('composer send contract', () => {
     expect(refused.disabledReason).not.toContain('raw-diagnostic-sentinel')
   })
 
+  it('restores an identity-unavailable submission with visible retry-later copy', async () => {
+    const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'identity-unavailable', detail: 'raw-diagnostic-sentinel' })
+    const onRefused = vi.fn()
+    const options = { source: { attachments: { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send } }, agentRef: seat, grants, readable: true, items: [], onRefused }
+    await expect(composerSendBinding(options).runtime.onNew(message)).rejects.toBeInstanceOf(MessageNotSentError)
+    expect(onRefused).toHaveBeenCalledWith({ reason: 'identity-unavailable' })
+    expect(sendFailureDetail('identity-unavailable')).toContain('Identity unavailable, retry later.')
+    expect(sendFailureDetail('identity-unavailable')).toContain('draft and images have been restored')
+  })
+
   it('restores the submitted draft and original image through the actual assistant-ui runtime on storage refusal', async () => {
     const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'storage', detail: 'Storage unavailable' })
     const binding = composerSendBinding({

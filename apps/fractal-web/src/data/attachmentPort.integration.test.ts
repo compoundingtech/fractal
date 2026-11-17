@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { createHash } from 'node:crypto'
-import { FractalClient } from '@fractal/client'
+import { FractalClient, outboxDeploymentId } from '@fractal/client'
 import * as Native from '@fractal/client/schema'
 import { Effect } from 'effect'
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
@@ -11,10 +11,10 @@ import { gatewayAttachments, gatewayMessageSend, type ChatOutbox } from './attac
 import { attemptsStore, openIndexedDbOutbox, type IndexedDbOutbox } from './outbox/indexedDb.ts'
 import type { AttachmentSendRequest } from './source.ts'
 
-const base = fixture.capabilities
+const base = { ...fixture.capabilities, value: { ...fixture.capabilities.value, issuer: 'person/example', issuer_key: 'issuer-key/a' } }
 const scope = {
   principalId: base.value.session_actor,
-  deploymentId: 'deployment/chat-integration',
+  deploymentId: outboxDeploymentId(base.value.issuer, base.value.issuer_key),
   memberId: base.snapshot.host_id,
 }
 const key = 'chat-durable-key'
@@ -57,6 +57,23 @@ afterEach(() => {
 })
 
 describe('chat durable gateway delivery', () => {
+  it('retains a validated receipt after another tab recovers its in-flight marker as unknown', async () => {
+    const factory = new IDBFactory()
+    const repo = await open(factory)
+    const started = Promise.withResolvers<void>()
+    const held = Promise.withResolvers<Response>()
+    const { client, calls } = transport(() => { started.resolve(); return held.promise })
+    const pending = bind(client, repo)(request, key)
+    await started.promise
+    const second = await open(factory)
+    expect(await second.read(key)).toMatchObject({ state: 'unknown' })
+    const body = calls.find(call => call.path.endsWith('/actions'))?.body
+    held.resolve(Response.json(receipt(String(body))))
+    expect(await pending).toMatchObject({ _tag: 'Success' })
+    expect(await second.read(key)).toMatchObject({ state: 'delivered', evidence: { kind: 'receipt' } })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
+  })
+
   it.each(['protected', 'unprotected'] as const)('acquires a text snapshot before capability discovery in %s mode', async mode => {
     const repo = mode === 'protected' ? await open() : undefined
     const { client, calls } = transport()
@@ -79,7 +96,9 @@ describe('chat durable gateway delivery', () => {
     expect(await send({
       ...request, images: [{ bytes: new Uint8Array([1, 2, 3]), mediaType: 'image/png', name: 'original.png' }],
     }, key)).toMatchObject({ _tag: 'Success' })
-    expect(calls.map(call => call.path)).toEqual(['/v1/client/capabilities', '/v1/client/blobs', '/v1/client/actions'])
+    expect(calls.map(call => call.path)).toEqual(mode === 'protected'
+      ? ['/v1/client/capabilities', '/v1/client/blobs', '/v1/client/capabilities', '/v1/client/actions', '/v1/client/capabilities']
+      : ['/v1/client/capabilities', '/v1/client/blobs', '/v1/client/actions'])
   })
 
   it.each(['message', 'attachment'] as const)('makes zero requests before the %s acceptance transaction completes', async entry => {
@@ -106,8 +125,8 @@ describe('chat durable gateway delivery', () => {
     expect(requestSucceeded).toBe(true)
     expect(committed).toBe(true)
     expect(calls.map(call => call.path)).toEqual(entry === 'message'
-      ? ['/v1/client/capabilities', '/v1/client/actions']
-      : ['/v1/client/capabilities', '/v1/client/blobs', '/v1/client/actions'])
+      ? ['/v1/client/capabilities', '/v1/client/capabilities', '/v1/client/actions', '/v1/client/capabilities']
+      : ['/v1/client/capabilities', '/v1/client/blobs', '/v1/client/capabilities', '/v1/client/actions', '/v1/client/capabilities'])
   })
 
   it('refuses an aborted acceptance transaction with zero capability, upload or action requests', async () => {
@@ -164,7 +183,7 @@ describe('chat durable gateway delivery', () => {
     expect(await repo.readPacketBytes(key)).toEqual(new TextEncoder().encode(captured))
     const count = calls.length
     expect(await send({ ...request, _tag: 'Resend', idempotencyKey: key })).toMatchObject({ _tag: 'Success' })
-    expect(calls).toHaveLength(count)
+    expect(calls.slice(count).map(call => call.path)).toEqual(['/v1/client/capabilities'])
   })
 
   it('reopens a crashed held POST as unknown and never dispatches its Resend', async () => {
@@ -182,7 +201,7 @@ describe('chat durable gateway delivery', () => {
     const count = calls.length
     expect(await bind(client, reopened)({ ...request, _tag: 'Resend', idempotencyKey: key }))
       .toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
-    expect(calls).toHaveLength(count)
+    expect(calls.slice(count).map(call => call.path)).toEqual(['/v1/client/capabilities'])
     held.reject(new TypeError('Connection disappeared'))
     expect(await pending).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
   })
@@ -219,7 +238,7 @@ describe('chat durable gateway delivery', () => {
     expect(await repo.read(key)).toMatchObject({ state })
     const count = calls.length
     expect(await send({ ...request, _tag: 'Resend', idempotencyKey: key })).toMatchObject({ _tag: 'Refused' })
-    expect(calls).toHaveLength(count)
+    expect(calls.slice(count).map(call => call.path)).toEqual(['/v1/client/capabilities'])
   })
 
   it.each(['rejected', 'accepted', 'wrong-action', 'wrong-message', 'malformed'] as const)(
@@ -241,7 +260,7 @@ describe('chat durable gateway delivery', () => {
       const count = calls.length
       expect(await send({ ...request, _tag: 'Resend', idempotencyKey: key }))
         .toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
-      expect(calls).toHaveLength(count)
+      expect(calls.slice(count).map(call => call.path)).toEqual(['/v1/client/capabilities'])
     },
   )
 })
