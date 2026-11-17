@@ -159,7 +159,8 @@ impl RuntimeControl for OneShotRuntime {
                 Registration::WriteFailure => {
                     self.store.connection.write().execute_batch(
                         "CREATE TRIGGER refuse_one_shot_registration BEFORE INSERT ON claims
-                         WHEN NEW.kind='runtime.observed' AND json_extract(NEW.body,'$.fields.status')='running'
+                         WHEN (NEW.kind='runtime.observed' AND json_extract(NEW.body,'$.fields.status')='running')
+                           OR (NEW.kind='runtime.action.requested' AND json_extract(NEW.body,'$.fields.action')='terminate')
                          BEGIN SELECT RAISE(ABORT,'fixture registration write refused'); END;"
                     )?;
                 }
@@ -261,7 +262,8 @@ fn driverless_step_one_shot_claims_and_completes_before_ordinary_observation() {
     reconciler.reconcile_once().unwrap();
     reconciler.reconcile_once().unwrap();
     let step = store.step_run(&runtime.step).unwrap().unwrap();
-    assert!(step.worker_reported);
+    assert!(step.worker_reported, "the immediate command did not complete: {:?}",
+        store.observations_for(&runtime.agent, "runtime.action.failed").unwrap());
     assert!(matches!(step.status.as_str(), "verifying" | "completed"));
     {
         let mut state = runtime.state.lock().unwrap();
@@ -282,7 +284,14 @@ fn driverless_step_one_shot_claims_and_completes_before_ordinary_observation() {
 fn assert_registration_refusal(registration: Registration) {
     let (store, runtime, reconciler, _) = fixture(registration);
     reconciler.reconcile_once().unwrap();
-    reconciler.reconcile_once().unwrap();
+    let registration_result = reconciler.reconcile_once();
+    match registration {
+        Registration::NotRunning => assert!(format!("{:#}", registration_result.unwrap_err())
+            .contains("held native launch is not the current running start operation")),
+        Registration::WriteFailure => assert!(format!("{:#}", registration_result.unwrap_err())
+            .contains("fixture registration write refused")),
+        _ => registration_result.unwrap(),
+    }
     let state = runtime.state.lock().unwrap();
     assert!(!state.released, "refused registration must never execute the command");
     assert!(state.cancelled, "held command must be cancelled");

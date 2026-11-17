@@ -80,7 +80,7 @@ impl LaunchRelease for NativeLaunchGate {
         }
         let mut acknowledged = [0];
         self.acknowledged.read_exact(&mut acknowledged)?;
-        anyhow::ensure!(acknowledged == [b'.'], "invalid native launch acknowledgement");
+        anyhow::ensure!(&acknowledged == b".", "invalid native launch acknowledgement");
         Ok(())
     }
 }

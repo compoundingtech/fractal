@@ -11,6 +11,21 @@ pub const MAX_START_JOBS: usize = 2;
 pub const OPERATION_TAG: &str = "st3.start-operation";
 pub const OPERATION_ENV: &str = "ST3_START_OPERATION";
 
+// A broken writer must not keep an unreleased native child alive. Preserve the
+// same fresh operation/incarnation guard even when durable cleanup cannot write.
+fn retire_unreleased_runtime<R: RuntimeControl>(runtime: &R, member: &MemberSpec, operation: &str) -> Result<()> {
+    let observation = runtime.observe_start(member)?;
+    if let Some(incarnation) = observation.as_ref().and_then(|item| item.incarnation_id.as_deref()) {
+        anyhow::ensure!(runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+            .as_deref() == Some(operation), "unreleased launch retirement lost operation ownership");
+        anyhow::ensure!(runtime.stop_with_retirement_proof(&member.runtime_id, member.terminal, incarnation)?,
+            "unreleased native launch retirement is not proven");
+    } else {
+        anyhow::ensure!(runtime.start_operation_closed(member)?, "unreleased native producer is not proven closed");
+    }
+    Ok(())
+}
+
 pub struct StartJobs {
     owner: String,
     pub live: Arc<(Mutex<HashSet<String>>, Condvar)>,
@@ -306,6 +321,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             if let Err(error) = store.finish_runtime_start(&id, &result) {
                 eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
+                let held = held_launches.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+                if let Some(held) = held {
+                    let retirement = retire_unreleased_runtime(runtime.as_ref(), &prepared.launch_member, &id);
+                    drop(held);
+                    if let Err(error) = retirement {
+                        eprintln!("st3: failed to retire unregistered native launch {id}: {error:#}");
+                    }
+                }
             }
             // Drop admission before waking the planner: a completion can admit queued work.
             drop(_lock);
@@ -670,6 +693,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             // Keep the user command blocked through exact, provenance-fenced native
             // retirement. Drop is cancellation, including when retirement errors.
             let result = self.cleanup_held_runtime(operation, prepared);
+            if result.is_err() {
+                retire_unreleased_runtime(self.runtime.as_ref(), &prepared.launch_member, &operation.id)?;
+            }
             drop(held);
             result?;
         }

@@ -186,7 +186,7 @@ mission "catalog" state="ready" {
             expected_subject: None,
             idempotency_key: None,
         };
-        let succeeded = input("runtime.action.succeeded", BTreeMap::from([
+        let mut succeeded = input("runtime.action.succeeded", BTreeMap::from([
             ("action".into(), json!("start")),
             ("operation".into(), json!(observed_operation)),
             ("runtime_id".into(), json!(SEAT)),
@@ -194,12 +194,14 @@ mission "catalog" state="ready" {
             ("desired_token".into(), json!("api-incarnation-test")),
             ("incarnation_id".into(), json!("chooser:one")),
         ]));
-        let observed = input("runtime.observed", BTreeMap::from([
+        succeeded.idempotency_key = Some(format!("start-succeeded:{admitted}"));
+        let mut observed = input("runtime.observed", BTreeMap::from([
             ("status".into(), json!("running")),
             ("runtime_id".into(), json!(SEAT)),
             ("terminal".into(), json!(true)),
             ("incarnation_id".into(), json!("chooser:one")),
         ]));
+        observed.idempotency_key = Some(format!("start-observed:{admitted}"));
         self.state.store.apply_runtime_start_result(admitted, &[succeeded, observed]).unwrap()
     }
 
