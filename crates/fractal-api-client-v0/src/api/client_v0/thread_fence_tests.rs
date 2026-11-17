@@ -625,7 +625,7 @@ pub(crate) mod retained_discussion {
             actor:Some(AGENT.into()),
             fields:serde_json::from_value(json!({
                 "from":AGENT, "to":PERSON, "content":"The retained discussion reply.",
-                "thread_id":thread,
+                "thread_id":thread, "status":"sent",
             })).unwrap(),
             evidence:vec![], expected_subject:None, idempotency_key:Some("retained-unread-incoming".into()),
         }, thread_metadata::PersonAuthority::BoundAgent { actor:AGENT }, None).unwrap();
@@ -869,7 +869,7 @@ pub(crate) mod retained_discussion {
             actor:Some(fallback.into()),
             fields:serde_json::from_value(json!({
                 "from":fallback, "to":PERSON, "content":"The new participant replied.",
-                "thread_id":"thread/unread-fallback",
+                "thread_id":"thread/unread-fallback", "status":"sent",
             })).unwrap(),
             evidence:vec![], expected_subject:None, idempotency_key:Some("unread-terminal-fallback".into()),
         }, thread_metadata::PersonAuthority::BoundAgent { actor:fallback }, None).unwrap();
