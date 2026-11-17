@@ -807,7 +807,7 @@ agent "start-context.other" { workspace "/tmp"; command "true"; restart always; 
         let omitted = query.split('&').filter(|part| !part.starts_with(&format!("{missing}=")))
             .collect::<Vec<_>>().join("&");
         assert_eq!(fixture.request(&format!("/v1/client/assistant/thread-start-context{omitted}"), None).await.0,
-            StatusCode::BAD_REQUEST);
+            StatusCode::UNPROCESSABLE_ENTITY);
     }
     let (status, _, _) = fixture.request(
         &format!("/v1/client/threads/start-context{query}"), None,
