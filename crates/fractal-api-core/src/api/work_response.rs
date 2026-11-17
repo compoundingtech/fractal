@@ -356,6 +356,7 @@ mod tests {
                 None,
                 None,
                 lease_view,
+                false,
             )
         };
         let lean = renew("lease-renew", true).await.unwrap().0;
