@@ -975,6 +975,21 @@ fn durable_hourly_readings_burn_with_partial_horizon_then_turn_unknown_when_stal
 }
 
 #[test]
+fn gauge_filters_do_not_turn_a_covered_burn_into_missing_data() {
+    for filter in ["only \"workflow\" \"production\"", "exclude \"workflow\" \"ignored\""] {
+        let store = store_with(&numeric_declaration("gauge", &format!("max-age \"1h\"\n    cadence \"1h\"\n    {filter}")));
+        for hour in 1..=6 {
+            let at = *NOW - hour * 60 * MINUTE;
+            claim(&store, "live", "custom.acme.reading", json!({"observed_at": at, "value": 20, "workflow": "production"}));
+            claim(&store, "filtered", "custom.acme.reading", json!({"observed_at": at, "value": 20, "workflow": "ignored"}));
+        }
+        let evaluated = evaluate(&store);
+        assert_eq!(evaluated["example/quality"]["status"], "burning", "{filter}");
+        assert!(evaluated["example/quality"]["remaining_percent"].is_null());
+    }
+}
+
+#[test]
 fn native_owner_binding_inherits_source_and_missing_source_is_unknown() {
     let store = store_with(r#"version 2
 objective "example/latency" {
@@ -1077,4 +1092,35 @@ objective "example/transactions" {
     assert!(unavailable.iter().all(|row| row["status"] == "no-data"));
     assert_eq!(check(&store, &unavailable).unwrap().recovered, 0);
     assert_eq!(check(&store, &unavailable).unwrap().opened, 0);
+}
+
+#[test]
+fn native_binding_does_not_recover_a_nested_declarations_unknown_episode() {
+    let store = store_with(r#"version 2
+objective "example/transactions" {
+  about "Transaction owner"
+  indicator "native" { objective "transaction"; }
+  on-breach "fault" owner="agent/node.ops" condition="transaction-burn"
+}
+objective "example/transactions/latency" {
+  about "Independent latency owner"
+  indicator "native" { objective "person-read"; }
+  on-breach "fault" owner="agent/node.ops" condition="latency-burn"
+}
+"#);
+    with_owner(&store, "node");
+    let nested = "example/transactions/latency";
+    open_fault(&store, nested);
+    let source = json!({
+        "id": "transaction/read", "kind": "objective", "about": "Native source",
+        "target": "1% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    });
+    let evaluated = rows(&store, *NOW, &[source]).unwrap();
+    assert_eq!(evaluated.iter().find(|row| row["id"] == nested).unwrap()["status"], "no-data");
+    let faults = check(&store, &evaluated).unwrap();
+    assert_eq!(faults.opened, 1);
+    assert_eq!(faults.recovered, 0);
+    assert_eq!(fault_status(&store, nested), "pending");
+    assert_eq!(check(&store, &evaluated).unwrap(), ObjectiveFaults::default());
 }

@@ -20,7 +20,7 @@ fn tracked(gauge: Option<Gauge>) -> Tracked {
     Tracked {
         revision: "revision".into(), claim_id: "declaration".into(),
         objective: Ok(Objective { name: "example/quality".into(), about: "Example quality".into(), indicator, window: Some(Window { ms: policy().horizon_ms, min_samples: 1 }), budget: Some(policy()), targets: Vec::new(), on_breach: None }),
-        cursor: 0, samples: BTreeMap::new(), events: BTreeMap::new(), numeric: Observations::default(), seen: false, labels: BTreeMap::new(), unreadable: 0, ids: BTreeSet::new(),
+        cursor: 0, samples: BTreeMap::new(), events: BTreeMap::new(), numeric: Observations::default(), seen: false, labels: BTreeMap::new(), unreadable: 0, ids: BTreeSet::new(), native_ids: BTreeSet::new(),
     }
 }
 fn point(tracked: &mut Tracked, source: &str, at: u64, value: Option<f64>) {
@@ -96,6 +96,38 @@ fn coverage_counts_silent_sources_as_unknown_not_healthy() {
     tracked.numeric.prune(NOW - policy().horizon_ms - gauge.max_age_ms, true);
     let measured = tracked.numeric.measure(NOW - HOUR, NOW, gauge.threshold, Some(&gauge), None);
     assert_eq!(measured.coverage(), 0.5);
+}
+
+#[test]
+fn filtered_out_gauge_source_does_not_reduce_eligible_source_coverage() {
+    let mut gauge = gauge();
+    gauge.max_age_ms = policy().horizon_ms;
+    let mut tracked = tracked(Some(gauge.clone()));
+    let start = NOW - policy().horizon_ms;
+    point(&mut tracked, "live", start, Some(1.0));
+    point(&mut tracked, "excluded", start, Some(20.0));
+    tracked.numeric.sources.get_mut("excluded").unwrap().get_mut(&start).unwrap().eligible = false;
+    let measured = tracked.numeric.measure(start, NOW, gauge.threshold, Some(&gauge), None);
+    assert_eq!(measured.possible, policy().horizon_ms as f64);
+    assert_eq!(measured.coverage(), 1.0);
+    assert_eq!(row(&tracked, Some(&gauge))["status"], "met");
+}
+
+#[test]
+fn gauge_filter_membership_excludes_only_its_own_time_and_keeps_eligible_gaps_unknown() {
+    let gauge = gauge();
+    let mut tracked = tracked(Some(gauge.clone()));
+    point(&mut tracked, "source", NOW - 5 * HOUR, Some(1.0));
+    point(&mut tracked, "source", NOW - 3 * HOUR, Some(20.0));
+    tracked.numeric.sources.get_mut("source").unwrap().get_mut(&(NOW - 3 * HOUR)).unwrap().eligible = false;
+    point(&mut tracked, "source", NOW - 2 * HOUR, None);
+    point(&mut tracked, "source", NOW - HOUR, Some(1.0));
+    let measured = tracked.numeric.measure(NOW - 5 * HOUR, NOW, gauge.threshold, Some(&gauge), None);
+    assert_eq!(measured.possible, (4 * HOUR) as f64);
+    assert_eq!(measured.total, (2 * HOUR) as f64);
+    assert_eq!(measured.bad, 0.0);
+    assert_eq!(measured.coverage(), 0.5);
+    assert!(!measured.eligible(&policy(), true));
 }
 
 #[test]

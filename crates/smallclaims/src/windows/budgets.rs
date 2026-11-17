@@ -207,10 +207,10 @@ pub fn gauge_report(stream: &str, now: u64, max_age_ms: u64, bad_above: f64) -> 
         |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Option<f64>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut windows = serde_json::Map::new();
     for (name, width) in WINDOWS {
-        let (covered, bad) = integrate(&samples, now.saturating_sub(width), now, max_age_ms, bad_above);
+        let (covered, bad, contributing_samples) = integrate(&samples, now.saturating_sub(width), now, max_age_ms, bad_above);
         windows.insert(name.to_owned(), json!({"eligible": covered, "bad": bad, "good": covered - bad,
             "covered_ms": covered, "unknown_ms": width.saturating_sub(covered), "window_ms": width,
-            "samples": samples.iter().filter(|(at, value)| *at >= now.saturating_sub(width) && value.is_some()).count(),
+            "samples": contributing_samples,
             "from_unix_ms": now.saturating_sub(width), "through_unix_ms": now,
             "coverage": covered as f64 / width as f64}));
     }
@@ -218,18 +218,20 @@ pub fn gauge_report(stream: &str, now: u64, max_age_ms: u64, bad_above: f64) -> 
         "through_unix_ms": samples.last().map(|(at, _)| at), "max_age_ms": max_age_ms, "windows": windows}))
 }
 
-fn integrate(samples: &[(u64, Option<f64>)], from: u64, through: u64, max_age: u64, threshold: f64) -> (u64, u64) {
+fn integrate(samples: &[(u64, Option<f64>)], from: u64, through: u64, max_age: u64, threshold: f64) -> (u64, u64, u64) {
     let mut covered = 0;
     let mut bad = 0;
+    let mut contributing_samples = 0;
     for (index, &(at, value)) in samples.iter().enumerate() {
         let Some(value) = value else { continue; };
         let end = samples.get(index + 1).map_or(through, |(next, _)| *next)
             .min(at.saturating_add(max_age)).min(through);
         let held = end.saturating_sub(at.max(from));
+        contributing_samples += u64::from(held > 0);
         covered += held;
         if value > threshold { bad += held; }
     }
-    (covered, bad)
+    (covered, bad, contributing_samples)
 }
 
 #[cfg(test)]
@@ -238,9 +240,17 @@ mod tests {
 
     #[test]
     fn gauge_holds_expire_and_clip_without_filling_gaps() {
-        assert_eq!(integrate(&[(0, Some(2.0)), (200, Some(0.0))], 50, 400, 100, 1.0), (150, 50));
-        assert_eq!(integrate(&[(0, Some(1.0))], 0, 100, 100, 1.0), (100, 0));
-        assert_eq!(integrate(&[(0, Some(0.0)), (50, None)], 0, 100, 100, 1.0), (50, 0));
+        assert_eq!(integrate(&[(0, Some(2.0)), (200, Some(0.0))], 50, 400, 100, 1.0), (150, 50, 2));
+        assert_eq!(integrate(&[(0, Some(1.0))], 0, 100, 100, 1.0), (100, 0, 1));
+        assert_eq!(integrate(&[(0, Some(0.0)), (50, None)], 0, 100, 100, 1.0), (50, 0, 1));
+    }
+
+    #[test]
+    fn predecessor_readings_count_only_when_their_hold_contributes_to_the_window() {
+        let readings = [(0, Some(2.0)), (200, Some(0.0)), (400, Some(2.0))];
+        assert_eq!(integrate(&readings, 250, 400, 200, 1.0), (150, 0, 1));
+        assert_eq!(integrate(&readings, 250, 400, 40, 1.0), (0, 0, 0));
+        assert_eq!(integrate(&[(200, None)], 250, 400, 200, 1.0), (0, 0, 0));
     }
 
     #[test]

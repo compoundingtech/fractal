@@ -72,16 +72,22 @@ impl Observations {
         for points in self.sources.values() {
             let matches = |point: &Observation| group.is_none_or(|(key, value)| point.fields.get(key).is_some_and(|field| field == value));
             if let Some(gauge) = gauge {
-                // A source remains in its label group even when its latest sample ages out.
-                if group.is_some() && !points.values().any(matches) {
-                    continue;
-                }
-                measured.possible += (to - from) as f64;
                 let mut iter = points.iter().peekable();
+                let mut first = true;
                 while let Some((&at, point)) = iter.next() {
-                    let end = at.saturating_add(gauge.max_age_ms).min(iter.peek().map_or(to, |(next, _)| **next)).min(to);
+                    let next = iter.peek().map_or(to, |(next, _)| **next).min(to);
+                    // Membership lasts until the next sample, even after the value expires.
+                    // Before discovery, an eligible source is unknown, never healthy; an
+                    // excluded source contributes neither covered nor possible time.
+                    let membership_start = if first { from } else { at.max(from) };
+                    first = false;
+                    if !matches(point) || !point.eligible {
+                        continue;
+                    }
+                    measured.possible += next.saturating_sub(membership_start) as f64;
+                    let end = at.saturating_add(gauge.max_age_ms).min(next);
                     let start = at.max(from);
-                    if end <= start || !matches(point) || !point.eligible {
+                    if end <= start {
                         continue;
                     }
                     let Some(value) = point.value else { continue };
