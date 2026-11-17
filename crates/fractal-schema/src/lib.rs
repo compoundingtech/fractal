@@ -5431,6 +5431,14 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        for kind in [github_capture::FACT_KIND, github_capture::COMMIT_KIND,
+            github_capture::AUTHORITY_KIND, github_capture::FENCED_KIND] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in [github_capture::FACT_FAMILY, github_capture::COMMIT_FAMILY,
+            github_capture::AUTHORITY_FAMILY, "github-scope"] {
+            current.subjects.remove(family).unwrap();
+        }
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
