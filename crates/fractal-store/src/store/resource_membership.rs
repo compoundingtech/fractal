@@ -503,7 +503,7 @@ impl Store {
                     "resource lane policy differs from host-installed policy");
                 // Earlier writers installed profile-less policies. Define the missing profile
                 // without changing their custody; resource_blocking drains those holders first.
-                transaction.execute("DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                     rusqlite::params![request.host,request.name])?;
             }
             transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
