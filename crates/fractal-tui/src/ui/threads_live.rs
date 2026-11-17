@@ -18,7 +18,7 @@ use super::{
     doc::{Doc, DocExt, Hit},
     edit,
     pane::Pane,
-    text, theme, thread,
+    text, theme, thread, view,
 };
 
 const DRAFT_COLLISION: &str = "This item has different saved drafts. Both drafts are kept. Combine saved drafts to edit both together; nothing will be sent.";
