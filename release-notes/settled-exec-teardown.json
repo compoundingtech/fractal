@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stop repeating historical exec teardown on full reconciliation sweeps once exact-incarnation whole-scope cleanup has been proven and recorded durably.",
+  "replay": { "status": "none", "detail": "No graph replay or history backfill. Existing ended execs are checked lazily on reconciliation; unsettled descendants continue to receive native cleanup on later sweeps." },
+  "schema": { "status": "changed", "detail": "The daemon store adds the node-local local_runtime_cleanup_settled table, keyed by runtime ID and incarnation. CREATE TABLE IF NOT EXISTS installs an empty WITHOUT ROWID table; no existing tables are scanned, indexed, copied or rewritten, including on stores around 60 GB. No shared storage version or client-v0 schema changes." },
+  "rules": { "status": "changed", "detail": "A stopped leader or successful signal is insufficient. Only native exact-generation leader exit plus closed whole-scope proof permits a durable settlement receipt. Missing, unreadable, logical-only or still-populated scopes retain cleanup retries. PTY cleanup is unchanged. A new incarnation cannot reuse a previous incarnation's settlement." },
+  "compatibility": { "status": "none", "detail": "No client or peer protocol changes. Settlement receipts are local daemon bookkeeping, not replicated claims or graph digests." },
+  "downtime": { "status": "none", "detail": "Ordinary daemon restart or rolling deployment. Installation adds an empty table and does not convert historical data; the first sweep may still perform existing historical cleanup work." },
+  "manual": { "status": "none", "detail": "No manual migration. Compare historical EndLeftoversLater exec_teardown calls over subsequent full sweeps after rollout; only unsettled or new incarnations should continue teardown." },
+  "recovery": { "status": "changed", "detail": "Receipts survive daemon and store restart. Older binaries ignore this additive table and safely resume redundant teardown. Losing local settlement receipts restores conservative cleanup work rather than suppressing recovery." }
+}
