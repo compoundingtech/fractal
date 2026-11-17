@@ -1,4 +1,5 @@
 /** A thread's Related requests: the real LiveThreadPane reading a local request history page in every state. */
+import { FractalClient } from '@fractal/client'
 import { assistantDarkTheme, compositionLightTheme } from '@fractal/ui/assistant-ui/shell'
 import * as Native from '@fractal/client/schema/read'
 import type { Meta, StoryObj } from '@storybook/react'
@@ -13,9 +14,10 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
+import gatewayFixture from '../data/subjectReadPort.gateway.fixtures.json'
 import { observed, unavailable, waiting, type Feed } from '../data/source.ts'
 import { LiveThreadPane } from './LiveThreads.tsx'
-import type { ThreadDraft, ThreadSource } from './threadSource.ts'
+import { gatewayThreads, type ThreadDraft, type ThreadSource } from './threadSource.ts'
 
 const actor = 'person/operator'
 const agentId = 'agent/build-host-a/release-desk'
@@ -29,7 +31,7 @@ const ciEpisode = 'claim/ask-ci'
 const scopingEpisode = 'claim/ask-scope'
 const now = Date.parse('2026-11-17T10:00:00Z')
 
-type Scenario = 'branch' | 'unavailable' | 'hidden-predecessor' | 'loading' | 'stale' | 'refused' | 'failed' | 'unsupported'
+type Scenario = 'branch' | 'long-history-cross-page' | 'unavailable' | 'hidden-predecessor' | 'loading' | 'stale' | 'refused' | 'failed' | 'unsupported'
 type Args = {
   readonly scheme: 'dark' | 'light'
   /** Desktop thread tab at 1440px, or the phone layout at 390px. */
@@ -70,10 +72,31 @@ const branch = page({
   source_episodes: [{ source_id: approval, episodes: [key(approval, abc), key(approval, def)] }],
 })
 
+const longHistoryItems = Array.from({ length: 45 }, (_, index) => {
+  const episode = `claim/release-review-${index + 1}`
+  return { key: key(approval, episode), complete: true,
+    payload: available(`Release review ${index + 1}`, `Review release revision ${index + 1}.`, runtime(episode)),
+    state: state(index === 44 ? 'ready' : 'completed') }
+})
+// Forty items on the first page, including the selected request's different-source predecessor.
+// The 45 episodes of the approval source stay grouped; they are never linked to each other.
+const requestHistoryPages = [
+  { items: [{ key: key(scoping, scopingEpisode), complete: true, state: state('completed'),
+      payload: available('Scope the release', 'Which services ship in 4.2?', runtime(scopingEpisode)) }, ...longHistoryItems.slice(0, 39)],
+    boundary_items: [], relations: [],
+    source_episodes: [{ source_id: approval, episodes: longHistoryItems.slice(0, 39).map(item => item.key) }],
+    source_support: 'person-step', next_cursor: 'history/release-review/page-2', complete: true },
+  { items: longHistoryItems.slice(39), boundary_items: [],
+    relations: [{ predecessor: key(scoping, scopingEpisode), request: longHistoryItems[44]!.key, reason: 'The release scope was settled before this review.' }],
+    source_episodes: [{ source_id: approval, episodes: longHistoryItems.map(item => item.key) }],
+    source_support: 'person-step', next_cursor: null, complete: true },
+]
+
 const initialHistory = (scenario: Scenario): Feed<Native.RequestHistoryPage> => {
   switch (scenario) {
     case 'branch': return observed({ value: branch })
     case 'stale': return observed({ value: branch, freshness: 'stale' })
+    case 'long-history-cross-page': return waiting
     case 'loading': return waiting
     case 'unavailable': return observed({ value: page({
       complete: false,
@@ -113,6 +136,22 @@ const createFixture = (scenario: Scenario) => {
   })]
   const history = Atom.keepAlive(Atom.make(initialHistory(scenario)))
   const drafts = Atom.family((_destination: string) => Atom.keepAlive(Atom.make<ThreadDraft>({ content: '' })))
+  const pagedHistory = scenario === 'long-history-cross-page' ? gatewayThreads(new FractalClient({
+    baseUrl: 'http://example.test',
+    fetchImpl: async input => {
+      const url = new URL(String(input))
+      const base = gatewayFixture.capabilities
+      if (url.pathname.endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, capabilities: [
+        ...base.value.capabilities,
+        { id: 'threads-v1', version: 3, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      ] } })
+      if (!url.pathname.endsWith('/request-history')) throw new Error('Unexpected request-history fixture read')
+      const cursor = url.searchParams.get('cursor')
+      if (cursor !== null && cursor !== requestHistoryPages[0]!.next_cursor) throw new Error('Unexpected request-history fixture cursor')
+      return Response.json({ ...base, value: requestHistoryPages[cursor === null ? 0 : 1] })
+    },
+  }), registry) : undefined
   const noChange = { detail: 'This story does not change threads.' }
   const threads: ThreadSource = {
     access: Atom.make({ read: true, actor, actions: new Set(['thread.reply']) }),
@@ -121,9 +160,9 @@ const createFixture = (scenario: Scenario) => {
     detail: () => Atom.make(observed({ value: { summary, snapshotId: 'snapshot/request-history' } })),
     timeline: () => Atom.make(observed({ value: { items: messages, next_cursor: Option.none() } })),
     draft: drafts,
-    requestHistory: () => history,
+    requestHistory: pagedHistory?.requestHistory ?? (() => history),
     // Retry reads again; the story's second read succeeds.
-    reloadRequestHistory: () => registry.set(history, observed({ value: branch })),
+    reloadRequestHistory: pagedHistory?.reloadRequestHistory ?? (() => registry.set(history, observed({ value: branch }))),
     start: async () => ({ _tag: 'Refused', detail: 'This story does not send messages.' }),
     reply: async () => ({ _tag: 'Refused', detail: 'This story does not send messages.' }),
     rename: async () => noChange,
@@ -149,7 +188,7 @@ const RequestHistoryStory = ({ scheme, viewport, scenario }: Args) => {
   </main>
 }
 
-const scenarios: readonly Scenario[] = ['branch', 'unavailable', 'hidden-predecessor', 'loading', 'stale', 'refused', 'failed', 'unsupported']
+const scenarios: readonly Scenario[] = ['branch', 'long-history-cross-page', 'unavailable', 'hidden-predecessor', 'loading', 'stale', 'refused', 'failed', 'unsupported']
 const meta = {
   excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/Threads/Related requests',
@@ -181,6 +220,7 @@ export const scenarioExemptions: readonly string[] = [
   'Failed:contract-fixture',
   'HiddenPredecessor:contract-fixture',
   'Loading:contract-fixture',
+  'LongHistoryCrossPage:contract-fixture',
   'Refused:contract-fixture',
   'Stale:contract-fixture',
   'Unavailable:contract-fixture',
@@ -204,6 +244,24 @@ const expectBranch = async (canvasElement: HTMLElement) => {
 }
 const branchPlay: Story['play'] = ({ canvasElement }) => expectBranch(canvasElement)
 export const Branch: Story = { play: branchPlay }
+
+/** Local cursor-paged fixture, not authenticated live API. */
+export const LongHistoryCrossPage: Story = {
+  args: { scenario: 'long-history-cross-page' },
+  parameters: { docs: { description: { story: '45 episodes of one source across two local request-history pages, with a predecessor on the earlier page; not authenticated live API.' } } },
+  play: async ({ canvasElement }) => {
+    const selectedEpisode = longHistoryItems[44]!.key.episode
+    await waitFor(() => expect(row(canvasElement, approval, selectedEpisode)).not.toBeNull())
+    await expect(canvasElement.querySelector(`[data-request-same-source="${approval}"]`)?.querySelectorAll('[data-request-episode]')).toHaveLength(45)
+    const selected = row(canvasElement, approval, selectedEpisode)!
+    const predecessor = row(canvasElement, scoping, scopingEpisode)!
+    await expect(predecessor).not.toBeNull()
+    await userEvent.click(within(selected).getByRole('button', { name: 'Requested after “Scope the release”' }))
+    await waitFor(() => expect(canvasElement.ownerDocument.activeElement).toBe(predecessor))
+    await expect(predecessor.getAttribute('data-request-source')).toBe(scoping)
+    await expect(predecessor.getAttribute('data-request-episode')).toBe(scopingEpisode)
+  },
+}
 export const BranchLight: Story = { args: { scheme: 'light' }, play: branchPlay }
 export const BranchNarrow: Story = { args: { viewport: 390 }, play: branchPlay }
 export const BranchNarrowLight: Story = { args: { viewport: 390, scheme: 'light' }, play: branchPlay }
