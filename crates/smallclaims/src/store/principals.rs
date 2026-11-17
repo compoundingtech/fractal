@@ -1333,6 +1333,23 @@ impl Store {
         }))
     }
 
+    /// Read the issuer of pairing's held person-root grant without minting any keys.
+    pub fn person_root_issuer(&self, person: &str) -> Result<Option<(String, String)>, FractalError> {
+        if Family::of(person) != Some(Family::Person) {
+            return Ok(None);
+        }
+        let Some(root) = self.held_root(person) else {
+            return Ok(None);
+        };
+        let Some(id) = root.chain.first() else {
+            return Ok(None);
+        };
+        let claim = self.claim_by_id(id).map_err(internal)?;
+        Ok(claim
+            .and_then(|claim| claim.body.get("fields").and_then(KeyGrant::from_fields))
+            .map(|grant| (grant.issuer, grant.issuer_key)))
+    }
+
     /// Sign a device-renewal offer with the person's local root.
     pub fn sign_device_renewal_offer(&self, person: &str, tuple: &Value) -> Result<String, FractalError> {
         self.person_root_grant(person)?;
