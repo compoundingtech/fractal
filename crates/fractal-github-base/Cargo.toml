@@ -11,6 +11,7 @@ test-support = ["fractal-secrets/test-support", "dep:parking_lot"]
 
 [dependencies]
 fractal-secrets = { path = "../fractal-secrets" }
+fractal-schema = { path = "../fractal-schema" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
