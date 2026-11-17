@@ -191,7 +191,7 @@ github-source "example" {{
         let second = append(&store, commit.subject().unwrap(), COMMIT_KIND, &commit);
         assert!(capture_replay(&store, state.path(), "example", None, 128).unwrap().is_none());
         assert!(capture_replay(&store, state.path(), "example", None, 128).unwrap().is_none());
-        store.import_replication("delayed", &delayed.export_replication(0).unwrap()).unwrap();
+        store.import_replication("node", &delayed.export_replication(0).unwrap()).unwrap();
         let page = capture_replay(&store, state.path(), "example", None, 128).unwrap().unwrap();
         assert_eq!(page.through_sequence, 2);
         assert_eq!(page.frontier.as_deref(), Some(second.id.as_str()));
