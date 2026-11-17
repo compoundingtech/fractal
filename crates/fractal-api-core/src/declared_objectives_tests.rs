@@ -1015,3 +1015,14 @@ objective "example/latency" {
     assert!(store.operational_failure("slo-objective/node/example/latency").unwrap().is_some());
     assert_eq!(check(&store, &evaluated).unwrap().opened, 0);
 }
+
+#[test]
+fn known_ratio_source_without_recent_events_is_not_missing_source_data() {
+    let store = store_with(&numeric_declaration("ratio", ""));
+    assert_eq!(evaluate(&store)["example/quality"]["status"], "no-data");
+    claim(&store, "good", "custom.acme.reading", json!({"observed_at": *NOW - MINUTE, "value": 1}));
+    claim(&store, "invalid", "custom.acme.reading", json!({"observed_at": *NOW - MINUTE, "value": "invalid"}));
+    assert_eq!(evaluate(&store)["example/quality"]["status"], "no-data");
+    let later = rows(&store, *NOW + 31 * 24 * 60 * MINUTE, &[]).unwrap();
+    assert_eq!(later[0]["status"], "no-qualifying-events");
+}

@@ -133,6 +133,8 @@ impl Tracked {
         };
         let value = fields.and_then(|fields| fields.get(field)).and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok())).filter(|value| value.is_finite());
         if value.is_none() { self.unreadable += 1; }
+        // Preserve source discovery independently of bounded observation retention.
+        self.seen |= value.is_some();
         let kept = kept_fields(labels, excludes, only, fields);
         let eligible = holds(only, &kept) && !excludes.iter().any(|exclude| kept.get(&exclude.field).is_some_and(|value| exclude.values.contains(value)));
         let observation = Observation { id: claim.id.clone(), value, fields: kept, eligible };
@@ -186,7 +188,7 @@ impl Tracked {
         };
         let fast = pair("fast", &policy.fast);
         let slow = pair("slow", &policy.slow);
-        let empty_status = if self.numeric.sources.is_empty() || gauge.is_some() || horizon.unknown > 0 || self.unreadable > 0 { "no-data" } else { "no-qualifying-events" };
+        let empty_status = if gauge.is_some() || horizon.unknown > 0 || (!self.seen && horizon.excluded == 0) { "no-data" } else { "no-qualifying-events" };
         let (status, remaining) = classify_budget(policy, evidence(&horizon), fast.0, slow.0, empty_status);
         let id = group.map_or_else(|| objective.name.clone(), |(label, value)| format!("{}{{{label}={value}}}", objective.name));
         let current = if gauge.is_some() {
