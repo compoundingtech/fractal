@@ -969,7 +969,7 @@ mod tests {
         ]);
         let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(vec![
             Ok(success(&rows.to_string())),
-            Ok(success(&format!("{}\n\n{gone}", properties("fractal.service")))),
+            Ok(success(&format!("{}\n{gone}", properties("fractal.service")))),
         ]));
         let snapshot = monitor.snapshot().unwrap();
         let unit = &snapshot.units["st3-work.scope"];
