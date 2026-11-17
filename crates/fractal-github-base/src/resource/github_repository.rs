@@ -1817,19 +1817,29 @@ async fn observe_poll(
             ).await;
         }
     }
+    // History shares this observer's authenticated acquisition budget and deadline,
+    // but never its operational facts: replay must not wake old watch events.
+    let capture_delay = if let Some(ledger) = request.github_capture.as_deref() {
+        let repository = format!("{}/{}", current_location.0, current_location.1);
+        let progress = ledger.step(api_base, &repository, token).await?;
+        progress.continue_after_ms.filter(|_| progress.active)
+    } else {
+        None
+    };
     // Once either listing exhausts its reconciliation burst, throttle the observation,
     // including pagination in the other listing. Keep every frozen watermark and cursor.
     let reconcile_backoff = [&cursor.items_scan, &cursor.comments_scan].into_iter()
         .flatten().any(|scan| scan.unstable_sweeps >= IMMEDIATE_RECONCILIATION_SWEEPS);
+    let normal_delay = if more && !reconcile_backoff {
+        super::PROVIDER_CONTINUE_MS
+    } else {
+        300_000
+    };
+    let delay = capture_delay.map_or(normal_delay, |delay| normal_delay.min(u128::from(delay)));
     Ok(ProviderObservation {
         facts: Value::Object(facts),
         cursor: Some(serde_json::to_string(&cursor)?),
-        // Large listings continue immediately only while the reconciliation burst permits it.
-        next_check_unix_ms: now_ms().saturating_add(if more && !reconcile_backoff {
-            super::PROVIDER_CONTINUE_MS
-        } else {
-            300_000
-        }),
+        next_check_unix_ms: now_ms().saturating_add(delay),
     })
 }
 
@@ -2227,6 +2237,7 @@ mod tests {
             refresh: false,
             webhook_covered: false,
             workflow_runs: None,
+            github_capture: None,
         }
     }
 
