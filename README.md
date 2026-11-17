@@ -77,7 +77,7 @@ For this repository, **PR proof is hosted CI at the exact head**. Agents must no
 skip all local evidence work, including for agents with listed signers, and record `hosted_proof`.
 It is repository policy, not a per-push `ST_EVIDENCE_LOCAL=off` bypass. The public-content guard still blocks unsafe pushes.
 Policy is read from the base, preferring `.fractal/prepush-policy.json` when present; candidate policy cannot enable it.
-Malformed or non-object policy and unknown `pr-proof` values print a diagnostic and retain the default local evidence flow.
+Unreadable, malformed or non-object policy and unknown `pr-proof` values print a diagnostic and retain the default local evidence flow.
 
 The local pre-signing flow below applies only where accepted policy does not select hosted proof:
 

@@ -153,29 +153,31 @@ def config_path(base, name):
 
 def hosted_proof(base):
     """Only accepted base policy can select hosted proof; absent policy keeps the local flow."""
-    path = config_path(base, 'prepush-policy.json')
-    probe = git('ls-tree', '--full-tree', '-z', base, '--', path)
-    if probe.returncode != 0:
-        raise RuntimeError(f'cannot inspect accepted pre-push policy at {base}')
-    if not probe.stdout:
-        return False
-    policy = git('show', f'{base}:{path}')
-    if policy.returncode != 0:
-        raise RuntimeError(f'cannot read accepted pre-push policy at {base}')
     try:
-        setting = json.loads(policy.stdout)
-    except ValueError:
-        say(f'{base}:{path}: invalid JSON; using the default local evidence flow')
+        path = config_path(base, 'prepush-policy.json')
+        probe = git('ls-tree', '--full-tree', '-z', base, '--', path)
+        if probe.returncode != 0:
+            raise RuntimeError('cannot inspect accepted pre-push policy')
+        if not probe.stdout:
+            return False
+        policy = git('show', f'{base}:{path}')
+        if policy.returncode != 0:
+            raise RuntimeError(f'cannot read accepted pre-push policy {path}')
+        try:
+            setting = json.loads(policy.stdout)
+        except ValueError:
+            raise ValueError(f'{path}: invalid JSON') from None
+        if not isinstance(setting, dict):
+            raise ValueError(f'{path}: expected a JSON object')
+        if 'pr-proof' not in setting:
+            return False
+        if setting['pr-proof'] != 'hosted':
+            raise ValueError(f'{path}: unknown pr-proof value {setting["pr-proof"]!r}')
+        return True
+    except Exception as error:
+        # Policy lookup must never reach main's non-blocking signing-error handler.
+        say(f'{base}:{error}; using the default local evidence flow')
         return False
-    if not isinstance(setting, dict):
-        say(f'{base}:{path}: expected a JSON object; using the default local evidence flow')
-        return False
-    if 'pr-proof' not in setting:
-        return False
-    if setting['pr-proof'] != 'hosted':
-        say(f'{base}:{path}: unknown pr-proof value {setting["pr-proof"]!r}; using the default local evidence flow')
-        return False
-    return True
 
 
 def positive(name, default):

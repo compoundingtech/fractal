@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """The pre-push hook and its installer, through real `git push`es to a bare remote, with a stub fractal-test."""
+from contextlib import redirect_stderr
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -862,6 +867,58 @@ class Hook(unittest.TestCase):
             done = subprocess.run(['bash', str(self.work / 'scripts/install-git-hooks')], capture_output=True, text=True,
                                   env=dict(self.env(), **{name: 'true'}), cwd=self.work)
             self.assertEqual((done.returncode, done.stdout, hook.exists()), (0, '', False), name)
+
+
+class PolicyLookupFailures(unittest.TestCase):
+    def test_unreadable_policy_and_lookup_exceptions_preserve_agent_refusal(self):
+        loader = importlib.machinery.SourceFileLoader('prepush_policy', str(ROOT / 'scripts/evidence-prepush'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        head, tree = 'a' * 40, 'b' * 40
+        for failure in ('layout_probe', 'policy_probe', 'unreadable_blob', 'lookup_exception'):
+            with self.subTest(failure):
+                probes = 0
+
+                def git_fixture(*args):
+                    nonlocal probes
+                    stdout, code = '', 0
+                    if args == ('rev-parse', 'HEAD'):
+                        stdout = head
+                    elif args == ('rev-parse', '--show-toplevel'):
+                        stdout = str(ROOT)
+                    elif args == ('rev-parse', 'HEAD^{tree}'):
+                        stdout = tree
+                    elif args == ('remote',):
+                        stdout = 'origin'
+                    elif args[0] == 'ls-tree':
+                        probes += 1
+                        if failure == 'lookup_exception':
+                            raise OSError('policy lookup unavailable')
+                        code = int((failure == 'layout_probe' and probes == 1)
+                                   or (failure == 'policy_probe' and probes == 2))
+                        stdout = '100644 blob fixture\t.fractal/prepush-policy.json'
+                    elif args[0] == 'show':
+                        code = 1  # Fixture: the selected policy blob is unavailable.
+                    else:
+                        self.fail(f'unexpected git call: {args}')
+                    return subprocess.CompletedProcess(args, code, stdout, '')
+
+                status = subprocess.CompletedProcess([], 3, Hook.UNCOVERED, '')
+                errors = io.StringIO()
+                with patch.dict(os.environ, {'ST_AGENT': 'agent/some/seat'}, clear=True), \
+                        patch.object(module, 'git', side_effect=git_fixture), \
+                        patch.object(module, 'has_signer', return_value=True), \
+                        patch.object(module, 'signer_listed', return_value=True), \
+                        patch.object(module, 'receipt') as receipt, \
+                        patch.object(module.subprocess, 'run', return_value=status) as run, \
+                        patch.object(sys, 'stdin', io.StringIO(f'refs/heads/feature {head} refs/heads/feature {"0" * 40}\n')), \
+                        redirect_stderr(errors):
+                    self.assertEqual(module.hook(['origin']), module.REFUSED)
+                self.assertEqual(errors.getvalue().count('using the default local evidence flow'), 1)
+                receipt.assert_called_once_with(tree, ['refs/heads/feature'], 'refused',
+                                                uncovered=['linux-gate', 'mail-redelivery-canaries'])
+                self.assertEqual(run.call_count, 1)
+                self.assertIn('--status', run.call_args.args[0])
 
 
 if __name__ == '__main__':
