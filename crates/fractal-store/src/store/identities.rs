@@ -417,8 +417,8 @@ fn validate_request(kind: IdentityKind, request: &RenameRequest) -> Result<(), F
 }
 
 /// One admission gate for both PLAN and the writer's commit-time check.
-fn rename_admission(connection: &Connection, kind: IdentityKind, request: &RenameRequest,
-    source: &ResolvedIdentity, declaration: &str, origin: &str, peers: &[String], schema_digest: &str,
+fn rename_admission(connection: &Connection, store: &Store, kind: IdentityKind, request: &RenameRequest,
+    source: &ResolvedIdentity, declaration: &str, peers: &[String],
 ) -> Result<(), FractalError> {
     let current = resolve_identity_conn(connection, kind, &request.from)?;
     retired_source(connection, kind, &current.identity)?;
@@ -429,8 +429,8 @@ fn rename_admission(connection: &Connection, kind: IdentityKind, request: &Renam
         return Err(unavailable(&source.identity, "stale-revision"));
     }
     occupied(connection, kind, &current, &request.to)?;
-    owner_admission(connection, kind, &source.identity, &token, origin)?;
-    check_fleet_registry_conn(connection, origin, peers, schema_digest)
+    owner_admission(connection, kind, &source.identity, &token, store.origin())?;
+    check_fleet_registry_conn(connection, store.origin(), peers, &store.fractal.schema_digest())
 }
 
 fn receipt(claim: &ClaimRecord, request: &RenameRequest, already: bool) -> RenameReceipt {
@@ -490,8 +490,8 @@ impl IdentityStore for Store {
         };
         input.fields.retain(|_, value| !value.is_null());
         self.graph.ensure_principal_key(&actor)?;
-        let admission = |connection: &Connection| rename_admission(connection, kind, request,
-            &source, &declaration, self.origin(), peers, &self.fractal.schema_digest());
+        let admission = |connection: &Connection| rename_admission(connection, self, kind, request,
+            &source, &declaration, peers);
         let (claim, created) = append_claim_with_commit_context(&self.graph, &input, None, None, None, None,
             ClaimCommitContext { admission: Some(&admission), identity_writer: true, ..Default::default() })?;
         if !created { check_receipt(&self.readers.get(), &claim)?; }

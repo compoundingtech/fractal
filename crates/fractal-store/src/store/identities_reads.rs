@@ -34,7 +34,7 @@ pub(super) fn plan(store: &Store, kind: IdentityKind, request: &RenameRequest, p
         plan.declaration = declaration_token(&snapshot, kind, &source.identity)?;
         let declaration = plan.declaration.as_deref().ok_or_else(|| unavailable(&source.identity, "missing"))?;
         resolve_reference_conn(&snapshot, &request.actor)?;
-        rename_admission(&snapshot, kind, request, &source, declaration, store.origin(), peers, &store.fractal.schema_digest())
+        rename_admission(&snapshot, store, kind, request, &source, declaration, peers)
     })();
     match admission {
         Ok(()) => plan.admissible = true,
