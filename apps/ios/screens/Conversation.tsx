@@ -20,6 +20,7 @@ import { tokenColor, type ConversationRules } from '../conversationStyle';
 import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
 import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
+import { ConversationComposer } from '../conversationComposer';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport } from '../visibleConversationImages';
@@ -504,8 +505,12 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
         <Button label="done" color={theme.subtext0} onPress={() => void finishListening('edit')} />
         <Button label="send" disabled={!canSend} onPress={() => void finishListening('send')} />
       </View>
-    </View> : agent ? <View>
-    {images.length || imageIssue ? <View style={[styles.tray, bar]}>
+    </View> : agent ? <ConversationComposer
+      text={draft} onChange={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
+      label={`Message ${title}`} inputRef={box} enabled canSend={canSend && !sizeInfo.over && (!!draft.trim() || !!images.length)}
+      onSend={() => void send()} sendLabel="send" sendStyle={styles.send}
+      style={[styles.composer, bar, { paddingBottom: bottom }]} inputStyle={[styles.input, canDictate ? { paddingRight: 36 } : null]}
+      before={images.length || imageIssue ? <View style={[styles.tray, bar]}>
       {images.map(image => <View key={image.key}>
         <Image source={{ uri: `data:${image.mediaType};base64,${image.base64}` }} style={[styles.thumb, { backgroundColor: palette.surface0 }]} accessibilityLabel={image.name ?? 'image to send'} />
         <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${image.name ?? 'image'}`} hitSlop={8} onPress={() => setImages(previous => previous.filter(other => other.key !== image.key))} style={[styles.unthumb, { backgroundColor: palette.surface1 }]}><T bold color={theme.text}>✕</T></Pressable>
@@ -513,30 +518,14 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       </View>)}
       {imageIssue ? <T color={theme.waiting} style={{ flex: 1 }}>{imageIssue}</T> : null}
     </View> : null}
-    {sendIssue || sizeInfo.note ? <View style={[styles.tray, bar]} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
-    <View style={[styles.composer, bar, { paddingBottom: bottom }]}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
+      status={sendIssue || sizeInfo.note ? <View style={[styles.tray, bar]} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
+      leading={<Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
         <T color={images.length >= MAX_IMAGES ? theme.overlay0 : theme.accent} style={{ fontSize: 18 }}>＋</T>
-      </Pressable>
-      {/* The microphone sits inside the box, at its right edge, over the text's padding. */}
-      <View style={{ flex: 1 }}>
-        <Field
-          ref={box}
-          value={draft}
-          onChangeText={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
-          placeholder={`Message ${title}`}
-          multiline
-          style={[styles.input, canDictate ? { paddingRight: 36 } : null]}
-          editable
-          accessibilityLabel={`Message ${title}`}
-        />
-        {canDictate ? <Pressable accessibilityRole="button" accessibilityLabel="Dictate a message" hitSlop={8} onPress={() => void listen()} style={styles.mic}>
-          <T style={{ fontSize: 17 }}>🎙</T>
-        </Pressable> : null}
-      </View>
-      <Button label="send" disabled={!canSend || sizeInfo.over || (!draft.trim() && !images.length)} onPress={() => void send()} style={styles.send} />
-    </View>
-    </View> : session ? <View style={[styles.composer, bar, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null}
+      </Pressable>}
+      inputAdornment={canDictate ? <Pressable accessibilityRole="button" accessibilityLabel="Dictate a message" hitSlop={8} onPress={() => void listen()} style={styles.mic}>
+        <T style={{ fontSize: 17 }}>🎙</T>
+      </Pressable> : null}
+    /> : session ? <View style={[styles.composer, bar, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null}
   </KeyboardAvoidingView>;
 }
 

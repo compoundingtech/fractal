@@ -46,6 +46,7 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   const exports = {};
   // Components rendered as children stay inspectable without mounting a second hook scope.
   dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', RequestHistory: 'RequestHistory', threadClock, threadExactTime, threadRelativeTime,
+    ConversationComposer: props => compile('ConversationComposer', undefined, { View: 'View', Field: 'Field', Button: 'Button' }, './conversationComposer.tsx')(props),
     HistoryStart: 'HistoryStart', StartRecipientPreview: 'StartRecipientPreview', ThreadStartContextReader: ReadyStartContext,
     Clipboard: { setStringAsync: async () => {} }, useMemo: create => create(), useEffect() {}, useFocusEffect() {}, useCallback: callback => callback,
     threadStartAttemptScope: attemptScope,

@@ -1,3 +1,4 @@
+import { ConversationComposer } from '../conversationComposer';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type Ref } from 'react';
 import * as Crypto from 'expo-crypto';
 import * as Clipboard from 'expo-clipboard';
@@ -1175,12 +1176,9 @@ function ThreadComposeField({ contextualTitle, inputRef, rowRef, onReveal, text,
   contextualTitle?: string; inputRef?: Ref<TextInput>; rowRef?: Ref<View>; onReveal?: () => void; text: string; onChange: (text: string) => void; onSend: () => void;
   onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean;
 }) {
-  const label = contextualTitle ? `Message ${contextualTitle}` : 'Message thread';
-  return <View ref={rowRef} onLayout={onReveal} style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
-    {/* iOS appends the placeholder to the label only while empty; keep one name in both states. */}
-    <Field ref={inputRef} onFocus={onReveal} accessibilityLabel={text.length ? label : undefined} placeholder={label} value={text} editable={enabled}
-      onChangeText={onChange} multiline autoFocus={autoFocus} style={{ flex: 1 }} />
-    <Button label="Send" accessibilityLabel={contextualTitle ? `Send reply to ${contextualTitle}` : undefined} disabled={!enabled || !canSend} onPress={onSend} />
-    {onCancel ? <Button label="Cancel" disabled={!enabled} onPress={onCancel} /> : null}
-  </View>;
+  return ConversationComposer({
+    text, onChange, onSend, inputRef, rowRef, onReveal, enabled, canSend, autoFocus, onCancel,
+    label: contextualTitle ? `Message ${contextualTitle}` : 'Message thread',
+    sendAccessibilityLabel: contextualTitle ? `Send reply to ${contextualTitle}` : undefined,
+  });
 }

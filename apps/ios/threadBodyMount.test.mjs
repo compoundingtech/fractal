@@ -54,6 +54,7 @@ function compile(file, name, next, dependencies) {
   const a = text.search(new RegExp(`function ${name}(?=[(<])`));
   const b = next === null ? text.length : text.indexOf(`\n${next}`, a);
   assert.ok(a >= 0 && b > a, `${name} in ${file}`);
+  dependencies = { ConversationComposer: props => compile('./conversationComposer.tsx', 'ConversationComposer', null, dependencies)(props), ...dependencies };
   const { outputText } = ts.transpileModule(`${text.slice(a, b)}\nexports.value = ${name};`, { compilerOptions });
   const exports = {};
   new Function('exports', 'React', ...Object.keys(dependencies), outputText)(exports, React, ...Object.values(dependencies));
