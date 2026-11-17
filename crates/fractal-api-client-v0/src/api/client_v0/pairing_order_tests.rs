@@ -502,3 +502,84 @@ async fn keyed_person_pairing_survives_reopening_the_same_daemon_state() {
     assert_eq!(completed["kind"], "paired-session");
     assert_eq!(completed["person_id"], PERSON);
 }
+
+async fn issuer_capabilities(state: &AppState, request: Request<Body>, fabric: bool) -> Value {
+    use tower::ServiceExt as _;
+    let app = if fabric {
+        crate::api::fabric_router(state.clone())
+    } else {
+        crate::api::router(state.clone())
+    };
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice::<Value>(&bytes).unwrap()["value"].clone()
+}
+
+#[tokio::test]
+async fn capabilities_issuer_matches_pairing_root_and_survives_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "capabilities-issuer");
+    let node_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    state.store.set_node_key(node_key.clone()).unwrap();
+    state.store.use_key_directory(&root.path().join("keys")).unwrap();
+    let challenge = begin_person(&state).await;
+    let paired = finish_person(&state, &challenge, challenge["code"].as_str().unwrap())
+        .await.unwrap().0;
+    let proof = &paired["person_root_key_proof"];
+    let issuer = proof["body"]["fields"]["issuer"].clone();
+    let issuer_key = proof["body"]["fields"]["issuer_key"].clone();
+    assert!(issuer.as_str().unwrap().starts_with("host/"));
+    assert_eq!(issuer, proof["signature"]["signer"]);
+    assert_eq!(issuer_key, proof["signature"]["key"]);
+    let request = || Request::builder().uri("/v1/client/capabilities")
+        .header(AUTHORIZATION, format!("Bearer {}", paired["credential"].as_str().unwrap()))
+        .body(Body::empty()).unwrap();
+    let capabilities = issuer_capabilities(&state, request(), true).await;
+    assert_eq!(capabilities["issuer"], issuer);
+    assert_eq!(capabilities["issuer_key"], issuer_key);
+    drop(state);
+    let reopened = super::tests::test_state_named(root.path(), "capabilities-issuer");
+    reopened.store.set_node_key(node_key).unwrap();
+    reopened.store.use_key_directory(&root.path().join("keys")).unwrap();
+    let capabilities = issuer_capabilities(&reopened, request(), true).await;
+    assert_eq!(capabilities["issuer"], issuer);
+    assert_eq!(capabilities["issuer_key"], issuer_key);
+}
+
+#[tokio::test]
+async fn capabilities_issuer_is_absent_for_agent_session() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "capabilities-agent");
+    let request = Request::builder().uri("/v1/client/capabilities")
+        .header(LOCAL_PERSON_HEADER, "agent/capabilities-reader")
+        .body(Body::empty()).unwrap();
+    let capabilities = issuer_capabilities(&state, request, false).await;
+    assert_eq!(capabilities["session_actor"], "agent/capabilities-reader");
+    assert!(capabilities.get("issuer").is_none());
+    assert!(capabilities.get("issuer_key").is_none());
+}
+
+#[tokio::test]
+async fn capabilities_without_person_root_never_writes_or_mints_keys() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "capabilities-rootless");
+    state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    state.store.use_key_directory(&root.path().join("keys")).unwrap();
+    let counts = || {
+        let connection = state.store.readers.get();
+        let claims: u64 = connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0)).unwrap();
+        let keys: u64 = connection.query_row("SELECT COUNT(*) FROM held_keys", [], |row| row.get(0)).unwrap();
+        (claims, keys)
+    };
+    let before = counts();
+    assert_eq!(state.store.person_root_issuer(PERSON).unwrap(), None);
+    let request = Request::builder().uri("/v1/client/capabilities")
+        .header(LOCAL_PERSON_HEADER, PERSON).body(Body::empty()).unwrap();
+    let capabilities = issuer_capabilities(&state, request, false).await;
+    assert_eq!(capabilities["session_actor"], PERSON);
+    assert!(capabilities.get("issuer").is_none());
+    assert!(capabilities.get("issuer_key").is_none());
+    assert_eq!(counts(), before, "GET must not append claims or hold any new keys");
+    assert_eq!(state.store.person_root_issuer(PERSON).unwrap(), None);
+}

@@ -74,6 +74,13 @@ storage adapter, startup worker, signing service, or server reconciliation endpo
   Dispatch-marked nonterminal records become unknown even if a crash happened
   before the socket call. Persist changed restoration/observation records by
   revision CAS. Definitive delivery and unambiguous nonapplication remain terminal.
+- Repository `list()` returns tagged `OutboxEntry` values: `{ _tag: 'record', record }`
+  or `{ _tag: 'corrupt', id, revision? }`. Restore the list with
+  `restoreOutboxEntries`; it applies normal restoration only to valid records and
+  preserves every corrupt entry as persistent unknown recovery, never a fabricated
+  record. Display **storage damaged; delivery unknown** and offer only explicit
+  Discard. Copy is unavailable without trustworthy content; Send/Retry and automatic
+  expiry are never allowed. The reference memory repository lists only record entries.
 - `prepareMessageSendPacket`, `prepareThreadStartPacket`, and
   `prepareThreadReplyPacket` return complete serializable action POST bodies.
   Supply the original ID, key, fence and all prepared parameters; persist the

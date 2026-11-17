@@ -25,7 +25,7 @@ export const createMemoryOutboxRepository = <TPacket>(scope: OutboxScope): Outbo
       return true;
     },
     async list() {
-      return structuredClone([...records.values()]);
+      return [...records.values()].map(record => ({ _tag: 'record' as const, record: structuredClone(record) }));
     },
     async read(id) {
       const record = records.get(id);

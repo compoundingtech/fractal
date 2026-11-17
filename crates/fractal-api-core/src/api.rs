@@ -2808,17 +2808,18 @@ pub async fn client_capabilities(
     let store = state.store.clone();
     let capability_state = state.clone();
     let capability_session = session.clone();
-    let (oldest, newest, capabilities) = blocking_store(move || {
+    let (oldest, newest, capabilities, person_root_issuer) = blocking_store(move || {
         // No further than the published index, as an event page (`read_event_page`).
         let through = store.index()?;
         let (oldest, newest) = store.read_snapshot(|_| store.event_bounds())?;
-        Ok((oldest, newest.min(through), client_v0::capabilities(&capability_state, &capability_session)))
+        let issuer = store.person_root_issuer(&capability_session.authority_actor)?;
+        Ok((oldest, newest.min(through), client_v0::capabilities(&capability_state, &capability_session), issuer))
     }).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
-    Ok(Json(json!({
+    let mut response = json!({
         "kind": "capabilities",
         "machine_version": fractal_drivers::version::machine_version(),
         "session_actor": session.actor,
@@ -2851,7 +2852,12 @@ pub async fn client_capabilities(
             "../client-v0/schemas/client-v0.schema.json",
             "../client-v0/schemas/operations.json"
         ]
-    })))
+    });
+    if let Some((issuer, issuer_key)) = person_root_issuer {
+        response["issuer"] = json!(issuer);
+        response["issuer_key"] = json!(issuer_key);
+    }
+    Ok(Json(response))
 }
 
 pub fn client_work_resources(
