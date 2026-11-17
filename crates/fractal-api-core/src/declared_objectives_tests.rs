@@ -1026,3 +1026,30 @@ fn known_ratio_source_without_recent_events_is_not_missing_source_data() {
     let later = rows(&store, *NOW + 31 * 24 * 60 * MINUTE, &[]).unwrap();
     assert_eq!(later[0]["status"], "no-qualifying-events");
 }
+
+#[test]
+fn native_root_binding_keeps_independent_child_identities_and_prefix_boundaries() {
+    let store = store_with(r#"version 2
+objective "example/transactions" {
+  about "Transaction owner"
+  indicator "native" { objective "transaction"; }
+  on-breach "fault" owner="agent/other.ops" condition="transaction-burn"
+}
+"#);
+    with_owner(&store, "other");
+    let native: Vec<Value> = ["transaction/read", "transaction/write", "transaction/writer-hold", "transactions/unrelated"]
+        .into_iter().map(|id| json!({
+            "id": id, "kind": "objective", "about": "Native source",
+            "target": "1% bad events", "current": "paired burn", "window": "30d",
+            "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+        })).collect();
+    let evaluated = rows(&store, *NOW, &native).unwrap();
+    assert_eq!(evaluated.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>(), [
+        "example/transactions/read", "example/transactions/write", "example/transactions/writer-hold",
+    ]);
+    assert_eq!(check(&store, &evaluated).unwrap().opened, 3);
+    assert_eq!(check(&store, &evaluated).unwrap().opened, 0);
+    // A child that disappears from the source ends only its own member-local episode.
+    let remaining = rows(&store, *NOW, &native[..2]).unwrap();
+    assert_eq!(check(&store, &remaining).unwrap().recovered, 1);
+}
