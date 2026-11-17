@@ -66,7 +66,20 @@ mission "example/report" state="ready" {
 
     fn program() -> Self {
         let mut fixture = Self::new();
-        let step = fixture.state.store.start_program_step_for_tests();
+        fixture.state.store.apply_internal(&parse_intent(r#"version 2
+mission "program-report" state="ready" {
+  goal "Send one program report."
+  authority { write "message/*"; }
+  step "program" { agentless }
+}
+"#, "origin").unwrap(), "declare-program-report").unwrap();
+        let created = fixture.state.store.create_mission_run(&MissionRunRequest {
+            mission: "program-report".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/example".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "program-report-run".into(),
+        }).unwrap();
+        let step = created.steps[0].clone();
+        fixture.state.store.set_step_run_state_for_tests(&step.subject, "working", 1);
         let run = fixture.state.store.mission_run(&step.run).unwrap().unwrap();
         fixture.request.from = run.subject;
         fixture.request.idempotency_key = "program-report-ready".into();
