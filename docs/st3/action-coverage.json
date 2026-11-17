@@ -3580,6 +3580,14 @@
       "verification": "device-local route preference; no daemon mutation, restart fence not applicable"
     },
     {
+      "action": "ThreadReading",
+      "tests": [
+        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_keeps_pre_palette_visible_anchor_evidence",
+        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_keeps_explicit_clear_available_with_no_visible_body"
+      ],
+      "verification": "real palette Enter dispatch queues MarkUnread at the pre-menu visible anchor or ClearUnread for exactly the observed reminders without reading unseen history"
+    },
+    {
       "action": "Name",
       "tests": [
         "crates/fractal-tui/src/ui/glass.rs::what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that",
