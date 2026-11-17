@@ -458,3 +458,16 @@ seeded random stream, so an older corpus's exact trim set is not transferable.
 The v34 filename is used in diagnostics as well as the audit summary.
 For a wider characterization, use a fresh `CONVERGENCE_REPORT_DIR` and the existing
 `fixed_sweep` workflow above; retain the source and binary hashes with its outcomes.
+
+`claims-v35.json` adds the durable `resource.exec-receipt` schema. Versions 1 through 34
+remain byte-identical. It is the official `claims_json` generator output produced under
+admitted capacity (receipt `1475150:88192935`), with SHA-256
+`ba9a0a13be02824369b77e5c0f7ff76f0107fe382e3f73de0777d6053221d86a`.
+Regenerate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v35.json`;
+do not hand-edit the snapshot.
+
+In [hosted run 44158892426](https://github.com/compoundingtech/fractal/actions/runs/44158892426),
+seed 2 converged and trimmed an initial checkpoint with this corpus, so v34's non-trimming
+expectation for seed 2 no longer applies. The v35 never-trim set is `[179]`; exact per-seed
+equality, continuation after excusing the old build, and majority trim coverage remain enforced.
