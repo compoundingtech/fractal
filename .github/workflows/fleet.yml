@@ -4860,6 +4860,7 @@ jobs:
               "docs/st3/client-v0/fixtures/github-plugin-run.json",
               "docs/st3/client-v0/fixtures/github-plugin-stale.json",
               "docs/st3/client-v0/fixtures/github-plugin-unavailable.json",
+              "docs/st3/client-v0/fixtures/thread-start-refusals.json",
               "fixtures/clients/transcripts/wakes.json",
               "apps/fractal-web/src/web/index.html",
               "clients/typescript/fractal-scenarios/**",
