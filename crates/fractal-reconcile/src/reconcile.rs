@@ -768,6 +768,7 @@ fn member_environment_from(
             crate::environment::remove_aliases(&mut inherited, name);
         }
     }
+    crate::environment::remove_aliases(&mut inherited, "ST3_INCARNATION");
     let mut environment = crate::environment::overlay(inherited, declared, executable)?;
     // Incarnation is runtime authority, never an inherited or declared launch input.
     crate::environment::remove_aliases(&mut environment, "ST3_INCARNATION");
@@ -828,19 +829,31 @@ fn local_process_is_alive(_pid: u32) -> bool {
 }
 
 impl NativeRuntime {
-    fn snapshot_pty_registry(&self, include_provenance: bool) -> Result<PtyRegistrySnapshot> {
+    fn launch_is_held(&self, operation: Option<&str>) -> Result<bool> {
+        operation.map(|operation| self.launch_gate_root.join(operation).try_exists())
+            .transpose().map(|held| held.unwrap_or(false)).map_err(Into::into)
+    }
+    fn snapshot_pty_registry(&self, include_provenance: bool, physical_start: bool) -> Result<PtyRegistrySnapshot> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
         self.pty()?.protect_servers(&observations)?;
         let mut start_operations = HashMap::new();
         let observations = observations
             .into_iter()
-            .map(|item| {
+            .map(|item| -> Result<_> {
                 let incarnation_id = match (&item.pid, &item.created_at) {
                     (Some(pid), Some(created)) => Some(format!("{pid}:{created}")),
                     _ => None,
                 };
-                let status = observed_pty_status(&item);
+                // Ordinary observation cannot publish a held command around the
+                // launch writer fence. Only observe_start may inspect it as running.
+                let status = if !physical_start
+                    && self.launch_is_held(item.tags.get(start_jobs::OPERATION_TAG).map(String::as_str))?
+                {
+                    "starting".into()
+                } else {
+                    observed_pty_status(&item)
+                };
                 if include_provenance
                     && let Some(incarnation) = &incarnation_id
                     && let Some(operation) = item.tags.get(start_jobs::OPERATION_TAG)
@@ -850,30 +863,69 @@ impl NativeRuntime {
                         (incarnation.clone(), operation.clone()),
                     );
                 }
-                RuntimeObservation {
+                Ok(RuntimeObservation {
                     runtime_id: item.name,
                     terminal: true,
                     status,
                     exit_code: item.exit_code,
                     incarnation_id,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
+    fn observe_native_exec(&self, runtime_id: &str, physical_start: bool) -> Result<Option<RuntimeObservation>> {
+        self
+            .exec
+            .observe(runtime_id)?
+            .map(|observation| Ok(match observation {
+                fractal_runtime::ExecObservation::Running(generation) => RuntimeObservation {
+                    runtime_id: runtime_id.into(),
+                    terminal: false,
+                    status: if !physical_start && self.launch_is_held(generation.start_operation.as_deref())? {
+                        "starting".into()
+                    } else {
+                        "running".into()
+                    },
+                    exit_code: None,
+                    incarnation_id: Some(generation.generation_id),
+                },
+                fractal_runtime::ExecObservation::Exited(generation) => RuntimeObservation {
+                    runtime_id: runtime_id.into(),
+                    terminal: false,
+                    status: "exited".into(),
+                    exit_code: generation.exit_code.map(i64::from),
+                    incarnation_id: Some(generation.generation_id),
+                },
+                fractal_runtime::ExecObservation::Indeterminate(reason) => RuntimeObservation {
+                    runtime_id: runtime_id.into(),
+                    terminal: false,
+                    status: "indeterminate".into(),
+                    exit_code: None,
+                    incarnation_id: Some(reason),
+                },
+            })).transpose()
     }
 }
 
 impl RuntimeControl for NativeRuntime {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
-        Ok(self.snapshot_pty_registry(false)?.observations)
+        Ok(self.snapshot_pty_registry(false, false)?.observations)
     }
 
     fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
-        self.snapshot_pty_registry(true)
+        self.snapshot_pty_registry(true, false)
     }
 
     fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
         self.pty()?.exit_evidence(runtime_id, incarnation)
+    }
+    fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
+        if member.terminal {
+            return Ok(self.snapshot_pty_registry(false, true)?.observations.into_iter()
+                .find(|item| item.runtime_id == member.runtime_id));
+        }
+        self.observe_native_exec(&member.runtime_id, true)
     }
 
     fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
@@ -915,35 +967,10 @@ impl RuntimeControl for NativeRuntime {
             })
         }
     }
-
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
-        Ok(self
-            .exec
-            .observe(runtime_id)?
-            .map(|observation| match observation {
-                fractal_runtime::ExecObservation::Running(generation) => RuntimeObservation {
-                    runtime_id: runtime_id.into(),
-                    terminal: false,
-                    status: "running".into(),
-                    exit_code: None,
-                    incarnation_id: Some(generation.generation_id),
-                },
-                fractal_runtime::ExecObservation::Exited(generation) => RuntimeObservation {
-                    runtime_id: runtime_id.into(),
-                    terminal: false,
-                    status: "exited".into(),
-                    exit_code: generation.exit_code.map(i64::from),
-                    incarnation_id: Some(generation.generation_id),
-                },
-                fractal_runtime::ExecObservation::Indeterminate(reason) => RuntimeObservation {
-                    runtime_id: runtime_id.into(),
-                    terminal: false,
-                    status: "indeterminate".into(),
-                    exit_code: None,
-                    incarnation_id: Some(reason),
-                },
-            }))
+        self.observe_native_exec(runtime_id, false)
     }
+
 
     fn rollout_exited(&self, runtime_id: &str, terminal: bool, incarnation: &str) -> Result<bool> {
         if !terminal {

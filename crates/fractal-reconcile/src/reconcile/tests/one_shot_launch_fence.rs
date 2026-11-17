@@ -14,6 +14,37 @@ fn member_environment_discards_stale_incarnation_aliases() {
     assert!(!environment.contains_key("FRACTAL_INCARNATION"));
 }
 
+#[test]
+fn native_ordinary_observation_cannot_admit_an_unreleased_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = NativeRuntime::new(root.path(), None, Path::new("unused-pty"));
+    let operation = "held-native-observation";
+    let gate = fractal_runtime::NativeLaunchGate::prepare(&runtime.launch_gate_root, operation).unwrap();
+    // A second gate holds the payload after release, without a timing delay.
+    let payload = fractal_runtime::NativeLaunchGate::prepare(&root.path().join("payload"), "payload").unwrap();
+    let launch = gate.wrap(&payload.wrap(&fractal_runtime::Launch::Shell("exit 0".into())));
+    let environment = BTreeMap::from([
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+        (start_jobs::OPERATION_ENV.into(), operation.into()),
+    ]);
+    let generation = runtime.exec.spawn("held-native", &launch, root.path(), &environment).unwrap();
+    struct Cleanup<'a>(&'a NativeRuntime, &'a str);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            self.0.exec.stop_if("held-native", Some(self.1)).unwrap();
+        }
+    }
+    let _cleanup = Cleanup(&runtime, &generation.generation_id);
+    let ordinary = runtime.observe_exec("held-native").unwrap().unwrap();
+    assert_eq!(ordinary.status, "starting");
+    let physical = runtime.observe_native_exec("held-native", true).unwrap().unwrap();
+    assert_eq!(physical.status, "running");
+    assert_eq!(physical.incarnation_id.as_deref(), Some(generation.generation_id.as_str()));
+    fractal_runtime::LaunchRelease::release(Box::new(gate), &generation.generation_id).unwrap();
+    assert_eq!(runtime.observe_exec("held-native").unwrap().unwrap().status, "running");
+    drop(payload);
+}
+
 #[derive(Clone, Copy)]
 enum Registration {
     Accept,
