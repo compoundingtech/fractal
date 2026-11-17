@@ -153,6 +153,8 @@ or section, switching tabs or pushing another screen releases it; refocus cannot
 restore a cleared row from the previous visit. Owner, pairing/session, client and
 read-grant changes still remove the protected context. A current exact-thread denial
 removes that body; a collection denial releases every selection in that collection.
+A later authorized live window supersedes an earlier HTTP refusal even with unchanged
+membership. It restores the readable collection, not the selections released on denial.
 An accepted inline Start is labeled “Started here”, visibly and for VoiceOver, to
 distinguish it from an existing contextual thread with the same generated title and
 message count. The two placements keep independent collapse controls.

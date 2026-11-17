@@ -421,8 +421,8 @@ test('initial mark and clear deliveries settle from the real unread server recei
 
 // Compile the production collection, exact summary, seek, history and composer together.
 // Only native hosts and transport are ports; no substitute collection/body UI owns retention.
-async function mountMarkedList(harness, initial, { inlineTwin, recentlyClosed = false } = {}) {
-  let summary = initial, listReads = 0, collectionHandlers, listRefused = false, revision = 1;
+async function mountMarkedList(harness, initial, { inlineTwin, recentlyClosed = false, deniedStatus = 403 } = {}) {
+  let summary = initial, listReads = 0, contextReads = 0, collectionHandlers, listRefused = false, revision = 1;
   const summaryHandlers = new Map();
   const others = [
     { ...initial, id: 'thread/two', title: 'Other one' },
@@ -500,8 +500,9 @@ async function mountMarkedList(harness, initial, { inlineTwin, recentlyClosed = 
     },
   };
   harness.member.threadList = async () => {
+    contextReads++;
     if (listRefused) throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-      request_id: 'request/one', code: 'forbidden', message: 'Thread access was revoked.', retryable: false }, 403);
+      request_id: 'request/one', code: 'forbidden', message: 'Thread access was revoked.', retryable: false }, deniedStatus);
     return { value: { items: recentlyClosed ? members() : [summary], next_cursor: null } };
   };
   harness.member.threadGet = async id => ({ value: id === inlineTwin?.id ? inlineTwin : id === summary.id ? summary : others.find(thread => thread.id === id) });
@@ -541,6 +542,8 @@ async function mountMarkedList(harness, initial, { inlineTwin, recentlyClosed = 
     denySummary: id => step(() => summaryHandlers.get(id).onIssue('Thread access was revoked.', true)),
     denyList: () => step(() => { listRefused = true; collectionHandlers?.onIssue('Thread access was revoked.', true); refresh(); }),
     members,
+    contextReads: () => contextReads,
+    liveList: () => step(() => collectionHandlers.onWindow({ items: members(), hasMore: false, snapshot: { host_id: 'host/one', store_index: ++revision } })),
     unmount: () => step(() => root.unmount()) };
 }
 
@@ -694,6 +697,34 @@ for (const change of ['explicit-clear', 'remote-clear', 'reopen']) for (const en
       if (ending === 'exact-denial') {
         assert.ok(document.contains(originalBodies[1]), 'denial of one exact thread does not revoke another');
       } else assert.equal(bodies().length, 0);
+    } finally { await view.unmount(); }
+  });
+}
+
+for (const status of [401, 403, 404]) {
+  test(`an authorized unchanged live membership supersedes an earlier HTTP ${status} refusal without reloading`, async () => {
+    const thread = { id: 'thread/one', title: 'Review', state: 'closed', unread: false };
+    const harness = deliveryStore(thread);
+    const view = await mountMarkedList(harness, thread, { recentlyClosed: true, deniedStatus: status });
+    const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel?.startsWith(label))?.props;
+    try {
+      await view.liveList();
+      await step(() => row('Recently closed, 3').onPress());
+      await step(() => row('Review').onPress());
+      assert.ok(document.querySelector('[data-collapsable="false"]'));
+      await view.denyList();
+      assert.equal(row('Review'), undefined, 'a current HTTP read denial hides the collection');
+      assert.equal(document.querySelector('[data-collapsable="false"]'), null);
+      assert.ok(mounted().some(({ type }) => type === 'ThreadReadIssue'));
+      const reads = view.contextReads();
+      await view.liveList(); // Same IDs and hasMore, while HTTP still refuses.
+      assert.equal(view.contextReads(), reads, 'unchanged live membership does not need another HTTP request');
+      assert.ok(row('Recently closed, 3'), 'the authorized live collection is visible again');
+      assert.ok(row('Review'));
+      assert.equal(mounted().some(({ type }) => type === 'ThreadReadIssue'), false, 'the superseded refusal is no longer shown');
+      assert.equal(document.querySelector('[data-collapsable="false"]'), null, 'revoked selections do not reopen themselves');
+      await step(() => row('Review').onPress());
+      assert.ok(document.querySelector('[data-collapsable="false"]'), 'the person can deliberately open the authorized thread again');
     } finally { await view.unmount(); }
   });
 }

@@ -86,6 +86,9 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
         const changed = !current || !sameHead(current.items, window.items) || current.hasMore !== window.hasMore;
         current = window;
         setLive({ read, follow, window });
+        // A successful authoritative frame supersedes an earlier HTTP refusal,
+        // even if its IDs/hasMore are unchanged and no HTTP reload is needed.
+        setResult(previous => previous?.read === read && previous.refused ? undefined : previous);
         if (changed) void load();
       },
       onIssue: (issue, refused) => {
