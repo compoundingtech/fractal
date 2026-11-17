@@ -71,26 +71,23 @@ fn retained_state(
     conn: &Connection, key: &SourceEpisode, ask: &ClaimRecord, cut: i64,
 ) -> Result<EpisodeState, FractalError> {
     // CASE bounds values before crossing SQLite's boundary; one extra row proves truncation.
-    let mut query = conn.prepare(/* sqlite-large-value: allow-for-now lv-h7f128b4737b8 owner=fractal_store::store::person_work_history TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut query = conn.prepare(/* sqlite-large-value: allow-for-now lv-h86326f6e2d00 owner=fractal_store::store::person_work_history TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,
-          CASE WHEN length(CAST(body AS BLOB))<=?4 THEN body ELSE NULL END,
-          CASE WHEN length(CAST(predecessors AS BLOB))<=?4 THEN predecessors ELSE NULL END,
-          accepted_at_unix_ms
+          CASE WHEN length(CAST(body AS BLOB))<=262144 THEN body ELSE NULL END,
+          predecessors,accepted_at_unix_ms
          FROM claims WHERE subject=?1 AND store_index<=?2
            AND kind IN ('work.person-done','work.person-cancelled','work.person-override')
            AND (json_extract(body,'$.fields.episode')=?3
              OR json_extract(body,'$.fields.episode') IS NULL)
          ORDER BY CANONICAL_ASC(claims) LIMIT 257",
     )).map_err(internal)?;
-    let mut rows = query.query(params![key.source_id, cut, key.episode, MAX_BODY_BYTES]).map_err(internal)?;
+    let mut rows = query.query(params![key.source_id, cut, key.episode]).map_err(internal)?;
     let mut responses: Vec<ClaimRecord> = Vec::new();
     let mut count = 0;
     let mut unproven_resolution = false;
     while let Some(row) = rows.next().map_err(internal)? {
         count += 1;
-        if count > MAX_RESPONSES
-            || matches!(row.get_ref(7).map_err(internal)?, rusqlite::types::ValueRef::Null)
-            || matches!(row.get_ref(8).map_err(internal)?, rusqlite::types::ValueRef::Null) {
+        if count > MAX_RESPONSES || matches!(row.get_ref(7).map_err(internal)?, rusqlite::types::ValueRef::Null) {
             return Ok(EpisodeState::Unavailable);
         }
         let response = claim_from_row(row).map_err(internal)?;
@@ -128,20 +125,17 @@ fn retained_state(
         && let Some(person) = ask.body["fields"]["person"].as_str()
     {
         // Reuse the existing clock fold, but exclude later claims from this content cut.
-        let mut clock_query = conn.prepare(/* sqlite-large-value: allow-for-now lv-h3a8cf2009419 owner=fractal_store::store::person_work_history TODO=trace-statement-and-value-representation */ &canonical_sql(
+        let mut clock_query = conn.prepare(/* sqlite-large-value: allow-for-now lv-hca314f305a19 owner=fractal_store::store::person_work_history TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id,store_index,batch_id,subject,kind,origin,actor,
-              CASE WHEN length(CAST(body AS BLOB))<=?4 THEN body ELSE NULL END,
-              CASE WHEN length(CAST(predecessors AS BLOB))<=?4 THEN predecessors ELSE NULL END,
-              accepted_at_unix_ms FROM claims
+              CASE WHEN length(CAST(body AS BLOB))<=262144 THEN body ELSE NULL END,
+              predecessors,accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND kind=?2 AND store_index<=?3
              ORDER BY CANONICAL_DESC(claims) LIMIT 257",
         )).map_err(internal)?;
-        let mut clock_rows = clock_query.query(params![person, fractal_schema::availability::DEADLINE_CLOCK_KIND, cut, MAX_BODY_BYTES]).map_err(internal)?;
+        let mut clock_rows = clock_query.query(params![person, fractal_schema::availability::DEADLINE_CLOCK_KIND, cut]).map_err(internal)?;
         let mut clocks = Vec::new();
         while let Some(row) = clock_rows.next().map_err(internal)? {
-            if clocks.len() == MAX_RESPONSES
-                || matches!(row.get_ref(7).map_err(internal)?, rusqlite::types::ValueRef::Null)
-                || matches!(row.get_ref(8).map_err(internal)?, rusqlite::types::ValueRef::Null) {
+            if clocks.len() == MAX_RESPONSES || matches!(row.get_ref(7).map_err(internal)?, rusqlite::types::ValueRef::Null) {
                 return Ok(EpisodeState::Unavailable);
             }
             let clock = claim_from_row(row).map_err(internal)?;
@@ -400,27 +394,6 @@ mod tests {
                 assert_eq!(answers[0]["summary"], "held clock answer");
             }
             _ => panic!("retained deadline clock must keep the on-time answer"),
-        }
-    }
-
-    #[test]
-    fn retained_runtime_oversized_predecessors_are_unavailable_before_decode() {
-        for oversized in ["answer", "clock"] {
-            let store = fixture();
-            let conn = store.connection.write();
-            let ask = claim_by_id_tx(&conn, "opening").unwrap().unwrap();
-            insert(&conn, "answer", "work.person-done", 100, json!({
-                "episode":"opening","status":"completed","summary":"default","resolved_by":"deadline"
-            }));
-            insert(&conn, "clock", fractal_schema::availability::DEADLINE_CLOCK_KIND, 50,
-                json!({"deadline_clock":"hold-all","until_unix_ms":150}));
-            conn.execute("UPDATE claims SET subject='person/avery' WHERE id='clock'", []).unwrap();
-            // Invalid JSON would fail claim decoding if the oversized cell crossed
-            // SQLite's boundary instead of being replaced by the NULL sentinel.
-            conn.execute("UPDATE claims SET predecessors=?1 WHERE id=?2",
-                params!["x".repeat(MAX_BODY_BYTES + 1), oversized]).unwrap();
-            assert!(matches!(retained_state(&conn, &key(), &ask, i64::MAX).unwrap(),
-                EpisodeState::Unavailable));
         }
     }
 

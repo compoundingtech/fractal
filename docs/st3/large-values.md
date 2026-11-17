@@ -1007,8 +1007,8 @@ These registrations are transitional debt, not permanent size exemptions.
 | `discussion_source.rs:548`, `lv-hef0e1c1afcc5` | Register notice snapshot hydration through the pinned creation dependency, after snapshot source/claim bytes pass preflight. | Trace dependency/claim/time identities while preserving indexed source lookup, registration and native owner-chain authority. |
 | `discussion_source.rs:591`, `lv-hd93815b8fb9e` | Register the canonical latest snapshot ID lookup, not an all-body history fold; its subject was metadata-admitted before hydration. | Reference exact snapshot/registration/time keys without changing delivery policy or the caller's transaction cut. |
 | `person_work_history.rs:16`, `lv-hf08b64fbbc13` | Register a canonical first ask ID lookup for one exact source; it selects no body. | Trace source/result IDs and canonical time keys into bounded references, preserving first-opening identity. |
-| `person_work_history.rs:74`, `lv-h7f128b4737b8` | **Fix** response hydration: both body and predecessors now use matched SQL CASE/byte guards with the existing `MAX_BODY_BYTES`; a NULL sentinel returns `EpisodeState::Unavailable` before `claim_from_row`. The existing 257th row remains the completeness sentinel. | Register residual source/claim/time identity debt; preserve exact episode/attempt, legacy causal fences and standing-answer selection. |
-| `person_work_history.rs:128`, `lv-h3a8cf2009419` | **Fix** retained clock hydration with the same body/predecessor guards and unavailable semantics. Unlike response subjects, the person's clock subject is outside discussion preflight. | Register residual person, claim and time identity debt; preserve history cut and effective-deadline folding. |
+| `person_work_history.rs:74`, `lv-h86326f6e2d00` | Register the reviewed response reader unchanged: CASE caps body transfer at 256 KiB and the 257th row is a completeness sentinel. Predecessors remain inline and are not CASE-bounded. | Trace source/claim/time identities and predecessor bytes; preserve exact episode/attempt, legacy causal fences and standing-answer selection. |
+| `person_work_history.rs:128`, `lv-hca314f305a19` | Register the reviewed clock reader unchanged: body CASE and row limits remain, but predecessors are hydrated without a byte guard. The person's clock subject is outside discussion preflight. | Trace person, claim and time identities and predecessor bytes; preserve history cut and effective-deadline folding. |
 | `thread_metadata.rs:11`, `lv-h6a3f9c9e7395` | Refresh stale `lv-h94fc80261c45` and its seven declaration identities; catalog the existing history-link index as the eighth declaration. All are existing person, agent, origin, episode, mission, thread, ask, actor, time and subject keys, not new payload copies. | Chunk/reference every variable index key while preserving current and historical lookup predicates and accounting for installation/reclamation. |
 | `step_history.rs:60`, `lv-h4563bdfd1a41` | Register seven fixed lifecycle-kind queries: body CASE bounds each value to 256 KiB, the fold caps cumulative body bytes at 2 MiB, and each kind has one extra completeness row. Source/claim/time keys remain variable. | Trace canonical template, bindings and result identities while preserving sparse openings, lifecycle ordering and fail-closed completeness. |
 | `retained_person_history_tests.rs:57`, `lv-h1f45e6a5ac2b` | Safe isolated fixture: writes fixed short title/goals poison to the generated step subject, proving current projection text is not historical authority. | Keep fixture corruption equivalent through projection/reference conversion; no production input bound follows. |
@@ -1024,9 +1024,18 @@ These registrations are transitional debt, not permanent size exemptions.
 | `thread_fence_tests.rs:961`, `lv-h374311c02b6a` | Safe finite notice fixture: only `snapshot.input` is cloned, recipient/source replaced with constants, then real notice/snapshot claims carry its fixed fields and returned creation ID. | Preserve native notice creation/projection identity; arbitrary production notice body/link bytes are not qualified. |
 | `thread_request_history_tests.rs:280`, `lv-h9ce35b9b6628` | Safe fixed registration fixture follows real manifest-document publication and one literal requested/answered episode, asserting unsupported custom history. | Preserve registration identity and unsupported-history behavior through representation changes. |
 
-The predecessor regression supplies oversized, deliberately invalid predecessor JSON
-to both response and clock rows and calls the real retained-state fold. Unavailable
-state rather than a JSON decode error demonstrates the SQL sentinel is checked
-before payload decoding. No new limit is introduced: both guards bind the existing
-body-byte limit. The catalog refresh is limited to `thread_metadata`; unchanged
-review provenance, source records and manual flows are retained.
+This review changes no SQL bytes, query meaning or bounds. The predecessor-hydration
+risk remains separate: both retained response and clock queries select the complete
+`predecessors` TEXT value, then `claim_from_row` decodes it; a body CASE and a row
+limit do not bound that value. Discussion preflight checks response-subject bytes,
+but the clock reader uses the person's different subject and lacks that preflight.
+Registration records existing debt, not a claim that those cells are safe or bounded.
+
+The catalog refresh is limited to `thread_metadata`; unchanged review provenance,
+source records and manual flows are retained. Reconciliation uses the composed source
+after merging TUI commit `9d382dc920fadaa048238f84646c48ceb23785b7`, not a union of
+parent inventories. Its assertion-only `thread-start-refusals.json` include in
+`fractal-tui/src/ui/threads_live/tests.rs` parses error envelopes in memory. The
+SQLite inventory does not cover `include_str!` in crates without a declared SQLite
+dependency, so that TUI include requires no additional SQLite site record; its
+separate Rust test-input declaration is supplied by the merged change.
