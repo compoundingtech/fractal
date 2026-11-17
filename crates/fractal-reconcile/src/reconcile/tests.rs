@@ -1051,6 +1051,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         /// How many keys `send_key_if` takes before it fails, when set.
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
+        settled_leftovers: Mutex<BTreeSet<(String, String)>>,
         lanes_ended: Mutex<Vec<String>>,
         pub lanes_resized: Mutex<Vec<(String, fractal_runtime::Capacity)>>,
         pub lane_held: Mutex<Option<u64>>,
@@ -1637,6 +1638,10 @@ mission "retained-reason" state="ready" {
                 .lock()
                 .unwrap()
                 .push((runtime_id.into(), terminal));
+        }
+        fn leftovers_settled(&self, runtime_id: &str, incarnation: &str) -> Result<bool> {
+            Ok(self.settled_leftovers.lock().unwrap()
+                .contains(&(runtime_id.into(), incarnation.into())))
         }
         fn end_lane(&self, runtime_id: &str) {
             self.lanes_ended.lock().unwrap().push(runtime_id.into());
@@ -8456,6 +8461,57 @@ agent "good" { workspace "/tmp"; command "true" }
             &[("exec.node.app.web".to_owned(), false)]
         );
         assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn historical_exec_cleanup_settlement_survives_reconciler_and_store_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cleanup.sqlite");
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        apply_source(&store, r#"version 2
+agent "app" {
+  workspace "/tmp"
+  exec "settled" { command "sleep infinity" }
+  exec "unsettled" { command "sleep infinity" }
+}
+"#, "cleanup-root");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new())).skipping_unneeded(false);
+        reconciler.reconcile_once().unwrap();
+        for name in ["settled", "unsettled"] {
+            let id = format!("exec.node.app.{name}");
+            runtime.execs.lock().unwrap().insert(id.clone(), RuntimeObservation {
+                runtime_id: id, terminal: false, status: "exited".into(),
+                exit_code: Some(0), incarnation_id: Some(format!("{name}-one")),
+            });
+        }
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "cleanup-stop");
+        // Both have stopped leaders, but neither yet has whole-scope empty proof.
+        reconciler.reconcile_once().unwrap();
+        let calls = |name: &str| runtime.leftovers.lock().unwrap().iter()
+            .filter(|(id, _)| id == &format!("exec.node.app.{name}")).count();
+        assert_eq!((calls("settled"), calls("unsettled")), (1, 1));
+        runtime.settled_leftovers.lock().unwrap()
+            .insert(("exec.node.app.settled".into(), "settled-one".into()));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 2));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 3));
+        drop(reconciler);
+        drop(store);
+        // Forget native in-memory proof too: only the daemon's durable receipt remains.
+        runtime.settled_leftovers.lock().unwrap().clear();
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new())).skipping_unneeded(false);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 4));
+        // The durable receipt cannot settle a later incarnation using the same runtime ID.
+        runtime.execs.lock().unwrap().get_mut("exec.node.app.settled").unwrap()
+            .incarnation_id = Some("settled-two".into());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (3, 5));
     }
 
     #[test]
