@@ -150,7 +150,7 @@ fn operators_are_not_inferred_from_bound_agent_or_body() {
 }
 
 fn declare(store: &Store, grant: &str, generation: u64) {
-    let kdl = format!("version 2\ngithub-source \"public-example\" {{ host \"github.com\"; generation {generation}; authority-grant \"{grant}\"; repository \"example/public\"; enabled true; checkpoint-every-ms 60000; replicate-private false }}");
+    let kdl = format!("version 2\ngithub-source \"public-example\" {{ host \"github.com\"; generation {generation}; authority-grant \"{grant}\"; repository \"example/public\"; enabled #true; checkpoint-every-ms 60000; replicate-private #false; }}");
     let intent = crate::graph::parse_intent(&kdl, store.origin()).unwrap();
     store.apply_internal(&intent, &format!("source-{generation}-{grant}")).unwrap();
 }

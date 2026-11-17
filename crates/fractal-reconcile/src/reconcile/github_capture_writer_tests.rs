@@ -203,9 +203,9 @@ github-source "example" {{
     generation 1
     authority-grant "{}"
     repository "acme/garden"
-    enabled true
+    enabled #true
     checkpoint-every-ms 60000
-    replicate-private false
+    replicate-private #false
 }}
 "#, definition.authority_grant);
     crate::reconcile::tests::apply_source(&store, &source, "declare-example");

@@ -23293,7 +23293,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 apply_source(&store, &format!(r#"version 2
 github-source "public-capture" {{
   host "github.com"; generation 1; authority-grant "grant-one"
-  repository "{repository}"; enabled {enabled}; checkpoint-every-ms 60000; replicate-private false
+  repository "{repository}"; enabled #{enabled}; checkpoint-every-ms 60000; replicate-private #false
 }}"#), "capture-event-ownership");
             }
             let plugin = github_plugin_store::GithubPluginStore::memory();

@@ -174,9 +174,9 @@ github-source "example" {{
     generation 1
     authority-grant "{}"
     repository "acme/garden"
-    enabled true
+    enabled #true
     checkpoint-every-ms 60000
-    replicate-private false
+    replicate-private #false
 }}"#, grant.id), "declare-replay");
         let fact = ObservedFact { version: VERSION, source: source.clone(), observed_at_ms: 100,
             supersedes: None, fact: FactImage::Repository(RepositoryFact {
