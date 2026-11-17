@@ -11,6 +11,7 @@ test-support = ["fractal-peer/test-support"]
 
 [dependencies]
 fractal-peer = { path = "../fractal-peer" }
+fractal-github = { path = "../fractal-github" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
@@ -37,6 +38,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "registry", "std"] }
 tower = { version = "0.5", features = ["util"] }
 tar = "0.4"
+url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
