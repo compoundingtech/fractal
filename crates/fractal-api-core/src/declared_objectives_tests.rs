@@ -1124,3 +1124,91 @@ objective "example/transactions/latency" {
     assert_eq!(fault_status(&store, nested), "pending");
     assert_eq!(check(&store, &evaluated).unwrap(), ObjectiveFaults::default());
 }
+
+fn native_revision_declaration(source: &str) -> String {
+    format!(r#"version 2
+objective "example/service" {{
+  about "Service owner"
+  indicator "native" {{ objective "{source}"; }}
+  on-breach "fault" owner="agent/node.ops" condition="service-burn"
+}}
+objective "example/service/read/latency" {{
+  about "Independent nested latency owner"
+  indicator "native" {{ objective "remote-path"; }}
+  on-breach "fault" owner="agent/node.ops" condition="latency-burn"
+}}
+"#)
+}
+
+fn open_native_revision_episodes(store: &Store) {
+    apply(store, &native_revision_declaration("transaction"));
+    with_owner(store, "node");
+    let native: Vec<Value> = ["transaction/read", "transaction/write", "remote-path"]
+        .into_iter().map(|id| json!({
+            "id": id, "kind": "objective", "about": "Native source",
+            "target": "1% bad events", "current": "paired burn", "window": "30d",
+            "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+        })).collect();
+    let evaluated = rows(store, *NOW, &native).unwrap();
+    assert_eq!(evaluated.iter().map(|row| row["id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["example/service/read", "example/service/write", "example/service/read/latency"]));
+    assert_eq!(check(store, &evaluated).unwrap(), ObjectiveFaults { opened: 3, ..ObjectiveFaults::default() });
+    for id in ["example/service/read", "example/service/write", "example/service/read/latency"] {
+        assert_eq!(fault_status(store, id), "pending", "{id}");
+    }
+}
+
+fn assert_native_revision_recovers_only_owned_children(store: &Store) {
+    let source = json!({
+        "id": "person-read", "kind": "objective", "about": "Replacement native source",
+        "target": "1% bad events", "current": "within budget", "window": "30d",
+        "remaining_percent": 100.0, "status": "met", "explain": "Replacement native evidence",
+    });
+    let evaluated = rows(store, *NOW, &[source]).unwrap();
+    assert_eq!(evaluated.iter().map(|row| row["id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["example/service", "example/service/read/latency"]));
+    assert_eq!(evaluated.iter().find(|row| row["id"] == "example/service").unwrap()["status"], "met");
+    assert_eq!(evaluated.iter().find(|row| row["id"] == "example/service/read/latency").unwrap()["status"], "no-data");
+    assert_eq!(check(store, &evaluated).unwrap(), ObjectiveFaults { recovered: 2, ..ObjectiveFaults::default() });
+    for id in ["example/service/read", "example/service/write"] {
+        assert_eq!(fault_status(store, id), "resolved", "{id} belongs to the obsolete binding");
+    }
+    assert_eq!(fault_status(store, "example/service/read/latency"), "pending",
+        "the independent declaration shares a child prefix, not episode ownership");
+    assert_eq!(check(store, &evaluated).unwrap(), ObjectiveFaults::default());
+}
+
+#[test]
+fn native_binding_revision_recovers_obsolete_children_without_prefix_cleaning() {
+    let store = Store::open_memory("node").unwrap();
+    open_native_revision_episodes(&store);
+    apply(&store, &native_revision_declaration("person-read"));
+    assert_native_revision_recovers_only_owned_children(&store);
+}
+
+#[test]
+fn native_binding_episode_ownership_survives_disk_reopen_and_revision() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Store::open(&path, "node").unwrap();
+    open_native_revision_episodes(&store);
+    drop(store);
+
+    // Publish after reopening, so no in-memory binding state can supply old ownership.
+    let store = Store::open(&path, "node").unwrap();
+    apply(&store, &native_revision_declaration("person-read"));
+    drop(store);
+
+    // Reopen the revised declaration before evaluating its replacement source as well.
+    let store = Store::open(&path, "node").unwrap();
+    for id in ["example/service/read", "example/service/write", "example/service/read/latency"] {
+        assert_eq!(fault_status(&store, id), "pending", "{id} must survive reopening");
+    }
+    assert_native_revision_recovers_only_owned_children(&store);
+    drop(store);
+
+    let store = Store::open(&path, "node").unwrap();
+    assert_eq!(fault_status(&store, "example/service/read"), "resolved");
+    assert_eq!(fault_status(&store, "example/service/write"), "resolved");
+    assert_eq!(fault_status(&store, "example/service/read/latency"), "pending");
+}

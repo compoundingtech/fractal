@@ -68,9 +68,6 @@ struct Tracked {
     /// The rows the last evaluation judges, for the breach response: every row but a count's label
     /// rows, which are never met or missed.
     ids: BTreeSet<String>,
-    /// Native row identities observed for this binding revision, including removed children.
-    /// Cleanup must not infer ownership from slash prefixes shared with other declarations.
-    native_ids: BTreeSet<String>,
 }
 
 /// What a declared objective measures.
@@ -301,7 +298,9 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 }
                 if produced.is_empty() {
                     // A wholly missing source is unknown, not proof its previously burning children ended.
-                    let ids = if entry.ids.is_empty() { BTreeSet::from([objective.name.clone()]) } else { entry.ids.clone() };
+                    let mut ids = entry.ids.clone();
+                    ids.extend(crate::objective_faults::owned_rows(store, &objective.name)?);
+                    if ids.is_empty() { ids.insert(objective.name.clone()); }
                     for id in ids {
                         produced.push(json!({
                             "id": id, "kind": "objective", "about": objective.about,
@@ -312,7 +311,6 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                     }
                 }
                 entry.ids = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
-                entry.native_ids.extend(entry.ids.iter().cloned());
                 rows.extend(produced);
                 continue;
             }
@@ -370,7 +368,16 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 entry.read(store, &[&gauge.event], &gauge.subject_prefix, |entry, claim| {
                     entry.observe_numeric(claim, &gauge.at, &gauge.field, &gauge.labels, &gauge.excludes, &gauge.only);
                 })?;
-                entry.numeric.prune(now.saturating_sub(window.ms).saturating_sub(gauge.max_age_ms), true);
+                let policy = entry.objective.as_ref().expect("decoded objective").budget.as_ref().expect("gauge budget");
+                let retention = window.ms
+                    .max(policy.fast.long_ms)
+                    .max(policy.fast.short_ms)
+                    .max(policy.slow.long_ms)
+                    .max(policy.slow.short_ms)
+                    .max(gauge.cadence_ms.saturating_mul(2));
+                // Keep every evaluated window and its immediate predecessor. Measurement
+                // clips that predecessor's held value to max-age; older points cannot help.
+                entry.numeric.prune(now.saturating_sub(retention), true);
                 let produced = entry.budget_rows(&declaration.subject, Some(gauge), now, &response);
                 let judged = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
                 (produced, judged)
@@ -400,24 +407,25 @@ pub fn check_and_report(store: &Store, rows: &[Value]) {
 /// fault for each of its missed rows and end it when the row is met again, or once the objective
 /// no longer judges the row.
 pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalError> {
-    let responders: Vec<(String, Breach, BTreeSet<String>, Option<BTreeSet<String>>)> = {
+    let responders: Vec<(String, Breach, BTreeSet<String>, bool)> = {
         let evaluations = store.fractal.extensions.get::<Evaluations>();
         let tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
         tracked
             .values()
             .filter_map(|tracked| {
                 let objective = tracked.objective.as_ref().ok()?;
-                let native_ids = matches!(objective.indicator, Indicator::Native { .. }).then(|| tracked.native_ids.clone());
-                Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone(), native_ids))
+                let native = matches!(objective.indicator, Indicator::Native { .. });
+                Some((objective.name.clone(), objective.on_breach.clone()?, tracked.ids.clone(), native))
             })
             .collect()
     };
     let mut total = ObjectiveFaults::default();
-    for (name, breach, ids, native_ids) in responders {
+    for (name, breach, ids, native) in responders {
         // Replicated claim evidence has one delivery host; native evidence belongs to this member.
-        if native_ids.is_none() && store.agent_host(&breach.owner).map_err(internal)?.as_deref() != Some(store.origin()) {
+        if !native && store.agent_host(&breach.owner).map_err(internal)?.as_deref() != Some(store.origin()) {
             continue;
         }
+        let owned = crate::objective_faults::owned_rows(store, &name)?;
         let check = check_with_response(
             store,
             rows,
@@ -425,7 +433,8 @@ pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalEr
             ObjectiveResponse { reviewer: &breach.owner, condition: &breach.condition, title: &name },
         )?;
         total.opened += check.opened;
-        total.recovered += check.recovered + end_unjudged(store, |id| native_ids.as_ref().map_or_else(|| owns(&name, id), |known| known.contains(id)), &ids)?;
+        total.recovered += check.recovered
+            + end_unjudged(store, |id| owned.contains(id) || (!native && owns(&name, id)), &ids)?;
         total.unowned += check.unowned;
     }
     Ok(total)
@@ -466,7 +475,6 @@ impl Tracked {
             labels: BTreeMap::new(),
             unreadable: 0,
             ids: BTreeSet::new(),
-            native_ids: BTreeSet::new(),
         }
     }
 

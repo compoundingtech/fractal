@@ -142,6 +142,8 @@ one cadence. Effective burn windows expand to `short=max(configured short,cadenc
 `long=max(configured long,2*cadence)`: hourly gauges use fast 2h+1h and slow 6h+1h, not fabricated
 five-minute evidence. Both actual windows still require coverage and sample gates. Gauge and
 ratio declarations require `budget` and take neither `window` nor diagnostic `target` children.
+The evaluator retains the longest effective burn or accounting window plus the held-value
+predecessor; cadence expansion never truncates the evidence needed to establish coverage.
 Thresholds must be finite and nonnegative; allowance is in (0,1), coverage in (0,1], and minimum samples positive.
 Each pair requires `short < long <= horizon`, and fast has shorter windows and a higher rate
 than slow. Unknown, repeated and missing fields are errors.
@@ -175,6 +177,10 @@ and condition and retain a separate episode on each observing member. Delivery c
 live declared owner agent hosted on another member; ownership is not restricted to a local
 process and public built-in definitions contain no private fleet IDs. Existing interval and
 count declarations keep their original syntax and semantics.
+Native episode failures persist the exact declaring objective name. Cleanup reads that ownership
+from the claims, so changing the bound native family or restarting the member still recovers
+obsolete children without prefix-matching an independent nested declaration. A wholly unavailable
+source keeps its previously open owned rows unknown, including after restart.
 
 ### Interval over claims
 

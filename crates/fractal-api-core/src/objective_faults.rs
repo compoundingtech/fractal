@@ -99,6 +99,7 @@ pub(crate) fn check_with_response(
             actor: Some("daemon/runtime".into()),
             fields: BTreeMap::from([
                 ("episode".into(), json!(episode)),
+                ("objective".into(), json!(response.title)),
                 ("condition".into(), json!(response.condition)),
                 ("reviewer".into(), json!(response.reviewer)),
                 ("title".into(), json!(format!(
@@ -188,12 +189,14 @@ fn recover(store: &Store, subject: &str, episode: &str, failure: &str, reason: &
 struct Episode {
     open: Vec<String>,
     latest: Option<String>,
+    objective: Option<String>,
 }
 
 fn objective_faults(store: &Store, subject: &str) -> anyhow::Result<BTreeMap<String, Episode>> {
     let connection = store.readers.get();
     let mut query = connection.prepare(
-        "SELECT id, kind, json_extract(body,'$.fields.episode'), json_extract(body,'$.fields.failure')
+        "SELECT id, kind, json_extract(body,'$.fields.episode'), json_extract(body,'$.fields.failure'),
+                json_extract(body,'$.fields.objective')
          FROM claims WHERE subject=?1
            AND kind IN ('operational.failure','operational.recovered')
            AND json_extract(body,'$.fields.episode') LIKE ?2
@@ -206,26 +209,40 @@ fn objective_faults(store: &Store, subject: &str) -> anyhow::Result<BTreeMap<Str
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let recovered: BTreeSet<&str> = rows
         .iter()
         .filter(|(_, kind, ..)| kind == "operational.recovered")
-        .filter_map(|(.., failure)| failure.as_deref())
+        .filter_map(|(_, _, _, failure, _)| failure.as_deref())
         .collect();
     let mut episodes: BTreeMap<String, Episode> = BTreeMap::new();
-    for (id, kind, episode, _) in &rows {
+    for (id, kind, episode, _, objective) in &rows {
         if kind != "operational.failure" {
             continue;
         }
         let entry = episodes.entry(episode.clone()).or_default();
         entry.latest = Some(id.clone());
+        entry.objective.clone_from(objective);
         if !recovered.contains(id.as_str()) {
             entry.open.push(id.clone());
         }
     }
     Ok(episodes)
+}
+
+/// Exact row ownership is carried by failure claims, not inferred from a declaration's
+/// current source or a process-local tracker. Revisions and restarts must not orphan faults.
+pub(crate) fn owned_rows(store: &Store, objective: &str) -> Result<BTreeSet<String>, FractalError> {
+    let local = store.origin();
+    let prefix = episode(local, "");
+    Ok(objective_faults(store, &format!("daemon/{local}")).map_err(internal)?
+        .into_iter()
+        .filter(|(_, fault)| !fault.open.is_empty() && fault.objective.as_deref() == Some(objective))
+        .filter_map(|(episode, _)| episode.strip_prefix(&prefix).map(str::to_owned))
+        .collect())
 }
 
 #[cfg(test)]

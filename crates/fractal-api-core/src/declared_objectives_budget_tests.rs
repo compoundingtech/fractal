@@ -160,3 +160,72 @@ fn ratio_retention_drops_expired_source_identities() {
     tracked.numeric.prune(NOW - policy().horizon_ms, false);
     assert!(tracked.numeric.sources.is_empty());
 }
+
+#[test]
+fn runtime_gauge_pruning_retains_cadence_expanded_burn_windows_and_one_predecessor() {
+    let source = r#"version 2
+objective "example/quality" {
+  about "Example covered-time quality"
+  indicator "gauge" {
+    subject-prefix "custom/example/source/"
+    event "custom.example.reading" at="at"
+    value "value" bad-above=10
+    max-age "2h"
+    cadence "2h"
+  }
+  budget allowance=0.05 horizon="1h" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="20m" short="5m"
+    slow burn-rate=6 long="40m" short="10m"
+  }
+}
+"#;
+    let store = Store::open_memory("node").unwrap();
+    let intent = crate::graph::parse_intent(source, "node").unwrap();
+    let preview = store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply(&intent, &preview.subject_tokens, &intent.source_hash).unwrap();
+    let minute = 60_000;
+    for (hours, value) in [(9, 20), (7, 20), (5, 20), (3, 20), (1, 1)] {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: "custom/example/source/one".into(),
+            kind: "custom.example.reading".into(),
+            actor: None,
+            fields: json!({"at": NOW - hours * HOUR - 6 * minute, "value": value}).as_object().unwrap().clone().into_iter().collect(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+
+    // The healthy horizon must not hide the slow pair's burn. Both pairs expand
+    // to 4h+2h, so the bad reading at -5h6m must survive as the predecessor.
+    for now in [NOW, NOW, NOW + minute] {
+        let evaluated = rows(&store, now, &[]).unwrap();
+        assert_eq!(evaluated.len(), 1);
+        let row = &evaluated[0];
+        assert_eq!(row["status"], "burning");
+        assert_eq!(row["remaining_percent"], 100.0);
+        let explain = row["explain"].as_str().unwrap();
+        assert!(explain.contains("Horizon eligible=true"), "{explain}");
+        assert!(explain.contains("fast paired 4h+2h"), "{explain}");
+        assert!(explain.contains("slow paired 4h+2h"), "{explain}");
+        assert_eq!(explain.matches("eligible=true, coverage 100.0%/100.0%").count(), 2, "{explain}");
+
+        let evaluations = store.fractal.extensions.get::<Evaluations>();
+        let tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = &tracked["objective/example/quality"];
+        let points = &entry.numeric.sources["custom/example/source/one"];
+        assert_eq!(points.keys().copied().collect::<Vec<_>>(), [
+            NOW - 5 * HOUR - 6 * minute,
+            NOW - 3 * HOUR - 6 * minute,
+            NOW - HOUR - 6 * minute,
+        ], "older history is pruned while the covering predecessor remains");
+    }
+
+    // Once all retained readings expire, pruning keeps only the source's
+    // identity boundary, not an ever-growing history or invented coverage.
+    assert_eq!(rows(&store, NOW + 8 * HOUR, &[]).unwrap()[0]["status"], "no-data");
+    let evaluations = store.fractal.extensions.get::<Evaluations>();
+    let tracked = evaluations.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let points = &tracked["objective/example/quality"].numeric.sources["custom/example/source/one"];
+    assert_eq!(points.keys().copied().collect::<Vec<_>>(), [NOW - HOUR - 6 * minute]);
+}
