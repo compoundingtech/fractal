@@ -10,11 +10,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 use fractal_conversation_ui::text::{self, Run};
 use std::cell::{Cell, RefCell};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Default)]
 pub struct Cursor {
     input: RefCell<String>,
     from_end: Cell<usize>,
+    vertical_column: Cell<Option<usize>>,
 }
 
 impl Cursor {
@@ -31,6 +33,7 @@ impl Cursor {
             *self.input.borrow_mut() = input.to_owned();
         }
         self.from_end.set(text.len() - at.min(text.len()));
+        self.vertical_column.set(None);
     }
 }
 
@@ -105,6 +108,42 @@ fn line_end(text: &str, at: usize) -> usize {
     text[at..].find('\n').map_or(text.len(), |index| at + index)
 }
 
+/// Move between newline-delimited logical lines, not soft-wrapped screen rows. This keeps
+/// editing independent of pane width. Remember the terminal column across shorter lines.
+fn vertical(text: &str, cursor: &Cursor, input: &str, at: usize, down: bool) -> bool {
+    let start = line_start(text, at);
+    let end = line_end(text, at);
+    let target = if down {
+        if end == text.len() {
+            return false;
+        }
+        end + 1
+    } else {
+        if start == 0 {
+            return false;
+        }
+        line_start(text, start - 1)
+    };
+    let column = if *cursor.input.borrow() == input {
+        cursor.vertical_column.get()
+    } else {
+        None
+    }
+    .unwrap_or_else(|| text[start..at].chars().map(|c| c.width().unwrap_or(0)).sum());
+    let mut to = target;
+    let mut width = 0;
+    for character in text[target..line_end(text, target)].chars() {
+        width += character.width().unwrap_or(0);
+        if width > column {
+            break;
+        }
+        to += character.len_utf8();
+    }
+    cursor.set(input, text, to);
+    cursor.vertical_column.set(Some(column));
+    true
+}
+
 /// Type `typed` at the cursor.
 pub fn insert(text: &mut String, cursor: &Cursor, input: &str, typed: &str) {
     let at = cursor.at(input, text);
@@ -113,7 +152,7 @@ pub fn insert(text: &mut String, cursor: &Cursor, input: &str, typed: &str) {
 }
 
 /// Edit `input`'s `text` with `key`. Returns whether the key belonged to the text; a typing
-/// key never reaches anything else. Up and Down do not belong to it.
+/// key never reaches anything else. Plain Up/Down fall through only at the logical edges.
 pub fn edit(text: &mut String, cursor: &Cursor, input: &str, key: KeyEvent) -> bool {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -123,6 +162,9 @@ pub fn edit(text: &mut String, cursor: &Cursor, input: &str, key: KeyEvent) -> b
         cursor.set(input, text, from);
     };
     let moved = match key.code {
+        KeyCode::Up | KeyCode::Down if !control && !alt => {
+            return vertical(text, cursor, input, at, key.code == KeyCode::Down);
+        }
         KeyCode::Backspace if control || alt => {
             delete(text, word_start(text, at), at);
             None
@@ -234,6 +276,57 @@ mod tests {
     const NONE: KeyModifiers = KeyModifiers::NONE;
 
     #[test]
+    fn composer_arrows_keep_the_column_across_short_and_empty_logical_lines() {
+        let cursor = Cursor::default();
+        let mut text = "abcdef\nx\n\nabcdef".to_owned();
+        assert!(press(&mut text, &cursor, KeyCode::Up, NONE));
+        assert_eq!(cursor.at("draft", &text), "abcdef\nx\n".len());
+        assert!(press(&mut text, &cursor, KeyCode::Up, NONE));
+        assert_eq!(cursor.at("draft", &text), "abcdef\nx".len());
+        assert!(press(&mut text, &cursor, KeyCode::Up, NONE));
+        assert_eq!(cursor.at("draft", &text), 6);
+        assert!(!press(&mut text, &cursor, KeyCode::Up, NONE));
+        for _ in 0..3 {
+            assert!(press(&mut text, &cursor, KeyCode::Down, NONE));
+        }
+        assert_eq!(cursor.at("draft", &text), text.len());
+        assert!(!press(&mut text, &cursor, KeyCode::Down, NONE));
+    }
+
+    #[test]
+    fn composer_arrows_use_terminal_columns_and_reset_after_horizontal_movement_and_typing() {
+        let cursor = Cursor::default();
+        let mut text = "abcdef\n界é\nabcdef".to_owned();
+        press(&mut text, &cursor, KeyCode::Left, NONE);
+        press(&mut text, &cursor, KeyCode::Up, NONE);
+        assert_eq!(cursor.at("draft", &text), "abcdef\n界é".len());
+        press(&mut text, &cursor, KeyCode::Left, NONE);
+        press(&mut text, &cursor, KeyCode::Up, NONE);
+        assert_eq!(cursor.at("draft", &text), 2);
+        press(&mut text, &cursor, KeyCode::Down, NONE);
+        typed(&mut text, &cursor, "!");
+        press(&mut text, &cursor, KeyCode::Down, NONE);
+        assert_eq!(cursor.at("draft", &text), "abcdef\n界!é\nabc".len());
+    }
+
+    #[test]
+    fn composer_arrows_handle_trailing_newlines_and_do_not_steal_modified_keys() {
+        let cursor = Cursor::default();
+        let mut text = "first\n".to_owned();
+        assert!(!press(&mut text, &cursor, KeyCode::Down, NONE));
+        assert!(!press(&mut text, &cursor, KeyCode::Up, CONTROL));
+        assert!(!press(&mut text, &cursor, KeyCode::Up, ALT));
+        assert!(press(&mut text, &cursor, KeyCode::Up, NONE));
+        assert_eq!(cursor.at("draft", &text), 0);
+        assert!(press(&mut text, &cursor, KeyCode::Down, NONE));
+        assert_eq!(cursor.at("draft", &text), text.len());
+        // A different input starts a fresh vertical sequence at its own end.
+        let mut other = "long\nab".to_owned();
+        assert!(edit(&mut other, &cursor, "other", key(KeyCode::Up, NONE)));
+        assert_eq!(cursor.at("other", &other), 2);
+    }
+
+    #[test]
     fn the_line_editor_keys_move_and_edit_at_the_cursor() {
         let cursor = Cursor::default();
         let mut text = String::new();
@@ -259,7 +352,7 @@ mod tests {
         assert_eq!(text, "there");
         press(&mut text, &cursor, KeyCode::Char('f'), ALT);
         assert_eq!(cursor.at("draft", &text), text.len());
-        // Up and Down are not the text's.
+        // Up falls through on the first logical line.
         assert!(!press(&mut text, &cursor, KeyCode::Up, NONE));
     }
 
