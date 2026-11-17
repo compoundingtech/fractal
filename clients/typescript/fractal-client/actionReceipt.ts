@@ -1,6 +1,6 @@
 import { API_VERSION, type ActionResult, type EnvelopeOf } from './Models.generated.ts';
 import { ClientError } from './Client.generated.ts';
-import { appliedAnswer, outcomeUnknown } from './errors.ts';
+import { outcomeUnknown } from './errors.ts';
 
 /**
  * The durable result each action may acknowledge; payload and platform auth stay outside it.
@@ -34,16 +34,7 @@ export class ActionRejected extends Error {
 
 /** The HTTP client checks the envelope, but its value still needs the exact action receipt. */
 async function confirmActionReceipt<TResponse extends EnvelopeOf<ActionResult>>(send: () => Promise<TResponse>, expected: ActionReceiptExpectation, terminal: boolean): Promise<TResponse> {
-  let response: TResponse;
-  try {
-    response = await send();
-  } catch (error) {
-    if (appliedAnswer(error) === 'none' || outcomeUnknown(error)
-      || error instanceof ClientError && error.status >= 400 && error.status < 500
-        && nonempty(error.response.code) && nonempty(error.response.message)) throw error;
-    // A truncated or malformed reply can arrive after the daemon has committed the action.
-    throw unconfirmed(expected.actionId);
-  }
+  const response = await send();
   const value = response?.value;
   if (value?.kind === 'action-result' && value.status === 'rejected' && value.action_id === expected.actionId
     && nonempty(value.operation_id) && nonempty(value.snapshot_id) && Array.isArray(value.affected_ids) && value.affected_ids.every(nonempty)) {

@@ -78,8 +78,8 @@ test('live activity shares compact header durations and host-supplied waiting st
   assert.ok(!noStart.includes('Working'))
 })
 
-test('an unconfirmed send reads as not confirmed yet with Send again, never as a failure', () => {
-  const unconfirmed = { ...prompt, sendState: { _tag: 'Unconfirmed', detail: 'Sending it again is safe.' } }
+test('an unconfirmed send has no resend action even when failed sends have a retry handler', () => {
+  const unconfirmed = { ...prompt, sendState: { _tag: 'Unconfirmed', detail: 'Do not send it again.' } }
   const element = React.createElement(EmbraceRuntimeProvider, {
     options: { messages: [unconfirmed], isRunning: false, onNew: async () => {} },
   }, React.createElement(Transcript, { turns: [{ ...turn, prompt: unconfirmed }], title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, onRetrySend: () => {} }))
@@ -88,7 +88,7 @@ test('an unconfirmed send reads as not confirmed yet with Send again, never as a
   assert.match(markup, /data-testid="send-unconfirmed"/)
   assert.match(markup, /role="status"/)
   assert.match(markup, /Not confirmed yet/)
-  assert.match(markup, /Send again/)
+  assert.doesNotMatch(markup, /Send again/)
   assert.doesNotMatch(markup, />Sent</)
   assert.doesNotMatch(markup, /send-failure|Couldn&#x27;t send|Couldn't send|role="alert"/)
   // Without a retry handler there is no action to offer.

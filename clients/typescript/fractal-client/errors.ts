@@ -1,4 +1,4 @@
-// Human-only error rendering, matching ClientError::human / human_message in the Rust client.
+// Human-only error rendering; delivery certainty is separate from error codes.
 // Rust plain()/plain_message() retain legacy wording for gate reports and durable consumers.
 // Neither path mutates the server's code, message or error envelope.
 import { ClientError } from './Client.generated.ts';
@@ -11,7 +11,7 @@ export function plainMessage(code: Code | string | undefined, message: string): 
   switch (code) {
     // A native prompt's answer is refused in words written for the person: the prompt was
     // answered elsewhere or replaced, or only its terminal can answer it.
-    case 'stale-fence': return message.startsWith('that prompt ') ? message : 'Fractal changed while this was on its way, so it was not applied';
+    case 'stale-fence': return message.startsWith('that prompt ') ? message : 'Fractal changed while this was on its way';
     case 'page-cursor-expired':
     case 'cursor-gap': return 'the list changed while it was being read';
     case 'remote-unavailable': return host ? `${host} cannot be reached right now` : 'the host this lives on cannot be reached right now';
@@ -57,13 +57,12 @@ export function appliedAnswer(error: unknown): 'none' | 'unknown' | undefined {
 }
 
 /**
- * Whether the request may have been taken without the person hearing so: its answer was lost (a
- * network failure, a deadline) or st said `applied: "unknown"`. Such a request is repeated
- * unchanged, never rebuilt with a new key, id or signature nonce.
+ * Whether a dispatched request lacks explicit proof of nonapplication.
+ * This does not classify failures before dispatch. Unknown attempts must not be resent,
+ * rebuilt, re-signed, refreshed or retargeted.
  */
 export function outcomeUnknown(error: unknown): boolean {
-  if (error instanceof ClientError) return appliedAnswer(error) === 'unknown';
-  return isTransient(error);
+  return !notApplied(error);
 }
 
 /**
@@ -76,7 +75,7 @@ export function promptGone(error: unknown): boolean {
 
 /** Any error as a person reads it. */
 export function plainError(error: unknown): string {
-  if (appliedAnswer(error) === 'unknown') return 'Fractal may have taken it and has not confirmed it yet; sending it again is safe';
+  if (appliedAnswer(error) === 'unknown') return 'Fractal may have taken it and has not confirmed it yet; do not send it again';
   if (error instanceof ClientError) return plainMessage(error.response.code, error.response.message);
   if (error instanceof Error) {
     if (/network request failed|failed to fetch/i.test(error.message)) return `the connection to Fractal broke (${error.message})`;
@@ -93,7 +92,7 @@ export function isTransientCode(code: string | undefined): boolean {
   return !code || TRANSIENT.has(code);
 }
 
-/** Whether the same request may succeed if tried again after a short wait. */
+/** A read/stream retry hint, never proof that a dispatched mutation was not applied. */
 export function isTransient(error: unknown): boolean {
   if (error instanceof ClientError) return error.response.retryable || TRANSIENT.has(error.response.code);
   // A request that never reached st, or whose answer was lost.
@@ -102,9 +101,7 @@ export function isTransient(error: unknown): boolean {
 
 /** Whether this response guarantees nonapplication. A replay refusal cannot settle an earlier ambiguous delivery. */
 export function notApplied(error: unknown): boolean {
-  if (!(error instanceof ClientError)) return false;
-  const applied = appliedAnswer(error);
-  return applied !== 'unknown' && (error.response.code === 'stale-fence' || error.response.code === 'rate-limited' || applied === 'none');
+  return appliedAnswer(error) === 'none';
 }
 
 /**

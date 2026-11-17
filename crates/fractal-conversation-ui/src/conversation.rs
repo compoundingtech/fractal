@@ -694,7 +694,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 (Some(error), true) => (
                     rules.unconfirmed.color(theme),
                     format!(
-                        "you · unconfirmed, Fractal did not answer ({error}) · ctrl+r send again · backspace edit"
+                        "you · unconfirmed, Fractal did not answer ({error}) · original may have arrived · backspace copy (may duplicate)"
                     ),
                     fg(rules.unconfirmed, theme),
                 ),

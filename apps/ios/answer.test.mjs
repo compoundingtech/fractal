@@ -29,20 +29,19 @@ function world(steps, waiting) {
   assert.equal(log.asked, 0, 'a success asks nothing');
 }
 
-// Cos, 2026-10-10: the answer landed but the reply was lost. The identical request is sent again
-// (the same key), and Fractal's first answer comes back: a success, no second record.
+// A lost reply stays unknown and cannot cause a second POST.
 {
   const { ports, log } = world([new TypeError('Network request failed'), 'ok'], true);
-  assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
-  assert.deepEqual(log.sent, ['action/1', 'action/1'], 'the same request, not a rebuilt one');
+  assert.equal((await submitAnswer(ports)).ok, false);
+  assert.deepEqual(log.sent, ['action/1']);
   assert.equal(log.built, 1);
 }
 
 // Fractal said it may still complete: the same.
 {
   const { ports, log } = world([refused('unavailable', { applied: 'unknown' }), 'ok'], true);
-  assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
-  assert.deepEqual(log.sent, ['action/1', 'action/1']);
+  assert.equal((await submitAnswer(ports)).ok, false);
+  assert.deepEqual(log.sent, ['action/1']);
 }
 
 // The reply is lost twice, but the step is no longer waiting: it landed. Answered, not failed.
@@ -59,12 +58,12 @@ function world(steps, waiting) {
   assert.deepEqual(log.sent, ['action/1'], 'no pointless retries once it is answered');
 }
 
-// A stale fence while it still waits is a race: a fresh request each time, then the refusal.
+// A stale fence retries only with explicit proof of nonapplication.
 {
-  const { ports, log } = world([refused('stale-fence'), 'ok'], true);
+  const { ports, log } = world([refused('stale-fence', { applied: 'none' }), 'ok'], true);
   assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
   assert.deepEqual(log.sent, ['action/1', 'action/2']);
-  const stuck = world([refused('stale-fence')], true);
+  const stuck = world([refused('stale-fence', { applied: 'none' })], true);
   const outcome = await submitAnswer(stuck.ports);
   assert.equal(outcome.ok, false);
   assert.equal(stuck.log.sent.length, 8, 'a stuck race gives up after eight requests');

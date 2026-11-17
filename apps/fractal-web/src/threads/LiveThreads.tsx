@@ -317,7 +317,7 @@ function InboxThreadsContent({ source, originSource, episode, title, onOpenThrea
       </div>}
     </div>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    {pending.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
+    {pending.map(start => <PendingStartPanel key={start.draftKey} start={start} />)}
     {/* A draft opens at the top of the list, where its thread lands once sent. */}
     {!offerStart ? null : starting
       ? <ThreadPanel thread={{ title: startTitle, state: 'open' }} initiallyExpanded onHideDraft={() => { restoreStart.current = true; setStarting(false) }}>
@@ -383,39 +383,25 @@ function StartRecipientStatus({ recipient, onRetry }: { readonly recipient: Excl
 }
 
 /** Pending first sends survive the Inbox source that originally hosted their editor. */
-export function LivePendingInboxStarts({ items, onOpenThread }: OpenThread & { readonly items: readonly Attention[] }) {
+export function LivePendingInboxStarts({ items }: OpenThread & { readonly items: readonly Attention[] }) {
   const source = useDataSource().threads
-  return source === undefined ? null : <PendingInboxStarts source={source} items={items} onOpenThread={onOpenThread} />
+  return source === undefined ? null : <PendingInboxStarts source={source} items={items} />
 }
 
-function PendingInboxStarts({ source, items, onOpenThread }: OpenThread & { readonly source: ThreadSource; readonly items: readonly Attention[] }) {
+function PendingInboxStarts({ source, items }: { readonly source: ThreadSource; readonly items: readonly Attention[] }) {
   const starts = useAtomValue(source.pendingStarts?.() ?? noPendingStarts).filter(start => !items.some(item =>
     item.source_id === start.parameters.origin.source_id && item.episode === start.parameters.origin.episode))
-  const [focused, setFocused] = React.useState<string>()
-  const [threadReadsStale, reportStale] = useStaleThreadReads()
-  if (starts.length === 0 && focused === undefined) return null
-  return <StaleThreadReads.Provider value={reportStale}><section aria-label="Thread recovery" {...stylex.props(styles.recovery)}>
+  if (starts.length === 0) return null
+  return <section aria-label="Thread recovery" {...stylex.props(styles.recovery)}>
     <h3 {...stylex.props(styles.note)}>Thread recovery</h3>
-    {threadReadsStale ? <SystemNotice kind="stale" scope="inline" title="Updates paused" onRetry={source.reload} /> : null}
-    {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    {starts.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
-  </section></StaleThreadReads.Provider>
+    {starts.map(start => <PendingStartPanel key={start.draftKey} start={start} />)}
+  </section>
 }
 
-function PendingStartPanel({ source, start, onSent }: {
-  readonly source: ThreadSource
-  readonly start: RetainedThreadStart
-  readonly onSent: (id: string) => void
-}) {
-  const retry = source.retryStart
+function PendingStartPanel({ start }: { readonly start: RetainedThreadStart }) {
   return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded
-    pendingChange="thread start" retryPending={start.state === 'sending'}
-    {...(retry === undefined ? {} : { onRetryChange: async () => {
-      const result = await retry(start.draftKey)
-      if (result._tag === 'Refused') return result
-      onSent(result.threadId)
-      return undefined
-    } })}>
+    pendingChange="thread start" retryPending={start.state === 'sending'}>
+    {start.state === 'unconfirmed' ? <p {...stylex.props(styles.note)}>Fractal has not confirmed this action. Do not send it again.</p> : null}
     <p {...stylex.props(styles.note)}>To <AgentName id={start.parameters.agent_id} /></p>
     <div {...stylex.props(styles.message)}>{start.parameters.content}</div>
   </ThreadPanel>
@@ -505,7 +491,6 @@ function LiveThread({ source, thread, visitRef, active = true, embedded = true, 
   const agent = useAgent(summary.agent_id)
   const observedAgent = agent._tag === 'Observed' ? agent.value : undefined
   const agentName = observedAgent === undefined ? undefined : agentDisplayName({ id: summary.agent_id, name: observedAgent.name })
-  const retryChange = source.retryChange
   const pendingChange = useAtomValue(source.pendingChange?.(thread.id) ?? noPendingChange)
   const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
   const viewport = useThreadViewport(expanded && (markRead !== undefined || source.unreadActions?.canMark === true))
@@ -543,7 +528,6 @@ function LiveThread({ source, thread, visitRef, active = true, embedded = true, 
     unreadControls={source.unreadActions === undefined ? undefined : <UnreadReminderControls threadId={thread.id}
       port={source.unreadActions} visibleReplies={viewport.capture} timeline={viewport.container}
       onBeforeMark={() => { visit.current = holdUnreadVisit(visit.current) }} />}
-    {...(retryChange === undefined ? {} : { onRetryChange: () => retryChange(thread.id) })}
     embedded={embedded} inList={inList} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
     {...(opensInTab && onOpenThread !== undefined ? { onActivate: () => onOpenThread(thread.id) } : {})}
     {...(embedded || agentName === undefined ? {} : { origin: <>With <span title={summary.agent_id}>{nameInSentence(agentName)}</span></> })}

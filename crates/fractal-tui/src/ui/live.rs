@@ -51,18 +51,15 @@ struct Pending {
     failed: Option<String>,
     /// st did not answer, so the message may have arrived.
     unconfirmed: bool,
-    /// What was asked of st, to ask again.
+    /// The original intent, retained separately from later composer edits.
     effect: Effect,
-    /// The exact request last sent; a retry repeats it so st can answer with the first result.
+    /// The prepared request, retained for identity only; unknown attempts are never replayed.
     sent: Arc<Mutex<Option<Sent>>>,
 
     /// The conversation drew it, noted once for the quality counters.
     echoed: bool,
-    /// When it was last sent (or sent again): one st has not answered for a while is said to be
-    /// unconfirmed, so it can be sent again or cleared rather than wait forever.
+    /// When dispatch began, so an unanswered send can be shown as unconfirmed.
     since: Instant,
-    /// How many times it was sent again without the person asking, once st had not confirmed it.
-    resent: usize,
 }
 
 /// How often st is asked how long a message it takes, and how soon again after it did not answer.
@@ -82,16 +79,8 @@ const SLOW_DRAW: Duration = Duration::from_millis(120);
 const SLOW_TURN: Duration = Duration::from_millis(250);
 const UNANSWERED_AFTER: Duration = Duration::from_secs(30);
 
-/// A message request as sent: st keys its receipt on the whole request.
-#[derive(Clone, Debug)]
-struct Sent {
-    id: String,
-    idempotency_key: String,
-    snapshot_id: String,
-    /// What it said, as sent: rebuilt later, it could name the agent's newer session, and st
-    /// refuses a repeat that differs as a conflict.
-    parameters: MessageSendParameters,
-}
+/// The fully prepared message packet. Retention never authorizes another dispatch.
+type Sent = fractal_client::ActionRequest;
 
 /// Read evidence belongs to a presented frame, so navigation cannot cancel retries.
 #[derive(Default)]
@@ -2063,13 +2052,6 @@ pub fn run(context: Context) -> Result<()> {
                 });
             });
         }
-        // A send st did not confirm goes again by itself, as the same request, while the link is
-        // live; what it cannot settle that way waits for the person.
-        if matches!(ui.world.link, super::view::Link::Live) {
-            effects.extend(due_for_resend(&mut pending).into_iter().map(|token| Effect::Resend {
-                entry: format!("pending:{token}"),
-            }));
-        }
         for effect in effects {
             let (effect, token, sent) = match effect {
                 Effect::Resend { entry } => {
@@ -2078,6 +2060,10 @@ pub fn run(context: Context) -> Result<()> {
                     else {
                         continue;
                     };
+                    if retry.unconfirmed || retry.sent.lock().map_or(true, |sent| sent.is_some()) {
+                        ui.flash("Delivery is unknown; the original may already have arrived and will not be sent again");
+                        continue;
+                    }
                     retry.failed = None;
                     retry.unconfirmed = false;
                     retry.since = Instant::now();
@@ -2129,7 +2115,6 @@ pub fn run(context: Context) -> Result<()> {
                         sent: sent.clone(),
                         echoed: false,
                         since: Instant::now(),
-                        resent: 0,
                     });
                     changed = true;
                     (effect, Some(token), Some(sent))
@@ -2807,35 +2792,8 @@ async fn older_page(
     Err("this session is too long to read further back here; fractal conversations timeline reads it all".into())
 }
 
-/// How long a message st did not confirm waits before it is sent again by itself, for each time.
-/// A repeat is the exact first request, so st answers it with the first result and never takes
-/// the message twice (Nathan, 2026-10-16: "I hate when it thinks it failed but it didn't"); after
-/// the last one the person decides.
-const AUTO_RESEND_AFTER: [Duration; 3] = [
-    Duration::from_secs(5),
-    Duration::from_secs(15),
-    Duration::from_secs(45),
-];
 
-/// The unconfirmed messages whose turn to be sent again has come. Only one st took no answer for;
-/// a message st refused is never sent again here.
-fn due_for_resend(pending: &mut [Pending]) -> Vec<String> {
-    let mut due = Vec::new();
-    for entry in pending {
-        if entry.unconfirmed
-            && entry.message_id.is_none()
-            && let Some(wait) = AUTO_RESEND_AFTER.get(entry.resent)
-            && entry.since.elapsed() >= *wait
-        {
-            entry.resent += 1;
-            due.push(entry.token.clone());
-        }
-    }
-    due
-}
-
-/// Say of each message st has not answered for a while that it is unconfirmed, so the person
-/// can send it again (safely: the same request) or clear it, rather than watch it wait forever.
+/// Show unanswered messages as unconfirmed without dispatching them again.
 fn mark_unanswered(pending: &mut [Pending]) -> bool {
     let mut marked = false;
     for entry in pending {
@@ -2945,10 +2903,7 @@ async fn acknowledge_visible_message(client: &Client, person: &str, id: &str) ->
     Ok(())
 }
 
-/// `perform`, tried again while st refused it only because it raced a busy store (or asked to
-/// slow down, or was not answering at all): each try reads a fresh fence, and nothing was
-/// applied, so a new request is safe. A timeout, which may have been applied, is not retried
-/// here; an unconfirmed send keeps its exact request for that.
+/// Retry only explicit nonapplication refusals. Unknown sends are retained, never replayed.
 async fn perform_steadily(
     client: &Client,
     person: &str,
@@ -2956,6 +2911,14 @@ async fn perform_steadily(
     effect: Effect,
     sent: Option<&Mutex<Option<Sent>>>,
 ) -> Result<(String, Option<String>)> {
+    if let Some(sent) = sent {
+        let slot = sent.lock().map_err(|_| anyhow::anyhow!("message delivery state is unavailable"))?;
+        if slot.is_some() {
+            return Err(ClientError::Protocol(
+                "Delivery is unknown; the original may already have arrived and will not be sent again".into(),
+            ).into());
+        }
+    }
     let mut wait = Duration::from_millis(50);
     for _ in 0..7 {
         match perform(client, person, model, effect.clone(), sent).await {
@@ -2969,22 +2932,12 @@ async fn perform_steadily(
     perform(client, person, model, effect, sent).await
 }
 
-/// Whether st refused a request in a way that guarantees it applied nothing and a fresh try
-/// may succeed. An attention action already moved to its source's current card once on a
-/// stale fence (`crate::attention_action`); trying its old card again cannot help.
-fn not_applied(error: &anyhow::Error, effect: &Effect) -> bool {
-    let attention = matches!(effect, Effect::Attention { .. });
+/// Only explicit nonapplication proof permits rebuilding a refused request.
+fn not_applied(error: &anyhow::Error, _effect: &Effect) -> bool {
     error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<ClientError>())
-        .any(|error| match error {
-            // st said it queued nothing, so a fresh try with a fresh fence is safe.
-            _ if error.applied() == Some("none") => true,
-            ClientError::Api(fractal_client::ErrorCode::StaleFence, ..) => !attention,
-            ClientError::Api(fractal_client::ErrorCode::RateLimited, ..)
-            | ClientError::Unreachable(_) => true,
-            _ => false,
-        })
+        .any(ClientError::not_applied)
 }
 
 /// An error as a person reads it: st's errors in plain words, anything else as it is.
@@ -3475,9 +3428,7 @@ fn latest_snapshot(model: &Model) -> Option<String> {
         .map(|snapshot| snapshot.id.clone())
 }
 
-/// Send a message. `sent` keeps the exact request: when it already holds one, that request goes
-/// again first, and st answers a repeat of a request it accepted with the first result, so a
-/// message st took but never confirmed is not sent twice.
+/// Prepare and dispatch once. A retained packet blocks every resend of an unresolved attempt.
 async fn send_message(
     client: &Client,
     to: &str,
@@ -3509,68 +3460,56 @@ async fn send_message(
             .into_iter()
             .find(|id| id.starts_with("message/"))
     };
-    let earlier = sent.and_then(|sent| sent.lock().ok()?.clone());
-    if let Some(earlier) = earlier {
-        let fence = Fence {
-            snapshot_id: earlier.snapshot_id,
-            ..Fence::default()
-        };
-        match client
-            .message_send(
-                earlier.id,
-                earlier.idempotency_key,
-                fence,
-                earlier.parameters,
-            )
-            .await
-        {
-            Ok(result) => return Ok(message_id(result)),
-            // st checks a repeat before the fence: a stale fence means it never took it.
-            Err(ClientError::Api(fractal_client::ErrorCode::StaleFence, ..)) => {}
-            Err(error) => return Err(error.into()),
+    if let Some(sent) = sent {
+        let slot = sent.lock().map_err(|_| anyhow::anyhow!("message delivery state is unavailable"))?;
+        if slot.is_some() {
+            return Err(ClientError::Protocol(
+                "Delivery is unknown; the original may already have arrived and will not be sent again".into(),
+            ).into());
         }
     }
-    // A send only needs a current snapshot. Take a fresh one each time, and once more if the
-    // graph moves between reading it and sending: a stale fence is not the person's problem.
-    // A message carries no subject revisions: st asks only that the snapshot be this host's and not
-    // ahead of its store, so the newest one a window frame already brought is as good as a fresh
-    // read and saves a round trip. Only if st calls it stale is a fresh one read.
-    let mut hint = snapshot_hint;
-    let mut last = None;
-    for _ in 0..2 {
-        let snapshot = match hint.take() {
-            Some(known) => known,
-            None => client.capabilities().await?.snapshot.id,
-        };
-        let (id, idem) = crate::action_pair();
-        if let Some(sent) = sent
-            && let Ok(mut slot) = sent.lock()
-        {
-            *slot = Some(Sent {
-                id: id.clone(),
-                idempotency_key: idem.clone(),
-                snapshot_id: snapshot.clone(),
-                parameters: parameters.clone(),
-            });
+    let snapshot = match snapshot_hint {
+        Some(known) => known,
+        None => client.capabilities().await?.snapshot.id,
+    };
+    let (id, idem) = crate::action_pair();
+    let request = client.prepare_message_send(
+        id.clone(),
+        idem,
+        Fence { snapshot_id: snapshot, ..Fence::default() },
+        parameters,
+    )?;
+    if let Some(sent) = sent {
+        let mut slot = sent.lock().map_err(|_| anyhow::anyhow!("message delivery state is unavailable"))?;
+        // Consume dispatch ownership while holding the lock, before any POST.
+        if slot.is_some() {
+            return Err(ClientError::Protocol("The original message has already been dispatched".into()).into());
         }
-        let fence = Fence {
-            snapshot_id: snapshot,
-            ..Fence::default()
-        };
-        match client
-            .message_send(id, idem, fence, parameters.clone())
-            .await
-        {
-            Ok(result) => return Ok(message_id(result)),
-            Err(error @ ClientError::Api(fractal_client::ErrorCode::StaleFence, ..)) => {
-                last = Some(error)
+        *slot = Some(request.clone());
+    }
+    match client.submit_action(&request).await {
+        Ok(result) => {
+            if !result.value.completed_for(&id)
+                || result.value.operation_id.is_empty()
+                || result.value.snapshot_id.is_empty()
+                || !result.value.affected_ids.iter().any(|id| id.starts_with("message/"))
+            {
+                return Err(ClientError::Protocol(
+                    "Fractal has not confirmed the original message action".into(),
+                ).into());
             }
-            Err(error) => return Err(error.into()),
+            Ok(message_id(result))
+        }
+        Err(error) => {
+            if error.not_applied()
+                && let Some(sent) = sent
+                && let Ok(mut slot) = sent.lock()
+            {
+                *slot = None;
+            }
+            Err(error.into())
         }
     }
-    Err(last
-        .map(Into::into)
-        .unwrap_or_else(|| anyhow::anyhow!("the graph kept changing; try again")))
 }
 
 #[cfg(test)]
@@ -3820,7 +3759,7 @@ mod tests {
         assert!(unknown.downcast_ref::<ClientError>().unwrap().outcome_unknown());
         assert_eq!(
             super::plain(&unknown),
-            "Fractal may have taken it and has not confirmed it yet; sending it again is safe"
+            "Fractal may have taken it and has not confirmed it yet; it will not be sent again"
         );
         // `applied: "none"` with a full queue (rate limited): nothing was queued, so try again.
         assert!(not_applied(&answer("none", fractal_client::ErrorCode::RateLimited), &send));
@@ -3830,13 +3769,9 @@ mod tests {
             .outcome_unknown());
     }
 
-    /// st answers a send it could not confirm in time `message-send-unconfirmed`, `applied:
-    /// "unknown"`: it may still complete. Nothing here sends it again by itself, and the person's
-    /// resend repeats the exact request. st keys its receipt on the whole request but the fence,
-    /// so a repeat that differs in anything else (here, the agent moved to a new session in
-    /// between) would be refused as a conflict and the message could never be confirmed.
+    /// Unknown delivery must not re-enter message_send, even after the session changes.
     #[tokio::test]
-    async fn an_unconfirmed_send_waits_for_the_person_and_goes_again_unchanged() {
+    async fn an_unconfirmed_send_never_dispatches_twice() {
         use axum::{body::Bytes, extract::State, http::StatusCode, routing};
         #[derive(Default)]
         struct Daemon {
@@ -3946,19 +3881,18 @@ mod tests {
         )
         .await
         .unwrap_err();
-        // What `Fetched::Sent` marks the pending copy with: unconfirmed, so it stays and offers
-        // a resend, not a plain failure.
+        // The pending copy stays unconfirmed, not a plain failure.
         assert!(error
             .downcast_ref::<ClientError>()
             .is_some_and(ClientError::outcome_unknown));
         assert!(!not_applied(&error, &send));
         assert_eq!(
             super::plain(&error),
-            "Fractal may have taken it and has not confirmed it yet; sending it again is safe"
+            "Fractal may have taken it and has not confirmed it yet; it will not be sent again"
         );
         assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
-        // The agent moved to a new session before the person sent it again.
-        let (_, message) = perform_steadily(
+        // Even an explicit resend after a session change must not make another POST.
+        let error = perform_steadily(
             &client,
             "person/avery",
             &in_session("session/second"),
@@ -3966,13 +3900,10 @@ mod tests {
             Some(&*sent),
         )
         .await
-        .unwrap();
-        assert_eq!(message.as_deref(), Some("message/example-tally"));
+        .unwrap_err();
+        assert!(error.downcast_ref::<ClientError>().is_some_and(ClientError::outcome_unknown));
         let posted = std::mem::take(&mut daemon.lock().unwrap().posted);
-        assert_eq!(posted.len(), 2);
-        for field in ["id", "type", "idempotency_key", "parameters"] {
-            assert_eq!(posted[1][field], posted[0][field], "{field} differs on the resend");
-        }
+        assert_eq!(posted.len(), 1, "unknown delivery cannot dispatch again");
         assert_eq!(posted[0]["parameters"]["session_id"], "session/first");
         server.abort();
     }
@@ -5081,11 +5012,9 @@ mod tests {
         server.abort();
     }
 
-    /// A stale fence is retried for an action that reads a fresh one each try, but not for an
-    /// attention action: it already moved once to its source's current card. A busy or absent
-    /// st is retried for both.
+    /// Bare refusal codes carry no nonapplication proof, for attention or ordinary actions.
     #[test]
-    fn an_attention_action_is_not_retried_on_a_stale_fence() {
+    fn unknown_refusal_codes_never_authorize_an_action_retry() {
         let refused = |code: fractal_client::ErrorCode| {
             anyhow::Error::new(ClientError::Api(
                 code.clone(),
@@ -5114,10 +5043,10 @@ mod tests {
         };
         let stale = refused(fractal_client::ErrorCode::StaleFence);
         assert!(!not_applied(&stale, &attention));
-        assert!(not_applied(&stale, &terminal));
+        assert!(!not_applied(&stale, &terminal));
         let busy = refused(fractal_client::ErrorCode::RateLimited);
-        assert!(not_applied(&busy, &attention));
-        assert!(not_applied(&busy, &terminal));
+        assert!(!not_applied(&busy, &attention));
+        assert!(!not_applied(&busy, &terminal));
         assert!(!not_applied(
             &refused(fractal_client::ErrorCode::ValidationFailed),
             &attention
@@ -5578,7 +5507,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_st_has_not_answered_becomes_unconfirmed_so_it_can_go_again() {
+    fn a_message_st_has_not_answered_becomes_unconfirmed_without_replaying() {
         let pending = |since: Instant| Pending {
             token: "t".into(),
             agent: "agent/example/cos".into(),
@@ -5597,7 +5526,6 @@ mod tests {
             sent: Arc::new(Mutex::new(None)),
             echoed: false,
             since,
-            resent: 0,
         };
         let mut fresh = [pending(Instant::now())];
         assert!(!mark_unanswered(&mut fresh));
@@ -5609,44 +5537,6 @@ mod tests {
         assert!(!mark_unanswered(&mut waiting));
     }
 
-    #[test]
-    fn a_send_st_did_not_confirm_goes_again_by_itself_a_few_times_and_then_waits_for_the_person() {
-        let pending = |unconfirmed: bool, message_id: Option<&str>| Pending {
-            token: "t".into(),
-            agent: "agent/example/cos".into(),
-            text: "hello".into(),
-            at: "10:17".into(),
-            message_id: message_id.map(str::to_owned),
-            failed: unconfirmed.then(|| "Fractal did not answer".into()),
-            unconfirmed,
-            effect: Effect::Send {
-                in_reply_to: None,
-                agent: "agent/example/cos".into(),
-                text: "hello".into(),
-                tags: Vec::new(),
-                images: Vec::new(),
-            },
-            sent: Arc::new(Mutex::new(None)),
-            echoed: false,
-            since: Instant::now() - Duration::from_secs(600),
-            resent: 0,
-        };
-        // Due three times in a row (each resend restarts the clock in the loop), then never.
-        let mut waiting = [pending(true, None)];
-        for turn in 1..=3 {
-            assert_eq!(due_for_resend(&mut waiting), ["t"], "turn {turn}");
-            assert_eq!(waiting[0].resent, turn);
-            waiting[0].since = Instant::now() - Duration::from_secs(600);
-        }
-        assert!(due_for_resend(&mut waiting).is_empty(), "then the person decides");
-        // Not yet: the first wait is five seconds.
-        let mut fresh = [pending(true, None)];
-        fresh[0].since = Instant::now();
-        assert!(due_for_resend(&mut fresh).is_empty());
-        // A send st refused or answered, or one still waiting for its answer, is left alone.
-        let mut refused = [pending(false, None), pending(true, Some("message/one"))];
-        assert!(due_for_resend(&mut refused).is_empty());
-    }
 
     fn fixture_screen() -> fractal_client::TerminalScreen {
         let text = include_str!("../../../../docs/st3/client-v0/fixtures/terminal-screen.json");

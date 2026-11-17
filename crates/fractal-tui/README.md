@@ -8,6 +8,17 @@ before them is gone ([#1166](https://github.com/compoundingtech/fractal/issues/1
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
 
+Message delivery is conservative: after dispatch, only explicit, uncontradicted
+`applied: none` proves the action was not applied. A bare stale-fence/rate-limit
+response, lost connection, timeout or unreadable response leaves delivery unknown.
+Ordinary messages and thread Starts/replies retain that uncertainty in memory and
+never automatically replay, rebuild, re-sign, refresh-send or retarget the attempt.
+Unknown messages have no Retry action. Backspace can explicitly copy an ordinary
+unknown message into the composer, with a warning that sending the copy may
+duplicate an original that already arrived; the original remains retained.
+This is not a durable outbox: unresolved attempts do not survive quitting the TUI,
+and there is no server outcome-reconciliation endpoint in this delivery step.
+
 Demo data flows from the six committed `fixtures/scenarios/fleet-mid-refactor/*.json`
 slices (embedded in the binary), through `fractal_client::scenarios` strict decoding
 and timestamp rebasing to now, into the ordinary `ui/adapt.rs` model adapter and screens.

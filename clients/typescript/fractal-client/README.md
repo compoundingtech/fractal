@@ -26,6 +26,23 @@ Existing query options and optional defaults keep their positions: for example,
 `resourcesList(filters, pageOptions, { signal })`. Cancellation is checked before fetching
 and after asynchronous credentials/discovery; the signal stays attached to native fetch while
 the JSON body is consumed. Cancellation does not prove an action was not delivered and never retries it.
+
+Shared action delivery distinguishes certainty from transport errors. Only explicit
+`applied: "none"` in the outer error or its details, with no unknown or malformed
+contradiction, proves nonapplication. Bare stale-fence, rate-limited, other HTTP errors,
+network failures and malformed receipts after dispatch remain `unconfirmed`.
+`failed` means a pre-dispatch build failure or a proven nonapplication refusal;
+`sent` requires the send adapter's completion check to succeed.
+`sendAction` may rebuild only after proven nonapplication. Neither automatic delivery
+nor `resendAction` / `resendBoundAction` POSTs an unknown retained attempt, refreshes
+its fence, or rebuilds/re-signs it. The retained packet and original member are for
+reconciliation, not permission to resend. This is process-lifetime retention, not a
+durable outbox or a read-only server outcome endpoint.
+
+Focused certainty and pure client tests use the existing workspace Vitest dependency:
+`CI=1 node_modules/.bin/vitest run --config clients/typescript/fractal-client/vitest.config.ts`
+from the repository root.
+
 The manifest read ids `harness-questions.list` and `harness-questions.get` map to
 `harnessQuestions(queryOptions, requestOptions)` and `harnessQuestion(id, requestOptions)`;
 their public helper names do not include the manifest's `list`/`get` suffixes.

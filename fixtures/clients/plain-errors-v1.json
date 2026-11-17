@@ -3,8 +3,8 @@
     "kind": "api",
     "code": "stale-fence",
     "message": "server detail",
-    "plain": "st changed while this was on its way, so it was not applied",
-    "human": "Fractal changed while this was on its way, so it was not applied"
+    "plain": "st changed while this was on its way",
+    "human": "Fractal changed while this was on its way"
   },
   {
     "kind": "api",
@@ -269,8 +269,8 @@
     "kind": "applied-unknown",
     "code": "message-send-unconfirmed",
     "message": "the database has not confirmed the send",
-    "plain": "st may have taken it and has not confirmed it yet; sending it again is safe",
-    "human": "Fractal may have taken it and has not confirmed it yet; sending it again is safe"
+    "plain": "st may have taken it and has not confirmed it yet; do not send it again",
+    "human": "Fractal may have taken it and has not confirmed it yet; do not send it again"
   },
   {
     "kind": "transport",
