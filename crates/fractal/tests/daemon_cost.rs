@@ -3232,7 +3232,7 @@ async fn prepare_start_context(
     fixture: &mut Fixture,
     root: &Path,
 ) -> (String, Value) {
-    use fractal_daemon::{AttentionListStore as _, PersonWorkStore as _};
+    use fractal_daemon::PersonWorkStore as _;
     use fractal_daemon::api::client_v0::{ClientSession, assistant};
 
     const AGENT: &str = "agent/bench/cost/start-context";
@@ -3897,12 +3897,11 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                         );
                     }
                     answer
-                        .map(|value| {
+                        .inspect(|value| {
                             if probe.route == "GET /v1/client/threads/start-context" {
-                                assert_eq!(&value, expected_start_context,
+                                assert_eq!(value, expected_start_context,
                                     "the person probe must preview the exact seeded recipient");
                             }
-                            value
                         })
                         .and_then(|value| {
                             if probe.route.contains("/v1/effects/") {
