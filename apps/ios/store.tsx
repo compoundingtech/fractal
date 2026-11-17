@@ -215,7 +215,7 @@ function useAppStore(proof?: FabricProfile) {
   const [caps, setCapsState] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
-  const outboxIdentity = useRef<{ client: FractalClient; profileKey: string; profile: PhoneProfile } | null>(null);
+  const outboxIdentity = useRef<{ client: FractalClient; profileKey: string; memberId: string; profile: PhoneProfile } | null>(null);
   const outboxNotices = useRef(new Set<string>());
   const setCaps = useCallback((next: Capabilities | null) => {
     capsRef.current = next;
@@ -345,6 +345,9 @@ function useAppStore(proof?: FabricProfile) {
   const clientCredential = credentialFor(selected.route.kind === 'fabric', fabricMember, memberProfile?.credential, credential);
   const signingKeyRef = useRef(PROFILE_KEY);
   signingKeyRef.current = selected.route.kind === 'fabric' && memberProfile && fabricMember ? memberProfileKey(fabricMember) : PROFILE_KEY;
+  // Same member label used by existing bound delivery; never an issuer substitute.
+  const outboxMemberRef = useRef('');
+  outboxMemberRef.current = selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url;
   const routeRef = useRef<Route>(selected.route); routeRef.current = selected.route;
   const feedMisses = useRef(0);
   // What the phone measures of its own service (see observations.ts): timed where the app already
@@ -641,6 +644,7 @@ function useAppStore(proof?: FabricProfile) {
     if (!client) return;
     try {
       const profileKey = signingKeyRef.current;
+      const memberId = outboxMemberRef.current;
       const capability = await client.capabilities();
       // A locked/malformed profile blocks protected binding, not legacy capabilities.
       let profile: PhoneProfile | undefined;
@@ -649,7 +653,8 @@ function useAppStore(proof?: FabricProfile) {
         if (rawProfile) profile = JSON.parse(rawProfile);
       } catch { /* No protected identity until a readable verified profile is available. */ }
       if (!current() || profileKey !== signingKeyRef.current) return;
-      outboxIdentity.current = profile ? { client, profileKey, profile } : null;
+      if (memberId !== outboxMemberRef.current) return;
+      outboxIdentity.current = profile ? { client, profileKey, memberId, profile } : null;
       recordDiagnosticCapabilities(client, capability.value);
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
@@ -675,8 +680,8 @@ function useAppStore(proof?: FabricProfile) {
   const authorizeProtectedOutbox = (scope: OutboxScope): void => {
     const identity = outboxIdentity.current;
     const currentIdentity = client !== null && liveOutboxClient.current === client && identity?.client === client && capsClient.current === client
-      && identity?.profileKey === signingKeyRef.current;
-    requireOutboxAuthorization(outboxProfileMode(currentIdentity ? identity.profile : {}, scope.memberId,
+      && identity?.profileKey === signingKeyRef.current && identity?.memberId === outboxMemberRef.current;
+    requireOutboxAuthorization(outboxProfileMode(currentIdentity ? identity.profile : {}, currentIdentity ? identity.memberId : '',
       currentIdentity ? capsRef.current : null), scope);
   };
 

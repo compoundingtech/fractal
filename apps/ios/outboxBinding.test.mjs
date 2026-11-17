@@ -168,3 +168,24 @@ test('store binds issuer comparison to live client/profile and current capabilit
   assert.match(native, /commit: record => \{ authorize\(scope\)/);
   assert.match(native, /compareAndSwap: \(revision, record\) => \{ authorize\(scope\)/);
 });
+
+test('store authorization refuses an old client, profile or member even when issuer pairs match', () => {
+  const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
+  const body = source.match(/const authorizeProtectedOutbox = \(scope: OutboxScope\): void => \{([\s\S]*?)\n  \};/)[1];
+  const client = {};
+  const identity = { client, profileKey: 'profile-key', memberId: 'member/original', profile };
+  const make = (change = {}) => {
+    const ports = { outboxIdentity: { current: identity }, client, liveOutboxClient: { current: client },
+      capsClient: { current: client }, signingKeyRef: { current: 'profile-key' },
+      outboxMemberRef: { current: 'member/original' }, capsRef: { current: capabilities },
+      requireOutboxAuthorization, outboxProfileMode, ...change };
+    return Function(...Object.keys(ports), `return scope => { ${body} };`)(...Object.values(ports));
+  };
+  make()(mode().scope);
+  for (const change of [
+    { liveOutboxClient: { current: {} } }, { capsClient: { current: null } },
+    { signingKeyRef: { current: 'another-profile' } }, { outboxMemberRef: { current: 'member/other' } },
+    { capsRef: { current: null } }, { capsRef: { current: { ...capabilities, issuer_key: 'authority/other' } } },
+  ]) assert.throws(() => make(change)(mode().scope), OutboxBindingUnavailableError);
+  assert.throws(() => make()({ ...mode().scope, memberId: 'member/other' }), OutboxBindingUnavailableError);
+});
