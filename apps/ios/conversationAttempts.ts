@@ -24,6 +24,8 @@ export class ConversationAttempts<TDraft, TResult extends AttemptOutcome> {
   remove = (id: string): void => { this.publish(this.rows.filter(row => row.id !== id)); };
   retain = (keep: (attempt: ConversationAttempt<TDraft, TResult>) => boolean): void => { this.publish(this.rows.filter(keep)); };
   has = (id: string): boolean => this.rows.some(row => row.id === id);
+  /** Replace a durable projection; repository/core records, not this class, own certainty. */
+  project = (rows: readonly ConversationAttempt<TDraft, TResult>[]): void => { this.publish(rows); };
   async send(id: string, draft: TDraft, operation: () => Promise<TResult>, onSettled?: (result: TResult) => void): Promise<TResult> {
     if (this.has(id)) throw new Error('Resolve the earlier send before starting another.');
     const initial: ConversationAttempt<TDraft, TResult> = { id, draft, phase: 'sending' };

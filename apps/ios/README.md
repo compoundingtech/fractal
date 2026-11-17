@@ -202,6 +202,15 @@ every write guard and exposed authorization check uses the repository's immutabl
 scope, never the caller-owned object. Mutating that object cannot change which
 profile, deployment or member is authorized for the captured database.
 
+`outboxRuntime.ts` is the durable transport owner: acceptance precedes preparation,
+the complete packet precedes the SQL dispatch marker, and that marker precedes a
+single POST. It delegates every certainty transition to the shared core, and projects
+records through the existing `ConversationAttempts` controller. Restart can resume
+never-dispatched preparation/ready packets; dispatched work restores unknown without
+signing or sending again. Check status only reads the original authoritative timeline
+for an exact derived identity. Absence remains unknown. This runtime adapter does not
+yet change screen send callsites in this commit.
+
 The core exports a reference repository but no reusable runnable contract suite.
 One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope
 contracts against both `createMemoryOutboxRepository` and real `node:sqlite`.
