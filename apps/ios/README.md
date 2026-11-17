@@ -152,6 +152,8 @@ Attachment bytes belong to the future iOS spool, not the serialized intent.
 Repository CAS must call `isAllowedOutboxTransition` inside the same transaction;
 revision equality alone is insufficient. Exact original authoritative timeline
 identity observations use the shared core; absence never proves nonapplication.
+The iOS contracts use the shared client's `createMemoryOutboxRepository` reference
+double (`@fractal/client/test-support`), not an independent repository implementation.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.

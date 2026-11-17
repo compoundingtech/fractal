@@ -3,33 +3,16 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { outboxProfileMode, pairingDeploymentId, acknowledgeOutboxNotice, restoreBoundAttempt, REPAIR_OUTBOX_NOTICE } from './outboxBinding.ts';
-import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, isAllowedOutboxTransition } from '../../clients/typescript/fractal-client/outbox.ts';
+import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox } from '../../clients/typescript/fractal-client/outbox.ts';
 import { prepareMessageSendPacket, prepareThreadStartPacket, prepareThreadReplyPacket, expectedPreparedPacketIdentities } from '../../clients/typescript/fractal-client/preparedPacket.ts';
+import { createMemoryOutboxRepository } from '../../clients/typescript/fractal-client/testSupport.ts';
 
 const issuer = { issuer: 'host/original', issuerKey: 'authority/original' };
 const profile = { profileId: 'profile/avery', pairingIssuer: issuer };
 const mode = () => outboxProfileMode(profile, 'member/original');
 const clone = value => JSON.parse(JSON.stringify(value));
-// The core exports no repository implementation. This test double enforces its CAS contract;
-// serialization simulates reopen, not native SQLite durability.
-const repository = () => {
-  const rows = new Map();
-  return {
-    scope: mode().scope, reads: 0, conflict: false,
-    async commit(record) {
-      if (record.revision !== 0 || record.state !== 'pending' || record.phase !== 'preparing'
-        || record.mayHaveDispatched || record.ambiguous || rows.has(record.id)) return false;
-      rows.set(record.id, clone(record)); return true;
-    },
-    async compareAndSwap(revision, record) {
-      const previous = rows.get(record.id);
-      if (this.conflict || previous?.revision !== revision || !isAllowedOutboxTransition(previous, record)) return false;
-      rows.set(record.id, clone(record)); return true;
-    },
-    async read(id) { this.reads++; return rows.has(id) ? clone(rows.get(id)) : undefined; },
-    async list() { return clone([...rows.values()]); },
-  };
-};
+// The shared reference repository models CAS, not native SQLite durability.
+const repository = () => createMemoryOutboxRepository(mode().scope);
 const base = { id: 'action/original', idempotency_key: 'action/original', fence: { snapshot_id: 'snapshot/original', subject_revisions: {} } };
 const signature = { signer: 'person/avery', key: 'key/original', chain: ['grant/original'], nonce: 'nonce/original', signed_at_unix_ms: 1790000000000, signature: 'signature/original' };
 const packets = [
@@ -103,6 +86,8 @@ test('each binding mismatch remains unknown without reading or adopting reposito
   const repo = repository();
   const original = createOutboxRecord('attempt/original', intentFor(packets[0]));
   await repo.commit(original);
+  const read = repo.read;
+  repo.read = async () => assert.fail('a mismatched binding must not read records');
   for (const changed of [
     outboxProfileMode({ ...profile, profileId: 'profile/ada' }, 'member/original'),
     outboxProfileMode(profile, 'member/other'),
@@ -110,8 +95,7 @@ test('each binding mismatch remains unknown without reading or adopting reposito
     outboxProfileMode({ ...profile, pairingIssuer: { ...issuer, issuerKey: 'authority/other' } }, 'member/original'),
     outboxProfileMode({}, 'member/original'),
   ]) assert.equal((await restoreBoundAttempt(repo, changed, original.id)).state, 'unknown');
-  assert.equal(repo.reads, 0);
-  assert.deepEqual(await repo.read(original.id), original);
+  assert.deepEqual(await read(original.id), original);
 });
 
 test('revision conflicts fail closed; missing records grant no packet', async () => {
@@ -121,7 +105,7 @@ test('revision conflicts fail closed; missing records grant no packet', async ()
   const ready = prepareOutboxRecord(original, packets[0], await identitiesFor(packets[0]));
   await repo.compareAndSwap(0, ready);
   await repo.compareAndSwap(1, markOutboxDispatched(ready));
-  repo.conflict = true;
+  repo.compareAndSwap = async () => false;
   assert.deepEqual(await restoreBoundAttempt(repo, mode(), 'attempt/original'), { state: 'unknown', reason: 'revision-conflict' });
   assert.deepEqual(await restoreBoundAttempt(repo, mode(), 'attempt/missing'), { state: 'bound', record: undefined });
 });
