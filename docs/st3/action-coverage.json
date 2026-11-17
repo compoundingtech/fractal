@@ -3583,9 +3583,10 @@
       "action": "ThreadReading",
       "tests": [
         "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_keeps_pre_palette_visible_anchor_evidence",
-        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_keeps_explicit_clear_available_with_no_visible_body"
+        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_keeps_explicit_clear_available_with_no_visible_body",
+        "crates/fractal-tui/src/ui/threads_live/unread_actions_tests.rs::unread_action_menu_marks_only_presented_replies_read_before_auto_read_dwell"
       ],
-      "verification": "real palette Enter dispatch queues MarkUnread at the pre-menu visible anchor or ClearUnread for exactly the observed reminders without reading unseen history"
+      "verification": "real palette Enter dispatch queues MarkUnread at the pre-menu visible anchor, ClearUnread for exactly the observed reminders, or MarkRead for only presented replies before auto-read dwell without reading loaded unseen history"
     },
     {
       "action": "Name",
