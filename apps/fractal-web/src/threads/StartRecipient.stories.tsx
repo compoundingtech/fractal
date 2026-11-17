@@ -8,6 +8,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
+import startRefusalWire from '../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
@@ -42,12 +43,13 @@ const context = (agent_id: string, basis: object): Feed<Native.ThreadStartContex
 })
 const originalContext = context(original, { _tag: 'original' })
 const fallbackContext = context(fallback, fallbackBasis)
+const unassignedRefusal = startRefusalWire['recipient-unassigned']
 /** What the exact-key preview first answers in each scenario. */
 const initialPreview = (scenario: Scenario): Feed<Native.ThreadStartContext> => {
   switch (scenario) {
     case 'configured': return context(configured, { _tag: 'configured' })
     case 'fallback': case 'existing-reply': return fallbackContext
-    case 'unconfigured': return unavailable({ reason: 'failed', code: 'recipient-retired', detail: 'Fractal could not load the first-send recipient.', explanation: 'The requested recipient is unavailable.' })
+    case 'unconfigured': return unavailable({ reason: 'failed', code: unassignedRefusal.code, detail: 'Fractal could not load the first-send recipient.', explanation: unassignedRefusal.message })
     case 'loading': return waiting
     case 'failed': return unavailable({ reason: 'failed', detail: 'Fractal could not load the first-send recipient.', explanation: 'The gateway did not answer in time.' })
     case 'original': case 'mismatch': case 'offline': case 'no-preview': case 'repeat': return originalContext
@@ -240,7 +242,10 @@ export const MismatchReread: Story = {
 export const UnconfiguredRefusal: Story = {
   args: { scenario: 'unconfigured' },
   play: async ({ canvasElement }) => {
-    await waitFor(() => expect(canvasElement.querySelector('[data-start-recipient="retired"]')).not.toBeNull())
+    await waitFor(() => expect(canvasElement.querySelector('[data-start-recipient="unassigned"]')).not.toBeNull())
+    await expect(canvasElement.querySelector('[data-start-recipient="unassigned"]')?.textContent).toContain('No recipient is configured. Set up a responsible agent before starting a thread.')
+    await expect(canvasElement.querySelector('[data-start-recipient="unassigned"]')?.textContent).toContain(unassignedRefusal.message)
+    await expect(canvasElement.querySelector('[data-start-recipient="retired"]')).toBeNull()
     await expect(within(canvasElement).queryByRole('button', { name: 'Start thread' })).toBeNull()
     await expect(canvasElement.querySelector('[data-start-recipient-id]')).toBeNull()
     await expect(canvasElement.querySelector('textarea')).toBeNull()
