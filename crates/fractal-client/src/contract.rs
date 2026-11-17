@@ -54,6 +54,14 @@ pub const ACTION_NAMES: &[&str] = &[
     "terminal.end",
     "terminal.input",
     "terminal.resize",
+    "thread.clear-unread",
+    "thread.close",
+    "thread.mark-unread",
+    "thread.read",
+    "thread.rename",
+    "thread.reopen",
+    "thread.reply",
+    "thread.start",
     "work.ask",
     "work.cancel-ask",
     "work.claim",
@@ -69,6 +77,9 @@ pub const ACTION_NAMES: &[&str] = &[
 ];
 #[rustfmt::skip]
 pub const READ_OPERATIONS: &[(&str, &str)] = &[
+    ("thread.list", "/v1/client/threads"),
+    ("thread.get", "/v1/client/threads/{id}"),
+    ("thread.timeline", "/v1/client/threads/{id}/timeline"),
     ("harness-questions.list", "/v1/client/harness-questions"),
     ("harness-questions.get", "/v1/client/harness-questions/{id}"),
     ("notes.list", "/v1/client/notes"),

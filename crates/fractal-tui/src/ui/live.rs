@@ -387,7 +387,15 @@ impl AnswerTiming {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Worker results transfer owned receipts to the UI without an extra allocation"
+)]
 enum Fetched {
+    ThreadWrite(u64, super::threads_live::Receipt),
+    ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),
+    ThreadSeek(u64, String, String, Result<fractal_client::ThreadTimelinePage, super::threads_live::SeekFailure>),
+    MarkedUnread(u64, u64, Result<Vec<fractal_client::Envelope<fractal_client::ThreadSummary>>, super::marked_unread::Failure>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
     Protocol(super::content::Key, u16, u16, super::content::Encoding),
@@ -649,6 +657,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut resources_stale = true;
     let mut resources_reading = false;
     let mut resources_generation = 0_u64;
+    let mut thread_interests = Vec::new();
     // Whether the feed was last told to follow the missions window, and until when the last time
     // one was on screen keeps it followed.
     let mut missions_sent = false;
@@ -754,6 +763,8 @@ pub fn run(context: Context) -> Result<()> {
                             version = %crate::version::short(crate::version::now()), endpoint = ?client);
                     }
                     resources_generation += 1;
+                    ui.threads.enable(false);
+                    thread_interests.clear();
                     resources_stale = true;
                     extras.inventory_supported = None;
                     extras.inventory_partial.clear();
@@ -770,6 +781,25 @@ pub fn run(context: Context) -> Result<()> {
                     body_requested.clear();
                     changed = true;
                     ui.reads.connected(Instant::now());
+                }
+                feed::Update::ThreadSupport { available, access, upgrade_required } => {
+                    ui.threads.enable(available);
+                    ui.threads.set_access(access);
+                    if upgrade_required {
+                        ui.flash_as(super::Severity::Warn, "Upgrade the connected Fractal to use threads. Your pairing is kept.");
+                    }
+                    if available { ui.threads.model(&model); }
+                    changed = true;
+                }
+                feed::Update::ThreadWindow { interest, snapshot, replace, rows, removes, order, has_more } => {
+                    if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
+                    ui.threads.window(interest, snapshot, replace, rows, removes, order, has_more);
+                    changed = true;
+                }
+                feed::Update::ThreadWindowFailed { interest, code, message, permanent } => {
+                    if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
+                    ui.threads.failure(interest, code, message, permanent);
+                    changed = true;
                 }
                 feed::Update::InventorySupport { granted, member_build } => {
                     extras.inventory_supported = Some(granted);
@@ -870,6 +900,7 @@ pub fn run(context: Context) -> Result<()> {
                     match window {
                         Window::Attention => {
                             model.now = collection;
+                            ui.threads.model(&model);
                             extras.attention_live = true;
                             auto_stale = true;
                         }
@@ -885,7 +916,10 @@ pub fn run(context: Context) -> Result<()> {
                         Window::Inventory(inventory) => match inventory {
                             Inventory::Machines => model.machines = collection,
                             Inventory::Devices => model.devices = collection,
-                            Inventory::Sessions => model.sessions = collection,
+                            Inventory::Sessions => {
+                                model.sessions = collection;
+                                ui.threads.model(&model);
+                            }
                             Inventory::Terminals => {
                                 ui.resource_sidebar.terminals = terminal_rows(collection.items);
                                 ui.resource_sidebar.terminals_has_more = collection.truncated;
@@ -1145,6 +1179,28 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
+                Fetched::MarkedUnread(generation, request, rows) => {
+                    if generation == resources_generation {
+                        ui.threads.marked_loaded(request, rows);
+                    }
+                }
+                Fetched::ThreadSeek(generation, id, key, page) => {
+                    if generation == resources_generation
+                        && let Some(error) = ui.threads.seek_loaded(&id, &key, page) {
+                        ui.flash_as(super::Severity::Error, error);
+                    }
+                }
+                Fetched::ThreadEarlier(generation, id, page) => {
+                    if generation == resources_generation
+                        && let Some(error) = ui.threads.earlier_loaded(&id, page) {
+                        ui.flash_as(super::Severity::Error, error);
+                    }
+                }
+                Fetched::ThreadWrite(generation, receipt) => {
+                    if generation == resources_generation {
+                        ui.complete_thread(receipt);
+                    }
+                }
                 Fetched::Notice(notice) => ui.flash(notice),
                 Fetched::AlertOutcome(id, outcome) => {
                     if let Err(error) = outcome {
@@ -1161,7 +1217,10 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 Fetched::Session(id, outcome) => match outcome {
-                    Ok(session) => model.add_opened_session(*session),
+                    Ok(session) => {
+                        model.add_opened_session(*session);
+                        ui.threads.model(&model);
+                    },
                     Err(message) => {
                         if opens.remove(&id).is_some() {
                             super::slo::METRICS.add("open_cannot_load", 1);
@@ -1220,7 +1279,6 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Fetched::Said(query, outcome) => {
                     ui.said = Some((query, outcome));
-                    changed = true;
                 }
                 Fetched::Inventory { generation, result } => {
                     if generation != resources_generation || extras.inventory_supported != Some(false) { continue; }
@@ -1240,7 +1298,10 @@ pub fn run(context: Context) -> Result<()> {
                             match inventory {
                                 Inventory::Machines => model.machines = rows,
                                 Inventory::Devices => model.devices = rows,
-                                Inventory::Sessions => model.sessions = rows,
+                                Inventory::Sessions => {
+                                    model.sessions = rows;
+                                    ui.threads.model(&model);
+                                }
                                 _ => unreachable!(),
                             }
                         },
@@ -1533,6 +1594,58 @@ pub fn run(context: Context) -> Result<()> {
                 said_typed = None;
             }
             _ => {}
+        }
+        let wanted_threads = ui.threads.interests(&ui.main_pane());
+        if wanted_threads != thread_interests {
+            ui.threads.keep_windows(&wanted_threads);
+            let _ = commands.send(Command::Threads(wanted_threads.clone()));
+            thread_interests = wanted_threads;
+            changed = true;
+        }
+        let pane = ui.main_pane();
+        if let Some(request) = ui.threads.marked_due(&pane) {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let rows = super::marked_unread::read(&reader).await;
+                let _ = tx.send(Fetched::MarkedUnread(generation, request, rows));
+            });
+        }
+        for seek in ui.threads.take_seeks() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = seek.read(&reader).await;
+                let _ = tx.send(Fetched::ThreadSeek(generation, seek.id, seek.key, result));
+            });
+        }
+        for earlier in ui.threads.take_earlier() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = earlier.read(&reader).await;
+                let _ = tx.send(Fetched::ThreadEarlier(generation, earlier.id, result));
+            });
+        }
+        for mut write in ui.threads.writes() {
+            if !extras.live {
+                ui.complete_thread(write.offline());
+                continue;
+            }
+            let writer = client.clone();
+            if let Err(error) = ui.threads.bind(&mut write, writer.clone()) {
+                ui.complete_thread(write.not_sent(error));
+                continue;
+            }
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let receipt = write.perform(writer).await;
+                let _ = tx.send(Fetched::ThreadWrite(generation, receipt));
+            });
         }
         // Every conversation on screen rides the feed's socket (the focused one first): st
         // pushes each change, so nothing here reads one again on a timer.
@@ -1939,11 +2052,6 @@ pub fn run(context: Context) -> Result<()> {
                     ref agent,
                     ref text,
                     ..
-                }
-                | Effect::Discuss {
-                    to: ref agent,
-                    ref text,
-                    ..
                 } => {
                     let token = uuid::Uuid::now_v7().to_string();
                     let sent = Arc::new(Mutex::new(None));
@@ -2226,6 +2334,7 @@ pub fn run(context: Context) -> Result<()> {
             super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
         }
         ui.read_presented_conversations(&timelines);
+        ui.read_presented_threads();
         ui.queue_read_advances(Instant::now(), extras.live);
         if extras.live
             && let Some(check) = ui.reads.list_due(Instant::now())
@@ -2985,7 +3094,10 @@ async fn perform(
                 format!(
                     "{} {}: asked Fractal",
                     control.verb(),
-                    agent.trim_start_matches("agent/")
+                    model
+                        .agents()
+                        .find(|candidate| candidate.header.id == agent)
+                        .map_or("an agent", |candidate| candidate.name.as_str())
                 ),
                 None,
             ))
@@ -3130,32 +3242,6 @@ async fn perform(
             )
             .await?;
             Ok(("Reply sent".into(), None))
-        }
-        Effect::Discuss { to, title, text } => {
-            let (to, session) = (
-                to.clone(),
-                model
-                    .agents()
-                    .find(|candidate| candidate.header.id == to)
-                    .and_then(|agent| agent.current_session_id.clone()),
-            );
-            let id = send_message(
-                client,
-                &to,
-                text,
-                Some(title),
-                None,
-                session,
-                Vec::new(),
-                Vec::new(),
-                sent,
-                latest_snapshot(model),
-            )
-            .await?;
-            Ok((
-                "Sent; the reply will show here and in their conversation".into(),
-                id,
-            ))
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
@@ -4179,12 +4265,28 @@ mod tests {
         let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
+        let mut requester = world.agents.items()[0].clone();
+        requester.id = "agent/x/requester".into();
+        requester.name = "Atlas\x1b[2J Builder\n".into();
+        let requester_id = requester.id.clone();
+        if let Load::Ready(agents) = &mut world.agents {
+            agents.push(requester);
+        }
         let mut ui = Ui::new(world);
         ui.show_focused();
-        ui.open_requested(Pane::Agent(Some(known)), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        ui.open_requested(Pane::Agent(Some(known.clone())), Place::Right, false, Some(&requester_id));
         let (shown, _) = ui.flash.clone().unwrap();
         assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
-        assert!(shown.contains("bad[2Jname"), "{shown:?}");
+        assert_eq!(shown, "Atlas[2J Builder opened Docs Writer");
+
+        let unknown = "agent/x/bad\x1b[2Jname\n";
+        ui.open_requested(Pane::Agent(Some(known)), Place::Right, false, Some(unknown));
+        let (shown, _) = ui.flash.clone().unwrap();
+        assert_eq!(shown, "an agent opened Docs Writer");
+        assert!(!shown.contains(unknown), "{shown:?}");
+        assert!(!shown.contains("agent/x/"), "{shown:?}");
+        assert!(!shown.contains("bad[2Jname"), "{shown:?}");
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
     }
 
     #[test]
@@ -4769,14 +4871,9 @@ mod tests {
         assert_eq!(
             store.index().unwrap(),
             reply_index,
-            "threaded replies keep the same retry receipt"
+            "ordinary conversation replies keep the same retry receipt"
         );
         for effect in [
-            Effect::Discuss {
-                to: "agent/example/worker".into(),
-                title: "Copper discussion".into(),
-                text: "Record the evidence".into(),
-            },
             Effect::CreateTerminal {
                 name: "Copper shell".into(),
             },
@@ -5152,6 +5249,8 @@ mod tests {
         );
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert!(ui.visible_messages().is_empty(), "a headless draw does not prove foreground");
+        ui.input_event(crossterm::event::Event::FocusGained);
         let shown = ui.visible_messages();
         assert!(shown.contains("message/reply"));
         assert!(

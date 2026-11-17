@@ -1,5 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, Alert, AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
+import { ownedPresentations } from '../ownedPresentation';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
@@ -10,7 +12,7 @@ import type { ConversationContentRef } from '../../../clients/typescript/fractal
 import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
-import { Banners } from '../chrome';
+import { Banners, useRefresh } from '../chrome';
 import { quality, readPositions } from '../qualityNative';
 import { seenTail } from '../readPosition';
 import rules from '../../../fixtures/clients/conversation-style.json';
@@ -30,6 +32,7 @@ import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
 import { Button, DraftRecoveryNote, Field, LINE, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
 import { AlertsStrip } from './Alerts';
+import { AgentThreads } from './Threads';
 
 // Drawn by the Fractal terminal UI's rules (fixtures/clients/conversation-style.json), so both apps look alike. Text
 // names its colour by Mocha token and `T` repaints it for the system appearance; fills and edges
@@ -102,6 +105,9 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const [now, setNow] = useState(() => Date.now());
   // Asking Fractal again: true from the moment the phone starts following this conversation until Fractal sends it.
   const [refreshing, setRefreshing] = useState(true);
+  // Native pull to refresh, like every host screen; it also reloads the agent's thread group.
+  // Its own spinner state is separate from `refreshing`, which tracks the conversation follow.
+  const pullRefresh = useRefresh();
   // The entry whose text is open for selecting in place: a long press selects it, any part of it can be copied.
   const [selecting, setSelecting] = useState<string | null>(null);
   useEffect(() => {
@@ -357,7 +363,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
     const pick = async () => {
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      const release = ownedPresentations.acquire();
+      let result;
+      try {
+        result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      } finally { release(); }
       if (result.canceled) return;
       const more = result.assets.map(asset => asset.base64 ? picked(asset.base64, asset.mimeType ?? 'image/jpeg', asset.fileName ?? undefined) : `${asset.fileName ?? 'That image'} could not be read.`);
       const next = addImages(images, more);
@@ -368,7 +378,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       const next = addImages(images, [image ? fromDataUri(image.data, 'Pasted image') : 'The clipboard holds no image.']);
       setImages(next.images); setImageIssue(next.refused);
     };
-    ActionSheetIOS.showActionSheetWithOptions({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
+    showOwnedActionSheet({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
       if (index === 0) void pick().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
       if (index === 1) void paste().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
     });
@@ -436,7 +446,10 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     <Banners />
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
     {header ? <View style={strip}><T dim>{header}</T></View> : null}
-    {agent ? <AlertsStrip agentId={agent.id} /> : null}
+    {agent ? <>
+      <AlertsStrip agentId={agent.id} />
+      <AgentThreads agentId={agent.id} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
+    </> : null}
     {issue ? <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry} style={strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now, stopped)}</T></Pressable> : null}
     {!unresolved && !issue ? <Freshness refreshing={refreshing} loaded={loaded} lastFrame={lastFrame} /> : null}
     {findOpen ? <View style={[strip, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
@@ -449,6 +462,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       ref={list}
       onViewableItemsChanged={visibleEntries.current}
       inverted
+      refreshControl={pullRefresh}
       data={rows}
       extraData={selecting}
       keyExtractor={row => row.kind === 'entry' ? row.entry.id : row.kind === 'call' ? `call:${row.entry.id}` : row.kind === 'bundle' ? row.id : row.kind === 'pending' ? row.pending.id : 'older'}
