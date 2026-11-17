@@ -71,7 +71,7 @@ mod managed_declaration_tests {
     use super::*;
 
     fn api_error(code: ClientErrorCode) -> GeneratedClientError {
-        let envelope = fractal_client::ErrorEnvelope {
+        let envelope = fractal_client::ErrorEnvelope { applied: None,
             api_version: "st3.client.v0".into(),
             error_version: "st3.client.error.v0".into(),
             request_id: "test".into(),
