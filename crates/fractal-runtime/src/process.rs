@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod reaper;
 const SCHEMA: &str = "st.runtime.exec-generation.v1";
 
 // All receipt updates and rotations share the generation fence, including fresh observers.
@@ -497,6 +498,9 @@ impl ExecRuntime {
                 );
             })?;
         }
+        // Thread creation is fallible and precedes process creation, never stranding a child
+        // behind a thread-spawn panic or a failed reactor initialization.
+        let reaper = self.owned_reaper()?;
         let mut child = command.spawn().context("spawn detached exec")?;
         *child_created = true;
         let pid = child.id();
@@ -530,15 +534,15 @@ impl ExecRuntime {
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
         };
-        // Register while this child is still ours, before an observer can consume its wait.
-        let subscription = subscribe_process_exit(pid, start_token);
         let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
         children.insert(OwnedChildKey::new(id, &generation), OwnedChild::Running(child));
         let receipt = self.write_generation(id, &generation);
-        // Publish the initial receipt before exposing custody to concurrent observers.
+        // Registration and initial persistence precede exposing custody to observers. A failed
+        // receipt write still leaves the reactor responsible for the successfully spawned child.
+        if let Some(reaper) = reaper {
+            reaper.register(self.clone(), OwnedChildKey::new(id, &generation), start_token);
+        }
         drop(children);
-        // Registration precedes fallible receipt persistence. Even a failed launch must reap.
-        self.start_owned_reaper(OwnedChildKey::new(id, &generation), subscription);
         receipt?;
         // `systemd-run` joins its scope only when the user manager starts it, and runs the task
         // after. Until then it is in this process's cgroup and ends with it, so the exec outlives
@@ -756,54 +760,12 @@ impl ExecRuntime {
         Ok(false)
     }
 
-    /// Spawn custody, not mission membership, owns completion. Each child has a kernel exit
-    /// subscription and a parked completion worker, with no periodic running-child scans.
-    /// The worker retains the runtime until its wait and fallible receipt write are finished.
-    fn start_owned_reaper(
-        &self,
-        key: OwnedChildKey,
-        subscription: Result<Option<ProcessExitSubscription>>,
-    ) {
+    fn owned_reaper(&self) -> Result<Option<&'static reaper::CompletionReactor>> {
         #[cfg(test)]
         if !self.reap_automatically {
-            return;
+            return Ok(None);
         }
-        let runtime = self.clone();
-        std::thread::spawn(move || {
-            let notification = subscription.and_then(|subscription| {
-                subscription.map_or(Ok(()), ProcessExitSubscription::wait)
-            });
-            let mut wait_for_child = notification.is_err();
-            if let Err(error) = notification {
-                // An old kernel or descriptor exhaustion must not erase a successfully spawned
-                // child's wait obligation. The exact-child waitid below is the blocking fallback.
-                tracing::warn!(runtime_id = key.id, generation = key.generation, pid = key.pid,
-                    %error, "owned child exit subscription unavailable; using exact-child wait");
-            }
-            let mut retry_delay = Duration::from_millis(100);
-            loop {
-                let ready = if wait_for_child {
-                    // WNOWAIT leaves consumption and receipt custody in the owned-child map.
-                    wait_owned_child_exit(key.pid)
-                } else {
-                    Ok(())
-                };
-                let completion = ready.and_then(|()| runtime.finish_owned_child(&key));
-                match completion {
-                    Ok(true) => break,
-                    // Also covers a notification that preceded whole-process waitability.
-                    Ok(false) => wait_for_child = true,
-                    Err(error) => {
-                        // Only failed completion I/O is retried on a timer. Healthy running
-                        // children sleep in the kernel, not in a daemon-wide polling loop.
-                        tracing::warn!(runtime_id = key.id, generation = key.generation, pid = key.pid,
-                            %error, "owned child completion remains pending");
-                        std::thread::sleep(retry_delay);
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
-                    }
-                }
-            }
-        });
+        reaper::CompletionReactor::get().map(Some)
     }
 
     fn finish_owned_child(&self, key: &OwnedChildKey) -> Result<bool> {
@@ -1592,18 +1554,19 @@ impl ProcessExitSubscription {
     }
 }
 
-/// Fallback only for an owned child's unavailable/failed subscription. Do not consume its wait
-/// status here: Child::try_wait and the retained Exited mark remain the single status owner.
-fn wait_owned_child_exit(pid: u32) -> Result<()> {
+/// Probe only an owned child whose native exit subscription is unavailable. WNOWAIT keeps
+/// consumption and receipt custody in the normal child-map reaper; no global wait is used.
+fn owned_child_waitable(pid: u32) -> Result<bool> {
     loop {
-        // SAFETY: waitid initializes this plain C status record; P_PID targets only our child,
-        // and WNOWAIT leaves its status available to this runtime's normal nonblocking reaper.
+        // SAFETY: waitid initializes this plain C record. P_PID confines the probe to our child;
+        // WNOHANG is nonblocking and WNOWAIT leaves its status for Child::try_wait.
         let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = unsafe {
-            libc::waitid(libc::P_PID, pid as libc::id_t, &mut status, libc::WEXITED | libc::WNOWAIT)
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut status,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG)
         };
         if result == 0 {
-            return Ok(());
+            return Ok(status.si_signo != 0);
         }
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::Interrupted {
@@ -1611,9 +1574,9 @@ fn wait_owned_child_exit(pid: u32) -> Result<()> {
         }
         if error.raw_os_error() == Some(libc::ECHILD) {
             // A concurrent observer can have already consumed and persisted this exact child.
-            return Ok(());
+            return Ok(true);
         }
-        return Err(error).context("wait for exact owned child without consuming status");
+        return Err(error).context("probe exact owned child without consuming status");
     }
 }
 
@@ -2392,8 +2355,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn owned_reap_regression_exact_child_wait_fallback() {
-        owned_reap_regression(false, false, RegressionReaper::ExactChildWait);
+    fn owned_reap_regression_fallback_stays_pending_while_child_is_alive() {
+        owned_reap_regression(false, false, RegressionReaper::ExactChildProbe);
     }
 
     #[cfg(target_os = "linux")]
@@ -2401,7 +2364,7 @@ mod tests {
     enum RegressionReaper {
         Subscription,
         Observer,
-        ExactChildWait,
+        ExactChildProbe,
     }
 
     #[cfg(target_os = "linux")]
@@ -2434,17 +2397,23 @@ mod tests {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
         assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
         let exited = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        if mode == RegressionReaper::ExactChildProbe {
+            let reactor = reaper::CompletionReactor::get().unwrap();
+            let token = reactor.register_fallback(owner.clone(), OwnedChildKey::new("work", &generation));
+            // Wait for an actual fallback probe while the FIFO keeps this child alive.
+            // The probe must neither consume a status nor certify early completion.
+            assert!(reactor.wait_for_fallback_scan(token));
+            assert!(process_generation_alive(generation.pid, generation.start_token).unwrap());
+            let current = owner.read_generation_path(&owner.record_path("work")).unwrap().unwrap();
+            assert_eq!(current.exit_code, None);
+            assert_eq!(current.exit_signal, None);
+            assert!(!current.group_exited);
+            assert!(matches!(owner.owned_children.lock().unwrap()
+                .get(&OwnedChildKey::new("work", &generation)), Some(OwnedChild::Running(_))));
+        }
         // Freeze only the owner's map. A different runtime can cancel and publish terminal
         // containment, but cannot consume the parent's wait status.
         let children = owner.owned_children.lock().unwrap();
-        if mode == RegressionReaper::ExactChildWait {
-            let mut fallback = owner.clone();
-            fallback.reap_automatically = true;
-            fallback.start_owned_reaper(
-                OwnedChildKey::new("work", &generation),
-                Err(std::io::Error::from_raw_os_error(libc::ENOSYS).into()),
-            );
-        }
         observer.stop_if("work", Some(&generation.generation_id)).unwrap();
         let mut event = libc::pollfd {
             fd: exited.as_raw_fd(), events: libc::POLLIN, revents: 0,
