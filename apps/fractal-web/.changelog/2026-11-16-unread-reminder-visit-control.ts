@@ -2,6 +2,6 @@ import type { ChangelogEntrySource } from '../src/changelog/contract.ts'
 
 export default {
   title: 'Read conversations only in the foreground',
-  summary: 'Replies advance natural read history only after a stable half-second of meaningful body visibility in a focused conversation, including expanded embedded threads, never from background tabs, list rows or behind a dialog. Private Mark unread reminders keep a return anchor without reversing read history. Mark read clears observed reminder IDs; reminders otherwise stay sticky until a later conversation visit. Inbox includes an owner-wide Marked unread section, with complete paging and explicit loading errors. Return-anchor navigation explains pending or unavailable replies without inventing content. Older thread endpoints show an upgrade notice instead of issuing unsupported reminder reads.',
+  summary: 'Thread replies are marked read only after a stable half-second of meaningful body visibility in a focused conversation, including expanded embedded threads. Private Mark unread reminders keep return anchors without reversing read history, and remain until a later conversation visit reaches the reply or you explicitly choose Mark read. Inbox now has a fully paged Marked unread section that keeps closed threads visible, explains pending or unavailable replies and shows an upgrade notice when the server needs updating.',
   kind: 'feature',
 } satisfies ChangelogEntrySource
