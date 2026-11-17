@@ -167,14 +167,14 @@ fn read_conn(
         if seed.source_id.starts_with("step-run/")
             && (runtime || seed.episode.starts_with("run-generation/"))
         {
-            if discussion_source::qualify(conn, &person, seed, now_ms())?.is_none() {
+            if !discussion_source::qualify_history(conn, &person, seed, now_ms())?.is_authorized() {
                 return Err(unavailable());
             }
             page.source_support = Some(HistorySourceSupport::PersonStep);
         } else {
             // Retained discussion uses the same exact-opening authority as the writer.
             // Families with no retained proof retain their existing live-only admission.
-            if discussion_source::qualify(conn, &person, seed, now_ms())?.is_none() {
+            if !discussion_source::qualify_history(conn, &person, seed, now_ms())?.is_authorized() {
                 inbox_source::resolve(store, conn, &person, &InboxOrigin {
                     source_id: seed.source_id.clone(), episode: seed.episode.clone(),
                 }, now_ms())?;
@@ -188,7 +188,7 @@ fn read_conn(
         if marker.len() > 2048 { return Err(invalid_context_cursor()); }
         let key: SourceEpisode = serde_json::from_str(marker)
             .map_err(|_| invalid_context_cursor())?;
-        if discussion_source::qualify(conn, &person, &key, now_ms())?.is_none() {
+        if !discussion_source::qualify_history(conn, &person, &key, now_ms())?.is_authorized() {
             return Err(invalid_context_cursor());
         }
         Ok(key)
@@ -223,7 +223,7 @@ fn read_conn(
             }
             if key.source_id == seed.source_id
                 && after.is_none_or(|after| &key > after)
-                && discussion_source::qualify(conn, &person, &key, now_ms())?.is_some()
+                && discussion_source::qualify_history(conn, &person, &key, now_ms())?.is_authorized()
             {
                 members.insert(key);
             }
@@ -256,7 +256,7 @@ fn read_conn(
             break;
         }
         if members.contains(&key)
-            || discussion_source::qualify(conn, &person, &key, now_ms())?.is_none()
+            || !discussion_source::qualify_history(conn, &person, &key, now_ms())?.is_authorized()
             || !is_member(conn, &created, thread, &key, cut)?
         {
             continue;
@@ -267,7 +267,7 @@ fn read_conn(
     // Revalidate each selected exact key before any content, including lookahead. The reader
     // must not return a different episode as a substitute.
     for key in members {
-        if discussion_source::qualify(conn, &person, &key, now_ms())?.is_none() { continue; }
+        if !discussion_source::qualify_history(conn, &person, &key, now_ms())?.is_authorized() { continue; }
         if let Some(item) = read_source(conn, &person, &key, cut)?
             && item.key == key
         {
@@ -300,7 +300,7 @@ fn read_conn(
         ) else { continue; };
         let parent = SourceEpisode { source_id: source.into(), episode: episode.into() };
         if !is_member(conn, &created, thread, &parent, cut)?
-            || discussion_source::qualify(conn, &person, &parent, now_ms())?.is_none() { continue; }
+            || !discussion_source::qualify_history(conn, &person, &parent, now_ms())?.is_authorized() { continue; }
         if !primary.contains(&parent) && !page.boundary_items.iter().any(|item| item.key == parent) {
             let Some(row) = read_source(conn, &person, &parent, cut)?.filter(|row| row.key == parent) else { continue; };
             page.boundary_items.push(row);

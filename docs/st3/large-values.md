@@ -1024,7 +1024,7 @@ These registrations are transitional debt, not permanent size exemptions.
 | `thread_fence_tests.rs:961`, `lv-h374311c02b6a` | Safe finite notice fixture: only `snapshot.input` is cloned, recipient/source replaced with constants, then real notice/snapshot claims carry its fixed fields and returned creation ID. | Preserve native notice creation/projection identity; arbitrary production notice body/link bytes are not qualified. |
 | `thread_request_history_tests.rs:280`, `lv-h9ce35b9b6628` | Safe fixed registration fixture follows real manifest-document publication and one literal requested/answered episode, asserting unsupported custom history. | Preserve registration identity and unsupported-history behavior through representation changes. |
 
-This review changes no SQL bytes, query meaning or bounds. The predecessor-hydration
+The existing payload SQL bytes and bounds remain unchanged. The predecessor-hydration
 risk remains separate: both retained response and clock queries select the complete
 `predecessors` TEXT value, then `claim_from_row` decodes it; a body CASE and a row
 limit do not bound that value. Discussion preflight checks response-subject bytes,
@@ -1039,3 +1039,35 @@ parent inventories. Its assertion-only `thread-start-refusals.json` include in
 SQLite inventory does not cover `include_str!` in crates without a declared SQLite
 dependency, so that TUI include requires no additional SQLite site record; its
 separate Rust test-input declaration is supplied by the merged change.
+
+### Bounded runtime history authority
+
+The engineering RCA `retained-runtime-9e3-rca@06509323` separates the canonical
+runtime opening's routing authority from payload availability. The shared
+discussion qualifier now records typed within-budget, over-budget and invalid-key
+preflight outcomes. Its history-only entry point may return an authorized
+payload-over-budget outcome only after a bounded header projection proves the
+exact canonical unrepaired `work.person-asked` opening, immutable original person,
+current step recipient policy, and accepted-time cut. Persistent repaired IDs are
+excluded even after receipt cleanup. Explicit operation metadata additionally
+requires an active operation with the exact canonical opening and request digest;
+legacy openings without operation metadata keep their existing admission form.
+Unknown, missing, foreign or over-budget header authority remains absent.
+
+`fractal_store::store::discussion_source` owns `lv-h7c1ab81ff9e3`, the dynamic
+bounded header reader. It selects only original recipient, current recipient and
+accepted time, never the opening body or predecessors. SQL CASE expressions
+return these fields only when their combined encoded bytes fit the existing
+256 KiB proof budget. Existing claim identity and canonical index keys remain
+inline; the module retains `trace-statement-and-value-representation` to qualify
+their physical representation and ordering costs without weakening recipient
+proof or changing canonical selection.
+
+Only authorized history reads map that outcome to the existing unavailable
+payload with `ReadBoundExceeded` and `complete: false`. Start and start-context
+continue to call the full qualifier, whose payload input is null for every
+over-budget key; the narrow header result cannot construct a
+`QualifiedDiscussionSource` or grant a send. No bound, protocol or public error
+kind changes. Missing-content fixture mutations retain person and attempt authority;
+oversized-opening coverage distinguishes verified owners from missing or foreign
+original authority and keeps the full Start boundary closed.
