@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadEdits } from './threadEdits.ts';
+import { LocalDrafts } from './draftsStorage.ts';
 import { ClientError, FractalClient } from '../../clients/typescript/fractal-client/index.ts';
 import { threadClock, threadExactTime, threadRelativeTime } from './threadClock.ts';
 import { anchorPresentation, reminderFromSummary } from './unreadVisit.ts';
@@ -1507,4 +1508,61 @@ test('an unconfirmed first composer moves to separate recovery and leaves a fres
   button(after, 'Start thread').props.onPress();
   assert.equal(find(render(), 'InlineThread').props.start.target, undefined, 'the next send allocates a new thread UUID');
   assert.ok(threadDeliveries.has('start/thread/first'), 'the first attempt remains recoverable');
+});
+
+test('a nonempty Start draft transfers intact to its own recovery across remount and a durable store restart', async () => {
+  const origin = { sourceId: 'notice/same', episode: 'episode/same' }, client = {};
+  const originKey = 'thread-draft/["notice/same","episode/same"]', attemptKey = 'thread-draft/start/thread/first';
+  const original = JSON.stringify({ text: 'Original first message\nwith a second line', quote: { id: 'message/quote', from: 'Agent', text: 'Exact quoted words' } });
+  const values = new Map(), storage = {
+    async getItem(key) { return values.get(key) ?? null; },
+    async setItem(key, value) { values.set(key, value); },
+  };
+  let persistence = new LocalDrafts(storage), writes = [];
+  let store = {
+    status: 'online', threadRefresh: 0, draftsReady: true,
+    draftCache: { current: new Map([[originKey, original]]) },
+    threadDeliveries: new Map([['start/thread/first', { target: 'thread/first', retry() {} }]]),
+    saveDrafts() { writes.push(persistence.save('person/one', store.draftCache.current)); },
+  };
+  store.saveDrafts(); await Promise.all(writes);
+  const panel = () => {
+    const state = hooks();
+    const component = compile('InboxThreadStart', 'function InlineThread', {
+      ...state, useStore: () => store, threadStartScope: target => `start/${target}`,
+      threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
+      View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+    });
+    return props => { state.reset(); return component(props); };
+  };
+  const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
+  const first = find(panel()(props), 'InlineThread').props.start;
+  first.onSubmitted('thread/first');
+  await Promise.all(writes);
+  assert.equal(store.draftCache.current.get(attemptKey), original, 'copy precedes the persisted origin deletion');
+  assert.equal(store.draftCache.current.has(originKey), false);
+  const parse = compile('readThreadDraft', 'function ThreadComposer', {});
+  const assertRemount = () => {
+    const fresh = panel()(props);
+    assert.equal(find(fresh, 'InlineThread'), undefined, 'the fresh origin composer is empty and independent');
+    assert.equal(button(fresh, 'Start thread').props.disabled, false);
+    const recovery = find(panel()({ ...props, canStart: false, pendingTarget: 'thread/first', showHistory: false }), 'InlineThread').props.start;
+    assert.equal(recovery.cacheKey, attemptKey);
+    assert.deepEqual(parse(store.draftCache.current.get(recovery.cacheKey)), JSON.parse(original), 'the recovered composer reads the original text and quote');
+    return recovery;
+  };
+  const remounted = assertRemount();
+  // A retry that remains unknown must not delete text typed into a later fresh composer.
+  const later = JSON.stringify({ text: 'A separate next Start' });
+  store.draftCache.current.set(originKey, later);
+  remounted.onSubmitted('thread/first');
+  await Promise.all(writes);
+  assert.equal(store.draftCache.current.get(originKey), later);
+  assert.equal(store.draftCache.current.get(attemptKey), original);
+  store.draftCache.current.delete(originKey); store.saveDrafts(); await Promise.all(writes);
+  // Simulate process loss: neither a cache nor a bound-delivery closure is reused.
+  persistence = new LocalDrafts(storage);
+  store = { ...store, draftCache: { current: new Map() }, threadDeliveries: new Map() };
+  assert.equal(await persistence.restore('person/one', store.draftCache.current), 1);
+  assertRemount();
 });

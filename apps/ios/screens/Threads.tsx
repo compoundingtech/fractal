@@ -532,7 +532,7 @@ function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canSt
 }) {
   const { status, threadRefresh, threadDeliveries, draftCache, draftsReady, saveDrafts } = useStore();
   const scope = JSON.stringify([origin.sourceId, origin.episode]);
-  const cacheKey = threadDraftKey(scope);
+  const cacheKey = threadDraftKey(pendingTarget ? threadStartScope(pendingTarget) : scope);
   const [local, setLocal] = useState<{ client: ThreadClient; target?: string; accepted: boolean; generation: number }>();
   const current = local?.client === client ? local : undefined;
   const target = current?.target ?? pendingTarget;
@@ -540,12 +540,16 @@ function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canSt
   const accepted = current?.accepted === true;
   const show = !!current || !!delivery || draftsReady && draftCache.current.has(cacheKey);
   const draft: ThreadStartDraft | undefined = show && agentId ? {
-    target, cacheKey: pendingTarget ? threadDraftKey(threadStartScope(pendingTarget)) : cacheKey, origin: { ...origin, agentId }, accepted, title: threadTitleFromAsk(initialTitle),
+    target, cacheKey, origin: { ...origin, agentId }, accepted, title: threadTitleFromAsk(initialTitle),
     onAccepted: id => setLocal({ client, target: id, accepted: true, generation: current?.generation ?? 0 }),
-    onSubmitted: () => {
-      // The signed first message now belongs to its own recovery, not the
-      // origin's fresh composer. A subsequent Start must get a fresh UUID.
-      if (!pendingTarget) draftCache.current.delete(cacheKey);
+    onSubmitted: id => {
+      // Preserve the exact serialized text/quote before persisting the handoff.
+      // Retrying an existing recovery must not touch a later origin draft.
+      if (!pendingTarget) {
+        const original = draftCache.current.get(cacheKey);
+        if (original !== undefined) draftCache.current.set(threadDraftKey(threadStartScope(id)), original);
+        draftCache.current.delete(cacheKey);
+      }
       saveDrafts();
       setLocal(undefined);
     },
