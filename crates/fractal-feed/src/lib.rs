@@ -605,7 +605,7 @@ async fn connected(
     };
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
-    let upgrade_required = [("threads-v1", 2), ("thread-summary-feed", 1)].iter().any(|(id, version)| {
+    let upgrade_required = [("threads-v1", 3), ("thread-summary-feed", 1)].iter().any(|(id, version)| {
         !capabilities.value.capabilities.iter().any(|capability| {
             capability.id == *id && capability.version >= *version
         })

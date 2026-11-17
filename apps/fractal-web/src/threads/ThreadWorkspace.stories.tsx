@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as Native from '@fractal/client/schema/read'
 import { ActionResult } from '@fractal/client/schema'
-import { Option } from 'effect'
+import { Option, Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
@@ -153,7 +153,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
         previous_title: observation.summary.title, title,
       })
       registry.set(history, { ...registry.get(history), [id]: [event, ...(registry.get(history)[id] ?? [])] })
-      update(id, row => Native.decodeUnknownSync(Native.ThreadSummary)({ ...row, title, title_revision: `claim/title-${next}` }))
+      update(id, row => Native.decodeUnknownSync(Native.ThreadSummary)({ ...Schema.encodeSync(Native.ThreadSummary)(row), title, title_revision: `claim/title-${next}` }))
       return undefined
     },
     changeState: async (observation, state) => {

@@ -7,8 +7,12 @@ import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
+import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
+
+export const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. Your browser pairing is kept.'
+const threadProtocolVersion = 3
 
 export type ThreadDraft = {
   readonly content: string
@@ -25,7 +29,7 @@ export type ThreadSendResult =
   | { readonly _tag: 'Sent'; readonly threadId: string }
   | ({ readonly _tag: 'Refused' } & ThreadRefusal)
 
-type ThreadActionKind = 'thread.start' | 'thread.reply' | 'thread.rename' | 'thread.close' | 'thread.reopen' | 'thread.read'
+type ThreadActionKind = 'thread.start' | 'thread.reply' | 'thread.rename' | 'thread.close' | 'thread.reopen' | 'thread.read' | 'thread.mark-unread' | 'thread.clear-unread'
 /** The sentence that names a refused action, so Fractal's reason is never shown without what it refused. */
 const refusedAction: Readonly<Record<ThreadActionKind, string>> = {
   'thread.start': "Couldn't start this thread.",
@@ -34,6 +38,8 @@ const refusedAction: Readonly<Record<ThreadActionKind, string>> = {
   'thread.close': "Couldn't close this thread.",
   'thread.reopen': "Couldn't reopen this thread.",
   'thread.read': "Couldn't mark these replies read.",
+  'thread.mark-unread': "Couldn't mark this thread unread.",
+  'thread.clear-unread': "Couldn't clear this unread reminder.",
 }
 
 /** A send that never reached Fractal: nothing changed, and the advice holds only until it reconnects. */
@@ -79,6 +85,8 @@ export interface ThreadSource {
   readonly pendingChange?: (threadId: string) => Atom.Atom<string | undefined>
   readonly retryChange?: (threadId: string) => Promise<ThreadRefusal | undefined>
   readonly markRead?: (thread: ThreadObservation, through: string, seen: readonly string[]) => Promise<ThreadRefusal | undefined>
+  /** Explicit reminder operations are separate from natural thread.read receipts. */
+  readonly unreadActions?: UnreadActionPort
   /** Read every mounted thread projection again, including one refused before. */
   readonly reload?: () => void
 }
@@ -137,8 +145,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     get.addFinalizer(() => abort.abort())
     void client.capabilities({ signal: abort.signal }).then(({ value }) => {
       const caps = Native.decodeUnknownSync(Native.Capabilities)(value)
-      const upgradeRequired = ([['threads-v1', 2], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
-      const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= 2 && capability.state === 'granted')
+      const upgradeRequired = ([['threads-v1', threadProtocolVersion], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
+      const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= threadProtocolVersion && capability.state === 'granted')
       const read = inboxOrigins && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')
       if (!abort.signal.aborted) {
         if (!read && registry.get(titles).size > 0) registry.set(titles, new Map())
@@ -342,6 +350,20 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       return Native.decodeUnknownSync(Native.ThreadTimelinePage)(value)
     }, { refused: refusedThread, ...(follow === undefined ? {} : { follow }) })
   })
+  const soughtPages = Atom.family((_threadId: string) => Atom.make<{
+    readonly page: ThreadTimelinePage
+    readonly actor: string | undefined
+  } | undefined>(undefined))
+  const firstTimeline = Atom.family((threadId: string) => Atom.make<Feed<ThreadTimelinePage>>(get => {
+    const grant = get(access)
+    const page = get(soughtPages(threadId))
+    const latest = get(readTimeline(threadId))
+    if (!grant.read) return waiting
+    if (page === undefined || page.actor !== grant.actor || latest._tag === 'Unavailable') return latest
+    const stale = (transportLive !== undefined && !get(transportLive))
+      || (latest._tag === 'Observed' && latest.freshness === 'stale')
+    return { _tag: 'Observed', value: page.page, freshness: stale ? 'stale' : 'live' }
+  }))
   const deliveryRevision = Atom.make(0)
   const deliveryChanged = () => registry.set(deliveryRevision, registry.get(deliveryRevision) + 1)
   const invalidate = () => {
@@ -399,6 +421,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           const { snapshot, value } = await client.capabilities()
           if (value.session_actor !== attempt.actor) throw new Error('The connected account changed. Return to the original account to retry this action.')
           if (!value.capabilities.some(capability => capability.id === kind && capability.state === 'granted')
+            || ((kind === 'thread.mark-unread' || kind === 'thread.clear-unread')
+              && !['thread.mark-unread', 'thread.clear-unread'].every(id => value.capabilities.some(capability => capability.id === id && capability.state === 'granted')))
             || ((kind === 'thread.start' || kind === 'thread.reply') && !canSendUnsignedThread(value))) {
             throw new Error('This connection cannot perform that thread action.')
           }
@@ -470,6 +494,28 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   return {
     access,
     titles,
+    unreadActions: gatewayUnreadActions({
+      client, registry, access, detail: readDetail,
+      onFound: (threadId, page) => registry.set(soughtPages(threadId), { page, actor: registry.get(access).actor }),
+      send: async (thread, edit) => {
+        const parameters = {
+          target_id: thread.summary.id,
+          observed_marks: [...edit.observed_marks],
+          ...(edit.kind === 'thread.mark-unread' ? { anchor_message_id: edit.anchor_message_id } : {}),
+        }
+        const result = await deliver(`unread/${thread.summary.id}`, JSON.stringify({ kind: edit.kind, parameters }), edit.kind,
+          () => thread.summary.id,
+          attempt => ({
+            expected: { kind: 'unread', actionId: `action/${attempt.key}`, targetId: thread.summary.id },
+            revisions: { [thread.summary.id]: thread.summary.revision },
+            send: request => edit.kind === 'thread.mark-unread'
+              ? client.threadMarkUnread({ ...request, parameters: { ...parameters, anchor_message_id: edit.anchor_message_id } })
+              : client.threadClearUnread({ ...request, parameters }),
+          }),
+        )
+        return result._tag === 'Sent' ? { _tag: 'Sent' } : { _tag: 'Refused', detail: result.detail }
+      },
+    }),
     reload: () => registry.set(revision, registry.get(revision) + 1),
     pendingStarts: Atom.family((sourceId?: string) => Atom.make(get => {
       get(deliveryRevision)
@@ -505,7 +551,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     },
     list: query => readList(JSON.stringify(query)),
     detail: readDetail,
-    timeline: (threadId, cursor) => readTimeline(pageKey(threadId, cursor)),
+    timeline: (threadId, cursor) => cursor === undefined ? firstTimeline(threadId) : readTimeline(pageKey(threadId, cursor)),
     draft: drafts,
     start: (draftKey, parameters) => send(draftKey, parameters),
     reply: parameters => send(parameters.target_id, parameters),

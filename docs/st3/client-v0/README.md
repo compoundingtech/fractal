@@ -941,6 +941,10 @@ documented filters. The server clamps `limit` to `capabilities.limits.max_page_i
 sort after present values, strings compare as Unicode scalar sequences, and the final key is always
 the stable `id` ascending. No locale-sensitive ordering is permitted.
 
+Unread reminders require granted `threads-v1` version 3: `thread.mark-unread`,
+`thread.clear-unread`, timeline `around` seeks, and the `marked_unread` list selector.
+Older versions do not advertise this unread contract; natural unread remains independent.
+
 The owner-wide unread-reminder list, `GET /v1/client/threads?marked_unread=true`,
 uses bounded candidate pages. A page can return `items: []` with a non-null
 `next_cursor`; this does **not** mean the collection is empty. Continue with the

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal UI requires stable foreground-visible thread bodies for automatic reading and offers private reminders with explicit clearing",
+  "replay": { "status": "none", "detail": "The client uses the existing thread read and unread reminder actions; no replay policy changes." },
+  "schema": { "status": "none", "detail": "No additional schema or generated client changes beyond the composed unread API dependency." },
+  "rules": { "status": "none", "detail": "No checkpoint rules, digests or coordination changes." },
+  "compatibility": { "status": "changed", "detail": "Requires negotiated threads-v1 version 3 and thread.read access; version 2 members use the existing upgrade-required state without querying reminder lists or anchors. No privacy, storage or writer version changes. Read-only connections hide mark actions and natural read history is preserved." },
+  "downtime": { "status": "none", "detail": "No service interruption or startup work." },
+  "manual": { "status": "none", "detail": "Mark read clears all observed private reminders even when their anchors are unavailable, without reading unseen history. Mark unread is available in Ctrl+K and the thread panel. Inbox lists private marked-unread threads. These features require threads-v1 version 3; older members show upgrade required." },
+  "recovery": { "status": "none", "detail": "No new local persistent state. Reminders remain authoritative on the member across client restarts." }
+}
