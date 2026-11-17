@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 async fn cancellation_reaps_payload_and_publishes_real_signal_without_git_or_logical_peak() {
     let directory = tempfile::tempdir().unwrap();
     let result_path = directory.path().join("outcome.json");
-    let mut helper = tokio::process::Command::new(env!("CARGO_BIN_EXE_fractal"))
+    let mut helper = tokio::process::Command::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"))
         .arg("resource-payload").arg(&result_path).arg("--")
         .args(["/bin/sh", "-c", "printf 'ready\\n'; exec sleep 60"])
         .current_dir(directory.path())
@@ -55,7 +55,7 @@ async fn successful_payload_records_git_start_and_end_without_inventing_logical_
     let observations = tempfile::tempdir().unwrap();
     let result_path = observations.path().join("outcome.json");
     let output = tokio::time::timeout(Duration::from_secs(10),
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_fractal"))
+        tokio::process::Command::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"))
             .arg("resource-payload").arg(&result_path).arg("--")
             .args(["/bin/sh", "-c", "printf 'after\\n' > tracked"])
             .current_dir(directory.path()).env_remove("FRACTAL_RESOURCE_PARENT")

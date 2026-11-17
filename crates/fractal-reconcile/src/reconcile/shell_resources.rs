@@ -233,12 +233,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         let live_member = self.store.resource_memberships_for_host(&self.host)?.into_iter()
             .find(|member| member.request.id == request.id
                 && member.roots.iter().any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()));
-        if !execution.cancel && execution.state != "failing" {
-            if let Err(error) = self.store.shell_resource_owner_live(&request.owner) {
-                if live_member.is_none() { return Err(error); }
-                execution.state = "failing".into();
-                execution.reason = format!("{error:#}");
-            }
+        if !execution.cancel && execution.state != "failing"
+            && let Err(error) = self.store.shell_resource_owner_live(&request.owner)
+        {
+            if live_member.is_none() { return Err(error); }
+            execution.state = "failing".into();
+            execution.reason = format!("{error:#}");
         }
         let grant: Grant = if let Some(member) = live_member {
             member.grant.context("launched shell has no grant")?

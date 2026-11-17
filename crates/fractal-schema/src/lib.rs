@@ -5397,6 +5397,7 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();

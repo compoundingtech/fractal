@@ -243,12 +243,12 @@ coverage does not imply a measured memory peak.
 Subjects use this layout, where `hex` is lowercase hexadecimal encoding of the exact UTF-8 bytes:
 
 ```text
-resource/exec/{hex(head_start or empty)}/{hex(host)}/{class}/{hex(exec_id)}
+resource/exec/{hex(head_start) or _}/{hex(host)}/{class}/{hex(exec_id)}
 ```
 
 The head comes first so the existing claims subject-prefix query can find a head across all
-hosts and classes. An unobserved start head has an empty segment (`resource/exec//`), not an
-invented revision. For a known head, `resource/exec/{hex(head)}/` selects every receipt for that
+hosts and classes. An unobserved start head uses the reserved `_` segment (`resource/exec/_/`),
+which is not a hexadecimal revision. For a known head, `resource/exec/{hex(head)}/` selects every receipt for that
 head; appending `{hex(host)}/` and then `{class}/` narrows the same prefix by host and class.
 
 For example, read a page for a head and select a host/class using the ordinary claims response:

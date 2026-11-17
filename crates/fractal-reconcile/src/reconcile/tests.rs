@@ -1021,6 +1021,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     /// The exec a hook waits for, and what happens right after that exec is next observed.
     type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
 
+    type ResourceRecoveryHook = Box<dyn Fn(&Store) + Send>;
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
@@ -1032,7 +1034,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
         resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-        before_resource_recovery: Mutex<Option<Box<dyn Fn(&Store) + Send>>>,
+        before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,

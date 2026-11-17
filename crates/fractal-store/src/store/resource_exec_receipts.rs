@@ -8,7 +8,8 @@ pub const KIND: &str = "resource.exec-receipt";
 /// Head-first subjects support the existing indexed claims prefix query without
 /// creating a second receipt authority. Components are exact, slash-safe identities.
 pub fn head_prefix(head: &str) -> String {
-    format!("resource/exec/{}/", hex::encode(head))
+    let component = if head.is_empty() { "_".into() } else { hex::encode(head) };
+    format!("resource/exec/{component}/")
 }
 
 pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: &Execution) -> Result<()> {
@@ -125,6 +126,17 @@ mod tests {
         assert!(fields.get("memory_peak_bytes").is_none());
         assert!(claims(&store, Some(&head_prefix("other"))).is_empty());
         assert_eq!(fractal_schema::retention::policy().kind(KIND).class, fractal_schema::retention::Class::Durable);
+    }
+
+    #[test]
+    fn unobserved_head_uses_a_nonempty_reserved_subject_component() {
+        let store = Store::open_memory("host-a").unwrap();
+        let mut execution = terminal(&store, "one", "cancelled");
+        execution.result = None;
+        store.update_shell_resource(&execution).unwrap();
+        let page = claims(&store, Some("resource/exec/_/"));
+        assert_eq!(page.len(), 1);
+        assert!(page[0].body["fields"].get("head_start").is_none());
     }
 
     #[test]
