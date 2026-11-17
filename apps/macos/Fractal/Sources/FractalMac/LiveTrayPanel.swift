@@ -17,12 +17,17 @@ struct LiveTrayPanel: View {
       if model.isPanelVisible {
         TrayPanel(model: model, build: build)
           .environment(\.panelAvailableHeight, availableHeight)
-          .onGeometryChange(for: CGSize.self) { $0.size } action: { lastSize = $0 }
+          .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+            lastSize = $0.size
+            #if DEBUG
+              NativePanelDiagnostic.recordContent($0)
+            #endif
+          }
       } else {
         Color.clear.frame(width: lastSize.width, height: lastSize.height)
       }
     }
     .background(PanelVisibility(model: model, availableHeight: $availableHeight))
-    .background(PanelWindowFrame())
+    .background(PanelWindowFrame(contentSize: lastSize))
   }
 }
