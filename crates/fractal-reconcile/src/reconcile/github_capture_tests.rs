@@ -55,7 +55,7 @@ fn dependencies_replay_out_of_order_without_partial_publication() -> Result<()> 
     let mut first = commit(1, None);
     first.facts.push(FactReference { claim_id: "fact".into(), digest: fact.digest()? });
     hold(&db, "second", COMMIT_KIND, "member-one", &commit(2, Some("first")))?;
-    assert!(advance(&mut db, &definition())?);
+    assert!(!advance(&mut db, &definition())?);
     hold(&db, "first", COMMIT_KIND, "member-one", &first)?;
     assert!(!advance(&mut db, &definition())?);
     let key = projection_key(&definition())?;
@@ -76,6 +76,24 @@ fn unauthorized_candidates_do_not_override_admitted_member() -> Result<()> {
     hold(&db, "good", COMMIT_KIND, "member-one", &commit(1, None))?;
     assert!(advance(&mut db, &definition())?);
     assert_eq!(current_head(&db, &projection_key(&definition())?)?.1.as_deref(), Some("good"));
+    Ok(())
+}
+
+#[test]
+fn later_unadmitted_candidates_do_not_make_projection_pending() -> Result<()> {
+    let mut db = database()?;
+    root(&db)?;
+    for index in 0..PAGE + 1 {
+        hold(&db, &format!("rogue-{index}"), COMMIT_KIND, "other-member", &commit(3, Some("missing")))?;
+    }
+    let mut wrong_grant = commit(4, Some("missing"));
+    wrong_grant.authority_grant = "unselected".into();
+    hold(&db, "wrong-grant", COMMIT_KIND, "member-one", &wrong_grant)?;
+    let mut wrong_epoch = commit(5, Some("missing"));
+    wrong_epoch.epoch = 2;
+    hold(&db, "wrong-epoch", COMMIT_KIND, "member-one", &wrong_epoch)?;
+    assert!(advance(&mut db, &definition())?);
+    assert_eq!(current_head(&db, &projection_key(&definition())?)?, (0, None));
     Ok(())
 }
 

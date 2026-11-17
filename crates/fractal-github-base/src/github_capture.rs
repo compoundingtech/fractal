@@ -564,10 +564,13 @@ mod tests {
             -> Pin<Box<dyn Future<Output = Result<CaptureProgress>> + Send + 'a>> {
             Box::pin(async move {
                 assert!(api_base.starts_with("http://127.0.0.1:"));
-                assert_eq!(repository, "renamed/project");
+                assert_eq!(repository, "example/project", "source selection keeps the authored locator across redirects");
                 assert!(auth.is_valid());
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if self.fail { bail!("capture publication rejected"); }
+                if self.fail {
+                    return Err(anyhow::anyhow!("the selected source writer has been fenced and cannot resume")
+                        .context("capture publication rejected"));
+                }
                 Ok(self.progress)
             })
         }
@@ -602,17 +605,94 @@ mod tests {
             "capture is independent of workflow performance fields");
     }
 
+    type CaptureWarningFields = std::collections::BTreeMap<String, String>;
+
+    #[derive(Clone, Default)]
+    struct CaptureWarnings(std::sync::Arc<std::sync::Mutex<Vec<CaptureWarningFields>>>);
+
+    impl tracing::field::Visit for CaptureWarnings {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.lock().unwrap().last_mut().unwrap()
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    impl tracing::Subscriber for CaptureWarnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            self.0.lock().unwrap().push(std::collections::BTreeMap::new());
+            event.record(&mut self.clone());
+        }
+    }
+
     #[tokio::test]
-    async fn capture_publication_errors_are_not_swallowed() {
+    async fn fenced_capture_reports_failure_without_discarding_changed_live_pull_requests() {
+        use tracing::instrument::WithSubscriber as _;
+
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/example/project", json!({"id":7,"full_name":"renamed/project"}));
+        github.route("/repos/example/project/issues?state=open&per_page=100", json!([]));
+        let live_pull = |head: &str| json!({
+            "number": 7, "title": "Live pull request",
+            "url": "https://github.com/example/project/pull/7",
+            "createdAt": "2026-09-01T00:00:00Z", "isDraft": false,
+            "headRefOid": head, "headRefName": "feature",
+            "commits": {"nodes": []}
+        });
+        github.open_pull_requests(json!([live_pull("old-head")]));
+        let mut initial = observer_request(None);
+        initial.fields.insert("pull_requests".into());
+        let baseline = crate::resource::test_github::observe(initial, &base).await.unwrap();
+        assert_eq!(baseline.facts["pull_requests"][0]["head"], "old-head");
+        let cursor: Value = serde_json::from_str(baseline.cursor.as_deref().unwrap()).unwrap();
+        let since = chrono::DateTime::parse_from_rfc3339(cursor["items_since"].as_str().unwrap()).unwrap()
+            - chrono::Duration::seconds(1);
+        github.route(&format!(
+            "/repos/example/project/issues?state=all&sort=updated&direction=asc&since={}&per_page=100",
+            since.format("%Y-%m-%dT%H:%M:%SZ")
+        ), json!([]));
+
+        github.open_pull_requests(json!([live_pull("new-head")]));
         let ledger = std::sync::Arc::new(RecordingCapture {
             calls: std::sync::atomic::AtomicUsize::new(0), fail: true,
             progress: CaptureProgress { active: true, continue_after_ms: Some(100) },
         });
-        let error = crate::resource::test_github::observe(observer_request(Some(ledger.clone())), &base)
-            .await.unwrap_err();
-        assert!(error.to_string().contains("capture publication rejected"));
+        let mut request = observer_request(Some(ledger.clone()));
+        request.fields.insert("pull_requests".into());
+        request.cursor = baseline.cursor;
+        request.previous_facts = Some(baseline.facts);
+        let warnings = CaptureWarnings::default();
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let observed = crate::resource::test_github::observe(request, &base)
+            .with_subscriber(warnings.clone()).await.unwrap();
+        let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        assert_eq!(observed.facts["pull_requests"][0]["head"], "new-head",
+            "live watch facts survive a fenced capture publication");
+        assert!(observed.facts.get("github_capture").is_none(),
+            "capture status is separate from watch-facing facts");
+        assert!(observed.cursor.is_some(), "live observation progress is retained");
+        assert!(observed.next_check_unix_ms >= before + 300_000);
+        assert!(observed.next_check_unix_ms <= after + 300_000,
+            "a fenced source does not request accelerated continuation");
         assert_eq!(ledger.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let warnings = warnings.0.lock().unwrap();
+        let failure = warnings.iter().find(|fields| fields.get("capture_status")
+            .is_some_and(|status| status == "\"failed\"")).expect("capture failure is reported independently");
+        assert_eq!(failure["repository"], "\"example/project\"");
+        assert!(failure["error"].contains("capture publication rejected"));
+        assert!(failure["error"].contains("the selected source writer has been fenced and cannot resume"),
+            "the original cause is not hidden by its publication context");
     }
 }

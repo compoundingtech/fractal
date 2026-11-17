@@ -161,6 +161,46 @@ mod tests {
     }
 
     #[test]
+    fn replay_remains_pending_until_known_later_captures_predecessor_arrives() {
+        let store = Store::open_memory("node").unwrap();
+        let delayed = Store::open_memory("node").unwrap();
+        for store in [&store, &delayed] {
+            store.bind_fleet("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();
+        }
+        let state = tempfile::tempdir().unwrap();
+        let source = Source { host: "github.com".into(), id: "example".into(), generation: 1 };
+        let grant = AuthorityGrant { version: VERSION, source: source.clone(), member: "node".into(),
+            epoch: 1, predecessor_grant: None, final_predecessor_commit: None, fencing_receipt: None };
+        let grant = append(&store, "github-source/example".into(), AUTHORITY_KIND, &grant);
+        crate::reconcile::tests::apply_source(&store, &format!(r#"version 2
+github-source "example" {{
+    host "github.com"
+    generation 1
+    authority-grant "{}"
+    repository "acme/garden"
+    enabled #true
+    checkpoint-every-ms 60000
+    replicate-private #false
+}}"#, grant.id), "declare-delayed-replay");
+        let mut commit = CaptureCommit { version: VERSION, source, epoch: 1,
+            authority_grant: grant.id, sequence: 1, predecessor: None,
+            facts: vec![], checkpoint: None, coverage: vec![], observed_at_ms: 100 };
+        let first = append(&delayed, commit.subject().unwrap(), COMMIT_KIND, &commit);
+        commit.sequence = 2;
+        commit.predecessor = Some(first.id.clone());
+        let second = append(&store, commit.subject().unwrap(), COMMIT_KIND, &commit);
+        assert!(capture_replay(&store, state.path(), "example", None, 128).unwrap().is_none());
+        assert!(capture_replay(&store, state.path(), "example", None, 128).unwrap().is_none());
+        store.import_replication("delayed", &delayed.export_replication(0).unwrap()).unwrap();
+        let page = capture_replay(&store, state.path(), "example", None, 128).unwrap().unwrap();
+        assert_eq!(page.through_sequence, 2);
+        assert_eq!(page.frontier.as_deref(), Some(second.id.as_str()));
+        assert_eq!(page.records.iter().map(|record| record.claim_id.as_str()).collect::<Vec<_>>(),
+            vec![first.id.as_str(), second.id.as_str()]);
+        assert!(page.snapshot_complete);
+    }
+
+    #[test]
     fn replay_pins_coverage_and_frontier_and_ignores_staged_facts() {
         let store = Store::open_memory("node").unwrap();
         store.bind_fleet("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();

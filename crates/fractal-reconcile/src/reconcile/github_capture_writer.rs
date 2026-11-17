@@ -130,8 +130,11 @@ fn publish_coverage(store:&Store, connection:&mut Connection, definition:&Source
     Ok(())
 }
 
-fn publish(store: &Store, connection: &mut Connection, definition: &SourceDefinition, grant: &AuthorityGrant, page: &AcquisitionPage, now: u64) -> Result<()> {
+fn publish(store: &Store, connection: &mut Connection, definition: &SourceDefinition, grant: &AuthorityGrant, locator: &str, page: &AcquisitionPage, now: u64) -> Result<()> {
     let repository = page.checkpoint.repository.as_ref().context("capture has not resolved repository identity")?;
+    if let Some(previous) = configured_checkpoint(connection,definition,locator)? {
+        ensure!(previous.repository_id == repository.id, "configured repository resolved to another committed node identity");
+    }
     ensure!(!repository.is_private || definition.replicate_private, "private source replication has not been explicitly admitted");
     if page.status != AcquisitionStatus::Complete {
         publish_coverage(store,connection,definition,grant,&page.coverage,now)?;
@@ -151,9 +154,13 @@ fn publish(store: &Store, connection: &mut Connection, definition: &SourceDefini
     }
     if !references.is_empty() { commit(store,connection,definition,grant,references,None,Vec::new(),now)?; }
     let receipt = page.receipt.as_ref();
+    // Bind the authored scope member to the resolved node, not its mutable upstream name.
+    // This travels in the committed checkpoint, so cache rebuilds retain rename identity.
+    let mut cursor = serde_json::to_value(&page.checkpoint)?;
+    cursor["configured_locator"] = Value::String(locator.to_ascii_lowercase());
     let checkpoint = ScanCheckpoint { repository_id:repository.id.clone(),
         pass_started_at_ms:receipt.map_or_else(|| page.checkpoint.pass.map_or(now,|pass|pass.started_ms),|receipt|receipt.pass_started_ms),
-        cursor:Some(serde_json::to_string(&page.checkpoint)?),pass_complete:page.status == AcquisitionStatus::Complete,
+        cursor:Some(serde_json::to_string(&cursor)?),pass_complete:page.status == AcquisitionStatus::Complete,
         pull_request_id:receipt.map(|receipt|receipt.pull_request_id.clone()),
         upstream_updated_at_ms:receipt.map(|receipt|receipt.upstream_updated_at_ms) };
     if page.status == AcquisitionStatus::Complete {
@@ -191,12 +198,7 @@ impl GitHubCaptureLedger for GraphGitHubCaptureLedger {
                     return Ok(CaptureProgress {active:false,continue_after_ms:None});
                 }
                 let grant = writer_grant(&connection,&definition,self.store.origin())?;
-                let mut statement = connection.prepare("SELECT record FROM capture_v1_entities WHERE source=?1 AND family='repository' LIMIT 129")?;
-                let mut node_id = None;
-                for row in statement.query_map([projection_key(&definition)?],|row|row.get::<_,String>(0))? {
-                    if let FactImage::Repository(repo) = serde_json::from_str(&row?)? && repo.locator.eq_ignore_ascii_case(repository) { node_id=Some(repo.id); }
-                }
-                let previous = node_id.as_deref().map(|id|checkpoint(&connection,&definition,id)).transpose()?.flatten();
+                let previous = configured_checkpoint(&connection,&definition,repository)?;
                 (grant,previous)
             };
             if work.grant != authority { work.acquisitions.clear();work.grant=authority.to_owned(); }
@@ -227,7 +229,7 @@ impl GitHubCaptureLedger for GraphGitHubCaptureLedger {
                         "source declaration changed while its request was in flight");
                     ensure!(ready(&self.store,&mut connection,&definition)?, "source dependencies changed during acquisition");
                     writer_grant(&connection,&definition,self.store.origin())?;
-                    publish(&self.store,&mut connection,&definition,&grant,&page,now)
+                    publish(&self.store,&mut connection,&definition,&grant,repository,&page,now)
             })?;
             let status=page.status;
             if let Some(error)=page.error {return Err(error);}
@@ -236,14 +238,26 @@ impl GitHubCaptureLedger for GraphGitHubCaptureLedger {
     }
 }
 
-fn page_repository(connection:&Connection,definition:&SourceDefinition,locator:&str)->Result<String> {
-    let mut statement=connection.prepare_cached("SELECT record FROM capture_v1_entities WHERE source=?1 AND family='repository' LIMIT 129")?;
-    let mut count=0;
-    for row in statement.query_map([projection_key(definition)?],|row|row.get::<_,String>(0))? {
-        count+=1;ensure!(count<=128,"source repository population exceeds bounded lookup");
-        if let FactImage::Repository(repo)=serde_json::from_str(&row?)? && repo.locator.eq_ignore_ascii_case(locator) {return Ok(repo.id);}
+fn configured_checkpoint(connection:&Connection,definition:&SourceDefinition,locator:&str)->Result<Option<ScanCheckpoint>> {
+    let mut statement=connection.prepare_cached("SELECT record FROM capture_v1_checkpoints WHERE source=?1 LIMIT 129")?;
+    let rows=statement.query_map([projection_key(definition)?],|row|row.get::<_,String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(rows.len()<=128,"source repository population exceeds bounded lookup");
+    for row in rows {
+        let checkpoint:ScanCheckpoint=serde_json::from_str(&row)?;
+        let cursor:Value=serde_json::from_str(checkpoint.cursor.as_deref().context("capture checkpoint has no acquisition cursor")?)?;
+        let configured=cursor.get("configured_locator").and_then(Value::as_str)
+            .context("committed checkpoint has no authored repository binding; refusing to infer membership from its current name")?;
+        if configured.eq_ignore_ascii_case(locator) {
+            return Ok(Some(checkpoint));
+        }
     }
-    anyhow::bail!("repository identity is not yet committed")
+    Ok(None)
+}
+
+fn page_repository(connection:&Connection,definition:&SourceDefinition,locator:&str)->Result<String> {
+    Ok(configured_checkpoint(connection,definition,locator)?
+        .context("repository identity is not yet committed")?.repository_id)
 }
 
 /// Serialize with acquisition, then durably stop the exact authority before a successor is admitted.

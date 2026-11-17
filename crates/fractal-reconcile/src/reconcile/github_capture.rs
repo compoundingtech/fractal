@@ -60,6 +60,7 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         INSERT OR IGNORE INTO capture_v1_meta VALUES(1,0);
         CREATE TABLE IF NOT EXISTS capture_v1_claims(id TEXT PRIMARY KEY,kind TEXT NOT NULL,origin TEXT NOT NULL,source TEXT NOT NULL,sequence INTEGER,record TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS capture_v1_source_sequence ON capture_v1_claims(source,kind,sequence,id);
+        CREATE INDEX IF NOT EXISTS capture_v1_admitted_sequence ON capture_v1_claims(source,kind,origin,json_extract(record,'$.authority_grant'),json_extract(record,'$.epoch'),sequence);
         CREATE TABLE IF NOT EXISTS capture_v1_heads(source TEXT PRIMARY KEY,grant_id TEXT NOT NULL,sequence INTEGER NOT NULL,commit_id TEXT,error TEXT);
         CREATE TABLE IF NOT EXISTS capture_v1_history(source TEXT NOT NULL,sequence INTEGER NOT NULL,commit_id TEXT NOT NULL,PRIMARY KEY(source,sequence));
         CREATE TABLE IF NOT EXISTS capture_v1_conflicts(source TEXT NOT NULL,claim_id TEXT NOT NULL,PRIMARY KEY(source,claim_id));
@@ -283,7 +284,20 @@ fn advance(connection: &mut Connection, definition: &SourceDefinition) -> Result
             ensure!(admitted.is_none(), "two admitted captures claim the same source sequence");
             admitted = Some((id, commit));
         }
-        let Some((id, commit)) = admitted else { return Ok(true) };
+        let Some((id, commit)) = admitted else {
+            // A gap is pending only when the selected authority has a later capture.
+            // Each epoch probes an indexed range; unrelated candidates cannot consume
+            // the replay budget or masquerade as admitted progress.
+            for (number, epoch) in &epochs {
+                let later: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM capture_v1_claims WHERE source=?1 AND kind=?2 AND origin=?3 AND json_extract(record,'$.authority_grant')=?4 AND json_extract(record,'$.epoch')=?5 AND sequence>?6 AND sequence<=coalesce(?7,9223372036854775807))",
+                    params![acquisition_source,COMMIT_KIND,epoch.member,epoch.grant_id,number,sequence,epoch.final_sequence],
+                    |row| row.get(0),
+                )?;
+                if later { return Ok(false); }
+            }
+            return Ok(true);
+        };
         if !apply_one(connection, &key, &id, &commit)? { return Ok(false); }
     }
     Ok(false)

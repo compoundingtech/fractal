@@ -32,6 +32,75 @@ fn cached_work(definition: &SourceDefinition, checkpoint: AcquisitionCheckpoint)
 }
 
 #[test]
+fn renamed_checkpoint_without_authored_binding_is_refused() {
+    let (store, mut connection, definition, grant) = fixture();
+    let mut legacy = page().checkpoint;
+    legacy.repository.as_mut().unwrap().locator = "other/greenhouse".into();
+    let checkpoint = ScanCheckpoint { repository_id: "R_example".into(), pass_started_at_ms: 100,
+        cursor: Some(serde_json::to_string(&legacy).unwrap()), pass_complete: true,
+        pull_request_id: None, upstream_updated_at_ms: None };
+    commit(&store, &mut connection, &definition, &grant, vec![], Some(checkpoint), vec![], 100).unwrap();
+    let error = configured_checkpoint(&connection, &definition, LOCATOR).unwrap_err();
+    assert!(error.to_string().contains("no authored repository binding"));
+}
+
+#[tokio::test]
+async fn renamed_and_transferred_repository_keeps_declared_source_and_committed_node_after_rebuild() {
+    let (store, mut connection, definition, grant) = fixture();
+    let declare = |locator: &str| format!(r#"version 2
+github-source "example" {{
+    host "github.com"
+    generation 1
+    authority-grant "{}"
+    repository "{locator}"
+    enabled #true
+    checkpoint-every-ms 60000
+    replicate-private #false
+}}"#, selected_authority(&definition).unwrap());
+    crate::reconcile::tests::apply_source(&store, &declare(LOCATOR), "declare-rename");
+    let mut renamed = page();
+    for locator in ["acme/greenhouse", "other/greenhouse"] {
+        let repository = RepositoryFact { id: "R_example".into(), locator: locator.into(), is_private: false };
+        renamed.facts = vec![FactImage::Repository(repository.clone())];
+        renamed.checkpoint.repository = Some(repository);
+        renamed.checkpoint.checked_ms = Some(now_ms().unwrap());
+        publish(&store, &mut connection, &definition, &grant, LOCATOR, &renamed, now_ms().unwrap()).unwrap();
+    }
+    let store = Arc::new(store);
+    let state = tempfile::tempdir().unwrap();
+    let ledger = GraphGitHubCaptureLedger { store: store.clone(), state_dir: state.path().to_owned() };
+    let auth = GithubAuth::Local { token: Arc::new("fixture-auth".into()), cache: None };
+    // No live request: the rebuilt committed checkpoint is still fresh despite both moves.
+    let progress = ledger.step("https://api.github.com", LOCATOR, &auth).await.unwrap();
+    assert!(progress.active);
+    assert!(progress.continue_after_ms.is_none());
+    let plugin = GithubPluginStore::shared(state.path()).unwrap();
+    {
+        let rebuilt = plugin.connection.lock().unwrap_or_else(PoisonError::into_inner);
+        let checkpoint = configured_checkpoint(&rebuilt, &definition, LOCATOR).unwrap().unwrap();
+        assert_eq!(checkpoint.repository_id, "R_example");
+        assert!(checkpoint.cursor.as_ref().unwrap().len() <= 768);
+        let resumed: AcquisitionCheckpoint = serde_json::from_str(checkpoint.cursor.as_deref().unwrap()).unwrap();
+        assert_eq!(resumed.repository.unwrap().locator, "other/greenhouse");
+        let mut generation = definition.clone();
+        generation.source.generation += 1;
+        let mut host = definition.clone();
+        host.source.host = "git.example.com".into();
+        let mut authority = definition.clone();
+        authority.authority_grant = Some("another-grant".into());
+        for different in [generation, host, authority] {
+            assert!(configured_checkpoint(&rebuilt, &different, LOCATOR).unwrap().is_none());
+        }
+    }
+    for alias in ["acme/greenhouse", "other/greenhouse"] {
+        assert!(!ledger.step("https://api.github.com", alias, &auth).await.unwrap().active);
+    }
+    // Committed identity is not permission to retain a removed declaration member.
+    crate::reconcile::tests::apply_source(&store, &declare("acme/orchard"), "remove-rename-scope");
+    assert!(!ledger.step("https://api.github.com", LOCATOR, &auth).await.unwrap().active);
+}
+
+#[test]
 fn api_identity_accepts_only_the_established_public_origin() {
     let (_, _, definition, _) = fixture();
     for base in ["https://api.github.com", "https://api.github.com/", "https://API.GITHUB.COM:443"] {
@@ -57,7 +126,7 @@ fn publication_failure_discards_advanced_acquisition_and_replays_durable_frontie
     // Fail the cache transaction after facts and coverage are durably claimed, at checkpoint application.
     connection.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE INSERT ON capture_v1_checkpoints BEGIN SELECT RAISE(ABORT,'simulated crash'); END;").unwrap();
     let failure = publish_page(&mut work, LOCATOR, &page,
-        || publish(&store, &mut connection, &definition, &grant, &page, 100));
+        || publish(&store, &mut connection, &definition, &grant, LOCATOR, &page, 100));
     assert!(failure.is_err());
     assert!(!work.acquisitions.contains_key(LOCATOR));
     assert!(checkpoint(&connection, &definition, "R_example").unwrap().is_none());
@@ -72,7 +141,7 @@ fn publication_failure_discards_advanced_acquisition_and_replays_durable_frontie
     let head = current_head(&rebuilt, &projection_key(&definition).unwrap()).unwrap();
     assert_eq!(head.0, 3);
     // Retrying an identical normalized page writes no duplicate fact revision or coverage.
-    publish(&store, &mut rebuilt, &definition, &grant, &page, 200).unwrap();
+    publish(&store, &mut rebuilt, &definition, &grant, LOCATOR, &page, 200).unwrap();
     assert_eq!(current_head(&rebuilt, &projection_key(&definition).unwrap()).unwrap().0, 4);
     let facts = store.claims_by_kinds_after(&[FACT_KIND], None, 0, 128).unwrap();
     assert_eq!(facts.claims.len(), 1);
@@ -90,7 +159,7 @@ fn staging_crash_reuses_original_fact_claim_before_first_commit() {
     let staged = append_record(&store, fact.subject().unwrap(), FACT_KIND, &fact, format!("github-fact:{digest}")).unwrap();
     assert!(ready(&store, &mut connection, &definition).unwrap());
     assert!(image_revision(&connection, &definition, &page.facts[0]).unwrap().is_none());
-    publish(&store, &mut connection, &definition, &grant, &page, 100).unwrap();
+    publish(&store, &mut connection, &definition, &grant, LOCATOR, &page, 100).unwrap();
     let facts = store.claims_by_kinds_after(&[FACT_KIND], None, 0, 128).unwrap();
     assert_eq!(facts.claims.len(), 1);
     assert_eq!(facts.claims[0].id, staged.id);
@@ -104,7 +173,7 @@ fn publication_rejection_before_any_claim_discards_cursor() {
     page.checkpoint.repository.as_mut().unwrap().is_private = true;
     let mut work = cached_work(&definition, page.checkpoint.clone());
     assert!(publish_page(&mut work, LOCATOR, &page,
-        || publish(&store, &mut connection, &definition, &grant, &page, 100)).is_err());
+        || publish(&store, &mut connection, &definition, &grant, LOCATOR, &page, 100)).is_err());
     assert!(work.acquisitions.is_empty());
     assert_eq!(current_head(&connection, &projection_key(&definition).unwrap()).unwrap().0, 0);
     assert!(store.claims_by_kinds_after(&[FACT_KIND, COMMIT_KIND], None, 0, 128).unwrap().claims.is_empty());
@@ -142,7 +211,7 @@ fn writer_requires_exact_grant_source_member_and_fence_identity() {
     let mut work = cached_work(&definition, page().checkpoint);
     assert!(publish_page(&mut work, LOCATOR, &page(), || {
         writer_grant(&connection, &definition, "node")?;
-        publish(&store, &mut connection, &definition, &grant, &page(), 100)
+        publish(&store, &mut connection, &definition, &grant, LOCATOR, &page(), 100)
     }).is_err());
     assert!(work.acquisitions.is_empty());
     assert_eq!(current_head(&connection, &projection_key(&definition).unwrap()).unwrap().0, 0);
@@ -151,7 +220,7 @@ fn writer_requires_exact_grant_source_member_and_fence_identity() {
 #[test]
 fn stopped_receipt_retry_returns_original_claim_and_requires_exact_frontier() {
     let (store, mut connection, definition, grant) = fixture();
-    publish(&store, &mut connection, &definition, &grant, &page(), 100).unwrap();
+    publish(&store, &mut connection, &definition, &grant, LOCATOR, &page(), 100).unwrap();
     let (_, frontier) = current_head(&connection, &projection_key(&definition).unwrap()).unwrap();
     assert!(existing_fence(&store, &connection, &definition, &grant, frontier.as_deref()).unwrap().is_none());
     let receipt = FenceReceipt { version: VERSION, source: definition.source.clone(), member: "node".into(),
@@ -181,7 +250,7 @@ fn continuing_publication_retains_acquisition_only_after_checkpoint_is_committed
     page.coverage[0].through_ms = 0;
     let mut work = cached_work(&definition, page.checkpoint.clone());
     publish_page(&mut work, LOCATOR, &page,
-        || publish(&store, &mut connection, &definition, &grant, &page, 100)).unwrap();
+        || publish(&store, &mut connection, &definition, &grant, LOCATOR, &page, 100)).unwrap();
     assert!(work.acquisitions.contains_key(LOCATOR));
     assert!(!checkpoint(&connection, &definition, "R_example").unwrap().unwrap().pass_complete);
     let commits = store.claims_by_kinds_after(&[COMMIT_KIND], None, 0, 128).unwrap();
@@ -246,7 +315,7 @@ fn another_origin_cannot_fence_the_designated_member_by_naming_it() {
 #[test]
 fn ingested_late_forks_remain_rejected_after_cache_restart() {
     let (store, mut connection, definition, grant) = fixture();
-    publish(&store, &mut connection, &definition, &grant, &page(), 100).unwrap();
+    publish(&store, &mut connection, &definition, &grant, LOCATOR, &page(), 100).unwrap();
     let key = projection_key(&definition).unwrap();
     let head = current_head(&connection, &key).unwrap();
     let fork = CaptureCommit { version: VERSION, source: definition.source.clone(), epoch: grant.epoch,
@@ -270,7 +339,7 @@ fn successor_namespace_rebuilds_receipts_without_reusing_old_cache_rows() {
     first_page.receipt = Some(crate::github_capture::CaptureReceipt {
         pull_request_id: "PR_example".into(), upstream_updated_at_ms: 90, pass_started_ms: 100,
     });
-    publish(&store, &mut connection, &definition, &grant, &first_page, 100).unwrap();
+    publish(&store, &mut connection, &definition, &grant, LOCATOR, &first_page, 100).unwrap();
     let old_key = projection_key(&definition).unwrap();
     let old_head = current_head(&connection, &old_key).unwrap();
     let receipt = FenceReceipt { version: VERSION, source: definition.source.clone(), member: grant.member.clone(),
@@ -291,7 +360,7 @@ fn successor_namespace_rebuilds_receipts_without_reusing_old_cache_rows() {
     assert!(ready(&store, &mut connection, &next).unwrap());
     assert_eq!(current_head(&connection, &next_key).unwrap(), old_head);
     assert!(captured_since(&connection, &next, "R_example", "PR_example", 90, 100).unwrap());
-    publish(&store, &mut connection, &next, &successor, &first_page, 300).unwrap();
+    publish(&store, &mut connection, &next, &successor, LOCATOR, &first_page, 300).unwrap();
     assert_eq!(current_head(&connection, &old_key).unwrap(), old_head);
     assert_eq!(current_head(&connection, &next_key).unwrap().0, old_head.0 + 1);
     assert!(writer_grant(&connection, &definition, "node").is_err());
@@ -305,14 +374,14 @@ fn coverage_publication_crash_never_certifies_uncommitted_checkpoint() {
     let mut work = cached_work(&definition, page.checkpoint.clone());
     connection.execute_batch("CREATE TRIGGER fail_coverage BEFORE INSERT ON capture_v1_coverage BEGIN SELECT RAISE(ABORT,'simulated coverage crash'); END;").unwrap();
     assert!(publish_page(&mut work, LOCATOR, &page,
-        || publish(&store, &mut connection, &definition, &grant, &page, 100)).is_err());
+        || publish(&store, &mut connection, &definition, &grant, LOCATOR, &page, 100)).is_err());
     assert!(work.acquisitions.is_empty());
     assert!(checkpoint(&connection, &definition, "R_example").unwrap().is_none());
     let mut rebuilt = Connection::open_in_memory().unwrap();
     migrate(&rebuilt).unwrap();
     assert!(ready(&store, &mut rebuilt, &definition).unwrap());
     assert!(checkpoint(&rebuilt, &definition, "R_example").unwrap().is_none());
-    publish(&store, &mut rebuilt, &definition, &grant, &page, 200).unwrap();
+    publish(&store, &mut rebuilt, &definition, &grant, LOCATOR, &page, 200).unwrap();
     assert!(checkpoint(&rebuilt, &definition, "R_example").unwrap().unwrap().pass_complete);
     assert_eq!(current_head(&rebuilt, &projection_key(&definition).unwrap()).unwrap().0, 3);
     assert_eq!(store.claims_by_kinds_after(&[FACT_KIND], None, 0, 128).unwrap().claims.len(), 1);

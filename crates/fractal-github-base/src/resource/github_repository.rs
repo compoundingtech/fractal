@@ -1819,10 +1819,24 @@ async fn observe_poll(
     }
     // History shares this observer's authenticated acquisition budget and deadline,
     // but never its operational facts: replay must not wake old watch events.
+    // Like workflow-run publication above, a capture failure is reported separately:
+    // a fenced or broken history source must not discard already-read live changes.
+    // The ledger owns durable coverage; a failed step makes no claim of completeness
+    // and requests no accelerated continuation for a source configuration defect.
     let capture_delay = if let Some(ledger) = request.github_capture.as_deref() {
-        let repository = format!("{}/{}", current_location.0, current_location.1);
-        let progress = ledger.step(api_base, &repository, token).await?;
-        progress.continue_after_ms.filter(|_| progress.active)
+        // Select the authored source by its locator, not GitHub's redirected name.
+        // The ledger resolves committed node identity for renamed repositories.
+        let repository = &request.locator;
+        match ledger.step(api_base, repository, token).await {
+            Ok(progress) => progress.continue_after_ms.filter(|_| progress.active),
+            Err(error) => {
+                tracing::warn!(
+                    repository, capture_status = "failed", error = %format_args!("{error:#}"),
+                    "could not acquire or publish GitHub capture"
+                );
+                None
+            }
+        }
     } else {
         None
     };
