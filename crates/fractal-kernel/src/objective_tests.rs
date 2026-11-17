@@ -242,3 +242,90 @@ fn a_nonsensical_count_is_refused_never_defaulted() {
     }
     assert!(!one(&COUNT.replace("factory/work-throughput", "throughput")).unwrap().declarable());
 }
+
+const RATIO: &str = r#"objective "acme/request-budget" {
+  about "Request bad-event allowance"
+  indicator "ratio" {
+    subject-prefix "custom/acme/request/"
+    event "custom.acme.request" at="observed_at"
+    value "duration_ms" bad-above=100
+    label "route"
+    only "class" "interactive"
+  }
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=20 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+  on-breach "fault" owner="agent/acme/ops" condition="request-budget"
+}"#;
+
+#[test]
+fn native_numeric_indicators_read_policy_and_cadence() {
+    let objective = one(RATIO).unwrap();
+    assert!(objective.declarable());
+    let Indicator::Ratio(ratio) = objective.indicator else { panic!() };
+    assert_eq!(ratio.field, "duration_ms");
+    assert_eq!(ratio.bad_above, 100.0);
+    assert_eq!(ratio.at, "observed_at");
+    let budget = objective.budget.unwrap();
+    assert_eq!(budget.horizon_ms, 30 * 86_400_000);
+    assert_eq!(budget.allowance, 0.05);
+    assert_eq!(budget.fast.short_ms, 300_000);
+    assert_eq!(budget.slow.burn_rate, 6.0);
+    let gauge = RATIO.replace("\"ratio\"", "\"gauge\"").replace(
+        "value \"duration_ms\" bad-above=100",
+        "value \"duration_ms\" bad-above=100\n    max-age \"2h\"\n    cadence \"1h\"",
+    );
+    let Indicator::Gauge(gauge) = one(&gauge).unwrap().indicator else { panic!() };
+    assert_eq!(gauge.max_age_ms, 7_200_000);
+    assert_eq!(gauge.cadence_ms, 3_600_000);
+}
+
+#[test]
+fn numeric_declarations_reject_ambiguous_or_impossible_semantics() {
+    for (from, to) in [
+        (" at=\"observed_at\"", ""),
+        ("bad-above=100", "bad-above=-1"),
+        ("value \"duration_ms\" bad-above=100", ""),
+        ("allowance=0.05", "allowance=1"),
+        ("min-coverage=0.9", "min-coverage=0"),
+        ("min-samples=20", "min-samples=0"),
+        ("short=\"5m\"", "short=\"1h\""),
+        ("long=\"6h\"", "long=\"31d\""),
+        ("burn-rate=14.4", "burn-rate=2"),
+        ("    slow burn-rate=6 long=\"6h\" short=\"30m\"", ""),
+        ("  on-breach", "  target \"p99\" within=\"1s\"\n  on-breach"),
+    ] {
+        assert!(one(&RATIO.replace(from, to)).is_err(), "accepted {from} -> {to}");
+    }
+    let gauge = RATIO.replace("\"ratio\"", "\"gauge\"");
+    assert!(one(&gauge).is_err());
+    assert!(one(&gauge.replace("value \"duration_ms\" bad-above=100",
+        "value \"duration_ms\" bad-above=100\n    max-age \"1m\"\n    cadence \"1h\"")).is_err());
+}
+
+#[test]
+fn gauge_lower_limits_are_exclusive_and_native_bindings_inherit_policy() {
+    let gauge = RATIO.replace("\"ratio\"", "\"gauge\"").replace(
+        "value \"duration_ms\" bad-above=100",
+        "value \"free_bytes\" bad-below=100\n    max-age \"2h\"\n    cadence \"1h\"",
+    );
+    let Indicator::Gauge(parsed) = one(&gauge).unwrap().indicator else { panic!() };
+    assert_eq!(parsed.threshold, Threshold::Below(100.0));
+    assert!(parsed.threshold.is_bad(99.0));
+    assert!(!parsed.threshold.is_bad(100.0));
+    assert!(one(&gauge.replace("bad-below=100", "bad-below=100 bad-above=100")).is_err());
+    assert!(one(&RATIO.replace("bad-above=100", "bad-below=100")).is_err());
+    let native = r#"objective "acme/person-read" {
+      about "Fleet ownership of native latency"
+      indicator "native" { objective "person-read/remote"; }
+      on-breach "fault" owner="agent/acme/ops" condition="person-read-budget"
+    }"#;
+    let parsed = one(native).unwrap();
+    assert!(parsed.declarable());
+    assert_eq!(parsed.indicator, Indicator::Native { objective: "person-read/remote".into() });
+    assert!(parsed.budget.is_none());
+    assert!(one(&native.replace("person-read/remote", "../bad")).is_err());
+    assert!(one(&native.replace("      on-breach", "      target \"p99\" within=\"1s\"\n      on-breach")).is_err());
+    assert!(one(&native.replace("      on-breach", "      window \"1h\"\n      on-breach")).is_err());
+}
