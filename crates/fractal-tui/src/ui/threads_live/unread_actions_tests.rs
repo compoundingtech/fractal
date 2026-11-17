@@ -245,6 +245,28 @@ fn unread_action_menu_keeps_pre_palette_visible_anchor_evidence() {
 }
 
 #[test]
+fn unread_action_menu_marks_only_presented_replies_read_before_auto_read_dwell() {
+    let mut ui = fixture(true, &[]);
+    assert!(present_at(&mut ui, std::time::Instant::now()).contains("Meaningful reply content"));
+    // A reply can load after the last frame without having been presented to the reader.
+    ui.threads.histories.get_mut(ID).unwrap().head.push(event(
+        "message/unpresented", "Loaded but not presented",
+    ));
+    assert!(ui.threads.writes().is_empty(), "one frame cannot satisfy the auto-read dwell");
+    ui.open_palette(None, Open::Here);
+    ui.paste("Mark read".into());
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let writes = ui.threads.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].id, ID);
+    assert_eq!(writes[0].host, HOST);
+    let Mutation::MarkRead(read) = &writes[0].mutation else {
+        panic!("palette must mark naturally unread replies read")
+    };
+    assert_eq!(read.seen_message_ids, ["message/visible"]);
+}
+
+#[test]
 fn unread_marked_row_is_a_private_reminder_and_opening_it_seeks_the_anchor() {
     let mark = smallclaims::store::operation_id_for_key("unread/return");
     let mut ui = fixture(false, &[(mark.as_str(), "message/anchor")]);
