@@ -67,8 +67,9 @@ def download(url, destination, sleep=time.sleep, open_url=urllib.request.urlopen
         urls.append((codeload(url), 0))
     for index, (candidate, delay) in enumerate(urls):
         budget.pause(delay, sleep)
+        request = urllib.request.Request(candidate, headers={"User-Agent": "fractal-release-preseed/1"})
         try:
-            with elapsed_deadline(budget.remaining()), open_url(candidate, timeout=budget.remaining()) as response, destination.open("wb") as output:
+            with elapsed_deadline(budget.remaining()), open_url(request, timeout=budget.remaining()) as response, destination.open("wb") as output:
                 shutil.copyfileobj(response, output)
                 length = response.headers.get("Content-Length")
                 if length is not None and output.tell() != int(length):

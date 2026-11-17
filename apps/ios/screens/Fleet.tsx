@@ -5,6 +5,7 @@ import { ScrollView, Switch, Text, View } from 'react-native';
 import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
+import { useGatewayDraft } from '../gatewayDraft';
 import { clientDetail, clientTitle, deviceDetail, deviceTitle, olderThanMember } from '../presentation';
 import { isUnmanaged, isUnresolved } from '@fractal/views';
 import { useStore } from '../store';
@@ -252,7 +253,8 @@ function CarrierSection() {
 export function PairScreen() {
   const { carrierInfo: fabricInfo, actions: fabricActions } = useStore();
   useEffect(() => { if (fabricInfo.built) void fabricActions.loadFabricNode(); }, [fabricInfo.built]);
-  const { url, urlDraft, setUrlDraft, pairDraft, busy, actions, carrierInfo } = useStore();
+  const { url, urlDraft, setUrlDraft, urlDraftProfileRevision, pairDraft, busy, actions, carrierInfo } = useStore();
+  const gatewayDraft = useGatewayDraft(urlDraft, setUrlDraft, urlDraftProfileRevision);
   // Fabric chosen with a target saved (a build can carry one): a device with no gateway pairs over fabric alone.
   const overFabric = carrierInfo.built && carrierInfo.choice === 'fabric' && !!carrierInfo.target;
   const [id, setId] = useState(pairDraft?.id ?? ''), [code, setCode] = useState(pairDraft?.code ?? '');
@@ -263,7 +265,7 @@ export function PairScreen() {
     setScanning(true); setScanNote('');
     try {
       const raw = await scanPairingQrNative();
-      const outcome = scanOutcome(raw === null ? null : parsePairingQr(raw), pairDraft?.gateway ?? (url || urlDraft));
+      const outcome = scanOutcome(raw === null ? null : parsePairingQr(raw), pairDraft?.gateway ?? (url || gatewayDraft.read()));
       if (outcome.kind === 'unchanged') return;
       if (outcome.kind === 'issue') { setScanNote(outcome.text); return; }
       const prefill = () => {
@@ -293,9 +295,9 @@ export function PairScreen() {
         <T soft>Pairing over Fabric with {carrierInfo.target ? fabricTargetLabel(carrierInfo.target) : ''}. {carrierInfo.fabric.phase === 'ready' ? 'Fabric is connected.' : carrierInfo.fabric.phase === 'failed' || carrierInfo.fabric.phase === 'refused' ? carrierInfo.fabric.reason : 'Connecting to Fabric…'}</T>
         {carrierInfo.node ? <><T dim>This phone's fabric node ID, for the member's grant (public):</T><T selectable>{carrierInfo.node}</T></> : null}
       </> : <>
-      <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} keyboardType="url" placeholder="https://gateway, http://100.x.y.z:port, or http://host.local:port" value={urlDraft} onChangeText={setUrlDraft} />
-      {gatewayTransport(urlDraft) === 'lan' ? <T color={theme.waiting}>{LAN_HTTP_WARNING}</T> : null}
-      <Button label="save gateway" onPress={() => void actions.saveUrl()} />
+      <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} keyboardType="url" placeholder="https://gateway, http://100.x.y.z:port, or http://host.local:port" value={gatewayDraft.value} onChangeText={gatewayDraft.change} />
+      {gatewayTransport(gatewayDraft.value) === 'lan' ? <T color={theme.waiting}>{LAN_HTTP_WARNING}</T> : null}
+      <Button label="save gateway" onPress={() => void actions.saveUrl(gatewayDraft.read())} />
       </>}
       {url || pairDraft || overFabric ? <>
         <SectionHeader title="pair" />

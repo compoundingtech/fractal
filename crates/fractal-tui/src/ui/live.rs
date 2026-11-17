@@ -3742,7 +3742,7 @@ mod tests {
     #[test]
     fn a_send_st_may_have_taken_is_unconfirmed_and_one_it_never_queued_is_tried_afresh() {
         let answer = |applied: &str, code: fractal_client::ErrorCode| -> anyhow::Error {
-            let envelope = fractal_client::ErrorEnvelope {
+            let envelope = fractal_client::ErrorEnvelope { applied: None,
                 api_version: "st3.client.v0".into(),
                 error_version: "st3.client.error.v0".into(),
                 request_id: "request/test".into(),
@@ -4386,7 +4386,7 @@ mod tests {
         anyhow::Error::new(fractal_client::ClientError::Api(
             code.clone(),
             "refused".into(),
-            Box::new(fractal_client::ErrorEnvelope {
+            Box::new(fractal_client::ErrorEnvelope { applied: None,
                 api_version: "st3.client.v0".into(),
                 error_version: "st3.client.error.v0".into(),
                 request_id: "request/test".into(),
@@ -5041,7 +5041,7 @@ mod tests {
             anyhow::Error::new(ClientError::Api(
                 code.clone(),
                 "refused".into(),
-                Box::new(fractal_client::ErrorEnvelope {
+                Box::new(fractal_client::ErrorEnvelope { applied: None,
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: "request/1".into(),

@@ -291,7 +291,9 @@ const serveTerminal = (gateway: FakeGateway) => {
 
 describe('follow freshness', () => {
   beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }))
-  afterEach(() => {
+  afterEach(async () => {
+    // A cancelled Effect leaves the JavaScript import running; drain its mock factory first.
+    await vi.dynamicImportSettled()
     vi.useRealTimers()
     vi.doUnmock('@fractal/client/schema')
   })
