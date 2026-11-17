@@ -2,7 +2,8 @@ import * as Crypto from 'expo-crypto';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { createSqliteOutboxRepository, migrateOutboxDatabase, withOutboxTransaction } from './outboxSqlite.ts';
 import type { OutboxSqlExecutor, OutboxSqlSession } from './outboxSqlite.ts';
-import type { OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
+import type { OutboxScope, OutboxRepository } from '../../clients/typescript/fractal-client/outbox.ts';
+import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import FractalOutboxFiles from './modules/fractal-outbox-files/index.ts';
 import { acceptProtectedOutboxIntent, openProtectedOutboxStorage, readOutboxAttachment, OutboxStorageProtectionError } from './outboxSpool.ts';
 import type { OutboxHash } from './outboxSpool.ts';
@@ -38,7 +39,7 @@ const executorFor = (database: SQLiteDatabase): OutboxSqlExecutor & { close(): P
 };
 
 /** Explicit owner lifecycle; closing/reopening never resets records or changes their scope. */
-export const openNativeOutbox = async (scope: OutboxScope) => {
+export const openNativeOutbox = async (scope: OutboxScope, authorize: (scope: OutboxScope) => void) => {
   const bridge = FractalOutboxFiles;
   return openProtectedOutboxStorage(bridge, async protection => {
     if (!bridge) throw new OutboxStorageProtectionError();
@@ -51,12 +52,21 @@ export const openNativeOutbox = async (scope: OutboxScope) => {
     try {
       const executor = executorFor(database);
       await migrateOutboxDatabase(executor);
-      const repository = createSqliteOutboxRepository(executor, scope);
+      const storage = createSqliteOutboxRepository(executor, scope);
+      // Read/list remain available under the persisted scope during re-pair recovery.
+      // All acceptance/transition writes require the live, original client's identity.
+      const repository: OutboxRepository<PreparedPacket> = {
+        scope: storage.scope, read: id => storage.read(id), list: () => storage.list(),
+        commit: record => { authorize(scope); return storage.commit(record); },
+        compareAndSwap: (revision, record) => { authorize(scope); return storage.compareAndSwap(revision, record); },
+      };
       const sha256: OutboxHash = async bytes => new Uint8Array(await Crypto.digest(
         Crypto.CryptoDigestAlgorithm.SHA256, arrayBufferBacked(bytes) ? bytes : new Uint8Array(bytes),
       ));
       return {
         repository, close: () => executor.close(),
+        // Future status/dispatch owners must invoke this immediately before network work.
+        authorize: () => authorize(scope),
         acceptIntent: (id: string, text: string, images: readonly Picked[] = []) =>
           acceptProtectedOutboxIntent(repository, bridge, directory, sha256, id, text, images),
         readAttachment: (reference: string) => readOutboxAttachment(bridge, directory, sha256, reference),

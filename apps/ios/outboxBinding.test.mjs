@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { outboxProfileMode, acknowledgeOutboxNotice, restoreBoundAttempt, REPAIR_OUTBOX_NOTICE } from './outboxBinding.ts';
+import { outboxProfileMode, acknowledgeOutboxNotice, restoreBoundAttempt, restoreBoundEntries, requireOutboxAuthorization, OutboxBindingUnavailableError, REPAIR_OUTBOX_NOTICE } from './outboxBinding.ts';
 import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, outboxDeploymentId } from '../../clients/typescript/fractal-client/outbox.ts';
 import { prepareMessageSendPacket, prepareThreadStartPacket, prepareThreadReplyPacket, expectedPreparedPacketIdentities } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import { createMemoryOutboxRepository } from '../../clients/typescript/fractal-client/testSupport.ts';
 
 const issuer = { issuer: 'host/original', issuerKey: 'authority/original' };
 const profile = { profileId: 'profile/avery', pairingIssuer: issuer };
-const mode = () => outboxProfileMode(profile, 'member/original');
+const capabilities = { issuer: issuer.issuer, issuer_key: issuer.issuerKey };
+const mode = () => outboxProfileMode(profile, 'member/original', capabilities);
 const clone = value => JSON.parse(JSON.stringify(value));
 // The shared reference repository models CAS, not native SQLite durability.
 const repository = () => createMemoryOutboxRepository(mode().scope);
@@ -127,4 +128,43 @@ test('saved root fingerprint pins person root, not host authority; profile save 
   assert.match(source, /const pairingIssuer = await verifyPairing/);
   assert.match(source, /profileId: Crypto.randomUUID\(\), .*pairingIssuer/);
   assert.match(source, /SecureStore.setItemAsync\(profileKey, JSON.stringify\(next\)/);
+});
+
+test('missing, partial or mismatched live issuer blocks protected recovery and dispatch without retargeting visible entries', async () => {
+  const repo = repository();
+  const original = createOutboxRecord('attempt/original', intentFor(packets[0]));
+  await repo.commit(original);
+  const before = clone(profile);
+  for (const caps of [undefined, null, {}, { issuer: issuer.issuer }, { issuer_key: issuer.issuerKey },
+    { ...capabilities, issuer: 'host/other' }, { ...capabilities, issuer_key: 'authority/other' }]) {
+    const blocked = outboxProfileMode(profile, 'member/original', caps);
+    assert.equal(blocked.authorized, false);
+    assert.equal(blocked.notice, REPAIR_OUTBOX_NOTICE);
+    assert.deepEqual(blocked.scope, mode().scope);
+    assert.throws(() => requireOutboxAuthorization(blocked, repo.scope), OutboxBindingUnavailableError);
+    assert.equal((await restoreBoundAttempt(repo, blocked, original.id)).state, 'unknown');
+    assert.deepEqual(await restoreBoundEntries(repo, blocked), [{ _tag: 'record', record: original }]);
+    assert.deepEqual(await repo.read(original.id), original);
+    assert.deepEqual(profile, before);
+    assert.equal(outboxProfileMode(acknowledgeOutboxNotice(profile), 'member/original', caps).notice, undefined);
+  }
+  requireOutboxAuthorization(mode(), repo.scope);
+  assert.throws(() => requireOutboxAuthorization(mode(), { ...repo.scope, memberId: 'member/other' }), OutboxBindingUnavailableError);
+  repo.list = async () => [{ _tag: 'corrupt', id: 'attempt/damaged', revision: 3 }];
+  const [damage] = await restoreBoundEntries(repo, outboxProfileMode(profile, 'member/original', {}));
+  assert.equal(damage.state, 'unknown');
+  assert.deepEqual(damage.actions, ['discard']);
+});
+
+test('store binds issuer comparison to live client/profile and current capabilities epoch; notice metadata never rewrites pairing', () => {
+  const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
+  assert.match(source, /if \(!current\(\) \|\| profileKey !== signingKeyRef.current\) return/);
+  assert.match(source, /liveOutboxClient.current === client/);
+  assert.match(source, /capsClient.current === client/);
+  assert.match(source, /requireOutboxAuthorization\(outboxProfileMode/);
+  assert.match(source, /AsyncStorage.setItem\(key, 'seen'\)/);
+  assert.match(source, /Alert.alert\('Re-pair this phone', mode.notice\)/);
+  const native = readFileSync(new URL('./outboxSqliteNative.ts', import.meta.url), 'utf8');
+  assert.match(native, /commit: record => \{ authorize\(scope\)/);
+  assert.match(native, /compareAndSwap: \(revision, record\) => \{ authorize\(scope\)/);
 });

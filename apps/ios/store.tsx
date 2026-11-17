@@ -1,7 +1,7 @@
 import { ConversationAttempts } from './conversationAttempts';
 import { markdownSource } from '../../clients/typescript/fractal-client/markdown-text';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { AppState, unstable_batchedUpdates, View } from 'react-native';
+import { Alert, AppState, unstable_batchedUpdates, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
@@ -15,6 +15,8 @@ import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, l
 import app from './app.json';
 import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
 import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, requirePairingAdvertisement, validatePairingTrust, verifyPairing, type PairingAdvertisement } from './pairingProof';
+import { outboxProfileMode, requireOutboxAuthorization } from './outboxBinding';
+import type { OutboxScope } from '../../clients/typescript/fractal-client/outbox';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
@@ -213,6 +215,8 @@ function useAppStore(proof?: FabricProfile) {
   const [caps, setCapsState] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
+  const outboxIdentity = useRef<{ client: FractalClient; profileKey: string; profile: PhoneProfile } | null>(null);
+  const outboxNotices = useRef(new Set<string>());
   const setCaps = useCallback((next: Capabilities | null) => {
     capsRef.current = next;
     setCapsState(next);
@@ -390,6 +394,7 @@ function useAppStore(proof?: FabricProfile) {
   const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
   const client = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const liveOutboxClient = useRef(client); liveOutboxClient.current = client;
   const pushRef = useRef<PushRegistrationLifecycle | null>(null);
   if (!pushRef.current) pushRef.current = new PushRegistrationLifecycle(nativePushPorts({
     readEnabled: async () => (await AsyncStorage.getItem(PUSH_KEY)) === '1',
@@ -635,15 +640,45 @@ function useAppStore(proof?: FabricProfile) {
   const loadCapabilities = useCallback(async (current: () => boolean) => {
     if (!client) return;
     try {
+      const profileKey = signingKeyRef.current;
       const capability = await client.capabilities();
-      if (!current()) return;
+      // A locked/malformed profile blocks protected binding, not legacy capabilities.
+      let profile: PhoneProfile | undefined;
+      try {
+        const rawProfile = await SecureStore.getItemAsync(profileKey);
+        if (rawProfile) profile = JSON.parse(rawProfile);
+      } catch { /* No protected identity until a readable verified profile is available. */ }
+      if (!current() || profileKey !== signingKeyRef.current) return;
+      outboxIdentity.current = profile ? { client, profileKey, profile } : null;
       recordDiagnosticCapabilities(client, capability.value);
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
       capsClient.current = client;
       setCaps(capability.value);
+      // Separate acknowledgement metadata never rewrites the verified pairing tuple.
+      if (profile?.profileId && profile.pairingIssuer) {
+        const mode = outboxProfileMode(profile, 'notice-only', capability.value);
+        const key = `st3.outbox.repair-notice.${profile.profileId}`;
+        if (mode.notice && !outboxNotices.current.has(key)) {
+          const seen = await AsyncStorage.getItem(key);
+          if (!current() || profileKey !== signingKeyRef.current) return;
+          outboxNotices.current.add(key);
+          if (!seen) {
+            await AsyncStorage.setItem(key, 'seen');
+            if (current() && profileKey === signingKeyRef.current) Alert.alert('Re-pair this phone', mode.notice);
+          }
+        }
+      }
     } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
+
+  const authorizeProtectedOutbox = (scope: OutboxScope): void => {
+    const identity = outboxIdentity.current;
+    const currentIdentity = client !== null && liveOutboxClient.current === client && identity?.client === client && capsClient.current === client
+      && identity?.profileKey === signingKeyRef.current;
+    requireOutboxAuthorization(outboxProfileMode(currentIdentity ? identity.profile : {}, scope.memberId,
+      currentIdentity ? capsRef.current : null), scope);
+  };
 
   useEffect(() => {
     setSync(undefined); setSyncStale(false);
@@ -1698,6 +1733,7 @@ function useAppStore(proof?: FabricProfile) {
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, urlDraftProfileRevision, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
+    authorizeProtectedOutbox,
     error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client, draftsOwner, draftGeneration,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, threadEdits, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,

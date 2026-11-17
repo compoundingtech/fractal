@@ -142,7 +142,7 @@ test('SQLite file reopen retains intent/ready packets and restores dispatched wo
   await store.reopen(); repo = store.repository(scope);
   assert.deepEqual(await repo.read('attempt/preparing'), preparing('attempt/preparing'));
   assert.deepEqual(await repo.read('attempt/ready'), prepared('attempt/ready'));
-  const restored = await restoreBoundAttempt(repo, { mode: 'bound', scope }, 'attempt/dispatched');
+  const restored = await restoreBoundAttempt(repo, { mode: 'bound', scope, authorized: true, notice: undefined }, 'attempt/dispatched');
   assert.equal(restored.record.state, 'unknown');
   assert.equal(markOutboxDispatched(restored.record), undefined);
   await store.reopen();
@@ -178,7 +178,7 @@ for (const corruption of ['json', 'revision', 'packet']) test(`SQLite ${corrupti
   assert.deepEqual(recovery.actions, ['discard']);
   assert.equal(recovery.expires, false);
   assert.equal('packet' in recovery, false);
-  await assert.rejects(restoreBoundAttempt(repo, { mode: 'bound', scope }, 'attempt/original'), unknown);
+  await assert.rejects(restoreBoundAttempt(repo, { mode: 'bound', scope, authorized: true, notice: undefined }, 'attempt/original'), unknown);
   await assert.rejects(repo.compareAndSwap(0, prepared()), unknown);
 });
 

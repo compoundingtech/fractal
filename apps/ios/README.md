@@ -180,6 +180,19 @@ autolinking/prebuild/Pods and a rebuilt installed binary are still required; no
 generated native files were hand-edited. JS fake-bridge and Node SQLite tests do
 not establish native compilation, actual backup exclusion or installed crash proof.
 
+Protected binding also requires the current authenticated capabilities `issuer` and
+`issuer_key` to exactly match the persisted verified pairing tuple. The store loads
+that profile under the existing capabilities epoch/profile guard; stale clients,
+missing/partial pairs and mismatches cannot authorize protected writes. A mismatch
+shows a once-per-profile re-pair notice, acknowledged in separate local metadata
+without changing pairing identity. Persisted-scope records remain visible through
+`restoreBoundEntries`, which uses the core `restoreOutboxEntries` (including corrupt
+discard-only recovery entries); they are never silently moved, re-signed or sent.
+`openNativeOutbox` requires the store's live authorization callback for acceptance
+and transition writes and exposes it for future status/dispatch owners to check
+immediately before network work. Those owners are not implemented by this step;
+ordinary legacy sending is unchanged. Neither URL nor `host_id` can grant binding.
+
 The core exports a reference repository but no reusable runnable contract suite.
 One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope
 contracts against both `createMemoryOutboxRepository` and real `node:sqlite`.
