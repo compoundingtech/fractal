@@ -197,6 +197,10 @@ discard-only recovery entries); they are never silently moved, re-signed or sent
 and transition writes and exposes it for future status/dispatch owners to check
 immediately before network work. Those owners are not implemented by this step;
 ordinary legacy sending is unchanged. Neither URL nor `host_id` can grant binding.
+The native opener snapshots/freezes the requested scope before awaiting storage;
+every write guard and exposed authorization check uses the repository's immutable
+scope, never the caller-owned object. Mutating that object cannot change which
+profile, deployment or member is authorized for the captured database.
 
 The core exports a reference repository but no reusable runnable contract suite.
 One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope

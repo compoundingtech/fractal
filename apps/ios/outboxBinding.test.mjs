@@ -165,8 +165,8 @@ test('store binds issuer comparison to live client/profile and current capabilit
   assert.match(source, /AsyncStorage.setItem\(key, 'seen'\)/);
   assert.match(source, /Alert.alert\('Re-pair this phone', mode.notice\)/);
   const native = readFileSync(new URL('./outboxSqliteNative.ts', import.meta.url), 'utf8');
-  assert.match(native, /commit: record => \{ authorize\(scope\)/);
-  assert.match(native, /compareAndSwap: \(revision, record\) => \{ authorize\(scope\)/);
+  assert.match(native, /commit: record => \{ authorize\(storage.scope\)/);
+  assert.match(native, /compareAndSwap: \(revision, record\) => \{ authorize\(storage.scope\)/);
 });
 
 test('store authorization refuses an old client, profile or member even when issuer pairs match', () => {
