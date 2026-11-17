@@ -435,54 +435,60 @@ async fn series_counts_repeatable_claim_kinds_and_typed_field_groups() {
     }
 }
 
-// Seed already-admitted history so reserved records reach the serving boundary.
-fn series_privacy_claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
-    let mut fields = fields;
-    let at = fields.as_object_mut().unwrap().remove("at").unwrap();
+fn series_privacy_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().try_into().unwrap()
+}
+
+fn series_privacy_claim(state: &AppState, subject: &str, kind: &str, mut fields: Value) -> ClaimRecord {
     if kind == "message.sent" {
         fields["from"] = json!("agent/reviewer");
         fields["to"] = json!("person/owner");
-        fields["content"] = json!(at.to_string());
+        // A real event field time, also usable by a declared count objective.
+        fields["content"] = json!(series_privacy_now().to_string());
         fields["status"] = json!("sent");
-    } else {
-        fields["at"] = at.clone();
+    } else if kind.starts_with("custom.") {
+        fields["at"] = json!(series_privacy_now());
     }
-    let claim = if fields.get("thread_id").is_some() {
-        crate::store::thread_delivery::append_reply(&state.store, &ClaimInput {
-            subject: subject.into(), kind: kind.into(), actor: Some("agent/reviewer".into()),
-            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
-            expected_subject: None, idempotency_key: Some(subject.into()),
-        }, crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: "agent/reviewer" }, None).unwrap().0
-    } else {
-        // Seed historical custom events independently of today's custom subject admission.
-        let admitted_subject = if kind.starts_with("custom.") && !subject.starts_with("custom/") {
-            "custom/acme/series-history"
-        } else { subject };
-        state.store.connection.batched(|tx| crate::store::append_claim_tx(
-            tx, state.store.origin(), admitted_subject, kind, None,
-            &json!({"fields": fields}), &[], None,
-        )).unwrap().unwrap()
+    let input = ClaimInput {
+        subject: subject.into(), kind: kind.into(), actor: Some("agent/reviewer".into()),
+        fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+        expected_subject: None, idempotency_key: Some(subject.into()),
     };
-    state.store.connection.batched(|tx| {
-        tx.execute("UPDATE claims SET subject=?1, accepted_at_unix_ms=?2 WHERE id=?3",
-            [subject, &at.to_string(), &claim.id])
-    }).unwrap().unwrap();
-    // Appending runs the normal timestamp projector after the historical edit.
-    state.store.connection.batched(|tx| crate::store::append_claim_tx(
-        tx, state.store.origin(), "custom/acme/series-flush", "custom.acme.series-fixture",
-        None, &json!({"fields": {}}), &[], None,
-    )).unwrap().unwrap();
-    state.store.committed_index.fetch_max(claim.store_index, std::sync::atomic::Ordering::Release);
+    if input.fields.contains_key("thread_id") {
+        crate::store::thread_delivery::append_reply(&state.store, &input,
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: "agent/reviewer" }, None).unwrap().0
+    } else if kind.starts_with("custom.attention.") || subject.starts_with("custom/attention/") {
+        // Reserved notice history uses the same admitting transaction as the notice writer.
+        let claim = state.store.connection.batched(|tx| crate::store::append_claim_tx(
+            tx, state.store.origin(), subject, kind, None,
+            &json!({"fields": input.fields}), &[], None,
+        )).unwrap().unwrap();
+        state.store.committed_index.fetch_max(claim.store_index, std::sync::atomic::Ordering::Release);
+        claim
+    } else {
+        state.store.append_claim(&input).unwrap()
+    }
 }
 
-async fn assert_series_privacy_counts(state: &AppState, selection: &str, counts: &[u64]) {
-    let query = format!("{selection}&from=1000&to=3000&bucket_seconds=1");
+async fn assert_series_privacy_counts(state: &AppState, selection: &str, claims: &[ClaimRecord], count: u64) {
+    let mut times = Vec::new();
+    for claim in claims {
+        times.push(u64::try_from(claim.accepted_at_unix_ms).unwrap());
+        for field in ["at", "content", "title"] {
+            if let Some(time) = claim.body["fields"][field].as_u64().or_else(|| {
+                claim.body["fields"][field].as_str().and_then(|text| text.parse().ok())
+            }) {
+                times.push(time);
+            }
+        }
+    }
+    let from = *times.iter().min().unwrap();
+    let to = times.iter().max().unwrap() + 1;
+    let bucket_seconds = (to - from).div_ceil(1000);
+    let query = format!("{selection}&from={from}&to={to}&bucket_seconds={bucket_seconds}");
     let expected = json!({
-        "from": 1000, "to": 3000, "bucket_seconds": 1,
-        "buckets": [
-            {"start": 1000, "end": 2000, "count": counts[0]},
-            {"start": 2000, "end": 3000, "count": counts[1]},
-        ],
+        "from": from, "to": to, "bucket_seconds": bucket_seconds,
+        "buckets": [{"start": from, "end": to, "count": count}],
     });
     // This paired reader is not a participant in the private thread.
     let Json(paired) = client_v0::series_read(
@@ -495,8 +501,8 @@ async fn assert_series_privacy_counts(state: &AppState, selection: &str, counts:
                 let (key, value) = selection.split_once('=').unwrap();
                 (key.to_owned(), value.replace("%2F", "/"))
             },
-            ("from".into(), "1000".into()), ("to".into(), "3000".into()),
-            ("bucket_seconds".into(), "1".into()),
+            ("from".into(), from.to_string()), ("to".into(), to.to_string()),
+            ("bucket_seconds".into(), bucket_seconds.to_string()),
         ]),
     ).await.unwrap();
     assert_eq!(paired, expected, "paired reader: {selection}");
@@ -505,14 +511,14 @@ async fn assert_series_privacy_counts(state: &AppState, selection: &str, counts:
     assert_eq!(local, expected, "local reader: {selection}");
 }
 
-fn series_privacy_thread(state: &AppState) {
+fn series_privacy_thread(state: &AppState) -> ClaimRecord {
     state.store.configure_thread_write_rollout([]);
     crate::store::thread_metadata::apply(
         &state.store, "person/owner", "thread/series-private", "series-private-thread",
         crate::store::thread_metadata::Edit::Create {
-            agent: "agent/reviewer", title: "Private series discussion",
+            agent: "agent/reviewer", title: &series_privacy_now().to_string(),
         },
-    ).unwrap();
+    ).unwrap().0
 }
 
 #[tokio::test]
@@ -520,13 +526,11 @@ async fn series_kinds_hide_private_thread_messages_from_nonparticipants() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     series_privacy_thread(&state);
-    for (subject, thread) in [("message/private-series", Some("thread/series-private")), ("message/public-series", None)] {
-        let mut fields = json!({"at": 1000, "from": "person/owner", "to": "agent/reviewer",
-            "content": "Series fixture", "status": "sent"});
-        if let Some(thread) = thread { fields["thread_id"] = json!(thread); }
-        series_privacy_claim(&state, subject, "message.sent", fields);
-    }
-    assert_series_privacy_counts(&state, "kind=message.sent", &[1, 0]).await;
+    let claims = [
+        series_privacy_claim(&state, "message/private-series", "message.sent", json!({"thread_id": "thread/series-private"})),
+        series_privacy_claim(&state, "message/public-series", "message.sent", json!({})),
+    ];
+    assert_series_privacy_counts(&state, "kind=message.sent", &claims, 1).await;
 }
 
 #[tokio::test]
@@ -546,31 +550,30 @@ objective "privacy/messages" {
 }
 "#, "node").unwrap();
     state.store.apply_internal(&intent, "series-private-messages").unwrap();
-    for (subject, fields) in [
-        ("message/private-series", json!({"at": 1000, "thread_id": "thread/series-private"})),
-        ("message/public-series", json!({"at": 1000})),
-    ] {
-        series_privacy_claim(&state, subject, "message.sent", fields);
-    }
-    assert_series_privacy_counts(&state, "objective=privacy%2Fmessages", &[1, 0]).await;
+    let claims = [
+        series_privacy_claim(&state, "message/private-series", "message.sent", json!({"thread_id": "thread/series-private"})),
+        series_privacy_claim(&state, "message/public-series", "message.sent", json!({})),
+    ];
+    assert_series_privacy_counts(&state, "objective=privacy%2Fmessages", &claims, 1).await;
 }
 
 #[tokio::test]
 async fn series_count_objectives_hide_reserved_thread_and_notice_records() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    series_privacy_thread(&state);
-    for (name, prefix, kind) in [
-        ("threads", "thread/", "custom.acme.series-event"),
-        ("notice-subjects", "custom/", "custom.acme.series-event"),
-        ("notice-kinds", "custom/", "custom.attention.notice-created"),
+    let thread = series_privacy_thread(&state);
+    assert!(fractal_schema::threads::is_reserved_record(&thread.subject, &thread.kind));
+    for (name, prefix, kind, at) in [
+        ("threads", "thread/", "thread.created", "title"),
+        ("notice-subjects", "custom/", "custom.acme.series-event", "at"),
+        ("notice-kinds", "custom/", "custom.attention.notice-created", "at"),
     ] {
         let intent = parse_intent(&format!(r#"version 2
 objective "privacy/{name}" {{
   about "Only public events"
   indicator "count" {{
     subject-prefix "{prefix}"
-    event "{kind}" at="at"
+    event "{kind}" at="{at}"
   }}
   window "1h"
   target "per-hour" min=1
@@ -578,17 +581,15 @@ objective "privacy/{name}" {{
 "#), "node").unwrap();
         state.store.apply_internal(&intent, &format!("series-private-{name}")).unwrap();
     }
-    for (subject, kind) in [
-        ("thread/series-private", "custom.acme.series-event"),
-        ("custom/attention/source/series-private", "custom.acme.series-event"),
-        ("custom/acme/series-notice", "custom.attention.notice-created"),
-        ("custom/acme/series-public", "custom.acme.series-event"),
-    ] {
-        series_privacy_claim(&state, subject, kind, json!({"at": 1000}));
-    }
-    assert_series_privacy_counts(&state, "objective=privacy%2Fthreads", &[0, 0]).await;
-    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-subjects", &[1, 0]).await;
-    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-kinds", &[0, 0]).await;
+    let claims = [
+        thread,
+        series_privacy_claim(&state, "custom/attention/source/series-private", "custom.acme.series-event", json!({})),
+        series_privacy_claim(&state, "custom/acme/series-notice", "custom.attention.notice-created", json!({})),
+        series_privacy_claim(&state, "custom/acme/series-public", "custom.acme.series-event", json!({})),
+    ];
+    assert_series_privacy_counts(&state, "objective=privacy%2Fthreads", &claims, 0).await;
+    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-subjects", &claims, 1).await;
+    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-kinds", &claims, 0).await;
 }
 
 #[tokio::test]
@@ -601,7 +602,7 @@ objective "privacy/interval" {
   about "Public message completion"
   indicator "interval" {
     subject-prefix "message/"
-    start "custom.acme.series-started" at="at"
+    start "publication.operation"
     stop "message.sent"
   }
   window "1h"
@@ -609,15 +610,19 @@ objective "privacy/interval" {
 }
 "#, "node").unwrap();
     state.store.apply_internal(&intent, "series-private-interval").unwrap();
-    // Both starts are public. Only the second stop is public.
+    // The ordinary publication receipts start two samples; only one stop is public.
+    let mut claims = Vec::new();
     for subject in ["message/private-series", "message/public-series"] {
-        series_privacy_claim(&state, subject, "custom.acme.series-started", json!({"at": 1000}));
+        claims.push(series_privacy_claim(&state, subject, "publication.operation",
+            json!({"operation": "series-start", "action": "start", "status": "accepted"})));
     }
-    series_privacy_claim(&state, "message/private-series", "message.sent",
-        json!({"at": 1500, "thread_id": "thread/series-private"}));
-    series_privacy_claim(&state, "message/public-series", "message.sent", json!({"at": 2500}));
-    assert_series_privacy_counts(&state, "objective=privacy%2Finterval", &[0, 1]).await;
+    claims.push(series_privacy_claim(&state, "message/private-series", "message.sent",
+        json!({"thread_id": "thread/series-private"})));
+    claims.push(series_privacy_claim(&state, "message/public-series", "message.sent", json!({})));
+    // A single bucket avoids timing assumptions: one public completion, never two.
+    assert_series_privacy_counts(&state, "objective=privacy%2Finterval", &claims, 1).await;
 }
+
 
 #[tokio::test]
 async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
