@@ -50,17 +50,28 @@ storage adapter, startup worker, signing service, or server reconciliation endpo
   `list`, and `read` permanently to an original principal/deployment/member scope.
   Successful writes mean durable transaction completion; adapters must reject
   storage failures rather than silently fall back to memory.
-- `createOutboxRecord` captures an immutable packet as pending. Commit it before
-  acknowledging local acceptance. Persist `markOutboxDispatched` using CAS before
-  making the single POST; only the successful CAS owner may dispatch.
+- `createOutboxRecord(id, intent)` accepts immutable serializable intent (text and
+  attachment references carrying content hash, optional name, media type and a
+  storage reference) as pending/preparing, with no packet. Commit this record before
+  acknowledging local acceptance, uploading attachments or preparing the request.
+- `prepareOutboxRecord(record, packet, expectedIdentities)` proposes pending/ready
+  only from preparing. Persist it by revision CAS; the packet cannot be replaced
+  afterward. Persist `markOutboxDispatched` using CAS before making the single POST;
+  preparing cannot dispatch, and only the successful CAS owner may dispatch.
+- Adapters must call `isAllowedOutboxTransition(previous, next)` **inside** their
+  CAS transaction. It accepts only revision-incrementing transitions produced by
+  the pure core and rejects changed intent/packet, wrong revisions and fabricated
+  certainty changes, including unknown-to-not-applied.
 - `observeOutbox` records a validated completed receipt, explicit nonapplication,
-  or unknown. Pass `appliedAnswer(error)` for failure evidence; validate completed
-  receipts against the original packet first. Earlier ambiguity survives a later
-  refusal and serialization, and unknown never regains dispatch permission.
-- `restoreOutboxRecord` retains never-dispatched pending attempts, but turns
-  dispatch-marked nonterminal records into unknown even if a crash happened before
-  the socket call. Persist changed restoration/observation records by revision CAS.
-  Definitive completed receipts and unambiguous nonapplication remain terminal.
+  unknown, or an exact timeline identity match. Pass `appliedAnswer(error)` for
+  failure evidence; validate completed receipts against the original packet first.
+  Earlier ambiguity survives a later refusal and serialization, and unknown never
+  regains dispatch permission. Delivered records retain receipt or timeline evidence.
+- `restoreOutboxRecord` retains never-dispatched pending attempts, including
+  preparing records whose owners resume uploads/preparation from retained intent.
+  Dispatch-marked nonterminal records become unknown even if a crash happened
+  before the socket call. Persist changed restoration/observation records by
+  revision CAS. Definitive delivery and unambiguous nonapplication remain terminal.
 - `prepareMessageSendPacket`, `prepareThreadStartPacket`, and
   `prepareThreadReplyPacket` return complete serializable action POST bodies.
   Supply the original ID, key, fence and all prepared parameters; persist the
@@ -68,6 +79,18 @@ storage adapter, startup worker, signing service, or server reconciliation endpo
   unchanged; authorized unsigned web bodies remain unsigned. Preparation performs
   no signing, transport selection or ID generation. Submit the retained packet
   unchanged through `submitAction` only when the core permits dispatch.
+- `expectedPreparedPacketIdentities(packet, sender, sha256)` derives the message
+  identities to persist with the record. Supply the captured original authenticated
+  sender, not the current connection's actor; unsigned thread bodies do not encode
+  their sender. Supply the platform's SHA-256 implementation. Chat hashes the key;
+  thread messages use the canonical sender/thread/action/key scope and two hashes.
+  A thread ID alone is never proof that this Start or reply was delivered.
+- Unknown reconciliation is a **person-initiated status check**, never an automatic
+  replay. After an authoritative timeline read on the original member, submit
+  `{ kind: 'observed', source: 'timeline', identity }` only for an actually present
+  message identity. The core settles delivery only when it matches a retained
+  expected identity. A mismatch leaves unknown unchanged; absence has no observation
+  variant and never proves nonapplication or permits another POST.
 
 `OutboxRepository<PreparedPacket>` is the shared adapter boundary. Concrete browser
 and native repositories, acceptance UI, and dispatch owners must implement these

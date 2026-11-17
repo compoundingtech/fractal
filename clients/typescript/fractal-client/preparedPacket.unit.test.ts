@@ -1,13 +1,17 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { threadMessageSubject } from '../fractal-views/deviceSigning.ts';
 import { API_VERSION } from './Models.generated.ts';
 import type { DeviceSignature, Fence } from './Models.generated.ts';
 import {
+    expectedPreparedPacketIdentities,
     prepareMessageSendPacket,
     prepareThreadReplyPacket,
     prepareThreadStartPacket,
 } from './preparedPacket.ts';
 import type {
     PreparedMessageSendPacket,
+    PreparedPacket,
     PreparedThreadReplyPacket,
     PreparedThreadStartPacket,
 } from './preparedPacket.ts';
@@ -123,3 +127,132 @@ for (const signed of [false, true]) {
         }
     });
 }
+
+const sha256 = async (bytes: Uint8Array): Promise<Uint8Array> =>
+    createHash('sha256').update(bytes).digest();
+
+describe('expected prepared packet identities', () => {
+    it('derives chat identity from only the original idempotency key', async () => {
+        const packet = prepareMessageSendPacket(message);
+        const identities = await expectedPreparedPacketIdentities(packet, 'person/sender', sha256);
+
+        expect(identities).toStrictEqual(['message/4042fba54f182e8a']);
+        expect(JSON.parse(JSON.stringify(identities))).toStrictEqual(identities);
+        expect(await expectedPreparedPacketIdentities(packet, 'person/another', sha256)).toStrictEqual(identities);
+        expect(await expectedPreparedPacketIdentities(
+            { ...packet, idempotency_key: 'key/another' }, 'person/sender', sha256,
+        )).not.toStrictEqual(identities);
+    });
+
+    const threadVectors = [
+        {
+            packet: prepareThreadStartPacket(start),
+            sender: 'person/sender',
+            expected: 'message/84d0f800721ff4f1',
+        },
+        {
+            packet: prepareThreadReplyPacket(reply),
+            sender: 'person/sender',
+            expected: 'message/cc7069ea23151192',
+        },
+        {
+            packet: prepareThreadReplyPacket({
+                ...reply,
+                idempotency_key: 'key/clé🔑',
+                parameters: { ...reply.parameters, target_id: 'thread/café/🧵' },
+            }),
+            sender: 'person/发送者🙂',
+            expected: 'message/526ce50008bb644a',
+        },
+    ];
+
+    for (const { packet, sender, expected } of threadVectors) {
+        it(`matches the ${packet.type} signing algorithm and vector ${expected}`, async () => {
+            const fields = {
+                content: packet.parameters.content,
+                from: sender,
+                thread_id: packet.parameters.target_id,
+                to: 'agent/recipient',
+            };
+            const signingSubject = await threadMessageSubject(
+                packet.type === 'thread.start'
+                    ? {
+                        ...fields,
+                        title: packet.parameters.title,
+                        thread_origin_source: packet.parameters.origin.source_id,
+                        thread_origin_episode: packet.parameters.origin.episode,
+                    }
+                    : fields,
+                packet.idempotency_key,
+                sha256,
+            );
+            const identities = await expectedPreparedPacketIdentities(packet, sender, sha256);
+
+            expect(identities).toStrictEqual([expected]);
+            expect(identities).toStrictEqual([signingSubject]);
+            expect(identities).not.toContain(packet.parameters.target_id);
+            expect(JSON.parse(JSON.stringify(identities))).toStrictEqual(identities);
+        });
+    }
+
+    it('binds thread identities to sender, key, thread and action', async () => {
+        const packet = prepareThreadReplyPacket(reply);
+        const original = await expectedPreparedPacketIdentities(packet, 'person/sender', sha256);
+        const variants = [
+            { packet, sender: 'person/another' },
+            { packet: { ...packet, idempotency_key: 'key/another' }, sender: 'person/sender' },
+            {
+                packet: { ...packet, parameters: { ...packet.parameters, target_id: 'thread/another' } },
+                sender: 'person/sender',
+            },
+            {
+                packet: prepareThreadStartPacket({
+                    ...start,
+                    idempotency_key: packet.idempotency_key,
+                    parameters: { ...start.parameters, target_id: packet.parameters.target_id },
+                }),
+                sender: 'person/sender',
+            },
+        ];
+        for (const variant of variants) {
+            expect(await expectedPreparedPacketIdentities(variant.packet, variant.sender, sha256))
+                .not.toStrictEqual(original);
+        }
+    });
+
+    it('length-prefixes UTF-8 parts rather than concatenating them', async () => {
+        const packet = prepareThreadReplyPacket({
+            ...reply,
+            parameters: { ...reply.parameters, target_id: 'bc' },
+        });
+        const other = { ...packet, parameters: { ...packet.parameters, target_id: 'c' } };
+
+        expect(await expectedPreparedPacketIdentities(packet, 'a', sha256))
+            .not.toStrictEqual(await expectedPreparedPacketIdentities(other, 'ab', sha256));
+    });
+
+    const packets: readonly PreparedPacket[] = [
+        prepareMessageSendPacket(message),
+        prepareThreadStartPacket(start),
+        prepareThreadReplyPacket(reply),
+    ];
+    for (const packet of packets) {
+        it(`${packet.type} derives the same identity signed or unsigned without modifying either body`, async () => {
+            // A supplied signature is not the trusted source of the original sender.
+            const signatureFields = { signature: { ...signature, signer: 'person/not-original' } };
+            const signed = packet.type === 'message.send'
+                ? { ...packet, parameters: { ...packet.parameters, ...signatureFields } }
+                : packet.type === 'thread.start'
+                    ? { ...packet, parameters: { ...packet.parameters, ...signatureFields } }
+                    : { ...packet, parameters: { ...packet.parameters, ...signatureFields } };
+            const originalBody = JSON.stringify(packet);
+            const signedBody = JSON.stringify(signed);
+            const identities = await expectedPreparedPacketIdentities(packet, 'person/sender', sha256);
+
+            expect(await expectedPreparedPacketIdentities(signed, 'person/sender', sha256)).toStrictEqual(identities);
+            expect(JSON.stringify(packet)).toBe(originalBody);
+            expect(JSON.stringify(signed)).toBe(signedBody);
+            expect(Object.hasOwn(packet.parameters, 'signature')).toBe(false);
+        });
+    }
+});
