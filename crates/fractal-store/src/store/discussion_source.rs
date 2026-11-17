@@ -33,6 +33,46 @@ impl QualifiedDiscussionSource {
     }
 }
 
+/// Read-only authority can survive a payload budget refusal, but never grants Start.
+pub(super) enum HistoryQualification {
+    Qualified,
+    PayloadOverBudget,
+    Unqualified,
+}
+
+impl HistoryQualification {
+    pub(super) fn is_authorized(&self) -> bool {
+        !matches!(self, Self::Unqualified)
+    }
+}
+
+enum ProofBudget {
+    WithinBudget,
+    OverBudget,
+    InvalidKey,
+}
+
+/// Only runtime asks have a separate bounded immutable routing proof. Other source
+/// families still require their existing full payload/evidence qualification.
+pub(super) fn qualify_history(connection: &Connection, person: &str, key: &SourceEpisode, at: u128)
+    -> Result<HistoryQualification, FractalError>
+{
+    match inputs_preflight(connection, key)? {
+        ProofBudget::WithinBudget => {
+            let source = qualify_batch_preflighted(connection, person, std::slice::from_ref(key), at,
+                std::iter::once(Ok(ProofBudget::WithinBudget)))?.pop().flatten();
+            Ok(if source.is_some() { HistoryQualification::Qualified } else { HistoryQualification::Unqualified })
+        }
+        ProofBudget::OverBudget => {
+            Ok(if runtime_opening_header_authorized(connection, person, key, at)? {
+                HistoryQualification::PayloadOverBudget
+            } else { HistoryQualification::Unqualified })
+        }
+        ProofBudget::InvalidKey => Ok(HistoryQualification::Unqualified),
+    }
+}
+
+
 pub fn qualify(connection: &Connection, person: &str, key: &SourceEpisode, at: u128)
     -> Result<Option<QualifiedDiscussionSource>, FractalError>
 {
@@ -45,6 +85,14 @@ pub fn qualify(connection: &Connection, person: &str, key: &SourceEpisode, at: u
 pub fn qualify_batch(connection: &Connection, person: &str, keys: &[SourceEpisode], at: u128)
     -> Result<Vec<Option<QualifiedDiscussionSource>>, FractalError>
 {
+    qualify_batch_preflighted(connection, person, keys, at,
+        keys.iter().map(|key| inputs_preflight(connection, key)))
+}
+
+fn qualify_batch_preflighted(
+    connection: &Connection, person: &str, keys: &[SourceEpisode], at: u128,
+    preflight: impl Iterator<Item = Result<ProofBudget, FractalError>>,
+) -> Result<Vec<Option<QualifiedDiscussionSource>>, FractalError> {
     let mut result: Vec<Option<QualifiedDiscussionSource>> = (0..keys.len()).map(|_| None).collect();
     if keys.is_empty() { return Ok(result); }
     let person = match identities::resolve_reference_conn(connection, person) {
@@ -56,8 +104,8 @@ pub fn qualify_batch(connection: &Connection, person: &str, keys: &[SourceEpisod
     // Admission reads only metadata/byte counts. Rejected entries remain null so the
     // batched query retains the caller's indices without ever hydrating their bodies.
     let mut admitted = Vec::with_capacity(keys.len());
-    for key in keys {
-        admitted.push(if inputs_preflight(connection, key)? {
+    for (key, budget) in keys.iter().zip(preflight) {
+        admitted.push(if matches!(budget?, ProofBudget::WithinBudget) {
             serde_json::to_value(key).map_err(internal)?
         } else { Value::Null });
     }
@@ -370,7 +418,7 @@ pub fn carried_episode(connection: &Connection, source: &str, opening: &str)
     -> Result<Option<String>, FractalError>
 {
     let key = SourceEpisode { source_id: source.into(), episode: opening.into() };
-    if !inputs_preflight(connection, &key)? { return Ok(None); }
+    if !matches!(inputs_preflight(connection, &key)?, ProofBudget::WithinBudget) { return Ok(None); }
     let Some(claim) = claim_by_id_tx(connection, opening).map_err(internal)? else { return Ok(None) };
     if claim.subject != source || claim.kind != "step-run.carried"
         || claim.body["fields"]["status"] != "ready" { return Ok(None); }
@@ -479,11 +527,60 @@ fn source_item(key: &SourceEpisode, person: &str, kind: &str, fields: &Value, at
 const MAX_PROOF_CLAIMS: usize = 512;
 const MAX_PROOF_BYTES: u64 = 256 * 1024;
 
+/// Prove only the original canonical runtime recipient and current policy. The
+/// database may inspect the body for JSON fields, but no body crosses this boundary.
+/// All returned header bytes together must fit the unchanged proof-byte budget.
+fn runtime_opening_header_authorized(connection: &Connection, person: &str, key: &SourceEpisode, at: u128)
+    -> Result<bool, FractalError>
+{
+    let person = match identities::resolve_reference_conn(connection, person) {
+        Ok(person) if person.starts_with("person/") => person,
+        Ok(_) => return Ok(false),
+        Err(error) if error.code == "lifecycle-unavailable" => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let before = canonical::after_sql("opening", "earlier");
+    let sql = format!(
+        "WITH header AS (
+           SELECT json_extract(opening.body,'$.fields.person') AS recipient,
+             step.assignee AS current_recipient, opening.accepted_at_unix_ms AS accepted
+           FROM claims opening LEFT JOIN step_runs step ON step.subject=opening.subject
+           WHERE opening.id=?2 AND opening.subject=?1 AND opening.kind='work.person-asked'
+             AND json_type(opening.body,'$.fields.person')='text'
+             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=opening.id AND state='repaired')
+             AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=opening.id)
+             AND (json_type(opening.body,'$._operation') IS NULL OR EXISTS(
+               SELECT 1 FROM operations
+               WHERE operations.id=json_extract(opening.body,'$._operation.id')
+                 AND operations.state='active' AND operations.canonical_claim_id=opening.id
+                 AND operations.request_digest=json_extract(opening.body,'$._operation.request_digest')))
+             AND NOT EXISTS(SELECT 1 FROM claims earlier
+               WHERE earlier.subject=opening.subject AND earlier.kind=opening.kind AND {before}
+                 AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=earlier.id AND state='repaired')
+                 AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=earlier.id))
+         ), bounded AS (
+           SELECT *, length(CAST(recipient AS BLOB))+length(CAST(current_recipient AS BLOB))
+             +length(CAST(accepted AS BLOB))<=?3 AS fits FROM header
+         )
+         SELECT CASE WHEN fits THEN recipient END,
+           CASE WHEN fits THEN current_recipient END, CASE WHEN fits THEN accepted END
+         FROM bounded"
+    );
+    let header: Option<(Option<String>, Option<String>, Option<String>)> = connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h7c1ab81ff9e3 owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ &sql, params![key.source_id, key.episode, MAX_PROOF_BYTES],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(internal)?;
+    let Some((Some(recipient), Some(current_recipient), Some(accepted))) = header else { return Ok(false) };
+    let accepted: u128 = accepted.parse().map_err(internal)?;
+    Ok(accepted <= at && matches_person(connection, &person, Some(&recipient))?
+        && matches_person(connection, &person, Some(&current_recipient))?)
+}
+
 /// Bound the complete proof read set, including repaired history, before selecting
 /// any body. JSON extracts here return exact references only, never source prose.
-fn inputs_preflight(connection: &Connection, key: &SourceEpisode) -> Result<bool, FractalError> {
+fn inputs_preflight(connection: &Connection, key: &SourceEpisode) -> Result<ProofBudget, FractalError> {
     if key.source_id.is_empty() || key.source_id.len() > 512
-        || key.episode.is_empty() || key.episode.len() > 512 { return Ok(false); }
+        || key.episode.is_empty() || key.episode.len() > 512 { return Ok(ProofBudget::InvalidKey); }
     let mut statement = connection.prepare(
         /* sqlite-large-value: allow-for-now lv-he9e177bb34b5 owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ "WITH RECURSIVE subjects(subject) AS (
            SELECT ?1 UNION SELECT subject FROM claims WHERE id=?2
@@ -522,9 +619,9 @@ fn inputs_preflight(connection: &Connection, key: &SourceEpisode) -> Result<bool
     while let Some(row) = rows.next().map_err(internal)? {
         count += 1;
         bytes = bytes.saturating_add(row.get::<_, Option<u64>>(0).map_err(internal)?.unwrap_or(0));
-        if count > MAX_PROOF_CLAIMS || bytes > MAX_PROOF_BYTES { return Ok(false); }
+        if count > MAX_PROOF_CLAIMS || bytes > MAX_PROOF_BYTES { return Ok(ProofBudget::OverBudget); }
     }
-    Ok(true)
+    Ok(ProofBudget::WithinBudget)
 }
 
 fn notice_snapshots(connection: &Connection, input: &str)

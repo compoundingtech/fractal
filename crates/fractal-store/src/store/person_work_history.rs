@@ -27,10 +27,13 @@ fn unavailable(key: &SourceEpisode, reason: PayloadUnavailable) -> RequestHistor
 
 /// Read an exact canonical runtime ask, including resolved/cancelled asks. This deliberately
 /// does not call `current`, `run_live`, or join responses through today's originating attempt.
+/// Authorized openings beyond the payload budget remain explicit unavailable history;
+/// routing proof alone never supplies payload or authorizes Start.
 pub fn retained_request_history(
     conn: &Connection, person: &str, key: &SourceEpisode, cut: u64,
 ) -> Result<Option<RequestHistoryItem>, FractalError> {
-    if discussion_source::qualify(conn, person, key, now_ms())?.is_none() { return Ok(None); }
+    let qualification = discussion_source::qualify_history(conn, person, key, now_ms())?;
+    if !qualification.is_authorized() { return Ok(None); }
     if canonical_request_id(conn, &key.source_id)?.as_deref() != Some(key.episode.as_str()) {
         return Ok(None);
     }
@@ -42,7 +45,9 @@ pub fn retained_request_history(
     let Some(length) = length else {
         return Ok(Some(unavailable(key, PayloadUnavailable::PayloadUnavailable)));
     };
-    if length > MAX_BODY_BYTES as i64 {
+    if length > MAX_BODY_BYTES as i64
+        || matches!(qualification, discussion_source::HistoryQualification::PayloadOverBudget)
+    {
         return Ok(Some(unavailable(key, PayloadUnavailable::ReadBoundExceeded)));
     }
     let ask = conn.query_row(
@@ -353,10 +358,204 @@ mod tests {
         conn.execute("UPDATE claims SET body='{\"fields\":{\"person\":\"person/avery\",\"attempt\":1,\"title\":\"Retained title\"}}' WHERE id='opening'", []).unwrap();
         assert!(matches!(read(&conn, u64::MAX).payload,
             HistoricalPayload::Unavailable { reason: PayloadUnavailable::PayloadUnavailable }));
-        let body = json!({"fields":{"reason":"x".repeat(MAX_BODY_BYTES + 1)}}).to_string();
+        let body = json!({"fields":{"person":"person/avery","attempt":1,
+            "reason":"x".repeat(MAX_BODY_BYTES + 1)}}).to_string();
         conn.execute("UPDATE claims SET body=?1 WHERE id='opening'", [body]).unwrap();
         assert!(matches!(read(&conn, u64::MAX).payload,
             HistoricalPayload::Unavailable { reason: PayloadUnavailable::ReadBoundExceeded }));
+    }
+
+    #[test]
+    fn retained_runtime_original_authority_is_required_at_every_payload_size() {
+        let oversized_person = format!("person/{}", "x".repeat(MAX_BODY_BYTES + 1));
+        for oversized in [false, true] {
+            for original in [None, Some("person/robin"), Some(oversized_person.as_str())] {
+                let store = fixture();
+                let conn = store.connection.write();
+                let mut fields = json!({"attempt":1,"title":"Retained title",
+                    "reason":if oversized { "x".repeat(MAX_BODY_BYTES + 1) } else { "Retained question".into() }});
+                if let Some(person) = original { fields["person"] = json!(person); }
+                let body = json!({"fields":fields,"evidence":[]}).to_string();
+                conn.execute("UPDATE claims SET body=?1 WHERE id='opening'", [body]).unwrap();
+                assert!(!discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+                    .unwrap().is_authorized());
+                assert!(retained_request_history(&conn, "person/avery", &key(), u64::MAX)
+                    .unwrap().is_none());
+                assert!(discussion_source::qualify(&conn, "person/avery", &key(), now_ms())
+                    .unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn retained_runtime_bounded_payload_qualifies_but_wrong_current_assignee_does_not() {
+        let store = fixture();
+        let conn = store.connection.write();
+        let fields = json!({"person":"person/avery","attempt":1,"title":"Retained title",
+            "reason":"bounded retained question"});
+        conn.execute("UPDATE claims SET body=?1 WHERE id='opening'",
+            [json!({"fields":fields,"evidence":[]}).to_string()]).unwrap();
+        assert!(matches!(discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+            .unwrap(), discussion_source::HistoryQualification::Qualified));
+        assert!(discussion_source::qualify(&conn, "person/avery", &key(), now_ms()).unwrap().is_some());
+        assert!(read(&conn, u64::MAX).complete);
+        conn.execute("UPDATE step_runs SET assignee='person/robin' WHERE subject=?1", [SOURCE]).unwrap();
+        for person in ["person/avery", "person/robin"] {
+            assert!(!discussion_source::qualify_history(&conn, person, &key(), now_ms())
+                .unwrap().is_authorized());
+            assert!(retained_request_history(&conn, person, &key(), u64::MAX).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn retained_runtime_oversized_duplicate_wrong_key_and_repaired_opening_stay_absent() {
+        let store = fixture();
+        let conn = store.connection.write();
+        let fields = json!({"person":"person/avery","attempt":1,"title":"Retained title",
+            "reason":"x".repeat(MAX_BODY_BYTES + 1)});
+        insert(&conn, "oversized-duplicate", "work.person-asked", 20, fields.clone());
+        conn.execute("UPDATE claims SET body=?1 WHERE id='opening'",
+            [json!({"fields":fields,"evidence":[]}).to_string()]).unwrap();
+        for candidate in [
+            SourceEpisode { episode:"oversized-duplicate".into(), ..key() },
+            SourceEpisode { source_id:"step-run/history/other".into(), ..key() },
+            SourceEpisode { episode:"missing-opening".into(), ..key() },
+        ] {
+            assert!(!discussion_source::qualify_history(&conn, "person/avery", &candidate, now_ms())
+                .unwrap().is_authorized());
+            assert!(retained_request_history(&conn, "person/avery", &candidate, u64::MAX)
+                .unwrap().is_none());
+        }
+        assert!(matches!(discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+            .unwrap(), discussion_source::HistoryQualification::PayloadOverBudget));
+        conn.execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", ["opening"]).unwrap();
+        assert!(!discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+            .unwrap().is_authorized());
+        assert!(retained_request_history(&conn, "person/avery", &key(), u64::MAX).unwrap().is_none());
+    }
+
+    #[test]
+    fn retained_runtime_oversized_explicit_operation_requires_active_exact_canonical_proof() {
+        let store = fixture();
+        let conn = store.connection.write();
+        let body = json!({"fields":{"person":"person/avery","attempt":1,
+            "title":"Retained title","reason":"x".repeat(MAX_BODY_BYTES + 1)},
+            "evidence":[], "_operation":{"id":"operation/history-opening","request_digest":"opening-digest"}});
+        conn.execute("UPDATE claims SET body=?1 WHERE id='opening'", [body.to_string()]).unwrap();
+        assert!(!discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+            .unwrap().is_authorized());
+        conn.execute("INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+            VALUES('operation/history-opening','opening-digest','opening','active')", []).unwrap();
+        assert!(matches!(discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+            .unwrap(), discussion_source::HistoryQualification::PayloadOverBudget));
+        let item = read(&conn, u64::MAX);
+        assert!(!item.complete);
+        assert!(matches!(item.payload,
+            HistoricalPayload::Unavailable { reason: PayloadUnavailable::ReadBoundExceeded }));
+        insert(&conn, "different-opening", "work.person-asked", 20,
+            json!({"person":"person/avery","attempt":1,"title":"Duplicate","reason":"Duplicate"}));
+        for (state, digest, canonical) in [
+            ("conflict", "opening-digest", "opening"),
+            ("active", "different-digest", "opening"),
+            ("active", "opening-digest", "different-opening"),
+        ] {
+            conn.execute("UPDATE operations SET state=?1,request_digest=?2,canonical_claim_id=?3
+                WHERE id='operation/history-opening'", params![state, digest, canonical]).unwrap();
+            assert!(!discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+                .unwrap().is_authorized());
+            assert!(retained_request_history(&conn, "person/avery", &key(), u64::MAX)
+                .unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn retained_runtime_authorized_oversized_history_does_not_authorize_start() {
+        let store = fixture();
+        {
+            let conn = store.connection.write();
+            let body = json!({"fields":{"person":"person/avery","attempt":1,
+                "title":"Retained title","reason":"x".repeat(MAX_BODY_BYTES + 1)}}).to_string();
+            conn.execute("UPDATE claims SET body=?1 WHERE id='opening'", [body]).unwrap();
+            assert!(matches!(discussion_source::qualify_history(&conn, "person/avery", &key(), now_ms())
+                .unwrap(), discussion_source::HistoryQualification::PayloadOverBudget));
+            let before_opening = read(&conn, 0);
+            assert!(!before_opening.complete);
+            assert!(matches!(before_opening.payload,
+                HistoricalPayload::Unavailable { reason: PayloadUnavailable::PayloadUnavailable }));
+            let item = read(&conn, u64::MAX);
+            assert!(!item.complete);
+            assert!(matches!(item.payload,
+                HistoricalPayload::Unavailable { reason: PayloadUnavailable::ReadBoundExceeded }));
+            assert!(discussion_source::qualify(&conn, "person/avery", &key(), now_ms())
+                .unwrap().is_none());
+        }
+        let origin = thread_metadata::InboxOrigin {
+            source_id: SOURCE.into(), episode:"opening".into(),
+        };
+        assert_eq!(thread_metadata::start_context(&store, "person/avery", &origin)
+            .err().unwrap().code, "thread-unavailable");
+        store.configure_thread_write_rollout([]);
+        let message = ClaimInput {
+            subject:"message/history-start".into(), kind:"message.sent".into(),
+            actor:Some("person/avery".into()),
+            fields:serde_json::from_value(json!({"from":"person/avery",
+                "to":"agent/history","content":"Discuss the retained ask"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        };
+        assert_eq!(thread_metadata::start_from_inbox(&store, thread_metadata::StartFromInbox {
+            thread:"thread/history-start", title:"Retained ask", person:"person/avery",
+            origin:&origin, key:"history-start", first_message:&message,
+        }).err().unwrap().code, "thread-unavailable");
+        let conn = store.connection.write();
+        conn.execute("UPDATE step_runs SET assignee='person/robin' WHERE subject=?1", [SOURCE]).unwrap();
+        for person in ["person/avery", "person/robin"] {
+            assert!(!discussion_source::qualify_history(&conn, person, &key(), now_ms())
+                .unwrap().is_authorized());
+            assert!(retained_request_history(&conn, person, &key(), u64::MAX).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn thread_history_keeps_authorized_oversized_origin_and_rejects_missing_authority() {
+        let store = fixture();
+        {
+            let conn = store.connection.write();
+            let body = json!({"fields":{"person":"person/avery","attempt":1,
+                "title":"Retained title","reason":"x".repeat(MAX_BODY_BYTES + 1)}}).to_string();
+            conn.execute("UPDATE claims SET body=?1 WHERE id='opening'", [body]).unwrap();
+            insert(&conn, "history-thread-created", "thread.created", 20, json!({
+                "person":"person/avery","agent":"agent/history","title":"History",
+                "origin_source":SOURCE,"origin_episode":"opening"
+            }));
+            conn.execute("UPDATE claims SET subject='thread/history',
+                body=json_set(body,'$._operation.id','operation/history-thread')
+                WHERE id='history-thread-created'", []).unwrap();
+            conn.execute("INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+                VALUES('operation/history-thread','history-thread','history-thread-created','active')", []).unwrap();
+        }
+        let history = || thread_metadata::request_history::read_with(
+            &store, "person/avery", "thread/history", None, 10,
+            retained_request_history, |_, _, _, _| Ok((Vec::new(), true)),
+        );
+        let page = history().unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].key, key());
+        assert!(!page.complete);
+        assert!(!page.items[0].complete);
+        assert!(matches!(page.items[0].payload,
+            HistoricalPayload::Unavailable { reason: PayloadUnavailable::ReadBoundExceeded }));
+        for person in [None, Some("person/robin")] {
+            {
+                let conn = store.connection.write();
+                let body = match person {
+                    None => json!({"fields":{"attempt":1,"reason":"x".repeat(MAX_BODY_BYTES + 1)}}),
+                    Some(person) => json!({"fields":{"person":person,"attempt":1,
+                        "reason":"x".repeat(MAX_BODY_BYTES + 1)}}),
+                };
+                conn.execute("UPDATE claims SET body=?1 WHERE id='opening'", [body.to_string()]).unwrap();
+            }
+            assert_eq!(history().err().unwrap().code, "thread-unavailable");
+        }
     }
 
     #[test]
