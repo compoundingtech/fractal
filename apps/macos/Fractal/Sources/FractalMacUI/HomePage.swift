@@ -411,7 +411,8 @@ struct InboxRow: View {
           .accessibilityHidden(true)
       }
     }
-    .buttonStyle(.panelRow)
+    // The card open beside the list keeps its row selected.
+    .buttonStyle(.panelRow(selected: model.route == .attention(record.id)))
     .help(help(write))
     .accessibilityLabel(accessibilityLabel(write))
     .accessibilityIdentifier("inbox-row-\(record.id)")

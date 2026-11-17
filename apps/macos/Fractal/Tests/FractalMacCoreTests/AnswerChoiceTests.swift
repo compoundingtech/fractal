@@ -105,6 +105,49 @@ final class AnswerChoiceTests: XCTestCase {
     XCTAssertTrue(AnswerChoice.canSend(choices[0], words: ""))
   }
 
+  // MARK: Pick, then Send
+
+  func testRecommendedOptionIsPreselectedAndSendSendsIt() {
+    let choices = AnswerChoice.choices(for: Fixture.record(request: Fixture.decision()))
+    XCTAssertEqual(AnswerChoice.preselected(choices)?.id, "answer:ship")
+    let pending = AnswerChoice.pending(choices, draft: AnswerDraft())
+    XCTAssertEqual(pending?.id, "answer:ship")
+    XCTAssertTrue(AnswerChoice.canSend(pending, words: ""))
+  }
+
+  func testAPickReplacesThePreselectionAndKeepsTheDeclineTone() {
+    let choices = AnswerChoice.choices(for: Fixture.record(request: Fixture.decision()))
+    let pending = AnswerChoice.pending(choices, draft: AnswerDraft(selected: "answer:hold"))
+    XCTAssertEqual(pending?.id, "answer:hold")
+    XCTAssertEqual(pending?.tone, .danger)
+  }
+
+  func testNothingIsPreselectedWithoutARecommendationSoSendWaitsForAPick() {
+    let choices = AnswerChoice.choices(for: Fixture.record(request: Fixture.decision(recommended: nil)))
+    XCTAssertNil(AnswerChoice.preselected(choices))
+    XCTAssertFalse(AnswerChoice.canSend(AnswerChoice.pending(choices, draft: AnswerDraft()), words: ""))
+  }
+
+  func testARecommendationThatNeedsWordsIsPreselectedButSendWaitsForWords() {
+    let choices = AnswerChoice.choices(for: Fixture.record(request: Fixture.decision(recommended: "changes")))
+    XCTAssertEqual(AnswerChoice.preselected(choices)?.id, "answer:changes")
+    let picked = AnswerChoice.pending(choices, draft: AnswerDraft())
+    XCTAssertFalse(AnswerChoice.canSend(picked, words: ""))
+    XCTAssertTrue(AnswerChoice.canSend(picked, words: "Fix the changelog"))
+  }
+
+  func testTypedWordsOverrideThePreselectionWithTheChoiceThatCarriesThem() {
+    let choices = AnswerChoice.choices(for: Fixture.record(request: Fixture.decision()))
+    XCTAssertEqual(AnswerChoice.pending(choices, draft: AnswerDraft(words: "why?"))?.id, "answer:changes")
+  }
+
+  func testListedPicksAreNumberedOptionsThenNothingWithoutTheWordsChoice() {
+    let decision = AnswerChoice.choices(for: Fixture.record(request: Fixture.decision()))
+    XCTAssertEqual(AnswerChoice.listed(decision).map(\.id), ["answer:ship", "answer:hold", "answer:changes"])
+    let untyped = AnswerChoice.choices(for: Fixture.record(title: "Deploy now?"))
+    XCTAssertEqual(AnswerChoice.listed(untyped).map(\.id), ["yes", "no", "nothing"])
+  }
+
   // MARK: Submission
 
   func testSubmissionTargetsTheStepEpisodeFallingBackToRevision() {
