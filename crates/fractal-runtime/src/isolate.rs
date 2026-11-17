@@ -556,7 +556,7 @@ pub fn signal_scope(unit: &str, signal: i32) -> Result<bool> {
 
 /// The cgroup directory of `unit`, or none once the unit is not loaded.
 fn control_group(unit: &str) -> Result<Option<PathBuf>> {
-    let snapshot = crate::systemd::snapshot()?;
+    let snapshot = crate::systemd::snapshot_after_admission()?;
     let Some(observed) = snapshot.units.get(unit) else {
         verify_scope_absence(unit, snapshot.captured_at)?;
         return Ok(None);

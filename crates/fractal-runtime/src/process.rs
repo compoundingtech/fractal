@@ -1589,6 +1589,14 @@ mod tests {
         crate::lane::set_enforced(true);
         let root = tempfile::tempdir().unwrap();
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        struct EndFixture(ExecRuntime);
+        impl Drop for EndFixture {
+            fn drop(&mut self) {
+                let _ = self.0.kill("finite-tree");
+                let _ = self.0.end_leftovers("finite-tree");
+            }
+        }
+        let _cleanup = EndFixture(runtime.clone());
         let policy = FiniteLane {
             name: format!("fixture_{}", std::process::id()),
             capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
@@ -3171,6 +3179,12 @@ libc.pthread_exit(None)
             .unwrap();
         let orphan = read_orphan(root.path());
         wait_for_exit(&runtime, "work");
+
+        // Reproduce teardown immediately after a successful observation and a
+        // local control invalidation. The two-second manager admission bound
+        // must delay teardown, not abandon the descendant outside custody.
+        crate::systemd::snapshot_after_admission().unwrap();
+        crate::systemd::invalidate();
 
         // The reconciler asks this on each pass in which a stopped runtime is not running.
         runtime.end_leftovers("work").unwrap();

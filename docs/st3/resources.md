@@ -227,6 +227,13 @@ gate. Required unsupported enforcement refuses rather than detaching. CPU quota 
 not reserved cores; memory maximum is a hard accounting bound, not proof that memory is available.
 No implicit `memory.high`, swap or IO policy is added to existing seats.
 
+Scope teardown, retirement proof, lane removal and legacy start closure wait for the systemd
+observer's next admitted observation after a local control invalidates its snapshot. The
+two-second observation bound still applies: waiting releases the observer lock and owns no
+subprocess. This is admission synchronization, not a retry of a failed manager command.
+Transport failures and manager backoff remain prompt errors, and stale or incomplete observations
+never prove that a scope has retired.
+
 Darwin offers host-local logical exclusivity and scoped cancellation, not Linux-equivalent
 whole-tree CPU/memory enforcement. Required `enforced` coverage returns `UnsupportedCoverage`.
 Logical-only execution does not imply an enforced resource cap. Detached process groups cannot
