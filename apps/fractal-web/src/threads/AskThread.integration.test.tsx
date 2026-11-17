@@ -30,12 +30,13 @@ it.each([
   { connection: 'approved paired browser', local: false, browserGrant: true, canStart: true, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: 'claim/episode' },
   { connection: 'legacy paired device', local: false, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: 'claim/episode' },
   { connection: 'custom Inbox source', local: true, browserGrant: false, canStart: true, kind: 'custom.garden.review', sourceId: 'custom/garden/review/origin', responsible: true, protocol: 3, episode: 'claim/episode' },
-  { connection: 'unassigned Inbox source', local: true, browserGrant: false, canStart: false, kind: 'custom.garden.review', sourceId: 'custom/garden/review/origin', responsible: false, protocol: 3, episode: 'claim/episode' },
+  { connection: 'unlisted configured recipient', local: true, browserGrant: false, canStart: true, kind: 'custom.garden.review', sourceId: 'custom/garden/review/origin', responsible: false, protocol: 3, episode: 'claim/episode' },
   { connection: 'old thread protocol', local: true, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 1, episode: 'claim/episode' },
   { connection: 'cached row without an episode', local: true, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: undefined },
   { connection: 'resolved ask', local: true, browserGrant: false, canStart: true, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: 'claim/episode', resolved: true },
   { connection: 'resolved authored step', local: true, browserGrant: false, canStart: true, kind: 'person-step', sourceId: 'step-run/release/review', responsible: true, protocol: 3, episode: 'claim/step-opening', resolved: true },
   { connection: 'resolved typed notice', local: true, browserGrant: false, canStart: true, kind: 'custom.release.notice', sourceId: 'custom/attention/source/release', responsible: true, protocol: 3, episode: 'claim/notice-opening', resolved: true },
+  { connection: 'resolved system notice', local: true, browserGrant: false, canStart: true, kind: 'system-notice', sourceId: 'system/notice/release', responsible: false, protocol: 3, episode: 'claim/system-notice-opening', resolved: true },
   { connection: 'auto-resolved ask', local: true, browserGrant: false, canStart: true, kind: 'person-step', sourceId: 'step-run/release/default', responsible: true, protocol: 3, episode: 'claim/default-opening', resolved: true, autoResolved: true },
 ])('offers an inline Inbox composer only when $connection supports unsigned sends', async ({ local, browserGrant, canStart, kind, sourceId, responsible, protocol, episode, ...scenario }) => {
   const resolved = 'resolved' in scenario && scenario.resolved === true
@@ -88,6 +89,10 @@ it.each([
     if (url.pathname.endsWith('/request-history')) return Response.json({ ...base, value: {
       items: [], boundary_items: [], relations: [], source_episodes: [], complete: true, next_cursor: null, source_support: null,
     } })
+    if (url.pathname === '/v1/client/threads/start-context') return Response.json({ ...base, value: {
+      kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'),
+      start_recipient: { agent_id: 'agent/example/atlas', basis: { _tag: responsible ? 'original' : 'configured' } },
+    } })
     if (url.pathname.endsWith('/timeline')) return Response.json({ ...base, value: { items: [{
       kind: 'message', id: 'message/first', actor_id: base.value.session_actor,
       content: 'Discuss this review before answering.', accepted_at_unix_ms: 1, thread_quote_id: null,
@@ -101,8 +106,8 @@ it.each([
   const source = { ...fixtureSource({ world: {
     now: Date.parse('2026-11-01T11:05:00Z'), events: [], missions: [], attention: autoResolved ? [] : [ask],
     // The roster serves the seat's declared name.
-    agents: [decodeNative(Agent)({ kind: 'agent', id: 'agent/example/atlas', name: 'atlas', host_id: 'host/example', runtime_ids: [], reachability: 'reachable',
-      state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })],
+    agents: responsible ? [decodeNative(Agent)({ kind: 'agent', id: 'agent/example/atlas', name: 'atlas', host_id: 'host/example', runtime_ids: [], reachability: 'reachable',
+      state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })] : [],
     conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }), threads: gatewayThreads(client, registry), alertActions: { act: answer, autoResolved: async () => ({ _tag: 'Observed' as const,
     asks: autoResolved ? [{ resolution_id: 'a'.repeat(64), title: ask.title, requester_id: 'agent/example/atlas',
@@ -132,15 +137,14 @@ it.each([
     // Start is offered only once the item's thread list is observed.
     const findStart = () => Array.from(host.querySelectorAll('button')).find(each => each.textContent === 'Start thread')
     if (!canStart) {
-      if (!responsible) await vi.waitFor(() => expect(host.textContent).toContain('No responsible agent is configured'))
-      else await act(async () => {})
+      await act(async () => {})
       expect(findStart()).toBeUndefined()
       expect(host.querySelector('[aria-label="Message composer, Review PR #42"]')).toBeNull()
       return
     }
     await vi.waitFor(() => expect(findStart()).toBeDefined())
     const button = findStart()
-    if (!resolved) expect(host.querySelector('[data-testid="alert-details"]')?.textContent).toContain('Ask atlas about this item without answering it.')
+    if (!resolved) expect(host.querySelector('[data-testid="alert-details"]')?.textContent).toContain(`Ask ${responsible ? 'atlas' : 'an agent'} about this item without answering it.`)
     await act(async () => button?.click())
     const composer = host.querySelector('[data-testid="alert-details"] [aria-label="Message composer, Review PR #42"]')
     expect(composer).not.toBeNull()
@@ -150,7 +154,9 @@ it.each([
     expect(Array.from(panel?.querySelectorAll('button') ?? []).some(each => each.textContent === 'Send' || each.getAttribute('aria-label') === 'Send')).toBe(true)
     expect(panel?.querySelector<HTMLInputElement>('input')?.value).toBe('Review PR #42')
     expect([...(panel?.querySelectorAll('label') ?? [])].map(label => label.textContent)).toContain('Thread title')
-    expect(panel?.textContent).toContain('To atlas')
+    expect(panel?.textContent).toContain(`To ${responsible ? 'atlas' : 'an agent'}`)
+    expect(panel?.querySelector('[data-start-recipient-id]')?.textContent).toBe('agent/example/atlas')
+    expect(panel?.querySelector('[data-start-recipient-basis]')?.textContent).toBe(responsible ? 'Original recipient' : 'Configured recipient')
     if (kind === 'agent-request' && !resolved) expect(host.querySelector('[data-testid="alert-details"] [data-alert-kind="agent-request"]')?.textContent).toContain('Merge')
     expect(answer).not.toHaveBeenCalled()
     expect(open).not.toHaveBeenCalled()

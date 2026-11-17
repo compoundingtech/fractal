@@ -67,6 +67,10 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
       return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id, operation_id: 'operation/start',
         status: 'completed', affected_ids: [action.parameters.target_id, 'message/first'], snapshot_id: base.snapshot.id } })
     }
+    if (url.pathname === '/v1/client/threads/start-context') return Response.json({ ...base, value: {
+      kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'),
+      start_recipient: { agent_id: originalAgent, basis: { _tag: 'original' } },
+    } })
     if (url.pathname.endsWith('/timeline')) return Response.json({ ...base, value: { items: [{
       kind: 'message', id: 'message/first', actor_id: base.value.session_actor, content,
       accepted_at_unix_ms: 1, thread_quote_id: null,

@@ -118,6 +118,15 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
           : 'origin_source' in query ? get(origins)[row.id] === query.origin_source && query.origin_episode === episode : true),
         next_cursor: Option.none(),
       } })),
+    startContext: (sourceId, sourceEpisode) => Atom.make(get => scenario === 'loading' ? waiting
+      : scenario === 'refused' ? unavailable({ reason: 'unauthorized', detail: credentialExpiredMessage })
+      : get(failing) ? unavailable({ reason: 'failed', detail: 'Fractal could not load the recipient.' })
+      : scenario === 'offline' ? unavailable({ reason: 'failed', detail: 'Fractal is offline; the recipient could not be confirmed.' })
+      : observed({ value: Native.decodeUnknownSync(Native.ThreadStartContext)({
+        kind: 'thread-start-context', source_id: sourceId, episode: sourceEpisode,
+        start_recipient: { agent_id: agentRef, basis: { _tag: scenario === 'custom-source' ? 'configured' : 'original' } },
+      }) })),
+    reloadStartContext: () => registry.set(failing, false),
     reload: () => registry.set(failing, false),
     detail: id => Atom.make(get => {
       if (scenario === 'refused-thread') return unavailable({ reason: 'ungranted', detail: 'You no longer have access to this thread.', explanation: 'This fixture withdrew the thread from this connection.' })
