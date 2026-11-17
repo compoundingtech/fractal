@@ -99,8 +99,7 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
               : resolvedAsk !== undefined ? <>
                 <DecisionCard density="full" label={resolvedAsk.title} meta={[]} heading={resolvedAsk.title}
                   resolved={resolvedAsk.default_answer === undefined ? 'Resolved at its deadline' : `Default applied: ${resolvedAsk.default_answer.label}`} />
-                <LiveResolvedInboxThreads sourceId={resolvedAsk.target_id} episode={resolvedAsk.episode} title={resolvedAsk.title}
-                  listedAgent={resolvedAsk.requester_id.startsWith('agent/') ? resolvedAsk.requester_id : undefined} onOpenThread={onOpenRef} />
+                <LiveResolvedInboxThreads sourceId={resolvedAsk.target_id} episode={resolvedAsk.episode} title={resolvedAsk.title} onOpenThread={onOpenRef} />
               </> : resolved !== undefined ? <>
                 <DecisionCard density="full" label={resolved.title} meta={[]} heading={resolved.title} resolved="No longer open" />
                 <LiveInboxThreads alert={resolved} onOpenThread={onOpenRef} />

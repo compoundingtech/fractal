@@ -627,6 +627,35 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
+## First-Start recipient preview
+
+Before a first send on any exact Inbox source item — a current or resolved ask,
+an authored step, a typed or system notice, with or without a listed agent — the
+web reads `ThreadSource.startContext(source_id, episode)`. The gateway source
+calls the generated `FractalClient.threadStartContext` for
+`/v1/client/threads/start-context` and decodes the answer with the generated
+`ThreadStartContext` schema; there is no hand-written DTO or adapter. Start is
+offered only once that preview returns `start_recipient`, and the first send
+carries exactly its `agent_id`. Nothing else names a recipient: neither the
+item's `conversation_id` nor its `requester_id` is read for it, and a source
+without the preview reader shows a note and no Start.
+
+The Start row and the draft show the recipient's name, its exact agent id and
+its basis (`Original recipient`, `Configured recipient`). A terminal-retirement
+fallback is labelled `New recipient`; the retired original agent and its exact id
+appear on their own line. Runtime offline status never selects a fallback. An
+unconfigured fallback shows the `recipient-retired` refusal with no default
+agent and no Start; while the preview loads or after it fails there is no Start
+either, and a failed read offers Retry.
+
+If Start returns a recipient-mismatch 404, the source reads that exact preview
+again and returns the refusal; the draft stays, the changed recipient is called
+out, and only another explicit Send starts the thread. Nothing is resent
+silently. A retained, unconfirmed Start keeps its original signed intent and
+identifiers on Retry. Replies continue to use the existing thread's stored
+participants, regardless of later routing policy. Storybook's
+`Fractal/App/Threads/Start recipient` covers every state.
+
 ## Independent resolved Inbox discussions
 
 Resolved Inbox asks, authored steps and typed notices retain the same Start
@@ -637,8 +666,7 @@ inventory. Every successful Start creates an independent discussion, even when
 other threads share that source episode; two Starts create two threads. Opening
 an existing discussion remains navigation, never Start coalescing. The daemon
 revalidates source authority and the recipient on each first send; neither the
-original discussion nor its participants are changed. The recipient-preview
-follow-up is deliberately separate from this history delivery.
+original discussion nor its participants are changed.
 
 ## Related requests
 
