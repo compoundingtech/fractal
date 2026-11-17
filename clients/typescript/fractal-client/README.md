@@ -50,6 +50,8 @@ storage adapter, startup worker, signing service, or server reconciliation endpo
   `list`, and `read` permanently to an original principal/deployment/member scope.
   Successful writes mean durable transaction completion; adapters must reject
   storage failures rather than silently fall back to memory.
+  Derive its deployment identity with `outboxDeploymentId(issuer, issuerKey)`,
+  the JSON-encoded tuple of the captured issuer and issuer key.
 - `createOutboxRecord(id, intent)` accepts immutable serializable intent (text and
   attachment references carrying content hash, optional name, media type and a
   storage reference) as pending/preparing, with no packet. Commit this record before
