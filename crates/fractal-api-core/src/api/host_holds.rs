@@ -210,15 +210,17 @@ mod tests {
         let refused = set_launch_freeze(State(state.clone()),
             Some(BoundActor::Agent("agent/worker".into())), Json(request())).await.unwrap_err();
         assert_eq!(refused.code, "launch-freeze-owner");
-        set_launch_freeze(State(state.clone()), None, Json(request())).await.unwrap();
+        let Json(placed) = set_launch_freeze(State(state.clone()), None, Json(request())).await.unwrap();
+        assert_eq!(placed["id"], "activation");
         let Json(shown) = launch_freeze(State(state.clone())).await.unwrap();
         assert_eq!(shown["freeze"]["owner"], "person/operator");
         assert_eq!(shown["freeze"]["reason"], "replace daemon");
         assert!(shown["freeze"]["expires_at_unix_ms"].as_u64().is_some());
         assert_eq!(shown["deferred"], json!([]));
-        clear_launch_freeze(State(state.clone()), None, Json(ClearFreezeRequest {
+        let Json(cleared) = clear_launch_freeze(State(state.clone()), None, Json(ClearFreezeRequest {
             actor: "person/operator".into(), id: "activation".into(),
         })).await.unwrap();
+        assert_eq!(cleared["cleared"], true);
         assert!(state.store.admit_launch().unwrap().is_some());
     }
 

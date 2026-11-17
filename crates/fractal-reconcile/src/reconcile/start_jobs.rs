@@ -190,11 +190,9 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     pub(super) fn admit_incarnation_launch(&self) -> Result<Option<crate::store::launch_freeze::LaunchPermit>> {
         let permit = self.store.admit_launch()?;
-        if permit.is_none() {
-            if let Some(freeze) = self.store.launch_freeze()? {
-                self.arm_deadline_at("launch-freeze", u128::from(freeze.expires_at_unix_ms),
-                    crate::reconcile_telemetry::WakeCause::Deadline);
-            }
+        if permit.is_none() && let Some(freeze) = self.store.launch_freeze()? {
+            self.arm_deadline_at("launch-freeze", u128::from(freeze.expires_at_unix_ms),
+                crate::reconcile_telemetry::WakeCause::Deadline);
         }
         Ok(permit)
     }
