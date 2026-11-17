@@ -4205,6 +4205,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "operational.failure" => &[
             ("episode", string()),
+            ("objective", string()),
             ("condition", string()),
             ("reviewer", reference()),
             ("title", string()),
