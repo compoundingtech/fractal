@@ -1398,7 +1398,6 @@ export const liveSource = ({
       for (const entry of recentTerminals.values()) entry.release()
       recentTerminals.clear()
       registry.dispose()
-      await outboxConnection?.then((connection) => connection.close(), () => {})
       await runtime.dispose()
       setDebug('Wf.conversationEntries', 0)
     },

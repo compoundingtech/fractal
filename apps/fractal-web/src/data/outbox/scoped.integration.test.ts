@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto'
-import { createOutboxRecord, FractalClient, outboxDeploymentId, prepareMessageSendPacket, prepareOutboxRecord, type Capabilities, type EnvelopeOf } from '@fractal/client'
+import { createOutboxRecord, FractalClient, outboxDeploymentId, prepareMessageSendPacket, prepareOutboxRecord, type EnvelopeOf } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -7,10 +7,10 @@ import fixture from '../subjectReadPort.gateway.fixtures.json'
 import { gatewayMessageSend } from '../attachmentPort.ts'
 import { createScopedChatOutbox, scopeFromCapabilities, type ScopedChatOutbox } from './scoped.ts'
 
-const base = { ...fixture.capabilities, api_version: 'st3.client.v0' as const, value: { ...Native.decodeUnknownSync(Native.Capabilities)(fixture.capabilities.value), issuer: 'person/example', issuer_key: 'issuer-key/a' } }
+const base = { ...fixture.capabilities, api_version: 'st3.client.v0' as const, snapshot: Native.decodeUnknownSync(Native.Snapshot)(fixture.capabilities.snapshot), value: { ...Native.decodeUnknownSync(Native.Capabilities)(fixture.capabilities.value), issuer: 'person/example', issuer_key: 'issuer-key/a' } }
 const owners: ScopedChatOutbox[] = []
 const setup = () => {
-  let response: EnvelopeOf<Capabilities> = base
+  let response: EnvelopeOf<typeof Native.Capabilities.Type> = base
   let fail = false
   const calls: string[] = []
   const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input) => {
@@ -20,7 +20,7 @@ const setup = () => {
   } })
   const owner = createScopedChatOutbox(client, { indexedDB: new IDBFactory() })
   owners.push(owner)
-  return { client, owner, calls, respond: (next: EnvelopeOf<Capabilities>) => { response = next }, offline: () => { fail = true } }
+  return { client, owner, calls, respond: (next: EnvelopeOf<typeof Native.Capabilities.Type>) => { response = next }, offline: () => { fail = true } }
 }
 afterEach(() => { for (const owner of owners.splice(0)) owner.close() })
 
@@ -112,7 +112,7 @@ describe('verified browser outbox scope', () => {
     expect(items).toContainEqual({ id: initial.id, status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] })
     expect(await repo.read(initial.id)).toEqual(dispatched)
     const send = gatewayMessageSend(client, async () => { throw new Error('No snapshot on mismatch') }, { repository: async () => repo })
-    expect(await send({ _tag: 'Resend', idempotencyKey: initial.id, api_version: 'st3.client.v0', type: 'message.send', id: packet.id, parameters: packet.parameters })).toMatchObject({ _tag: 'Refused', reason: 'ungranted' })
+    expect(await send({ _tag: 'Resend', idempotencyKey: initial.id, api_version: 'st3.client.v0', type: 'message.send', id: packet.id, parameters: { ...packet.parameters, tags: packet.parameters.tags ?? [], attachments: packet.parameters.attachments ?? [] } })).toMatchObject({ _tag: 'Refused', reason: 'ungranted' })
     expect(await repo.read(initial.id)).toEqual(dispatched)
     expect(calls.every(path => path === '/v1/client/capabilities')).toBe(true)
     expect(scopeFromCapabilities(changed)).not.toEqual(repo.scope)

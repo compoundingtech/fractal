@@ -1,4 +1,4 @@
-import { outboxDeploymentId, restoreOutboxEntries, type Capabilities, type EnvelopeOf, type FractalClient, type OutboxScope } from '@fractal/client'
+import { outboxDeploymentId, restoreOutboxEntries, type EnvelopeOf, type FractalClient, type OutboxScope } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import { Effect } from 'effect'
 import type { ChatOutbox } from '../attachmentPort.ts'
@@ -7,7 +7,7 @@ import { openIndexedDbOutbox, type IndexedDbOutbox, type OpenOutboxOptions } fro
 import { OutboxIdentityUnavailable, sameScope } from './repository.ts'
 
 /** Generated issuer fields alone identify a deployment; neither member IDs nor URLs substitute. */
-export const scopeFromCapabilities = (response: EnvelopeOf<Capabilities>): OutboxScope | undefined => {
+export const scopeFromCapabilities = (response: EnvelopeOf<typeof Native.Capabilities.Type>): OutboxScope | undefined => {
   const capabilities = response.value
   if (capabilities.issuer === undefined || capabilities.issuer_key === undefined) return undefined
   return {
@@ -18,7 +18,7 @@ export const scopeFromCapabilities = (response: EnvelopeOf<Capabilities>): Outbo
 }
 
 export interface ScopedChatOutbox extends ChatOutbox {
-  readonly observe: (response: EnvelopeOf<Capabilities>) => Capabilities
+  readonly observe: (response: EnvelopeOf<typeof Native.Capabilities.Type>) => typeof Native.Capabilities.Type
   readonly recovery: OutboxRecoveryPort
   readonly protection: () => 'durable' | 'unprotected'
   readonly close: () => void
@@ -32,7 +32,7 @@ export const createScopedChatOutbox = (
   let cached: { readonly scope: OutboxScope | undefined } | undefined
   let discovering: Promise<{ readonly scope: OutboxScope | undefined }> | undefined
   const connections = new Map<string, Promise<IndexedDbOutbox>>()
-  const observe = (response: EnvelopeOf<Capabilities>): Capabilities => {
+  const observe = (response: EnvelopeOf<typeof Native.Capabilities.Type>): typeof Native.Capabilities.Type => {
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)(response.value)
     cached = { scope: scopeFromCapabilities(response) }
     return capabilities
