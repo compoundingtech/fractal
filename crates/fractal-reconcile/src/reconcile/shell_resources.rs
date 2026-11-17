@@ -90,7 +90,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else { None };
         Ok(PayloadResult {
             head_start: execution.head_start.clone(), clean_start: execution.clean_start,
-            head_end, clean_end, exit_code: execution.exit_code, exit_signal: execution.exit_signal,
+            head_end, clean_end, exit_code: None, exit_signal: None,
             wall_duration_ms: self.store.resource_execution_elapsed(&execution.command.lane.id,
                 &execution.command.lane.owner, &execution.command.id, now)?.context("shell release clock missing")?,
             memory_peak_bytes,
@@ -114,6 +114,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Snapshot predecessor shells before rotating the epoch or destroying their cgroups.
     pub(super) fn prepare_shell_resource_recovery(&self) -> Result<()> {
         let members = self.store.resource_memberships_for_host(&self.host)?;
+        let (exited, receiver) = std::sync::mpsc::channel();
+        let mut running = Vec::new();
         for mut execution in self.store.shell_resources(&self.host, true)? {
             let Some(root) = members.iter().flat_map(|member| &member.roots)
                 .find(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()) else { continue; };
@@ -134,10 +136,43 @@ impl<R: RuntimeControl> Reconciler<R> {
             if self.runtime.observe_exec(&execution.command.id)?
                 .is_some_and(|observation| observation.status == "running"
                     && observation.incarnation_id.as_deref() == Some(generation.as_str())) {
-                // Ask the helper to publish before predecessor recovery takes over bounded
-                // native retirement. Finalization re-reads any atomic shutdown publication.
-                self.runtime.cancel_resource_exec(&execution.command.id, &generation)?;
+                // Install every generation-fenced exit watch before sending any signal.
+                let sender = exited.clone();
+                let id = execution.command.id.clone();
+                self.runtime.watch_resource_exec(&id, &generation, Arc::new({
+                    let id = id.clone();
+                    move || { let _ = sender.send(id.clone()); }
+                }))?;
+                running.push((id, generation));
             }
+        }
+        drop(exited);
+        // One startup grace for the whole recovered set, not one timeout per root.
+        // Native exit notifications wake this wait; no polling or sleep races publication.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        for (id, generation) in &running { self.runtime.cancel_resource_exec(id, generation)?; }
+        let mut pending: BTreeSet<_> = running.iter().map(|(id, _)| id.clone()).collect();
+        while !pending.is_empty() {
+            match receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(id) => { pending.remove(&id); }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout | std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        for (id, generation) in running {
+            let mut execution = self.store.shell_resource(&id)?;
+            if !self.read_shell_payload_result(&mut execution)? {
+                // A helper that missed grace is about to be forcibly retired. Sample its
+                // still-live cgroup now, but never attribute the helper's exit to its payload.
+                execution.exit_code = None; execution.exit_signal = None;
+                let mut result = self.shell_payload_observation(&execution, &generation,
+                    u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
+                if let Some(previous) = &execution.result {
+                    result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
+                    result.wall_duration_ms = result.wall_duration_ms.max(previous.wall_duration_ms);
+                }
+                execution.result = Some(result);
+            }
+            if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
         }
         Ok(())
     }
@@ -153,8 +188,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             "retired shell lacks generation-fenced exit evidence");
         let (stdout, stderr) = self.runtime.resource_exec_output(&execution.command.id, generation)?;
         execution.stdout = stdout; execution.stderr = stderr;
-        execution.exit_code = observation.exit_code.map(i32::try_from).transpose()?;
-        execution.exit_signal = self.runtime.resource_exec_signal(&execution.command.id, generation)?;
+        // The native root is the observer, not the payload. Only its result file can
+        // identify the payload's exit code/signal; missing publication means unknown.
+        execution.exit_code = None; execution.exit_signal = None;
         if !self.read_shell_payload_result(execution)? {
             let mut result = self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
             if let Some(previous) = &execution.result {
@@ -326,8 +362,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         anyhow::ensure!(observation.status == "exited", "shell execution status is indeterminate; custody retained");
         let (stdout, stderr) = self.runtime.resource_exec_output(&execution.command.id, &generation.generation_id)?;
         execution.stdout = stdout; execution.stderr = stderr;
-        execution.exit_code = observation.exit_code.map(i32::try_from).transpose()?;
-        execution.exit_signal = self.runtime.resource_exec_signal(&execution.command.id, &generation.generation_id)?;
+        execution.exit_code = None; execution.exit_signal = None;
         match fs::read(&result_path) {
             Ok(bytes) => {
                 let result: PayloadResult = serde_json::from_slice(&bytes)?;
