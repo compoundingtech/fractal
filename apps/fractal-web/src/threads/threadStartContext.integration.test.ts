@@ -96,7 +96,7 @@ it('never infers retirement or fallback from an offline opening read', async () 
   } finally { stop(); registry.dispose() }
 })
 
-it('rereads the exact key after Start mismatch without resend and requires a new explicit Start', async () => {
+it('keeps POST404 without applied metadata unknown despite a changed exact-key preview', async () => {
   const actions: ThreadAction[] = []
   const keys: Array<[string | null, string | null]> = []
   const registry = AtomRegistry.make()
@@ -117,18 +117,19 @@ it('rereads the exact key after Start mismatch without resend and requires a new
   const parameters = { agent_id: original, origin, title: 'Review', content: 'Please explain.' }
   try {
     await vi.waitFor(() => expect(registry.get(atom)._tag).toBe('Observed'))
-    expect(await source.start('draft/review', parameters)).toMatchObject({ _tag: 'Refused', detail: "Couldn't start this thread." })
+    expect(await source.start('draft/review', parameters)).toMatchObject({ _tag: 'Refused', detail: 'Fractal has not confirmed this action. Retry to check the same action.' })
     await vi.waitFor(() => expect(registry.get(atom)).toMatchObject({ _tag: 'Observed', value: context(fallbackRecipient) }))
     expect(actions).toHaveLength(1)
     expect(keys.length).toBeGreaterThanOrEqual(2)
     expect(keys.every(key => key[0] === origin.source_id && key[1] === origin.episode)).toBe(true)
-    expect(registry.get(pending)).toEqual([])
+    expect(registry.get(pending)).toMatchObject([{ draftKey: 'draft/review', state: 'unconfirmed', parameters }])
     expect(actions[0]?.parameters).toMatchObject(parameters)
-    expect((await source.start('draft/review', { ...parameters, agent_id: fallback }))._tag).toBe('Sent')
+    expect((await source.start('draft/review', { ...parameters, agent_id: fallback }))._tag).toBe('Refused')
+    expect(actions).toHaveLength(1)
+    expect((await source.retryStart!('draft/review'))._tag).toBe('Sent')
     expect(actions).toHaveLength(2)
-    expect(actions[1]?.parameters).toMatchObject({ agent_id: fallback })
-    expect(actions[1]?.parameters.target_id).not.toBe(actions[0]?.parameters.target_id)
-    expect(actions[1]?.id).not.toBe(actions[0]?.id)
+    expect(actions[1]).toEqual(actions[0])
+    expect(actions[1]?.parameters.agent_id).toBe(original)
   } finally { stops.forEach(stop => stop()); registry.dispose() }
 })
 
