@@ -604,10 +604,28 @@ account "ada/two" { provider "openai"; owner "person/ada"; login "/srv/logins/tw
     #[test]
     fn only_configured_omp_usage_writers_supply_enforcement_evidence() {
         let store = single_store();
-        observe_as(
-            &store,
-            "agent/alder.unconfigured",
-            vec![quota("ada/one", "weekly", Some(100.0), NOW)],
+        let excluded_writer = "agent/alder.unconfigured";
+        let excluded = ClaimInput {
+            subject: excluded_writer.into(),
+            actor: Some(excluded_writer.into()),
+            kind: "usage.limits.observed".into(),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([quota("ada/one", "weekly", Some(100.0), NOW)])),
+                ("credit_readings".into(), json!([])),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        assert!(store.append_claim(&excluded).is_err(), "unconfigured writers cannot append");
+        // Admit the evidence while configured, then exclude it without deleting the claim.
+        store.set_usage_limits_writers(vec![WRITER.into(), excluded_writer.into()]).unwrap();
+        let retained = store.append_claim(&excluded).unwrap();
+        assert_eq!(store.account_limits().unwrap()[0].measured_by, excluded_writer);
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+        assert_eq!(
+            store.claims_for(excluded_writer, Some("usage.limits.observed")).unwrap()[0].id,
+            retained.id
         );
         assert!(store.account_limits().unwrap().is_empty());
         assert_eq!(
@@ -668,8 +686,14 @@ account "ada/two" { provider "openai"; owner "person/ada"; login "/srv/logins/tw
             observe(&store, vec![quota("ada/one", "weekly", Some(99.0), NOW - 1)]);
             let mut unavailable = quota("ada/one", "weekly", Some(100.0), NOW);
             match case {
-                "unreported" => unavailable["coverage"] = json!("unreported"),
-                "gap" => unavailable["used_percent"] = Value::Null,
+                "unreported" => {
+                    unavailable["coverage"] = json!("unreported");
+                    unavailable["used_percent"] = Value::Null;
+                }
+                "gap" => {
+                    unavailable["coverage"] = json!("unsupported");
+                    unavailable["used_percent"] = Value::Null;
+                }
                 "missing-reset" => unavailable["resets_at"] = Value::Null,
                 "expired" => unavailable["resets_at"] = json!(timestamp(NOW)),
                 "future" => unavailable["measured_at"] = json!(timestamp(NOW + 60_001)),

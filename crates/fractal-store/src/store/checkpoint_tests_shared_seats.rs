@@ -48,7 +48,7 @@ pub fn limits_reading(store: &Store, writer: &str, account: &str, weekly: Option
         .unwrap().to_rfc3339();
     let fields = json!({
         "readings": [{
-            "account": account, "provider": "anthropic",
+            "account": account, "account_ref": account, "provider": "anthropic",
             "window": if weekly.is_some() { "weekly" } else { "5h" },
             "used_percent": weekly.unwrap_or(40.0),
             "resets_at": timestamp(1_800_000_000_000),

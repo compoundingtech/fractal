@@ -1,7 +1,7 @@
 /** Explicit presentation adapter for the canonical st3.client.v0 usage.period projection. */
 import { UsagePeriod } from '@fractal/client/schema/read'
 import type { UsageAccount, UsageLimit } from '@fractal/client/schema'
-import { Result, Schema } from 'effect'
+import { Option, Result, Schema } from 'effect'
 
 import type { QuotaFailure } from './model.ts'
 import { CLIENT_API_VERSIONS, type QuotaAccount, type QuotaEnvelope, type QuotaLimit } from './wire.ts'
@@ -23,11 +23,11 @@ const limit = ({ window, position, now }: {
   readonly position: number
   readonly now: number
 }): QuotaLimit => {
-  const percent = window.used_percent
-  const resetMs = window.resets_at_unix_ms
+  const percent = Option.getOrUndefined(window.used_percent)
+  const resetMs = Option.getOrUndefined(window.resets_at_unix_ms)
   const fresh = now - window.measured_at_unix_ms <= NATIVE_LIMIT_FRESHNESS_MS &&
     window.measured_at_unix_ms <= now &&
-    (resetMs == null || resetMs > now)
+    resetMs !== undefined && resetMs > now
   const known = window.coverage === 'reported' && percent != null &&
     Number.isFinite(percent) && percent >= 0 && fresh
   const label = window.window === '5h' ? '5-hour' : window.window === 'weekly' ? 'Weekly' : window.window

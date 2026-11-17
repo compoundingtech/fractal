@@ -271,17 +271,21 @@ async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history()
     state.store.set_usage_limits_writers(vec!["agent/example.live".into()]).unwrap();
     let app = router(state.clone());
     let now = client_now_ms() as u64;
+    let weekly_reset = now + 3 * 86_400_000;
+    let five_hour_reset = now + 3 * 3_600_000;
     let (status, body) = json_request(
         app.clone(),
         "/v1/claims",
         json!({"subject": "agent/example.live", "kind": "usage.limits.observed", "actor": "agent/example.live",
             "fields": {"readings": [
                 {"account": "claude/ada-1", "account_ref": "ada/claude-1", "provider": "anthropic",
-                    "window": "weekly", "used_percent": 30.0, "resets_at": null,
+                    "window": "weekly", "used_percent": 30.0,
+                    "resets_at": chrono::DateTime::from_timestamp_millis(weekly_reset as i64).unwrap().to_rfc3339(),
                     "measured_at": chrono::DateTime::from_timestamp_millis((now - 10_000) as i64).unwrap().to_rfc3339(),
                     "coverage": "reported", "source": "omp-usage", "host": "test-node"},
                 {"account": "claude/ada-1", "account_ref": "ada/claude-1", "provider": "anthropic",
-                    "window": "5h", "used_percent": 10.0, "resets_at": null,
+                    "window": "5h", "used_percent": 10.0,
+                    "resets_at": chrono::DateTime::from_timestamp_millis(five_hour_reset as i64).unwrap().to_rfc3339(),
                     "measured_at": chrono::DateTime::from_timestamp_millis((now - 10_000) as i64).unwrap().to_rfc3339(),
                     "coverage": "reported", "source": "omp-usage", "host": "test-node"}],
                 "credit_readings": []},
@@ -317,7 +321,8 @@ async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history()
     let typed: fractal_client::SloList = serde_json::from_value(client_list.clone()).unwrap();
     let weekly = typed.rows.iter().find(|row| row.id == "ada/claude-1/weekly").unwrap();
     assert_eq!((weekly.kind.as_str(), weekly.remaining_percent), ("budget", Some(70.0)));
-    assert!(weekly.resets_at_unix_ms.is_none() && weekly.measured_at_unix_ms.is_some());
+    assert_eq!(weekly.resets_at_unix_ms, Some(weekly_reset));
+    assert!(weekly.measured_at_unix_ms.is_some());
     assert!(typed.rows.iter().any(|row| row.kind == "objective" && row.id == "person-read"));
     let (status, client_history) = get_request(
         app.clone(),

@@ -83,14 +83,14 @@ pub struct OtlpExporter {
     node: String,
     /// The claim-write totals last sent, so an export with nothing new stored sends none.
     claims_sent: std::sync::Mutex<Vec<StoredClaims>>,
-    /// The newest measured time sent for each limits gauge series, so a reading delayed into a
-    /// later batch never replaces a newer one. Kept in memory: the export cursor survives a
-    /// restart, so only a reading delayed across the restart itself can still arrive late.
+    /// The newest measured time and value sent for each limits gauge series, so delayed older
+    /// readings never replace newer ones, but changed equal-time canonical winners are sent.
+    /// Kept in memory: only a reading delayed across a restart can still arrive late.
     limits_sent: std::sync::Mutex<LimitsSent>,
 }
 
-/// Each limits gauge series, (driver, account, window), and the measured time of its newest reading.
-type LimitsSent = BTreeMap<(String, String, String), u128>;
+/// Each limits gauge series, (driver, account, window), and its newest measured time and value.
+type LimitsSent = BTreeMap<(String, String, String), (u128, f64)>;
 
 impl OtlpExporter {
     pub fn new(config: &OtlpConfig, node: &str) -> Result<Self> {
@@ -494,14 +494,16 @@ fn otlp_usage_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
     )
 }
 
-/// Account windows from the configured quota observer, skipping measurements older
-/// than the newest already sent. Observer readings retain their provider measurement clock.
+/// Account windows from the configured quota observer, skipping older or unchanged readings.
+/// Changed equal-time canonical winners retain their provider measurement clock.
 fn otlp_limits_metrics(node: &str, readings: &[AccountLimitReading], sent: &LimitsSent) -> Option<(Value, LimitsSent)> {
-    let mut limits = BTreeMap::<(String, String, String), (u128, f64)>::new();
+    let mut limits = LimitsSent::new();
     for reading in readings {
         let key = (reading.driver.clone(), reading.account.clone(), reading.window.clone());
         let measured = u128::from(reading.measured_at_unix_ms);
-        if sent.get(&key).is_none_or(|newest| measured > *newest) {
+        if sent.get(&key).is_none_or(|(newest, percent)| {
+            measured > *newest || (measured == *newest && reading.used_percent != *percent)
+        }) {
             limits.insert(key, (measured, reading.used_percent));
         }
     }
@@ -521,14 +523,13 @@ fn otlp_limits_metrics(node: &str, readings: &[AccountLimitReading], sent: &Limi
             })
         })
         .collect::<Vec<_>>();
-    let newest = limits.iter().map(|(key, (measured, _))| (key.clone(), *measured)).collect();
     Some((json!({"resourceMetrics": [{"resource": resource(node, DAEMON_SERVICE), "scopeMetrics": [{
         "scope": {"name": "st"}, "metrics": [{
             "name": "st_account_limit_used_percent", "unit": "%",
             "description": "Share of a paying account's observed usage window used, by driver, account and window",
             "gauge": {"dataPoints": points},
         }],
-    }]}]}), newest))
+    }]}]}), limits))
 }
 
 /// Claims stored on this node per kind and writing node, and their body bytes, as cumulative
@@ -735,5 +736,55 @@ mod tests {
                 "{endpoint}"
             );
         }
+    }
+
+    #[test]
+    fn limits_gauge_exports_changed_equal_time_winners_but_not_unchanged_or_older_readings() {
+        let mut reading = AccountLimitReading {
+            driver: "codex".into(),
+            account: "work".into(),
+            window: "five_hour".into(),
+            used_percent: 25.0,
+            measured_at_unix_ms: 100,
+        };
+        let mut sent = LimitsSent::new();
+        let (metrics, newest) =
+            otlp_limits_metrics("node", std::slice::from_ref(&reading), &sent).unwrap();
+        let points = "/resourceMetrics/0/scopeMetrics/0/metrics/0/gauge/dataPoints";
+        assert_eq!(
+            metrics.pointer(points).unwrap()[0]["timeUnixNano"],
+            "100000000",
+        );
+        assert_eq!(metrics.pointer(points).unwrap()[0]["asDouble"], 25.0);
+        sent.extend(newest);
+        assert!(otlp_limits_metrics("node", std::slice::from_ref(&reading), &sent).is_none());
+
+        reading.used_percent = 40.0;
+        let (metrics, newest) =
+            otlp_limits_metrics("node", std::slice::from_ref(&reading), &sent).unwrap();
+        assert_eq!(metrics.pointer(points).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(
+            metrics.pointer(points).unwrap()[0]["timeUnixNano"],
+            "100000000",
+        );
+        assert_eq!(metrics.pointer(points).unwrap()[0]["asDouble"], 40.0);
+        sent.extend(newest);
+        assert!(otlp_limits_metrics("node", std::slice::from_ref(&reading), &sent).is_none());
+
+        reading.measured_at_unix_ms = 99;
+        reading.used_percent = 75.0;
+        assert!(otlp_limits_metrics("node", std::slice::from_ref(&reading), &sent).is_none());
+
+        reading.measured_at_unix_ms = 101;
+        reading.used_percent = 40.0;
+        let (metrics, newest) =
+            otlp_limits_metrics("node", std::slice::from_ref(&reading), &sent).unwrap();
+        assert_eq!(
+            metrics.pointer(points).unwrap()[0]["timeUnixNano"],
+            "101000000",
+        );
+        assert_eq!(metrics.pointer(points).unwrap()[0]["asDouble"], 40.0);
+        sent.extend(newest);
+        assert!(otlp_limits_metrics("node", std::slice::from_ref(&reading), &sent).is_none());
     }
 }

@@ -343,7 +343,7 @@ fn usage_limits_keep_source_snapshots_even_when_the_same_writer_publishes_again(
                 subject,
                 json!({
                     "readings": [{
-                        "account":"claude/aaaa", "provider":"anthropic", "window":"weekly",
+                        "account":"claude/aaaa", "account_ref":"ada/claude", "provider":"anthropic", "window":"weekly",
                         "used_percent":50.0, "coverage":"reported", "source":"omp-usage", "host":"alder",
                         "measured_at":chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64).unwrap().to_rfc3339(),
                         "resets_at":"2027-01-15T08:00:00Z"

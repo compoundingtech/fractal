@@ -13,7 +13,7 @@ const reading = {
   windows: [
     { window: 'weekly', used_percent: 97, resets_at_unix_ms: NOW + 1000,
       measured_at_unix_ms: NOW - 1000, coverage: 'reported', source: 'omp-usage', host: 'member-a' },
-    { window: '5h', used_percent: 0, resets_at_unix_ms: null,
+    { window: '5h', used_percent: 0, resets_at_unix_ms: NOW + 2000,
       measured_at_unix_ms: NOW - 1000, coverage: 'reported', source: 'omp-usage', host: 'member-a' },
   ],
 }
@@ -120,6 +120,11 @@ describe('native usage.period quota presentation', () => {
     const row = account(envelope([{ ...reading, windows: reading.windows.map((window) =>
       window.window === 'weekly' ? { ...window, resets_at_unix_ms: NOW } : window) }]))
     expect(row.limits.map(cellState)).toEqual([{ _tag: 'unknown' }, { _tag: 'fraction', percent: 0, exhausted: false }])
+  })
+  it('keeps a reported percentage with no reset unavailable', () => {
+    const row = account(envelope([{ ...reading, windows: reading.windows.map((window) =>
+      ({ ...window, resets_at_unix_ms: null })) }]))
+    expect(row.limits.map(cellState)).toEqual([{ _tag: 'unknown' }, { _tag: 'unknown' }])
   })
   it('uses each window clock instead of the latest account measurement', () => {
     const row = account(envelope([{ ...reading, windows: reading.windows.map((window) =>

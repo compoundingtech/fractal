@@ -50,6 +50,31 @@ fn unbound_login_account(connection: &Connection, seat: &str, body: &str) -> Res
     .map(|account| account.name.clone()))
 }
 
+/// The newest durable or local observation, within the caller's snapshot or write transaction.
+fn observation_at(
+    connection: &Connection,
+    origin: &str,
+    seat: &str,
+    kind: &str,
+) -> Result<Option<ClaimRecord>> {
+    let claim = connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-he6d1d9f14a2c owner=fractal_seats::store::accounts TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
+            claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
+            FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+        params![seat, kind], claim_from_row,
+    ).optional()?;
+    let local = connection
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-h353bb76d16ca owner=fractal_seats::store::accounts TODO=trace-statement-and-value-representation */ &format!(
+                "{LOCAL_OBSERVATION_COLUMNS} WHERE subject=?1 AND kind=?2 ORDER BY id DESC LIMIT 1"
+            ),
+            params![seat, kind],
+            |row| local_observation_from_row(origin, row),
+        )
+        .optional()?;
+    Ok(claim.into_iter().chain(local).max_by_key(claim_log_order))
+}
+
 /// Quota belongs to an account, not an incarnation. A new binding cannot use the previous
 /// login's reading; a relaunch on the same declared account can use its account's evidence.
 pub fn limit_binding_is_current(
