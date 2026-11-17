@@ -4362,6 +4362,82 @@ fn start_recipient_uses_agent_display_metadata_without_changing_the_canonical_re
 }
 
 #[test]
+fn offline_original_stays_the_recipient_while_retired_origin_uses_the_canonical_upstream() {
+    for (state, recipient, label, basis, basis_line) in [
+        (
+            view::AgentState::Stopped,
+            "agent/atlas",
+            "Atlas",
+            fractal_client::ThreadStartRecipientBasis::Original,
+            "Original source recipient",
+        ),
+        (
+            view::AgentState::Retired,
+            "agent/dotfiles/manager",
+            "Chief of Staff",
+            retired("agent/atlas"),
+            FALLBACK_LINE,
+        ),
+    ] {
+        let mut world = super::super::demo::test_world();
+        let mut original = world.agents.items().first().unwrap().clone();
+        let mut upstream = original.clone();
+        original.id = "agent/atlas".into();
+        original.name = "Atlas".into();
+        original.state = state;
+        original.terminal = false;
+        upstream.id = "agent/dotfiles/manager".into();
+        upstream.name = "Chief of Staff".into();
+        world.agents = view::Load::Ready(vec![original, upstream]);
+        let mut threads = observed_threads(ThreadState::Open);
+        let item = "attention/resolved";
+        let pane = Pane::Home(Some(item.into()));
+        let host = pane.key();
+        threads.saved_origins.insert(
+            item.into(),
+            origin(resolved_source(), Some("agent/atlas"), "Original request"),
+        );
+        install_start_context(&mut threads, item, recipient, basis);
+        let mut texts = HashMap::new();
+        assert!(threads.begin(&host, item, &mut texts));
+        let input = threads.start_input(item).unwrap();
+        texts.insert(input.key(), "Independent discussion".into());
+        let shown = threads
+            .mount(&pane, 240, &edit::Cursor::default(), &world, &texts)
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            shown.contains(&format!("New discussion to {label}")),
+            "{shown}"
+        );
+        assert!(shown.contains(basis_line), "{shown}");
+        if recipient == "agent/atlas" {
+            assert!(!shown.contains("Fallback recipient"), "{shown}");
+            assert!(
+                !shown.contains("New discussion to Chief of Staff"),
+                "{shown}"
+            );
+        }
+        assert!(
+            threads.writes().is_empty(),
+            "the preview is shown before any send"
+        );
+        threads.submit(&host, input, &texts);
+        let write = threads.writes().pop().expect("explicit first Send");
+        let Mutation::Start(start) = &write.mutation else {
+            panic!("Start")
+        };
+        assert_eq!(start.agent_id, recipient);
+        assert_eq!(write.agent, recipient);
+        assert_eq!(start.origin.source_id, "step-run/resolved");
+        assert_eq!(start.origin.episode, "original:1:1");
+    }
+}
+
+#[test]
 fn resolved_asks_authored_steps_and_notices_start_independent_discussions() {
     for kind in ["person-step", "authored-step", "notice"] {
         let mut threads = observed_threads(ThreadState::Open);
