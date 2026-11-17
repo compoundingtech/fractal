@@ -792,8 +792,8 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
         .unwrap();
     assert_eq!(
         draft[slot + 1].trim_end(),
-        "New discussion to agent/atlas",
-        "the exact canonical recipient is visible before the first send"
+        "New discussion to Atlas",
+        "the canonical recipient's display label is visible before the first send"
     );
     assert_eq!(draft[slot + 2].trim_end(), "Original source recipient");
     assert!(
@@ -828,7 +828,7 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     // While sending, the recipient preview is frozen to the exact packet recipient.
     pending_layout.splice(
         slot + 1..=panel_end,
-        ["Original delivery to agent/atlas is pending or unconfirmed. Retrying keeps this exact recipient.".to_owned()],
+        ["Original delivery to Atlas is pending or unconfirmed. Retrying keeps this exact recipient.".to_owned()],
     );
     assert_eq!(
         queued, pending_layout,
