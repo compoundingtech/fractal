@@ -1,6 +1,19 @@
 //! A driverless one-shot can claim its step before ordinary observation catches up.
 use super::*;
 
+#[test]
+fn member_environment_discards_stale_incarnation_aliases() {
+    let inherited = BTreeMap::from([
+        ("PATH".into(), "/bin".into()),
+        ("ST3_INCARNATION".into(), "inherited-old".into()),
+        ("FRACTAL_INCARNATION".into(), "inherited-new".into()),
+    ]);
+    let declared = BTreeMap::from([("FRACTAL_INCARNATION".into(), "declared-stale".into())]);
+    let environment = member_environment_from(inherited, &declared, Path::new("/bin/fractal"), None).unwrap();
+    assert!(!environment.contains_key("ST3_INCARNATION"));
+    assert!(!environment.contains_key("FRACTAL_INCARNATION"));
+}
+
 #[derive(Clone, Copy)]
 enum Registration {
     Accept,

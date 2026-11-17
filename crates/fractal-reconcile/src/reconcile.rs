@@ -877,10 +877,28 @@ impl RuntimeControl for NativeRuntime {
     }
 
     fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = (member, incarnation);
             Ok(None)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let pid = if member.terminal {
+                self.pty()?.snapshot()?.into_iter().find(|item| {
+                    item.name == member.runtime_id && item.status == "running"
+                        && item.pid.zip(item.created_at.as_ref())
+                            .is_some_and(|(pid, created)| format!("{pid}:{created}") == incarnation)
+                }).and_then(|item| item.pid)
+            } else {
+                match self.exec.observe(&member.runtime_id)? {
+                    Some(fractal_runtime::ExecObservation::Running(generation))
+                        if generation.generation_id == incarnation => Some(generation.pid),
+                    _ => None,
+                }
+            };
+            pid.map(|pid| fractal_runtime::macos_process_identity(pid)
+                .map(|(_, token, _)| (pid, token))).transpose()
         }
         #[cfg(target_os = "linux")]
         {
