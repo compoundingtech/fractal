@@ -22758,8 +22758,8 @@ pub fn apply_effective_step_state_with_owner(
         run_phase,
         current_generation,
         generation_status,
-        root_status,
-        root_phase,
+        _root_status,
+        _root_phase,
     )) = owner
     else {
         return Ok(());
@@ -22782,13 +22782,13 @@ pub fn apply_effective_step_state_with_owner(
             }
         }
     }
+    // Cancellation is a durable owner/generation transition, not a presentation
+    // inference from the root. The shared descendant traversal performs that transition.
     let generation_id = generation_id_from_subject(&view.generation);
     if is_terminal_run_state(&run_status)
         || run_phase == "terminal"
         || is_terminal_generation_state(&generation_status)
         || generation_id != current_generation
-        || is_terminal_run_state(&root_status)
-        || root_phase == "terminal"
     {
         if !matches!(view.status.as_str(), "completed" | "failed" | "cancelled") {
             view.status = "cancelled".into();
@@ -22995,8 +22995,17 @@ pub fn descendant_mission_run_ids_tx(
     connection: &Connection,
     generation_id: &str,
 ) -> rusqlite::Result<Vec<String>> {
+    // A root owns subscription deliveries by root identity, even though their
+    // synthetic parent subjects have no step_runs row. Keep generation-scoped
+    // ordinary child traversal for non-root runs and revision retirement.
     let mut statement = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-h2f4e2cad1b68 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+        /* sqlite-large-value: allow-for-now lv-hd5e2a1b1feaa owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
+           SELECT child.id
+           FROM run_generations generation
+           JOIN mission_runs root ON root.id=generation.run_id AND root.root_run_id=root.id
+           JOIN mission_runs child ON child.root_run_id=root.id AND child.id<>root.id
+           WHERE generation.id=?1
+           UNION
            SELECT child.id
            FROM mission_runs child
            JOIN step_runs parent_step ON parent_step.subject=child.parent_step_run

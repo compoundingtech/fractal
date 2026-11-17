@@ -12623,15 +12623,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             supersession_cleanup = parent.superseded_by.is_some();
             parent_step = parent.parent_step_run;
         }
-        let owner_runs = if run.mode == "eval" {
-            self.store
-                .mission_runs_for_root(&run.id)?
-                .into_iter()
-                .map(|owned_run| owned_run.subject)
-                .collect::<BTreeSet<_>>()
-        } else {
-            BTreeSet::from([run.subject.clone()])
-        };
+        // Descendants are terminalized by the same traversal during cancellation.
+        // Include their owners here so ordinary cleanup emits the existing exact stops.
+        let mut owner_runs = BTreeSet::from([run.subject.clone()]);
+        owner_runs.extend(self.store.descendant_mission_run_subjects(&run.generation)?);
+        smallclaims::touched::note_read(|| format!("children:{}", run.root_mission_run));
         let mut owned = owner_runs
             .iter()
             .map(|owner| self.store.desired_subjects_for_owner_run(owner))
