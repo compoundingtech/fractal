@@ -14,8 +14,9 @@ const page = (next_cursor: string | null = null) => ({ items: [], boundary_items
 
 it('uses the generated authorized history operation and follows an empty page cursor', async () => {
   const reads: { url: URL; authorization: string | null }[] = []
+  const token = 'paired-secret'
   const registry = AtomRegistry.make()
-  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', credential: async () => 'paired-secret', fetchImpl: async (input, init) => {
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', credential: async () => token, fetchImpl: async (input, init) => {
     const url = new URL(String(input))
     if (url.pathname.endsWith('/capabilities')) return capabilities()
     reads.push({ url, authorization: new Headers(init?.headers).get('Authorization') })
@@ -27,7 +28,7 @@ it('uses the generated authorized history operation and follows an empty page cu
     await vi.waitFor(() => expect(registry.get(atom)).toMatchObject({ _tag: 'Observed', value: { items: [], complete: true } }))
     expect(reads.map(read => read.url.pathname)).toEqual(['/v1/client/threads/history-exact/request-history', '/v1/client/threads/history-exact/request-history'])
     expect(reads[1]?.url.searchParams.get('cursor')).toBe('opaque/+?&')
-    expect(reads.every(read => read.authorization === 'Bearer paired-secret')).toBe(true)
+    expect(reads.every(read => read.authorization === `Bearer ${token}`)).toBe(true)
   } finally { stop(); registry.dispose() }
 })
 

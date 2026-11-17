@@ -45,8 +45,9 @@ const receipt = (body: ThreadAction) => Response.json({ ...base, value: {
 it.each([originalRecipient, fallbackRecipient, { agent_id: original, basis: { _tag: 'configured' } }])(
   'reads the authenticated exact opening key and preserves generated recipient proof %#', async recipient => {
     const reads: Array<{ url: URL; authorization: string | null }> = []
+    const token = 'paired-secret'
     const registry = AtomRegistry.make()
-    const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', credential: async () => 'paired-secret', fetchImpl: async (input, init) => {
+    const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', credential: async () => token, fetchImpl: async (input, init) => {
       const url = new URL(String(input))
       if (url.pathname.endsWith('/capabilities')) return capabilities()
       reads.push({ url, authorization: new Headers(init?.headers).get('Authorization') })
@@ -59,7 +60,7 @@ it.each([originalRecipient, fallbackRecipient, { agent_id: original, basis: { _t
       expect(reads).toHaveLength(1)
       expect(reads[0]?.url.pathname).toBe('/v1/client/threads/start-context')
       expect([...reads[0]!.url.searchParams]).toEqual([['source_id', origin.source_id], ['episode', origin.episode]])
-      expect(reads[0]?.authorization).toBe('Bearer paired-secret')
+      expect(reads[0]?.authorization).toBe(`Bearer ${token}`)
     } finally { stop(); registry.dispose() }
   },
 )
