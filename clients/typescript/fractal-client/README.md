@@ -96,6 +96,12 @@ storage adapter, startup worker, signing service, or server reconciliation endpo
 and native repositories, acceptance UI, and dispatch owners must implement these
 durability barriers; importing this pure module alone does not persist messages.
 
+Tests can import `createMemoryOutboxRepository` from `@fractal/client/test-support`.
+This shared reference double is scoped, isolates snapshots with copy-on-read/write,
+and calls `isAllowedOutboxTransition` inside its synchronous CAS check/write section.
+It models transaction ownership and refusal behavior but is **not durable** and must
+never replace a production IndexedDB or native storage adapter.
+
 The manifest read ids `harness-questions.list` and `harness-questions.get` map to
 `harnessQuestions(queryOptions, requestOptions)` and `harnessQuestion(id, requestOptions)`;
 their public helper names do not include the manifest's `list`/`get` suffixes.
