@@ -553,6 +553,12 @@ const checkTargets = ({
   readonly hasBreach: boolean
   readonly fail: Fail
 }): void => {
+  targets.forEach(({ target }, index) => {
+    if (targets.findIndex((other) => other.target.stat === target.stat && other.target.scope === target.scope) !== index) {
+      fail(`repeats target \`${target.stat}\``)
+    }
+    if (target.scope === 'remote' && indicator.kind !== 'latency') fail('only a latency target has a remote scope')
+  })
   if (indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') {
     if (hasWindow) fail('GitHub indicators own their rolling hour and calendar windows')
     if (indicator.measurement === 'only') {
@@ -566,12 +572,6 @@ const checkTargets = ({
     return
   }
   const local = (stat: string) => targets.find(({ target }) => target.stat === stat && target.scope === undefined)
-  targets.forEach(({ target }, index) => {
-    if (targets.findIndex((other) => other.target.stat === target.stat && other.target.scope === target.scope) !== index) {
-      fail(`repeats target \`${target.stat}\``)
-    }
-    if (target.scope === 'remote' && indicator.kind !== 'latency') fail('only a latency target has a remote scope')
-  })
   const wrong = targets.find((checked) => statBound({ indicator, checked }) === false)
   if (wrong !== undefined) fail(`a \`${indicator.kind}\` indicator has no target \`${wrong.target.stat}\` with that bound`)
   const missing = requiredStats[indicator.kind].find((stat) => local(stat) === undefined)

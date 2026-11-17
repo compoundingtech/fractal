@@ -85,6 +85,18 @@ Their TypeScript constructors are `Fractal.indicator.githubMergedCount` and
 references, an IANA `timezone`, explicit `cut: 'now' | 'watermark'`, and
 `measurement: 'only' | 'targeted'`. There are no default hosts, repository lists or target values.
 
+Merged-count requires `PullRequest` and `Merge` coverage; ready-to-merged additionally
+requires `Lifecycle` coverage. The finite evidence horizon is the latest authoritative
+required-family coverage endpoint intersecting effective roster membership. Retired
+members contribute only up to their authored membership end and never pin that horizon.
+`cut: 'watermark'` evaluates at this horizon (bounded by Now), not an invented claim of
+complete coverage. Each rolling-hour or civil-day window independently requires every
+member effective in that window to have all required-family coverage for its membership
+intersection. Missing coverage makes that aggregate window unknown, while fully covered
+historical civil-day bars remain available. A missing lifecycle family cannot erase
+otherwise covered merge-count bars, and an uncovered new member cannot erase days
+before that member joined.
+
 Root acquisition and membership declarations use `Fractal.githubSource` and
 `Fractal.githubScope` (also named package exports). They return KDL nodes for `emit` or
 `fractalKdl`, using the native schema declaration reader's fields:

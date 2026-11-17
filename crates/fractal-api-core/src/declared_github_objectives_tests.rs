@@ -67,3 +67,24 @@ fn descriptive_latency_percentiles_are_not_targets() {
     assert_eq!(descriptive_percentiles(&[1, 2, 3, 4, 5]), json!({ "p50": 3, "p95": 5, "p99": 5 }));
     assert_eq!(descriptive_percentiles(&[]), json!({ "p50": null, "p95": null, "p99": null }));
 }
+
+#[test]
+fn count_rows_keep_covered_days_when_lifecycle_or_a_new_member_is_uncovered() {
+    let now = 1_800_000_000_000;
+    let today = now / 86_400_000 * 86_400_000;
+    let objective = declaration("github-merged-count", "targeted", "target \"per-hour\" min=7");
+    let mut projection = projection(now);
+    projection.coverage.retain(|record| record.family != FactFamily::Lifecycle);
+    let measured = measure(&projection, now, Cut::Watermark, "UTC", false).unwrap();
+    assert_eq!(measured_row(&objective, "revision", &measured)["status"], "missed");
+    projection.roster.members.push(RosterMember {
+        repository_id: "new-member".into(), effective_from_ms: today, effective_until_ms: None,
+    });
+    let measured = measure(&projection, now, Cut::Watermark, "UTC", false).unwrap();
+    let row = measured_row(&objective, "revision", &measured);
+    assert_eq!(row["verdict"], "unknown");
+    let yesterday = row["measurement"]["days"].as_array().unwrap().iter()
+        .find(|day| day["start_ms"] == today - 86_400_000).unwrap();
+    assert_eq!(yesterday["complete"], true);
+    assert_eq!(yesterday["merged_count"], 0);
+}

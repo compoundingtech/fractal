@@ -573,6 +573,15 @@ objective "delivery/ready-to-merged" {
     expect(text).not.toContain('only "author"')
   })
 
+  it('rejects remote scope for GitHub targets just like the native reader', () => {
+    expect(() => render({
+      name: 'delivery/merged',
+      about: 'All-author merged PRs',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }),
+      targets: [{ stat: 'per-hour', min: 7, scope: 'remote' }],
+    })).toThrow('only a latency target has a remote scope')
+  })
+
   it('rejects a hidden default target, a latency target and an implicit cut', () => {
     const base = { name: 'delivery/merged', about: 'Merged', targets: [] } as const
     expect(() => render({ ...base, indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }) })).toThrow('needs one per-hour minimum')

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "summary": "Measure canonical rolling GitHub merges and final ready-to-merged cycles with native objectives",
-  "rules": {"status": "changed", "detail": "Native objective rows evaluate distinct merged PR identities across all authors under an explicit effective-dated scope. Incomplete capture remains unknown, never successful. Final-ready latency is measured-only and requires proven complete lifecycle evidence."},
+  "rules": {"status": "changed", "detail": "Native objective rows evaluate distinct merged PR identities across all authors under an explicit effective-dated scope. Merge counts require PR and merge coverage, while latency also requires lifecycle coverage. A finite evidence horizon and per-window coverage preserve covered civil days when other windows or families are unknown. Final-ready latency is measured-only. GitHub target scopes obey the same remote-scope validation as native declarations."},
   "compatibility": {"status": "changed", "detail": "The TypeScript DSL emits GitHub source, versioned scope, rolling throughput and measured-only latency declarations. Measurement uses canonical capture snapshots and reports source lag, correction revision and partial civil-day bars. The old queue-based merge-latency proxy declaration is retired."},
   "manual": {"status": "changed", "detail": "No source, roster history, throughput target or latency policy is installed by default. Operators author the scope dates and throughput target explicitly; acquisition activation remains separately admitted."},
   "recovery": {"status": "unchanged", "detail": "Measurement is derived from durable capture claims. Corrections and retractions replace prior samples; projection loss rebuilds without synthesizing successful windows."}

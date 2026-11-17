@@ -3,6 +3,7 @@ use std::path::Path;
 
 use fractal_github::measurement::{self, Cut, Measurement};
 use serde_json::{Value, json};
+use fractal_schema::github_capture::FactFamily;
 
 use crate::objective::{Bound, Indicator, Objective};
 use crate::store::Store;
@@ -12,14 +13,19 @@ pub(super) fn row(store: &Store, state_dir: &Path, objective: &Objective, declar
         Indicator::GithubMergedCount(config) | Indicator::GithubReadyToMerged(config) => config,
         _ => unreachable!("only GitHub declarations reach the domain evaluator"),
     };
+    let required = match objective.indicator {
+        Indicator::GithubMergedCount(_) => &[FactFamily::PullRequest, FactFamily::Merge][..],
+        Indicator::GithubReadyToMerged(_) => &[FactFamily::PullRequest, FactFamily::Merge, FactFamily::Lifecycle][..],
+        _ => unreachable!("only GitHub declarations reach the domain evaluator"),
+    };
     let measured = (|| -> anyhow::Result<Measurement> {
-        let frontier = crate::reconcile::github_capture::measurement_frontier(store, state_dir, &config.source, &config.roster)?
-            .ok_or_else(|| anyhow::anyhow!("source or roster has no trustworthy committed coverage frontier"))?;
+        let frontier = crate::reconcile::github_capture::measurement_frontier(store, state_dir, &config.source, &config.roster, required)?
+            .ok_or_else(|| anyhow::anyhow!("source or roster has no committed required-family evidence horizon"))?;
         let cut = if config.as_of_watermark { Cut::Watermark } else { Cut::Now };
         let end = if config.as_of_watermark { now.min(frontier) } else { now };
         let start = measurement::history_start(end, &config.timezone)?;
         let view_id = format!("{}:{}", config.timezone, config.as_of_watermark);
-        let snapshot = crate::reconcile::github_capture::measurement_snapshot(store, state_dir, &config.source, &config.roster, start, end, &view_id)?
+        let snapshot = crate::reconcile::github_capture::measurement_snapshot(store, state_dir, &config.source, &config.roster, start, end, &view_id, required)?
             .ok_or_else(|| anyhow::anyhow!("source or roster projection is unavailable or completing a bounded snapshot page"))?;
         let projection = &snapshot.projection;
         if config.as_of_watermark && projection.frontier_ms < snapshot.end_ms {

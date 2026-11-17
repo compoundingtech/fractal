@@ -190,3 +190,39 @@ fn canonical_indexed_ready_proofs_match_full_history_and_preserve_unknowns() {
     p.coverage.retain(|coverage| coverage.family != FactFamily::Lifecycle);
     assert_eq!(measure(&p, now, Cut::Now, "UTC", true).unwrap().rolling_hour.unknown_cycles, 1);
 }
+
+#[test]
+fn merged_count_does_not_require_lifecycle_coverage() {
+    let now = at("2026-11-17T12:00:00Z");
+    let mut p = projection(now);
+    merge(&mut p, "P1", now - 100_000, now - 1_000, None);
+    p.coverage.retain(|coverage| coverage.family != FactFamily::Lifecycle);
+    assert_eq!(measure(&p, now, Cut::Watermark, "UTC", false).unwrap().rolling_hour.merged_count, Some(1));
+    let latency = measure(&p, now, Cut::Watermark, "UTC", true).unwrap();
+    assert!(!latency.rolling_hour.complete);
+    assert_eq!(latency.rolling_hour.unknown_cycles, 1);
+}
+
+#[test]
+fn uncovered_current_members_and_families_preserve_covered_civil_days() {
+    let now = at("2026-11-17T12:00:00Z");
+    let today = at("2026-11-17T00:00:00Z");
+    let yesterday = at("2026-11-16T00:00:00Z");
+    let mut p = projection(now);
+    merge(&mut p, "P1", yesterday + 1_000, yesterday + 2_000, None);
+    p.roster.members.push(RosterMember {
+        repository_id: "R2".into(), effective_from_ms: today, effective_until_ms: None,
+    });
+    p.coverage.iter_mut().find(|coverage| coverage.family == FactFamily::Lifecycle).unwrap().through_ms = today;
+    for cut in [Cut::Now, Cut::Watermark] {
+        for latency in [false, true] {
+            let measured = measure(&p, now, cut, "UTC", latency).unwrap();
+            assert!(!measured.rolling_hour.complete);
+            assert!(!measured.days.last().unwrap().complete);
+            let covered = measured.days.iter().find(|day| day.start_ms == yesterday).unwrap();
+            assert!(covered.complete);
+            assert_eq!(covered.merged_count, Some(1));
+            if latency { assert_eq!(covered.ready_to_merged_ms, [1_000]); }
+        }
+    }
+}

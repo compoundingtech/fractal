@@ -277,6 +277,7 @@ fn github_target_policy_is_explicit_and_count_only() {
     let count = count.replacen("\n}", "\n  target \"per-hour\" min=7\n}", 1);
     assert_eq!(one(&count).unwrap().target("per-hour", false).unwrap().bound, Bound::Min(7.0));
     assert!(one(&count.replace("min=7", "max=7")).is_err());
+    assert!(one(&count.replace("min=7", "min=7 scope=\"remote\"")).is_err());
     assert!(one(&GITHUB_MEASURED.replace("    cut \"watermark\"\n", "")).is_err());
     assert!(one(&GITHUB_MEASURED.replace("    source \"github-source/test\"", "    source \"\"")).is_err());
     assert!(one(&GITHUB_MEASURED.replacen("\n}", "\n  target \"p95\" within=\"5m\"\n}", 1)).is_err());
