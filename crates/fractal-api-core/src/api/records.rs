@@ -7,9 +7,66 @@ use super::*;
 use super::client_v0::{ClientSession, require_scope};
 use rusqlite::OptionalExtension as _;
 
+pub fn private_thread_claim(claim: &ClaimRecord) -> bool {
+    fractal_schema::threads::is_reserved_record(&claim.subject, &claim.kind)
+        || (claim.kind == "message.sent"
+            && fractal_schema::threads::message_has_relation(&claim.body))
+}
+
+pub(super) fn client_message_person(session: &client_v0::ClientSession) -> Option<&str> {
+    let person = session.authority_actor.strip_prefix("person/")?;
+    (!session.local_peer && session.assistant_write.is_none()
+        && !person.is_empty() && !person.contains('/'))
+        .then_some(session.authority_actor.as_str())
+}
+
+/// Look up a raw message body for a concrete person or an agent bound as its recipient.
+pub(super) fn exact_message(
+    store: &Store,
+    subject: &str,
+    person: Option<&str>,
+    bound_agent: Option<&str>,
+) -> anyhow::Result<Option<MessageView>> {
+    let Some(message) = store.message(subject)? else { return Ok(None) };
+    Ok(message_visible(store, &message, person, bound_agent)?.then_some(message))
+}
+
+pub(super) fn raw_message_visible(
+    store: &Store,
+    message: &MessageView,
+    bound_agent: Option<&str>,
+) -> anyhow::Result<bool> {
+    message_visible(store, message, None, bound_agent)
+}
+
+fn message_visible(
+    store: &Store,
+    message: &MessageView,
+    person: Option<&str>,
+    bound_agent: Option<&str>,
+) -> anyhow::Result<bool> {
+    if bound_agent == Some(message.to.as_str())
+        || crate::store::messages_shard::mailbox_reads::is_stream_item(message)
+        || !store.claims_for(&message.subject, Some("message.sent"))?.iter().any(private_thread_claim)
+    {
+        return Ok(true);
+    }
+    let reader = store.readers.get();
+    let canonical = |party: &str| crate::store::identities::resolve_reference_conn(&reader, party);
+    if let Some(agent) = bound_agent {
+        return Ok(canonical(agent)? == canonical(&message.to)?);
+    }
+    if let Some(person) = person {
+        let person = canonical(person)?;
+        return Ok(person == canonical(&message.from)? || person == canonical(&message.to)?);
+    }
+    Ok(false)
+}
+
 pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
     !fractal_schema::notice::is_reserved_subject(&claim.subject)
         && !fractal_schema::notice::is_reserved_kind(&claim.kind)
+        && !private_thread_claim(claim)
 }
 
 /// Fill a serving page with visible claims, leaving raw replication/projector reads intact.

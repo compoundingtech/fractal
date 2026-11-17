@@ -203,6 +203,54 @@ pub fn hold_pre_boot_mail(
     Ok(())
 }
 
+/// Add an authenticated bound-delivery routing hint for this exact admitted message.
+pub fn attach_thread_delivery_context(
+    store: &Store,
+    message: &mut crate::model::MessageView,
+    sent: &ClaimRecord,
+) -> anyhow::Result<()> {
+    // The exact recipient and immutable message already selected by the mailbox own this
+    // context. Author-supplied tags and ordinary reply pointers carry no topic authority.
+    let fields = &sent.body["fields"];
+    if let Some(thread) = fields["thread_id"].as_str()
+        && let Some(operation) = sent.operation_id.as_deref()
+        && sent.subject == message.subject
+        && sent.store_index == message.created_index
+        && fields["from"].as_str() == Some(message.from.as_str())
+        && fields["to"].as_str() == Some(message.to.as_str())
+        && smallclaims::store::operation_tx(&store.graph.readers.get(), operation)?
+            .is_some_and(|(_, id, status)| id == sent.id && status == "active")
+    {
+        message.delivery_thread = Some(thread.to_owned());
+    }
+    Ok(())
+}
+
+/// Current native polling establishes both the delivery peer and the exact bound recipient.
+/// This string routes replies; structured history uses the dedicated bound endpoint.
+pub(super) fn attach_polled_thread_context(
+    store: &Store,
+    native: bool,
+    bound: Option<&str>,
+    recipient: Option<&str>,
+    messages: &mut [crate::model::MessageView],
+) -> anyhow::Result<()> {
+    let (true, Some(bound), Some(recipient)) = (native, bound, recipient) else {
+        return Ok(());
+    };
+    let reader = store.readers.get();
+    if crate::store::identities::resolve_reference_conn(&reader, bound)? != recipient {
+        return Ok(());
+    }
+    drop(reader);
+    for message in messages.iter_mut().filter(|message| message.status != "closed") {
+        if let Some(sent) = sent_claim(store, message)? {
+            attach_thread_delivery_context(store, message, &sent)?;
+        }
+    }
+    Ok(())
+}
+
 /// A message's `message.sent` claim; a stream item's is in the messages shard.
 pub fn sent_claim(
     store: &Store,
