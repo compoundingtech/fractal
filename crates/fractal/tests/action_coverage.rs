@@ -805,6 +805,7 @@ impl Daemon {
             .unwrap_or_else(|error| panic!("{kind} replay: {error}"));
         let replay = serde_json::to_value(replay.value).unwrap();
         assert_eq!(replay["affected_ids"], accepted["affected_ids"], "{kind}");
+        assert_eq!(replay["operation_id"], accepted["operation_id"], "{kind}");
         assert_eq!(
             self.store().index().unwrap(),
             index,
@@ -923,6 +924,7 @@ async fn dispatch(
         "terminal.create" => terminal_create, "terminal.detach" => terminal_detach,
         "terminal.end" => terminal_end, "terminal.input" => terminal_input, "terminal.resize" => terminal_resize,
         "thread.start" => thread_start, "thread.reply" => thread_reply, "thread.read" => thread_read,
+        "thread.mark-unread" => thread_mark_unread, "thread.clear-unread" => thread_clear_unread,
         "thread.rename" => thread_rename, "thread.close" => thread_close, "thread.reopen" => thread_reopen,
         "work.ask" => work_ask, "work.cancel-ask" => work_cancel_ask,
         "work.claim" => work_claim, "work.complete" => work_complete,
@@ -1439,6 +1441,83 @@ async fn topic_thread_actions_survive_stale_fences_and_restarts() {
     for kind in ["thread.renamed", "thread.closed", "thread.reopened"] {
         assert_eq!(items.iter().filter(|event| event["kind"] == kind).count(), 1, "{kind}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thread_unread_actions_survive_stale_fences_and_restarts() {
+    use fractal_daemon::store::{thread_delivery, thread_metadata};
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.thread_writes = true;
+    daemon.store().configure_thread_write_rollout([]);
+    daemon.worker();
+    let thread = "thread/unread-restart-coverage";
+    let incoming = "message/unread-restart-anchor";
+    thread_metadata::apply(
+        daemon.store(), PERSON, thread, "coverage:unread-thread-create",
+        thread_metadata::Edit::Create { agent: WORKER, title: "Return after restart" },
+    ).unwrap();
+    thread_delivery::append_reply(daemon.store(), &ClaimInput {
+        subject: incoming.into(), kind: "message.sent".into(), actor: Some(WORKER.into()),
+        fields: BTreeMap::from([
+            ("thread_id".into(), json!(thread)), ("from".into(), json!(WORKER)),
+            ("to".into(), json!(PERSON)), ("content".into(), json!("An unread anchor.")),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some("coverage:unread-anchor-message".into()),
+    }, thread_metadata::PersonAuthority::BoundAgent { actor: WORKER }, None).unwrap();
+    let before = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(before.unread, Some(true));
+    assert!(before.unread_reminder.is_none());
+    let history = serde_json::to_value(
+        thread_metadata::mixed_timeline(daemon.store(), PERSON, thread, None, None, 50).unwrap(),
+    ).unwrap();
+
+    let fence = daemon.fence(PERSON).await;
+    let marked = daemon.exercise(PERSON, "thread.mark-unread", json!({
+        "target_id": thread, "anchor_message_id": incoming, "observed_marks": [],
+    }), fence).await;
+    // `exercise` compares operation IDs, affected IDs and the store index across a
+    // full restart and identical-key replay. Require a real operation, not null == null.
+    assert!(!marked["operation_id"].as_str().unwrap().is_empty());
+    assert_eq!(marked["affected_ids"], json!([thread]));
+    let marked_summary = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(marked_summary.unread, Some(true));
+    let reminder = marked_summary.unread_reminder.unwrap();
+    assert_eq!(reminder.anchor_message_id, incoming);
+    assert_eq!(reminder.marks.len(), 1);
+    assert_eq!(reminder.marks[0].anchor_message_id, incoming);
+    // The observed mark comes from Summary, never the action receipt or a claim ID.
+    let observed_mark = reminder.marks[0].mark_id.clone();
+    let marks = daemon.store().claims_for(thread, Some(fractal_schema::threads::UNREAD_MARKED)).unwrap();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(Some(observed_mark.as_str()), marks[0].operation_id.as_deref());
+    daemon.restart().await;
+    let persisted = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert_eq!(persisted.unread_reminder, Some(reminder));
+
+    let fence = daemon.fence(PERSON).await;
+    let cleared = daemon.exercise(PERSON, "thread.clear-unread", json!({
+        "target_id": thread, "observed_marks": [observed_mark],
+    }), fence).await;
+    assert!(!cleared["operation_id"].as_str().unwrap().is_empty());
+    assert_eq!(cleared["affected_ids"], json!([thread]));
+    let cleared_summary = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
+    assert!(cleared_summary.unread_reminder.is_none());
+    assert_eq!(cleared_summary.unread, Some(true));
+    daemon.restart().await;
+    assert_eq!(daemon.client(PERSON).thread_get(thread).await.unwrap().value, cleared_summary);
+    assert_eq!(
+        serde_json::to_value(
+            thread_metadata::mixed_timeline(daemon.store(), PERSON, thread, None, None, 50).unwrap(),
+        ).unwrap(),
+        history,
+    );
+    assert!(daemon.store().claims_for(incoming, Some("message.read")).unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

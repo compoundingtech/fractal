@@ -41,13 +41,15 @@ export interface ThreadPanelProps {
   readonly onRetryChange?: () => Promise<ThreadRefusal | undefined>
   readonly onMarkRead?: () => Promise<ThreadRefusal | undefined>
   readonly canMarkRead?: boolean
+  /** The person's unread reminder controls, shown in the sticky heading row beside Mark read while expanded. */
+  readonly unreadControls?: React.ReactNode
   /** Mount the timeline demand and composer only while this presentation is expanded. */
   readonly children: React.ReactNode
 }
 
 /** The same conversation surface works inline in any context or as a standalone pane. */
 export function ThreadPanel({
-  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onActivate, inList = false, age, origin, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, retryPending = false, onRetryChange, onMarkRead, canMarkRead = false, children,
+  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onActivate, inList = false, age, origin, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, retryPending = false, onRetryChange, onMarkRead, canMarkRead = false, unreadControls, children,
 }: ThreadPanelProps): React.ReactNode {
   const narrow = React.useContext(NarrowLayoutContext)
   const [expanded, setExpanded] = React.useState(initiallyExpanded)
@@ -154,14 +156,16 @@ export function ThreadPanel({
     <span {...stylex.props(styles.compactLabel)}>Mark read</span>
   </Button> : null
   const subline = embedded || origin === undefined ? null : <p data-thread-origin="" {...stylex.props(styles.origin)}>{origin}</p>
+  const reminder = open && unreadControls !== undefined ? unreadControls : null
+  const sticky = markRead !== null || reminder !== null
   // A thread in its own tab keeps the Inbox detail's reading measure instead of spanning the pane.
   return <section data-thread-panel="" role="group" aria-label={thread.title}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocus={() => setFocused(true)}
     onBlur={event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocused(false) }}
     {...stylex.props(styles.panel, inList && styles.inList, !embedded && styles.dedicated)}>
-    {/* Keep the disclosure's DOM ancestry stable when its read action appears or disappears. */}
-    <div data-thread-read-heading={markRead === null ? undefined : ''} {...stylex.props(markRead !== null && styles.readHeader)}>
-      <div {...stylex.props(markRead !== null && styles.readHeadingRow)}>{heading}{markRead}</div>
+    {/* Keep the disclosure's DOM ancestry stable when its read actions appear or disappear. */}
+    <div data-thread-read-heading={sticky ? '' : undefined} {...stylex.props(sticky && styles.readHeader)}>
+      <div {...stylex.props(sticky && styles.readHeadingRow)}>{heading}{reminder}{markRead}</div>
       {subline}
       {markRead === null ? null : feedback}
     </div>
@@ -192,7 +196,7 @@ const styles = stylex.create({
   inList: { borderWidth: 0, borderRadius: 0, borderBlockStartWidth: { default: g.hairline, ':first-child': 0 }, borderBlockStartStyle: 'solid', borderBlockStartColor: c.border },
   dedicated: { boxSizing: 'border-box', width: '100%', maxInlineSize: g.lane, marginInline: 'auto' },
   // Disclosure | unread dot | title | metadata | age. Fixed leading columns align rows down a list; metadata and age stay at the end.
-  header: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'baseline', columnGap: s.sm, boxSizing: 'border-box', width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightRegular },
+  header: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'baseline', columnGap: { default: s.sm, '@container thread-panel (max-width: 360px)': s.xs }, boxSizing: 'border-box', width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightRegular },
   rowColumns: { gridTemplateColumns: `${g.statusSm} ${g.statusSm} minmax(0, 1fr)` },
   dotColumns: { gridTemplateColumns: `${g.statusSm} minmax(0, 1fr)` },
   titleColumns: { gridTemplateColumns: 'minmax(0, 1fr)' },
@@ -203,7 +207,7 @@ const styles = stylex.create({
   title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: t.weightMedium },
   paneTitle: { fontSize: t.headingSize, lineHeight: t.headingLeading },
   metadata: { color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end', whiteSpace: 'nowrap' },
-  age: { minWidth: g.sidebarMetric, color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end', whiteSpace: 'nowrap' },
+  age: { minWidth: { default: g.sidebarMetric, '@container thread-panel (max-width: 360px)': 0 }, color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end', whiteSpace: 'nowrap' },
   origin: { margin: 0, paddingInline: s.sm, paddingBlockEnd: s.sm, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   readHeader: { position: 'sticky', top: 0, zIndex: 1, backgroundColor: c.canvas },
   readHeadingRow: { display: 'flex', alignItems: 'center', paddingInlineEnd: s.sm },

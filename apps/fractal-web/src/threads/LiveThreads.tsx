@@ -18,11 +18,15 @@ import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/compositi
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThreadEditor } from './ThreadEditor.tsx'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
-import type { RetainedThreadStart, ThreadObservation, ThreadSource } from './threadSource.ts'
+import { upgradeThreadEndpoint, type RetainedThreadStart, type ThreadObservation, type ThreadSource, type ThreadRefusal } from './threadSource.ts'
+import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
+import { useForegroundVisibility } from './useForegroundVisibility.ts'
+import { awayVisit, enterUnreadVisit, holdUnreadVisit, planUnreadView, type UnreadVisit } from './unreadVisit.ts'
+import { UnreadReminderControls } from './UnreadReminderControls.tsx'
+import type { UnreadReminderRead } from './unread-action-port.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
-const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. Your browser pairing is kept.'
 /** The same words the alert answer box uses for a device without control access. */
 const readOnlyThread = 'Read-only on this device. Reply from a device with control access.'
 
@@ -310,20 +314,30 @@ function PendingStartPanel({ source, start, onSent }: {
  */
 type FocusComposer = boolean | 'when-lost'
 
-export function LiveThreadPane({ threadId }: { readonly threadId: string }) {
+export function LiveThreadPane({ threadId, active = true }: { readonly threadId: string; readonly active?: boolean }) {
   const source = useDataSource().threads
   return source === undefined ? <p>This connection does not support threads.</p>
-    : <div {...stylex.props(styles.standalone)}><ThreadById source={source} threadId={threadId} focusComposer="when-lost" /></div>
+    : <div {...stylex.props(styles.standalone)}><ThreadById source={source} threadId={threadId} active={active} focusComposer="when-lost" /></div>
 }
 
-function ThreadById({ source, threadId, embedded = false, focusComposer = false, onOpenThread }: OpenThread & {
+function ThreadById({ source, threadId, active = true, embedded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly threadId: string
+  readonly active?: boolean
   readonly embedded?: boolean
   readonly focusComposer?: FocusComposer
 }) {
   const { read, upgradeRequired, unknown, failure } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
+  const entryRead = useAtomValue(source.unreadActions?.reminder(threadId) ?? noReminder)
+  const entryReminder = entryRead._tag === 'Known' ? entryRead.reminder : undefined
+  // Capture at the route's entry cut, even while access/detail are still unknown.
+  const visit = React.useRef<UnreadVisit>(active ? enterUnreadVisit(entryReminder) : awayVisit)
+  const entry = React.useRef({ threadId, active })
+  if (entry.current.threadId !== threadId || entry.current.active !== active) {
+    entry.current = { threadId, active }
+    visit.current = active ? enterUnreadVisit(entryReminder) : awayVisit
+  }
   // The thread reports its own detail and each message page going stale; embedded, its section carries the marker.
   const [threadReadsStale, reportStale] = useStaleThreadReads()
   const paused = useUpdatesPaused(threadReadsStale)
@@ -337,7 +351,7 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
   // Reading again cannot bring back a thread Fractal says does not exist.
   if (detail._tag === 'Unavailable' && detail.code === 'not-found') return status(<SystemNotice kind="empty" scope="inline" title="Fractal has no thread at this link." />)
   if (detail._tag !== 'Observed') return status(<ReadStatus feed={detail} subject="thread" onRetry={source.reload} />)
-  const thread = <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
+  const thread = <LiveThread key={threadId} source={source} thread={detail.value.summary} visitRef={visit} active={active} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
   if (embedded) return thread
   return <StaleThreadReads.Provider value={reportStale}>
     {/* A thread in its own tab carries the marker above its heading; Retry only when one of its reads went stale. */}
@@ -351,10 +365,13 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
 const noPendingChange = Atom.make<string | undefined>(undefined)
 const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
 const noPendingStarts = Atom.make<readonly RetainedThreadStart[]>([])
+const noReminder = Atom.make<UnreadReminderRead>({ _tag: 'Unavailable', detail: 'Unread reminders are not available on this connection.' })
 
-function LiveThread({ source, thread, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
+function LiveThread({ source, thread, visitRef, active = true, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly thread: ThreadSummary
+  readonly visitRef?: React.RefObject<UnreadVisit>
+  readonly active?: boolean
   readonly embedded?: boolean
   readonly inList?: boolean
   /** The row opens the dedicated tab instead of expanding in place, when a tab can be opened. */
@@ -378,8 +395,41 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
   const retryChange = source.retryChange
   const pendingChange = useAtomValue(source.pendingChange?.(thread.id) ?? noPendingChange)
   const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
-  const viewport = useThreadViewport(expanded && markRead !== undefined)
+  const viewport = useThreadViewport(expanded && (markRead !== undefined || source.unreadActions?.canMark === true))
+  const foreground = useForegroundVisibility(active && expanded)
+  const timeline = React.useCallback((node: HTMLDivElement | null) => {
+    viewport.timeline(node)
+    foreground.timeline(node)
+  }, [viewport.timeline, foreground.timeline])
+  const reminderRead = useAtomValue(expanded ? source.unreadActions?.reminder(thread.id) ?? noReminder : noReminder)
+  const reminder = reminderRead._tag === 'Known' ? reminderRead.reminder : undefined
+  const localVisit = React.useRef<UnreadVisit>(awayVisit)
+  const visit = visitRef ?? localVisit
+  const naturallyRead = React.useRef(new Set<string>())
+  const [readFailure, setReadFailure] = React.useState<ThreadRefusal>()
+  React.useLayoutEffect(() => {
+    if (!active || !expanded) { visit.current = awayVisit; naturallyRead.current.clear(); return }
+    // Unknown at entry captures nothing and remains sticky when a reminder arrives later.
+    if (visit.current._tag === 'Away') visit.current = enterUnreadVisit(reminder)
+    if (!foreground.foreground || observation === undefined) return
+    if (source.unreadActions?.canMark && reminderRead._tag === 'Known') {
+      const plan = planUnreadView(visit.current, { foreground: true, visibleMessageIds: foreground.visibleMessageIds, currentReminder: reminder })
+      visit.current = plan.visit
+      if (plan.observed_marks.length > 0) void source.unreadActions.clear({ threadId: thread.id, observed_marks: plan.observed_marks }).then(result => {
+        if (result._tag !== 'Sent') setReadFailure({ detail: result.detail })
+      }).catch(() => setReadFailure({ detail: 'The unread reminder change could not be confirmed. Refresh to check its current state.' }))
+    }
+    const seen = foreground.visibleMessageIds.filter(id => !naturallyRead.current.has(id))
+    const anchor = seen.at(-1)
+    if (markRead === undefined || anchor === undefined) return
+    for (const id of seen) naturallyRead.current.add(id)
+    void markRead(observation, anchor, seen).then(failure => { if (failure !== undefined) setReadFailure(failure) })
+      .catch(() => setReadFailure({ detail: 'The read change could not be confirmed. Refresh to check its current state.' }))
+  }, [active, expanded, foreground, observation, markRead, reminderRead, reminder, source, thread.id, visit])
   return <ThreadPanel thread={summary} pendingChange={pendingChange}
+    unreadControls={source.unreadActions === undefined ? undefined : <UnreadReminderControls threadId={thread.id}
+      port={source.unreadActions} visibleReplies={viewport.capture} timeline={viewport.container}
+      onBeforeMark={() => { visit.current = holdUnreadVisit(visit.current) }} />}
     {...(retryChange === undefined ? {} : { onRetryChange: () => retryChange(thread.id) })}
     embedded={embedded} inList={inList} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
     {...(opensInTab && onOpenThread !== undefined ? { onActivate: () => onOpenThread(thread.id) } : {})}
@@ -405,7 +455,8 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
     })}
   >
     {detailStatus ?? <ThreadConversation source={source} thread={summary} agentName={agentName} canReply={actions.has('thread.reply')} observed={observation !== undefined}
-      focusComposer={focusComposer} timelineRef={viewport.timeline} />}
+      focusComposer={focusComposer} timelineRef={timeline} />}
+    {readFailure === undefined ? null : <ThreadRefusalAlert refusal={readFailure} />}
   </ThreadPanel>
 }
 
@@ -471,7 +522,7 @@ function useThreadViewport(enabled: boolean) {
       capture.current = () => []
     }
   }, [enabled, container])
-  return { timeline, canMark, capture: () => capture.current() }
+  return { timeline, container, canMark, capture: () => capture.current() }
 }
 
 function threadViewportBounds(container: HTMLElement) {
@@ -534,10 +585,11 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
 
 type Quote = ((event: ThreadMessageEvent, sender: string) => void) | undefined
 
-function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote }: {
+function ThreadTimeline({ source, threadId, cursor, direction, agentId, agentName, onQuote }: {
   readonly source: ThreadSource
   readonly threadId: string
   readonly cursor?: string
+  readonly direction?: 'older' | 'newer'
   readonly agentId: string
   readonly agentName: string | undefined
   readonly onQuote: Quote
@@ -548,13 +600,25 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
   const { actor } = useAtomValue(source.access)
   const now = useNow()
   const [showOlder, setShowOlder] = React.useState(false)
+  const [showNewer, setShowNewer] = React.useState(false)
+  const rows = React.useRef<HTMLOListElement>(null)
+  const revealedAnchor = React.useRef<string | undefined>(undefined)
+  React.useLayoutEffect(() => {
+    const anchor = feed._tag === 'Observed' && feed.value.anchor?.state === 'current' ? feed.value.anchor.message_id : undefined
+    if (anchor === undefined || anchor === revealedAnchor.current) return
+    const row = [...(rows.current?.querySelectorAll<HTMLElement>('[data-thread-anchor]') ?? [])].find(row => row.dataset.threadAnchor === anchor)
+    if (row === undefined) return
+    row.scrollIntoView?.({ block: 'center', behavior: 'auto' })
+    revealedAnchor.current = anchor
+  }, [feed])
   if (feed._tag !== 'Observed') return <ReadStatus feed={feed} subject="messages" onRetry={source.reload} />
-  const next = Option.getOrUndefined(feed.value.next_cursor)
+  const next = direction === 'newer' ? undefined : Option.getOrUndefined(feed.value.next_cursor)
+  const previous = direction === 'older' ? undefined : feed.value.previous_cursor
   return <>
     {next === undefined ? null : showOlder
-      ? <ThreadTimeline source={source} threadId={threadId} cursor={next} agentId={agentId} agentName={agentName} onQuote={onQuote} />
+      ? <ThreadTimeline source={source} threadId={threadId} cursor={next} direction="older" agentId={agentId} agentName={agentName} onQuote={onQuote} />
       : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
-    <ol {...stylex.props(styles.timeline)}>
+    <ol ref={rows} {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
         // Another person reads by their handle; only agents and Fractal's machinery go through the agent formatter.
         const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You'
@@ -571,7 +635,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
         const quoted = quotedId === undefined ? undefined : feed.value.items.find(
           (candidate): candidate is ThreadMessageEvent => candidate.kind === 'message' && candidate.id === quotedId,
         )
-        return <li key={event.id} data-thread-message={event.actor_id === agentId && feed.freshness === 'live' ? event.id : undefined} {...stylex.props(stylex.defaultMarker(), styles.event)}>
+        return <li key={event.id} data-thread-anchor={event.id} data-thread-message={event.actor_id === agentId && feed.freshness === 'live' ? event.id : undefined} {...stylex.props(stylex.defaultMarker(), styles.event)}>
           <div {...stylex.props(styles.eventHeader)}>
             <strong title={sender === 'You' ? undefined : event.actor_id}>{sender}</strong>
             {time}
@@ -579,10 +643,13 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
           </div>
           {quotedId === undefined ? null
             : <blockquote {...stylex.props(styles.quote)}>{quoted?.content.slice(0, 160) ?? 'Reply to an earlier message'}</blockquote>}
-          <div {...stylex.props(styles.message)}>{event.content}</div>
+          <div data-thread-message-content="" {...stylex.props(styles.message)}>{event.content}</div>
         </li>
       })}
     </ol>
+    {previous === undefined ? null : showNewer
+      ? <ThreadTimeline source={source} threadId={threadId} cursor={previous} direction="newer" agentId={agentId} agentName={agentName} onQuote={onQuote} />
+      : <ActionButton onPress={() => setShowNewer(true)}>Load newer messages</ActionButton>}
   </>
 }
 

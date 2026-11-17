@@ -394,6 +394,8 @@ impl AnswerTiming {
 enum Fetched {
     ThreadWrite(u64, super::threads_live::Receipt),
     ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),
+    ThreadSeek(u64, String, String, Result<fractal_client::ThreadTimelinePage, super::threads_live::SeekFailure>),
+    MarkedUnread(u64, u64, Result<Vec<fractal_client::Envelope<fractal_client::ThreadSummary>>, super::marked_unread::Failure>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
     Protocol(super::content::Key, u16, u16, super::content::Encoding),
@@ -1177,6 +1179,17 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
+                Fetched::MarkedUnread(generation, request, rows) => {
+                    if generation == resources_generation {
+                        ui.threads.marked_loaded(request, rows);
+                    }
+                }
+                Fetched::ThreadSeek(generation, id, key, page) => {
+                    if generation == resources_generation
+                        && let Some(error) = ui.threads.seek_loaded(&id, &key, page) {
+                        ui.flash_as(super::Severity::Error, error);
+                    }
+                }
                 Fetched::ThreadEarlier(generation, id, page) => {
                     if generation == resources_generation
                         && let Some(error) = ui.threads.earlier_loaded(&id, page) {
@@ -1588,6 +1601,25 @@ pub fn run(context: Context) -> Result<()> {
             let _ = commands.send(Command::Threads(wanted_threads.clone()));
             thread_interests = wanted_threads;
             changed = true;
+        }
+        let pane = ui.main_pane();
+        if let Some(request) = ui.threads.marked_due(&pane) {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let rows = super::marked_unread::read(&reader).await;
+                let _ = tx.send(Fetched::MarkedUnread(generation, request, rows));
+            });
+        }
+        for seek in ui.threads.take_seeks() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = seek.read(&reader).await;
+                let _ = tx.send(Fetched::ThreadSeek(generation, seek.id, seek.key, result));
+            });
         }
         for earlier in ui.threads.take_earlier() {
             let reader = client.clone();
@@ -2302,6 +2334,7 @@ pub fn run(context: Context) -> Result<()> {
             super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
         }
         ui.read_presented_conversations(&timelines);
+        ui.read_presented_threads();
         ui.queue_read_advances(Instant::now(), extras.live);
         if extras.live
             && let Some(check) = ui.reads.list_due(Instant::now())

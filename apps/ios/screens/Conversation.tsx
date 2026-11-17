@@ -1,5 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, Alert, AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
+import { ownedPresentations } from '../ownedPresentation';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
@@ -361,7 +363,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
     const pick = async () => {
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      const release = ownedPresentations.acquire();
+      let result;
+      try {
+        result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      } finally { release(); }
       if (result.canceled) return;
       const more = result.assets.map(asset => asset.base64 ? picked(asset.base64, asset.mimeType ?? 'image/jpeg', asset.fileName ?? undefined) : `${asset.fileName ?? 'That image'} could not be read.`);
       const next = addImages(images, more);
@@ -372,7 +378,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       const next = addImages(images, [image ? fromDataUri(image.data, 'Pasted image') : 'The clipboard holds no image.']);
       setImages(next.images); setImageIssue(next.refused);
     };
-    ActionSheetIOS.showActionSheetWithOptions({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
+    showOwnedActionSheet({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
       if (index === 0) void pick().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
       if (index === 1) void paste().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
     });
