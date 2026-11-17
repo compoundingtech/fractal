@@ -392,24 +392,24 @@ without retries may omit `retried_by`. Older servers omit both fields. Readers
 must preserve the distinction between a new-run retry and a step's next attempt.
 
 A retry creates a new run, defaulting to the latest published mission revision;
-explicit same-revision retry uses the source's current revision. It retains exact
-resolved inputs and workspace, refuses incompatible latest inputs with both
-revisions and a reason, and restarts all steps and the program from the top.
-The source's status, generation, and execution history do not change. These links
-are navigation and attribution, not a signal to hide the source or reuse its work.
+explicit same-revision retry uses the source's current revision. Resolved inputs
+remain pinned; incompatible inputs refuse with both revisions and the reason.
+Compatible completed work and bound answers carry by reference; unfinished work
+restarts without adopting program journals. Launch provenance resolves the current
+workspace, while explicit workspaces and source execution history remain unchanged.
 See [the runtime contract](../mission-graph-runtime.md#retrying-a-failed-run).
 
-For a policy-less mission, new-revision publication automatically supersedes already-active
-stale runs after replacement admission succeeds. Existing human-only review and when-idle
-policies take precedence; approved cutover also creates a fresh linked run, and
-the existing `revision-draining` phase denotes the source's idle-boundary wait. List, detail, and history `run_details[]` include
+New-revision publication supersedes older active runs only without completed work or
+person responses and when pinned revision policy allows it. Existing explicit review
+admits a fresh linked run; when-idle timing alone does not authorize evidence loss.
+The `revision-draining` phase denotes the source's idle wait. List, detail, and history `run_details[]` include
 optional `supersedes` and `superseded_by` mission-run IDs and optional string
 `supersession_fault`. Absent strings are omitted, never null; older servers omit
 them. A refusal names both revisions and the incompatibility while leaving the
-source active. A replacement waits for predecessor cleanup to reach terminal,
-then restarts all steps and programs without adopting journals. Republish alone
-does nothing; an explicit same-revision retry after publication is not caught by
-a continuous stale-revision scan. See [automatic publication supersession](../mission-graph-runtime.md#automatic-publication-supersession).
+source active. A replacement waits for confirmed predecessor cleanup, carries compatible
+completed evidence by reference, and restarts unfinished programs without adopting journals.
+Republishing the same revision does nothing; an explicit same-revision retry is not caught
+by a continuous stale-revision scan. See [automatic publication supersession](../mission-graph-runtime.md#automatic-publication-supersession).
 
 ### Mission run timing
 
@@ -1283,6 +1283,37 @@ a session with `read.projections`; an older daemon does not list it and answers 
 The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms, until_ms, steps)`;
 Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
 `sloHistory(id, { since_ms, until_ms, steps })`.
+
+`GET /v1/client/series?objective=…&from=…&to=…&bucket_seconds=…` returns
+`Series { from, to, bucket_seconds, group_by?, buckets: [{ start, end, count, groups? }] }`.
+Select either one exact declared count/interval `objective` name or explicit
+repeatable `kind` parameters. Explicit kinds may additionally filter by
+`subject_prefix` and group by a payload field with `group_by`. An objective
+cannot be combined with kinds, a prefix or grouping.
+
+`from`, `to` and `bucket_seconds` are required. The unsigned Unix millisecond
+range is half-open `[from,to)`, with `from < to` and a span of at most 31 days.
+`bucket_seconds` is a positive integer; the ceiling of the span divided by that
+duration must be at most 1000. Buckets include zero counts and the final bucket
+ends at `to` even when shorter than the requested duration.
+
+When grouped, the response echoes `group_by` and every bucket has
+`groups: [{ value, count }]`; empty buckets have `groups: []`. Group values
+preserve JSON types, including arrays and objects; a missing field groups under
+`null`. Ungrouped responses omit `group_by` and `groups`.
+
+Objective counts use evaluator selection, deduplication and exclusions.
+Intervals count closed samples by completion time. This is a count histogram,
+**not percentiles** or remaining-budget readings from `slo.history`.
+Unknown names return `unknown-objective` (HTTP 404); unsupported objectives return
+`unsupported-objective-series` (HTTP 422); invalid queries return `invalid-series`
+(HTTP 422). The read requires `read.projections`.
+
+Typed clients expose Rust `Client::series(&SeriesQuery)`,
+Swift `series(objective:kinds:subjectPrefix:groupBy:from:to:bucketSeconds:)`
+returning `Envelope<Series>`, and TypeScript `series(options, requestOptions?)`
+returning `Promise<EnvelopeOf<Series>>`. `fixtures/series.json` demonstrates
+ungrouped buckets; `fixtures/series-grouped.json` demonstrates typed group values.
 
 ### Documents
 

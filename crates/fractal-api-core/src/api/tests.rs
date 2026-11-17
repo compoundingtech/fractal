@@ -4694,9 +4694,9 @@ fn internal_routes() -> Vec<String> {
         .collect()
 }
 
-/// Internal routes now refuse seat callers: a bound harness is refused on every one of them, by
-/// any method, while this node's replication worker and its operator's CLI, which run in no
-/// harness, pass.
+/// Internal routes refuse seat callers except the exact resource methods whose handlers enforce
+/// native ownership. This node's replication worker and operator CLI, which run in no harness,
+/// still pass the transport guard for every internal route.
 #[tokio::test]
 async fn internal_routes_refuse_seat_callers() {
     let root = tempfile::tempdir().unwrap();
@@ -4704,7 +4704,11 @@ async fn internal_routes_refuse_seat_callers() {
     let routes = internal_routes();
     assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
     for route in &routes {
-        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+        for method in [
+            axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT,
+            axum::http::Method::PATCH, axum::http::Method::DELETE, axum::http::Method::HEAD,
+            axum::http::Method::OPTIONS, axum::http::Method::TRACE, axum::http::Method::CONNECT,
+        ] {
             let request = || {
                 Request::builder()
                     .method(method.clone())
@@ -4713,8 +4717,17 @@ async fn internal_routes_refuse_seat_callers() {
                     .body(Body::from("{}"))
                     .unwrap()
             };
-            let refused = guard_bound_request(request(), Some("agent/own"), &state.store).await.unwrap_err();
-            assert_eq!(refused.code, "foreign-agent-actor", "{method} {route}");
+            let bound = guard_bound_request(request(), Some("agent/own"), &state.store).await;
+            let resource_owner_route = matches!((route.as_str(), method.as_str()),
+                ("/v1/internal/resources" | "/v1/internal/resources/example", "GET")
+                | ("/v1/internal/resources/exec"
+                    | "/v1/internal/resources/example/wait"
+                    | "/v1/internal/resources/example/cancel", "POST"));
+            if resource_owner_route {
+                assert!(bound.is_ok(), "{method} {route} reaches native resource ownership enforcement");
+            } else {
+                assert_eq!(bound.unwrap_err().code, "foreign-agent-actor", "{method} {route}");
+            }
             assert!(
                 guard_bound_request(request(), None, &state.store).await.is_ok(),
                 "{method} {route} serves a caller in no harness"

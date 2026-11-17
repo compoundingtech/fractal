@@ -721,6 +721,7 @@ pub(super) async fn run_mission_view(
         }
         MissionViewCommand::Start(args) => start_mission_run(client, args, json_output).await,
         MissionViewCommand::Retry(args) => retry_mission_run(client, args, json_output).await,
+        MissionViewCommand::Run { command } => continuity_cli::run(endpoint, command, json_output).await,
         MissionViewCommand::Cancel(args) => {
             cancel_mission_run(client, endpoint, args, json_output).await
         }
