@@ -478,10 +478,13 @@ async fn assistant_final_delivery_denials_leave_durable_receipts() {
 
 // Use the native Codex transcript/runtime-binding fixture, not a synthetic projection.
 fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
+    content_source_for_agent(fixture, text, "agent/reads-codex")
+}
+
+fn content_source_for_agent(fixture: &mut Fixture, text: &str, agent: &str) -> (String,String,String) {
     let home=fixture.root.path().join("home");
     let transcript=home.join(".codex/sessions/2026/10/11/assistant.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    let agent="agent/reads-codex";
     let incarnation="native-pty:reads";
     let provider_incarnation="provider-reads";
     let native_id="native-reads-codex-test";
@@ -496,9 +499,9 @@ fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
         .join(&hex::encode(Sha256::digest(agent.as_bytes()))[..24]).join("state");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("runtime.json"),serde_json::to_vec(&json!({
-        "agent":"reads-codex","incarnation":provider_incarnation})).unwrap()).unwrap();
+        "agent":agent.strip_prefix("agent/").unwrap(),"incarnation":provider_incarnation})).unwrap()).unwrap();
     std::fs::write(directory.join("binding.json"),serde_json::to_vec(&json!({
-        "agent":"reads-codex","runtimeIncarnation":provider_incarnation,"threadId":native_id})).unwrap()).unwrap();
+        "agent":agent.strip_prefix("agent/").unwrap(),"runtimeIncarnation":provider_incarnation,"threadId":native_id})).unwrap()).unwrap();
     for (kind,fields) in [
         ("runtime.observed",json!({"status":"running","runtime_id":"reads-codex-pty",
             "incarnation_id":incarnation,"terminal":true})),
@@ -732,16 +735,17 @@ async fn thread_request_history_returns_store_page_and_preserves_opaque_cursor()
     fixture.state.store.configure_thread_write_rollout([]);
     let intent = crate::graph::parse_intent(
         r#"version 2
-agent "reads-codex" { workspace "/tmp"; harness "omp" {} }
+agent "history/reviewer" { workspace "/tmp"; harness "omp" {} }
 "#, fixture.state.store.origin(),
     ).unwrap();
     fixture.state.store.apply_internal(&intent, "assistant-history").unwrap();
-    let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
+    let agent = "agent/history/reviewer";
+    let (session, _, _) = content_source_for_agent(&mut fixture, &"Agent conversation ".repeat(512), agent);
     projection_read_mode(&mut fixture, "caller-bound-allow").await;
     let mut origins = Vec::new();
     for key in ["history-first", "history-second"] {
         let ask = fixture.state.store.ask_person(&serde_json::from_value(json!({
-            "person": OWNER, "actor": "agent/reads-codex", "title": key,
+            "person": OWNER, "actor": agent, "title": key,
             "reason": format!("Retained {key}"), "new_run": key, "idempotency_key": key,
         })).unwrap()).unwrap();
         let episode = fixture.state.store.latest_claim(&ask.subject, Some("work.person-asked"))
@@ -753,7 +757,7 @@ agent "reads-codex" { workspace "/tmp"; harness "omp" {} }
         subject: "message/assistant-history".into(), kind: "message.sent".into(),
         actor: Some(OWNER.into()),
         fields: serde_json::from_value(json!({
-            "from": OWNER, "to": "agent/reads-codex", "content": "Discuss retained asks", "status": "sent",
+            "from": OWNER, "to": agent, "content": "Discuss retained asks", "status": "sent",
         })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     };
@@ -761,7 +765,7 @@ agent "reads-codex" { workspace "/tmp"; harness "omp" {} }
         thread, title: "History", person: OWNER, origin: &origins[0],
         key: "start-assistant-history", first_message: &first_message,
     }).unwrap();
-    thread_links::attach_ask(&fixture.state.store, "agent/reads-codex", AttachAsk {
+    thread_links::attach_ask(&fixture.state.store, agent, AttachAsk {
         thread, ask: &origins[1].source_id, episode: &origins[1].episode,
         key: "attach-assistant-history",
         decision: Some(DecisionHistory {
@@ -773,7 +777,7 @@ agent "reads-codex" { workspace "/tmp"; harness "omp" {} }
     ).unwrap();
     let cursor = expected.next_cursor.as_deref().expect("two retained asks paginate");
     let endpoint = format!(
-        "/v1/client/assistant/thread-request-history?agent_id=agent%2Freads-codex&session_id={}&thread_id=thread%2Fassistant-history&limit=1&max_response_bytes=16384",
+        "/v1/client/assistant/thread-request-history?agent_id=agent%2Fhistory%2Freviewer&session_id={}&thread_id=thread%2Fassistant-history&limit=1&max_response_bytes=16384",
         urlencoding::encode(&session),
     );
     let (status, value, bytes) = fixture.request(&endpoint, None).await;
@@ -791,7 +795,7 @@ agent "reads-codex" { workspace "/tmp"; harness "omp" {} }
     assert_eq!(value["value"], serde_json::to_value(next).unwrap());
 
     for (id, person, agent) in [
-        ("thread/foreign-history", "person/other", "agent/reads-codex"),
+        ("thread/foreign-history", "person/other", agent),
         ("thread/other-agent-history", OWNER, "agent/other"),
     ] {
         thread_metadata::apply(&fixture.state.store, person, id, id,
@@ -803,7 +807,7 @@ agent "reads-codex" { workspace "/tmp"; harness "omp" {} }
     }
     for path in [
         endpoint.replace(&urlencoding::encode(&session).to_string(), "session%2Fwrong"),
-        endpoint.replace("agent%2Freads-codex", "agent%2Fother"),
+        endpoint.replace("agent%2Fhistory%2Freviewer", "agent%2Fother"),
     ] {
         let (status, value, _) = fixture.request(&path, None).await;
         assert!(!status.is_success(), "{value}");
