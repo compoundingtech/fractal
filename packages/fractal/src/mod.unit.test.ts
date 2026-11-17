@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { join } from 'node:path'
 
-import { Effect, Schema } from 'effect'
+import { Duration, Effect, Schema } from 'effect'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import {
@@ -14,6 +14,9 @@ import {
   AgentSchema,
   type CodexSchema,
   emit,
+  EscalationSchema,
+  silence,
+  residency,
   type GateSchema,
   type HumanGateSchema,
   Launch,
@@ -1192,6 +1195,53 @@ describe('Fractal declarations', () => {
     expect(() =>
       Schema.decodeUnknownSync(MissionSchema)({ ...fanInMission(), reportStalls }),
     ).toThrow()
+  })
+  it('renders silence and residency policies with explicit step overrides', () => {
+    const stages = [
+      { after: Duration.minutes(30), action: { _tag: 'notify' as const, recipient: owner } },
+      { after: Duration.hours(24), action: { _tag: 'ask' as const, recipient: person('person/reviewer') } },
+    ] as const
+    const escalation = [
+      silence({ id: 'silence', state: 'working', stages }),
+      residency({ id: 'residency', state: 'blocked', stages }),
+    ]
+    const decoded = Schema.decodeSync(EscalationSchema)(escalation[0]!)
+    expect(Duration.toMillis(decoded.stages[0].after)).toBe(1_800_000)
+    const rendered = emit([mission({
+      ...fanInMission(), escalation, steps: [{ id: 'approval', escalation: [] }],
+    })])
+    expect(rendered).toContain('clock="since-progress"')
+    expect(rendered).toContain('clock="in-state"')
+    expect(rendered).toContain('stage "1800000ms" notify="agent/example/owner"')
+    expect(rendered).toContain('stage "86400000ms" ask="person/reviewer"')
+    expect(rendered.match(/escalation/g)).toHaveLength(2)
+    expect(Schema.decodeSync(StepSchema)({ id: 'approval', escalation: [] }).escalation).toEqual([])
+    expect(Schema.decodeSync(StepSchema)({ id: 'inherited' }).escalation).toBeUndefined()
+  })
+  it('rejects malformed actions, delays, ordering and duplicate policy IDs', () => {
+    const notify = { _tag: 'notify', recipient: owner }
+    const valid = { after: Duration.minutes(30), action: notify }
+    for (const stages of [
+      [{ after: Duration.minutes(30), action: { _tag: 'notify', recipient: operator } }],
+      [{ after: Duration.minutes(30), action: { _tag: 'ask', recipient: owner } }],
+      [{ after: Duration.zero, action: notify }],
+      [{ after: Duration.infinity, action: notify }],
+      [{ after: Duration.nanos(1n), action: notify }],
+      [{ after: '30m', action: notify }],
+      [valid, valid],
+      [{ after: Duration.hours(4), action: notify }, valid],
+      [],
+    ]) {
+      expect(() => Schema.decodeUnknownSync(EscalationSchema)({
+        id: 'silence', when: { state: 'working', clock: 'since-progress' }, stages,
+      })).toThrow()
+    }
+    const policy = silence({ id: 'silence', state: 'working', stages: [
+      { after: Duration.minutes(30), action: { _tag: 'notify', recipient: owner } },
+    ] })
+    expect(() => Schema.decodeUnknownSync(StepSchema)({
+      id: 'duplicate', escalation: [policy, policy],
+    })).toThrow()
   })
   it('requires imported objects for step assignment and under targets', () => {
     type AssignedTo = NonNullable<(typeof StepSchema.Encoded)['assignedTo']>

@@ -845,10 +845,42 @@ impl Default for RetrySpec {
     }
 }
 
+/// Inline, absolute-delay ladder. Step lists replace (never merge) mission defaults.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EscalationSpec {
+    pub id: String,
+    pub state: String,
+    pub clock: EscalationClock,
+    pub stages: Vec<EscalationStage>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationClock {
+    SinceProgress,
+    InState,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EscalationStage {
+    pub after_ms: u64,
+    pub action: EscalationAction,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationAction {
+    Notify(String),
+    Ask(String),
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StepSpec {
     pub id: String,
     pub path: String,
+    /// None inherits mission defaults; Some(empty) explicitly disables them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<Vec<EscalationSpec>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     /// st's own step that holds its run open while the mission watches: not work. Read it with
@@ -1031,6 +1063,8 @@ pub struct MissionSpec {
     pub subject: String,
     pub state: MissionState,
     pub revision: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalation: Vec<EscalationSpec>,
     /// st's own plumbing or a standing observer, which clients fold away until asked. Read it
     /// with `mission::is_system` (fractal-daemon), which covers revisions published before the flag.
     #[serde(default, skip_serializing_if = "is_false")]

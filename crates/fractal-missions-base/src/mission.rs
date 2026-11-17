@@ -11,6 +11,7 @@ use crate::model::{
     LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec,
     MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, ProgramSpec,
     RetrySpec, RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector,
+    EscalationSpec, EscalationClock, EscalationStage, EscalationAction,
 };
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
@@ -312,6 +313,11 @@ fn parse_mission(
     for child in children.nodes() {
         match child.name().value() {
             "declared-priority" | "declared-lane" | "declared-budgets" => {}
+            "escalation" => {
+                if children.nodes().iter().filter(|n| n.name().value() == "escalation").count() > 1 {
+                    return Err(FractalError::new("duplicate-mission-field", "mission repeats escalation"));
+                }
+            }
             "system" => {
                 if system {
                     return Err(FractalError::new(
@@ -582,6 +588,7 @@ fn parse_mission(
         id,
         state,
         revision: String::new(),
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(parse_escalation).transpose()?.unwrap_or_default(),
         system,
         declared_priority: admission.priority,
         declared_lane: admission.lane,
@@ -919,6 +926,7 @@ fn parse_loop_group(
     let mut step = StepSpec {
         id,
         path,
+        escalation: None,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -1592,6 +1600,12 @@ fn parse_step(
                 "uses-mission" => uses_mission = Some(parse_used_mission(child)?),
                 "after-run" => after_run = Some(parse_after_run(child)?),
                 "program" => program = Some(parse_program(child)?),
+                "escalation" => {
+                    if node.children().is_some_and(|body| body.nodes().iter()
+                        .filter(|entry| entry.name().value() == "escalation").count() > 1) {
+                        return Err(FractalError::new("duplicate-step-field", "step repeats escalation"));
+                    }
+                }
                 "gate" => {
                     let gate = crate::gate_parse::parse_gate(child, default_host)?;
                     if matches!(gate, GateSpec::Deadline { .. }) {
@@ -1711,6 +1725,7 @@ fn parse_step(
     let mut step = StepSpec {
         id,
         path,
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(parse_escalation).transpose()?,
         fresh_context,
         keep_open,
         queue: None,
@@ -2583,6 +2598,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
     let mut step = StepSpec {
         id: AFTER_RUN_STEP.into(),
         path: AFTER_RUN_STEP.into(),
+        escalation: None,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -2992,6 +3008,52 @@ pub(crate) fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
         ));
     }
     Ok(())
+}
+
+/// A single block keeps an explicit empty step override distinct from inheritance.
+fn parse_escalation(node: &KdlNode) -> Result<Vec<EscalationSpec>, FractalError> {
+    ensure_bare(node)?;
+    let Some(body) = node.children() else { return Ok(Vec::new()); };
+    let invalid = || FractalError::new("invalid-escalation", "expected unique policy IDs, valid state/clock, and increasing positive stages with exactly one typed recipient");
+    let mut ids = BTreeSet::new();
+    let mut policies = Vec::new();
+    for policy in body.nodes() {
+        if policy.name().value() != "policy" { return Err(invalid()); }
+        crate::declaration_syntax::ensure_only_properties(policy, &["state", "clock"])?;
+        let id = one_string_with_children(policy)?;
+        validate_id(&id, "escalation")?;
+        if !ids.insert(id.clone()) { return Err(invalid()); }
+        let state = property_string(policy, "state")?.ok_or_else(invalid)?;
+        if !matches!(state.as_str(), "ready" | "claimed" | "working" | "blocked" | "failed" | "normal" | "revision-draining" | "final") { return Err(invalid()); }
+        let clock = match property_string(policy, "clock")?.as_deref() {
+            Some("since-progress") => EscalationClock::SinceProgress,
+            Some("in-state") => EscalationClock::InState,
+            _ => return Err(invalid()),
+        };
+        let mut stages = Vec::new();
+        let mut previous = 0;
+        for stage in policy.children().ok_or_else(invalid)?.nodes() {
+            if stage.name().value() != "stage" { return Err(invalid()); }
+            crate::declaration_syntax::ensure_only_properties(stage, &["notify", "ask"])?;
+            let after_ms = parse_duration(&one_string(stage)?)?;
+            if after_ms <= previous { return Err(invalid()); }
+            previous = after_ms;
+            let action = match (property_string(stage, "notify")?, property_string(stage, "ask")?) {
+                (Some(to), None) => { validate_report_to(&to)?; EscalationAction::Notify(to) }
+                (None, Some(to)) if to.starts_with("person/") => {
+                    for segment in to.strip_prefix("person/").unwrap_or_default().split('/') {
+                        validate_id(segment, "person")?;
+                    }
+                    EscalationAction::Ask(to)
+                }
+                _ => return Err(invalid()),
+            };
+            stages.push(EscalationStage { after_ms, action });
+        }
+        if stages.is_empty() { return Err(invalid()); }
+        policies.push(EscalationSpec { id, state, clock, stages });
+    }
+    Ok(policies)
 }
 
 /// The mission's opt-in run report: who hears of a failed, cancelled or stalled run, how long a
@@ -3643,5 +3705,85 @@ mod tests {
             if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+    #[test]
+    fn inline_escalation_parses_and_changes_revision() {
+        let source = r#"mission "refresh" state="ready" {
+            goal "Refresh";
+            escalation {
+                policy "pending-refresh" state="working" clock="in-state" {
+                    stage "30m" notify="agent/example/manager";
+                    stage "4h" notify="agent/example/manager";
+                    stage "24h" ask="person/owner";
+                }
+            }
+            step "inherit" { agentless; }
+            step "approval" { agentless; escalation {} }
+        }"#;
+        let mission = super::parse_missions(&source.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+        assert_eq!(mission.escalation[0].stages[2].after_ms, 86_400_000);
+        assert!(mission.steps["inherit"].escalation.is_none());
+        assert_eq!(mission.steps["approval"].escalation, Some(vec![]));
+        let rendered = crate::mission_render::render_mission_kdl(&mission).unwrap();
+        assert!(rendered.text.contains("1800000ms"));
+        assert!(rendered.text.contains("86400000ms"));
+        let roundtrip = super::parse_missions(&rendered.text.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+        assert_eq!(mission.revision, roundtrip.revision);
+        assert_eq!(mission.escalation, roundtrip.escalation);
+        assert_eq!(mission.steps["approval"].escalation, roundtrip.steps["approval"].escalation);
+        for (from, to) in [
+            ("24h", "25h"),
+            ("in-state", "since-progress"),
+            ("state=\"working\"", "state=\"blocked\""),
+            ("person/owner", "person/reviewer"),
+            ("pending-refresh", "residency"),
+            ("escalation {}", ""),
+        ] {
+            let changed = source.replace(from, to);
+            let changed = super::parse_missions(&changed.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
+            assert_ne!(mission.revision, changed.revision, "{from}");
+        }
+        let json = serde_json::to_string(&mission).unwrap();
+        assert_eq!(mission, serde_json::from_str(&json).unwrap());
+    }
+
+    #[test]
+    fn inline_escalation_rejects_invalid_stages() {
+        for stages in [
+            r#"stage "0m" notify="agent/a";"#,
+            r#"stage "4h" notify="agent/a"; stage "30m" notify="agent/a";"#,
+            r#"stage "30m" notify="agent/a" ask="person/a";"#,
+            r#"stage "30m" ask="agent/a";"#,
+            r#"stage "30m" notify="agent/a"; stage "30m" notify="agent/a";"#,
+            r#"stage "30m";"#,
+            r#"stage "30m" notify="agent/a" unexpected="value";"#,
+            r#"stage "30m" ask="person/";"#,
+            r#"stage "30m" notify="agent/a" {}"#,
+        ] {
+            let source = format!(r#"escalation {{ policy "p" state="working" clock="since-progress" {{ {stages} }} }}"#);
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert!(super::parse_escalation(&doc.nodes()[0]).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn inline_escalation_rejects_invalid_policies_and_duplicate_blocks() {
+        let policy = r#"policy "p" state="working" clock="since-progress" { stage "1m" notify="agent/example/manager"; }"#;
+        for body in [
+            format!("{policy} {policy}"),
+            policy.replace("since-progress", "activation-age"),
+            policy.replace("working", "unknown"),
+            policy.replace("stage \"1m\" notify=\"agent/example/manager\";", ""),
+        ] {
+            let document: kdl::KdlDocument = format!("escalation {{ {body} }}").parse().unwrap();
+            assert!(super::parse_escalation(&document.nodes()[0]).is_err());
+        }
+        for body in [
+            "escalation {}; escalation {}; step \"work\" { agentless; }",
+            "step \"work\" { agentless; escalation {}; escalation {}; }",
+        ] {
+            let source = format!("mission \"test\" state=\"ready\" {{ goal \"Test\"; {body} }}");
+            assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err());
+        }
     }
 }

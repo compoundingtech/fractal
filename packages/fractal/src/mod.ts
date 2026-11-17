@@ -1,6 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
-import { Schema, SchemaGetter } from 'effect'
+import { Duration as EffectDuration, Schema, SchemaGetter } from 'effect'
 
 import { node, type Node, type Value } from './kdl.ts'
 import type {
@@ -790,9 +790,77 @@ const UsedMissionSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('output'), outputOf: LocalId }),
 ]).annotate({ identifier: 'Fractal.UsedMission' })
 
+const EscalationAfter = Schema.Duration.check(Schema.makeFilter((after) => {
+  const millis = EffectDuration.toMillis(after)
+  return Number.isSafeInteger(millis) && millis > 0
+}, { message: 'escalation delay must be a positive, finite whole number of milliseconds' }))
+
+export const EscalationActionSchema = Schema.Union([
+  Schema.TaggedStruct('notify', { recipient: AgentReferenceSchema }),
+  Schema.TaggedStruct('ask', { recipient: PersonReferenceSchema }),
+]).annotate({ identifier: 'Fractal.EscalationAction' })
+
+/** Absolute stage delays; a step array replaces mission defaults, [] disables them. */
+export const EscalationSchema = Schema.Struct({
+  id: LocalId,
+  when: Schema.Struct({
+    state: Schema.Literals(['ready', 'claimed', 'working', 'blocked', 'failed', 'normal', 'revision-draining', 'final']),
+    clock: Schema.Literals(['since-progress', 'in-state']),
+  }),
+  stages: Schema.NonEmptyArray(Schema.Struct({
+    after: EscalationAfter,
+    action: EscalationActionSchema,
+  })),
+}).check(Schema.makeFilter(
+  (policy) => policy.stages.every((stage, index) =>
+    index === 0 || EffectDuration.greaterThan(stage.after, policy.stages[index - 1]!.after)),
+  { message: 'escalation stages must have strictly increasing absolute delays' },
+)).annotate({ identifier: 'Fractal.Escalation' })
+
+const EscalationsSchema = Schema.Array(EscalationSchema).check(Schema.makeFilter(
+  (policies) => new Set(policies.map((policy) => policy.id)).size === policies.length,
+  { message: 'escalation policy IDs must be unique within a scope' },
+))
+
+type EscalationInput = typeof EscalationSchema.Encoded
+/** Named constructors expand directly into native policy content. */
+export const silence = (input: Omit<EscalationInput, 'when'> & {
+  readonly state: EscalationInput['when']['state']
+}): EscalationInput => ({
+  id: input.id, when: { state: input.state, clock: 'since-progress' }, stages: input.stages,
+})
+export const residency = (input: Omit<EscalationInput, 'when'> & {
+  readonly state: EscalationInput['when']['state']
+}): EscalationInput => ({
+  id: input.id, when: { state: input.state, clock: 'in-state' }, stages: input.stages,
+})
+
+const lowerEscalationAction = (action: typeof EscalationActionSchema.Type): Record<string, Value> => {
+  switch (action._tag) {
+    case 'notify': return { notify: `agent/${action.recipient.id}` }
+    case 'ask': return { ask: action.recipient.subject }
+  }
+}
+
+const lowerEscalation = (policies: readonly (typeof EscalationSchema.Type)[] | undefined): Node[] =>
+  policies === undefined ? [] : [block({
+    name: 'escalation',
+    children: policies.map((policy) => node({
+      name: 'policy',
+      args: [policy.id],
+      props: { state: policy.when.state, clock: policy.when.clock },
+      children: policy.stages.map((stage) => node({
+        name: 'stage',
+        args: [`${EffectDuration.toMillis(stage.after)}ms`],
+        props: lowerEscalationAction(stage.action),
+      })),
+    })),
+  })]
+
 /** One mission step. */
 export const StepSchema = Schema.Struct({
   id: LocalId,
+  escalation: Schema.optionalKey(EscalationsSchema),
   ...OwnedDeclarationFields,
   documents: Schema.optionalKey(Schema.Array(PinnedDocumentReferenceSchema)),
   timeout: Schema.optionalKey(Duration),
@@ -987,6 +1055,7 @@ export const MissionSchema = Schema.Struct({
   ...OwnedDeclarationFields,
   state: Schema.Literal('ready'),
   reportTo: ReportToSchema,
+  escalation: Schema.optionalKey(EscalationsSchema),
   assignedTo: Schema.optionalKey(Schema.Union([AgentReferenceSchema, PersonReferenceSchema])),
   concurrentRuns: Schema.optionalKey(
     Schema.Int.pipe(
@@ -1690,6 +1759,7 @@ const productsNode = (products: readonly (typeof ProductSchema.Encoded)[]): Node
 const lowerStep = (input: typeof StepSchema.Encoded): Node => {
   const s = decode({ schema: StepSchema, input })
   const children: Node[] = []
+  children.push(...lowerEscalation(s.escalation))
   if (s.agentless === true) children.push(node({ name: 'agentless' }))
   if (s.assignedTo !== undefined) {
     children.push(
@@ -2485,6 +2555,7 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
       ...(m.reportCompleted === undefined ? {} : { 'report-completed': m.reportCompleted }),
     },
     children: [
+      ...lowerEscalation(m.escalation),
       ...declaredAdmissionNodes(m),
       ...(m.concurrentRuns === undefined
         ? []
