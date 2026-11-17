@@ -343,10 +343,11 @@ weekly budget. Render just these on a Mac with:
 ## Scroll and refresh performance Mac gate
 
 `PanelScroll` and `PanelForm` preserve their compact ideal height, bounded by the
-screen budget after measured chrome. A persistent `PanelWindowFrame` window accessor owns
-native resizing: AppKit chooses the anchor when positioning the window; synchronous resize
-notifications preserve that top edge instead of AppKit's default bottom-left origin.
-There are no delayed corrections or new resize animations. Short content stays compact,
+screen budget after measured chrome. The live `PanelWindowFrame` sizes the hosting window
+from the measured page on both growth and shrinkage, anchored two points below the current
+status-item window. macOS 27's `MenuBarExtra` can otherwise retain a larger hosting frame
+and center the smaller painted page inside it: checking only the window's top misses this
+detachment. No anchor is learned from previous panel frames. Short content stays compact,
 and content beyond the budget scrolls internally. Unbounded snapshots still size naturally.
 Markdown blocks/inline attributed strings and attachment images use bounded content-keyed
 caches. Ages share one minute-aligned clock. Identical page polls and pruning do not rewrite
@@ -380,14 +381,43 @@ Neither probe orders a window front or measures actual screen presentation or 12
 For navigation, build first (`/usr/bin/swift build -c release`), then run
 `.build/release/FractalMacGallery <out-dir> --navigation-probe`.
 It also never orders a window front, and records `navigation-probe.json` (phase,
-window height/top, content, viewport, offset) at 300/400/1578 pt. It asserts the menu-bar
-anchor through first-open loading, separately released SLO/availability reads, row arrival
-and removal, every signal, speech, ask/update route and refresh. Back restores native scroll
-state; a fresh push starts at the top. Page heights match unbounded content capped to the
-screen budget, and a quiet panel stays compact. Native outward wheel events and refreshes
-preserve top/bottom offsets, including fitting content. A 19-row inbox fits without scrolling
-on the tall screen; short screens apply `InboxCap`. Showing every row when all rows and
-signals fit is intentional. An AppKit move establishes a new top anchor for subsequent resizing.
+window height/top, content, viewport, offset) at 300/400/1578 pt. It checks layout through
+first-open loading, separately released SLO/availability reads, row arrival and removal,
+every signal, speech, ask/update route and refresh. Back restores native scroll state; a
+fresh push starts at the top. Page heights match unbounded content capped to the screen
+budget, and a quiet panel stays compact. This synthetic window is not a native attachment
+test. Native outward wheel events and refreshes preserve top/bottom offsets, including
+fitting content. A 19-row inbox fits without scrolling on the tall screen; short screens
+apply `InboxCap`.
+
+### Native panel attachment regression
+
+Build the DEBUG app and evolving Unix-socket member fixture on a developer Mac:
+
+```sh
+bash scripts/probe-panel-mac.sh build "$HOME/.local/state/fractal-panel-probe"
+```
+
+Transfer that directory into an isolated macOS GUI VM (the capture VM route above can
+provide one). In the guest, with the directory at the same short absolute path, run:
+
+```sh
+stage="$HOME/.local/state/fractal-panel-probe"
+bash "$stage/run.sh" run "$stage"
+```
+
+This opens the actual app's status-item scene, keeps it open across 19→14→40→3 rows and
+an availability read failure, navigates compact pages, and closes/reopens it twice.
+It needs an authorized GUI session, not Accessibility consent. On macOS 27 the status
+button has no target/action, so the DEBUG-only hook invokes AppKit's expanded-interface
+session delegate; release builds contain neither this SPI nor the probe.
+`frames.jsonl` records window moves/resizes/setFrame stacks, status/screen frames and the
+painted page rectangle. Its oracle checks the painted top, not just the hosting window's
+top; persistent centering within a stale large window fails. Missing samples, transitions
+or fixture data also fail. `source-revision` identifies the build source.
+Do not run the UI probe on an unapproved desktop. It is not wired into the headless
+macOS CI lane: it needs a logged-in WindowServer session. The offscreen layout checks
+remain the headless gate.
 
 `trace` records Animation Hitches and Time Profiler and exports their data tables.
 The script lists the interaction procedure and strict pass thresholds: every drill-in
