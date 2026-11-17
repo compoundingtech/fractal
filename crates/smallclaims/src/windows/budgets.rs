@@ -1,0 +1,340 @@
+//! Host-local compact SLO evidence. Request paths only increment counters; the minute
+//! checkpoint commits closed receipts. Missing receipts (including restart partial minutes)
+//! are unknown, never reconstructed from uptime or from a recent histogram.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Result, ensure};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
+
+const MINUTE: u64 = 60_000;
+const HORIZON: u64 = 30 * 24 * 60 * MINUTE;
+const WINDOWS: [(&str, u64); 6] = [
+    ("30d", HORIZON), ("6h", 6 * 60 * MINUTE), ("2h", 2 * 60 * MINUTE),
+    ("1h", 60 * MINUTE), ("30m", 30 * MINUTE), ("5m", 5 * MINUTE),
+];
+
+#[derive(Default)]
+struct Counts { eligible: u64, bad: u64 }
+
+struct Ledger {
+    db: Connection,
+    streams: Vec<String>,
+    pending: BTreeMap<(usize, u64), Counts>,
+    started_ms: u64,
+    last_ms: u64,
+    last_instant: Instant,
+    committed_through_ms: u64,
+}
+
+static LEDGER: Mutex<Option<Ledger>> = Mutex::new(None);
+
+pub fn unix_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
+        .as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// Open an exclusive host-local namespace. Stream identities include the measurement
+/// boundary, so a changed threshold cannot reinterpret old bad counters.
+pub fn install(path: &Path, node: &str, streams: Vec<String>) -> Result<()> {
+    ensure!(streams.iter().all(|stream| !stream.is_empty() && stream.len() <= 256),
+        "native SLO stream identity must contain 1..=256 bytes");
+    let mut guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    ensure!(guard.is_none(), "native SLO evidence is already installed");
+    let db = open(path, node)?;
+    let now = unix_ms();
+    db.execute(/* sqlite-large-value: allow-for-now lv-h1600ef705393 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_minutes_v1 WHERE slot >= ?1", [now / MINUTE])?;
+    db.execute(/* sqlite-large-value: allow-for-now lv-h0a7bcaadb3af owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_gauges_v1 WHERE at_ms > ?1", [now])?;
+    *guard = Some(Ledger { db, streams, pending: BTreeMap::new(), started_ms: now,
+        last_ms: now, last_instant: Instant::now(), committed_through_ms: now / MINUTE * MINUTE });
+    Ok(())
+}
+
+fn open(path: &Path, node: &str) -> Result<Connection> {
+    ensure!(!node.is_empty() && node.len() <= 256,
+        "native SLO node identity must contain 1..=256 bytes");
+    let mut db = Connection::open(path)?;
+    db.execute_batch(/* sqlite-large-value: allow-for-now lv-h7d555c9c34a2 owner=smallclaims::windows::budgets TODO=chunk-or-reference-variable-columns */ "PRAGMA synchronous = FULL;
+        CREATE TABLE IF NOT EXISTS native_slo_owner_v1 (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            node TEXT NOT NULL CHECK(length(CAST(node AS BLOB)) BETWEEN 1 AND 256)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS native_slo_minutes_v1 (
+            stream TEXT NOT NULL CHECK(length(CAST(stream AS BLOB)) BETWEEN 1 AND 256),
+            slot INTEGER NOT NULL CHECK(slot >= 0),
+            eligible INTEGER NOT NULL CHECK(eligible >= 0),
+            bad INTEGER NOT NULL CHECK(bad >= 0 AND bad <= eligible),
+            PRIMARY KEY(stream, slot)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS native_slo_gauges_v1 (
+            stream TEXT NOT NULL CHECK(length(CAST(stream AS BLOB)) BETWEEN 1 AND 256),
+            at_ms INTEGER NOT NULL CHECK(at_ms >= 0),
+            value REAL, PRIMARY KEY(stream, at_ms)
+        ) STRICT;")?;
+    let tx = db.transaction()?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h64986a2ae91d owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO native_slo_owner_v1 VALUES(1, ?1)", [node])?;
+    let owner: String = tx.query_row("SELECT node FROM native_slo_owner_v1 WHERE singleton=1", [], |r| r.get(0))?;
+    ensure!(owner == node, "native SLO evidence belongs to another node");
+    tx.commit()?;
+    Ok(db)
+}
+
+/// No disk I/O on the measurement path. Only commissioned stream names are accepted.
+pub fn record(stream: &str, bad: bool) {
+    let mut guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(ledger) = guard.as_mut() else { return; };
+    let now = unix_ms();
+    let Some(index) = ledger.streams.iter().position(|s| s == stream) else { return; };
+    let slot = now / MINUTE;
+    if !ledger.pending.contains_key(&(index, slot)) {
+        // Prune only on a new minute, never scan retained slots for every request.
+        ledger.pending.retain(|(_, slot), _| slot.saturating_mul(MINUTE) >= now.saturating_sub(HORIZON));
+    }
+    let counts = ledger.pending.entry((index, slot)).or_default();
+    counts.eligible = counts.eligible.saturating_add(1);
+    counts.bad = counts.bad.saturating_add(u64::from(bad));
+}
+
+/// Persist only a fully observed preceding minute. A late checkpoint, clock discontinuity,
+/// or restart leaves a gap. Repeated checkpoints within a minute never duplicate counts.
+pub fn checkpoint() -> Result<()> {
+    let mut guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(ledger) = guard.as_mut() else { return Ok(()); };
+    ledger.checkpoint_at(unix_ms(), Instant::now())
+}
+
+impl Ledger {
+    fn checkpoint_at(&mut self, now: u64, instant: Instant) -> Result<()> {
+        let end = now / MINUTE * MINUTE;
+        let elapsed = instant.saturating_duration_since(self.last_instant).as_millis() as u64;
+        let continuous = now >= self.last_ms && now - self.last_ms <= 90_000
+            && (now - self.last_ms).abs_diff(elapsed) <= 2_000;
+        let start = end.saturating_sub(MINUTE);
+        let complete = continuous && self.started_ms <= start;
+        let tx = self.db.transaction()?;
+        if end > self.committed_through_ms && complete {
+            for (index, stream) in self.streams.iter().enumerate() {
+                let counts = self.pending.get(&(index, start / MINUTE));
+                let eligible = counts.map_or(0, |c| c.eligible);
+                let bad = counts.map_or(0, |c| c.bad);
+                let prior: Option<(u64, u64)> = tx.query_row(
+                    "SELECT eligible,bad FROM native_slo_minutes_v1 WHERE stream=?1 AND slot=?2",
+                    params![stream, start / MINUTE], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                ensure!(prior.is_none_or(|p| p == (eligible, bad)), "conflicting native SLO minute receipt");
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h4d65f8fccc90 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO native_slo_minutes_v1 VALUES(?1,?2,?3,?4)",
+                    params![stream, start / MINUTE, eligible, bad])?;
+            }
+        }
+        if now < self.last_ms || !continuous {
+            // Old receipts from a clock's future must not become evidence again later.
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hb93ffd756510 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_minutes_v1 WHERE slot >= ?1", [start / MINUTE])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h473cc127dd19 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_gauges_v1 WHERE at_ms > ?1", [now])?;
+            self.pending.clear();
+            self.started_ms = now;
+        }
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h5b9949116852 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_minutes_v1 WHERE slot < ?1", [end.saturating_sub(HORIZON) / MINUTE])?;
+        // Two hours of predecessor allowance is sufficient for the hourly native gauge.
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4403777bcdfb owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_gauges_v1 WHERE at_ms < ?1",
+            [now.saturating_sub(HORIZON + 2 * 60 * MINUTE)])?;
+        tx.commit()?;
+        self.pending.retain(|(_, slot), _| *slot >= end / MINUTE);
+        self.committed_through_ms = end;
+        self.last_ms = now;
+        self.last_instant = instant;
+        Ok(())
+    }
+}
+
+/// Evidence, not a verdict. Windows advance with UTC time even if checkpointing stops.
+/// Incomplete source coverage cannot establish an event denominator for the missing time.
+pub fn report(stream: &str) -> Result<Value> {
+    let guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(ledger) = guard.as_ref() else { return Ok(json!({"available": false, "windows": {}})); };
+    report_at(ledger, stream, unix_ms())
+}
+
+fn report_at(ledger: &Ledger, stream: &str, now_ms: u64) -> Result<Value> {
+    let end = now_ms / MINUTE * MINUTE;
+    let newest_slot: Option<u64> = ledger.db.query_row(
+        "SELECT max(slot) FROM native_slo_minutes_v1 WHERE stream=?1 AND slot<?2",
+        params![stream, end / MINUTE], |row| row.get(0))?;
+    let mut windows = serde_json::Map::new();
+    for (name, width) in WINDOWS {
+        let (minutes, eligible, bad): (u64, u64, u64) = ledger.db.query_row(
+            "SELECT count(*),coalesce(sum(eligible),0),coalesce(sum(bad),0)
+             FROM native_slo_minutes_v1 WHERE stream=?1 AND slot>=?2 AND slot<?3",
+            params![stream, end.saturating_sub(width) / MINUTE, end / MINUTE],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        windows.insert(name.to_owned(), json!({
+            "eligible": eligible, "bad": bad, "good": eligible.saturating_sub(bad),
+            "covered_ms": minutes * MINUTE, "unknown_ms": width.saturating_sub(minutes * MINUTE),
+            "receipt_count": minutes,
+            "window_ms": width, "from_unix_ms": end.saturating_sub(width), "through_unix_ms": end,
+            "coverage": minutes as f64 * MINUTE as f64 / width as f64,
+        }));
+    }
+    Ok(json!({"available": true, "source": "native-minute-ledger-v1", "stream": stream,
+        "through_unix_ms": end, "committed_through_unix_ms": ledger.committed_through_ms,
+        "newest_receipt_through_unix_ms": newest_slot.map(|slot| (slot + 1) * MINUTE), "windows": windows}))
+}
+
+/// Gauge samples are infrequent source observations, not request-path operations.
+/// Persist the source timestamp, never the time somebody read the newest sample.
+pub fn record_gauge(stream: &str, at_ms: u64, value: Option<f64>) -> Result<()> {
+    ensure!(!stream.is_empty() && stream.len() <= 256,
+        "native SLO stream identity must contain 1..=256 bytes");
+    ensure!(value.is_none_or(f64::is_finite), "native SLO gauge must be finite");
+    let guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(ledger) = guard.as_ref() else { return Ok(()); };
+    let prior: Option<Option<f64>> = ledger.db.query_row("SELECT value FROM native_slo_gauges_v1 WHERE stream=?1 AND at_ms=?2",
+        params![stream, at_ms], |r| r.get(0)).optional()?;
+    ensure!(prior.is_none_or(|p| p == value), "conflicting native SLO gauge sample");
+    ledger.db.execute(/* sqlite-large-value: allow-for-now lv-ha0bcfcb764ac owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO native_slo_gauges_v1 VALUES(?1,?2,?3)", params![stream, at_ms, value])?;
+    Ok(())
+}
+
+/// Integrate finite forward holds, clipped by the next observation and maximum age.
+/// Missing time remains unknown, not healthy or an extrapolated event rate.
+pub fn gauge_report(stream: &str, now: u64, max_age_ms: u64, bad_above: f64) -> Result<Value> {
+    let guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(ledger) = guard.as_ref() else { return Ok(json!({"available": false, "windows": {}})); };
+    let mut query = ledger.db.prepare("SELECT at_ms,value FROM native_slo_gauges_v1 WHERE stream=?1 AND at_ms<=?2 AND at_ms>=?3 ORDER BY at_ms")?;
+    let samples = query.query_map(params![stream, now, now.saturating_sub(HORIZON.saturating_add(max_age_ms))],
+        |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Option<f64>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut windows = serde_json::Map::new();
+    for (name, width) in WINDOWS {
+        let (covered, bad, contributing_samples) = integrate(&samples, now.saturating_sub(width), now, max_age_ms, bad_above);
+        windows.insert(name.to_owned(), json!({"eligible": covered, "bad": bad, "good": covered - bad,
+            "covered_ms": covered, "unknown_ms": width.saturating_sub(covered), "window_ms": width,
+            "samples": contributing_samples,
+            "from_unix_ms": now.saturating_sub(width), "through_unix_ms": now,
+            "coverage": covered as f64 / width as f64}));
+    }
+    Ok(json!({"available": true, "source": "native-gauge-ledger-v1", "stream": stream,
+        "through_unix_ms": samples.last().map(|(at, _)| at), "max_age_ms": max_age_ms, "windows": windows}))
+}
+
+fn integrate(samples: &[(u64, Option<f64>)], from: u64, through: u64, max_age: u64, threshold: f64) -> (u64, u64, u64) {
+    let mut covered = 0;
+    let mut bad = 0;
+    let mut contributing_samples = 0;
+    for (index, &(at, value)) in samples.iter().enumerate() {
+        let Some(value) = value else { continue; };
+        let end = samples.get(index + 1).map_or(through, |(next, _)| *next)
+            .min(at.saturating_add(max_age)).min(through);
+        let held = end.saturating_sub(at.max(from));
+        contributing_samples += u64::from(held > 0);
+        covered += held;
+        if value > threshold { bad += held; }
+    }
+    (covered, bad, contributing_samples)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gauge_holds_expire_and_clip_without_filling_gaps() {
+        assert_eq!(integrate(&[(0, Some(2.0)), (200, Some(0.0))], 50, 400, 100, 1.0), (150, 50, 2));
+        assert_eq!(integrate(&[(0, Some(1.0))], 0, 100, 100, 1.0), (100, 0, 1));
+        assert_eq!(integrate(&[(0, Some(0.0)), (50, None)], 0, 100, 100, 1.0), (50, 0, 1));
+    }
+
+    #[test]
+    fn predecessor_readings_count_only_when_their_hold_contributes_to_the_window() {
+        let readings = [(0, Some(2.0)), (200, Some(0.0)), (400, Some(2.0))];
+        assert_eq!(integrate(&readings, 250, 400, 200, 1.0), (150, 0, 1));
+        assert_eq!(integrate(&readings, 250, 400, 40, 1.0), (0, 0, 0));
+        assert_eq!(integrate(&[(200, None)], 250, 400, 200, 1.0), (0, 0, 0));
+    }
+
+    #[test]
+    fn durable_receipts_survive_reopen_but_restart_minutes_are_unknown() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("native.sqlite");
+        let instant = Instant::now();
+        let mut ledger = Ledger { db: open(&path, "node-a")?, streams: vec!["read/300".into()],
+            pending: BTreeMap::new(), started_ms: 0, last_ms: 0, last_instant: instant, committed_through_ms: 0 };
+        ledger.pending.insert((0, 0), Counts { eligible: 100, bad: 5 });
+        ledger.checkpoint_at(MINUTE, instant + std::time::Duration::from_secs(60))?;
+        drop(ledger);
+        let db = open(&path, "node-a")?;
+        let count: u64 = db.query_row("SELECT eligible FROM native_slo_minutes_v1", [], |r| r.get(0))?;
+        assert_eq!(count, 100);
+        assert!(open(&path, "node-b").is_err());
+        let mut restarted = Ledger { db, streams: vec!["read/300".into()], pending: BTreeMap::new(),
+            started_ms: MINUTE + 10_000, last_ms: MINUTE + 10_000, last_instant: instant,
+            committed_through_ms: MINUTE };
+        restarted.checkpoint_at(2 * MINUTE, instant + std::time::Duration::from_secs(50))?;
+        let receipts: u64 = restarted.db.query_row("SELECT count(*) FROM native_slo_minutes_v1", [], |r| r.get(0))?;
+        assert_eq!(receipts, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn late_checkpoint_does_not_invent_quiet_coverage() -> Result<()> {
+        let instant = Instant::now();
+        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()],
+            pending: BTreeMap::new(), started_ms: 0, last_ms: 0, last_instant: instant, committed_through_ms: 0 };
+        ledger.checkpoint_at(3 * MINUTE, instant + std::time::Duration::from_secs(180))?;
+        let count: u64 = ledger.db.query_row("SELECT count(*) FROM native_slo_minutes_v1", [], |r| r.get(0))?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn thirty_day_retention_keeps_the_real_oldest_in_window_receipt() -> Result<()> {
+        let instant = Instant::now();
+        let now = HORIZON + MINUTE;
+        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()],
+            pending: BTreeMap::new(), started_ms: 0, last_ms: now - MINUTE, last_instant: instant,
+            committed_through_ms: now - MINUTE };
+        for (slot, count) in [(0, 999), (1, 20), (100, 30)] {
+            ledger.db.execute("INSERT INTO native_slo_minutes_v1 VALUES('x',?1,?2,0)", params![slot, count])?;
+        }
+        ledger.checkpoint_at(now, instant + std::time::Duration::from_secs(60))?;
+        let eligible: u64 = ledger.db.query_row("SELECT sum(eligible) FROM native_slo_minutes_v1", [], |r| r.get(0))?;
+        assert_eq!(eligible, 50);
+        // A second checkpoint at the same cut cannot create a duplicate receipt.
+        ledger.checkpoint_at(now, instant + std::time::Duration::from_secs(60))?;
+        let receipts: u64 = ledger.db.query_row("SELECT count(*) FROM native_slo_minutes_v1", [], |r| r.get(0))?;
+        assert_eq!(receipts, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn regular_checkpoint_jitter_preserves_complete_minutes_and_failures_age_out() -> Result<()> {
+        let instant = Instant::now();
+        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()],
+            pending: BTreeMap::new(), started_ms: 5, last_ms: 5, last_instant: instant,
+            committed_through_ms: 0 };
+        for tick in 1..=7 {
+            ledger.checkpoint_at(tick * MINUTE + 5,
+                instant + std::time::Duration::from_secs(tick * 60))?;
+        }
+        let receipts: u64 = ledger.db.query_row("SELECT count(*) FROM native_slo_minutes_v1", [], |r| r.get(0))?;
+        assert_eq!(receipts, 6); // The startup partial minute alone is excluded.
+        let active = report_at(&ledger, "x", 7 * MINUTE + 5)?;
+        assert_eq!(active["windows"]["5m"]["covered_ms"], 5 * MINUTE);
+        let stopped = report_at(&ledger, "x", 13 * MINUTE + 5)?;
+        assert_eq!(stopped["through_unix_ms"], 13 * MINUTE);
+        assert_eq!(stopped["committed_through_unix_ms"], 7 * MINUTE);
+        assert_eq!(stopped["windows"]["5m"]["covered_ms"], 0);
+        assert_eq!(stopped["windows"]["5m"]["unknown_ms"], 5 * MINUTE);
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_schema_bounds_node_and_stream_identity_bytes() -> Result<()> {
+        assert!(open(Path::new(":memory:"), &"n".repeat(257)).is_err());
+        let db = open(Path::new(":memory:"), "node")?;
+        assert!(db.execute("INSERT INTO native_slo_minutes_v1 VALUES(?1,0,0,0)", [&"x".repeat(257)]).is_err());
+        assert!(db.execute("INSERT INTO native_slo_gauges_v1 VALUES(?1,0,1)", [&"é".repeat(129)]).is_err());
+        Ok(())
+    }
+}
