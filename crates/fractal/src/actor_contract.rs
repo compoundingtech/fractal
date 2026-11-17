@@ -231,6 +231,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn continuity_contract_distinguishes_read_previews_from_attributed_recovery() {
+        let value = generate(super::super::command_graph());
+        let commands = &value["contract"]["commands"];
+        for path in [
+            "st missions run continuity preview",
+            "st missions run continuity startup-preview",
+        ] {
+            assert_eq!(commands[path]["actor"], "none", "{path}");
+            assert_eq!(commands[path]["can_carry_person"], false, "{path}");
+        }
+        let recover = &commands["st missions run continuity recover"];
+        assert_eq!(recover["actor"], "required");
+        assert_eq!(recover["accepts_person"], true);
+        assert_eq!(recover["can_carry_person"], true);
+        assert_eq!(recover["as_role"], "actor");
+        assert_eq!(recover["actor_environment"], Value::Null);
+    }
+
     fn assert_reviewed_configured_person_families(command: clap::Command) {
         let inventory = super::super::read_contract_inventory_for_command(command);
         let paths = inventory["commands"].as_array().unwrap();

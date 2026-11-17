@@ -198,6 +198,7 @@ mod native_delivery;
 pub mod replication;
 mod replication_replay;
 mod runs;
+mod continuity;
 mod agent_invocations;
 pub mod sessions;
 pub mod work;
@@ -995,6 +996,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/evals/{*run}", get(runs::get_eval))
         .route("/v1/mission-runs", get(runs::list_mission_runs))
         .route("/v1/mission-runs/tree", get(runs::list_mission_run_tree))
+        .route("/v1/mission-runs/continuity/preview", post(continuity::preview))
+        .route("/v1/mission-runs/continuity/recover", post(continuity::recover))
+        .route("/v1/mission-runs/continuity/startup-preview", get(continuity::startup_preview))
         .route("/v1/mission-overview", get(runs::mission_overview))
         .route("/v1/outcome-history", get(runs::outcome_history))
         .route("/v1/performance", get(runs::performance_report))
@@ -1195,6 +1199,8 @@ async fn response_envelope_unbounded(
     let effect_resolution = request.method() == axum::http::Method::POST
         && request.uri().path().starts_with("/v1/effects/")
         && request.uri().path().ends_with("/resolve");
+    let continuity_recovery = request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/mission-runs/continuity/recover";
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -1297,6 +1303,7 @@ async fn response_envelope_unbounded(
     // Bearers on native Unix routes must not evade the assistant route boundary.
     let (client_authentication, client_snapshot) = if client_request
         || effect_resolution
+        || continuity_recovery
         || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
