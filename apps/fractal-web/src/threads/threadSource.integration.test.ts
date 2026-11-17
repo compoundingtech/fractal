@@ -815,7 +815,7 @@ it('retains a protected Start retry and its accepted child when fresh capabiliti
     const repository = await outbox.repository()
     const accepted = await repository!.list()
     expect(accepted).toHaveLength(2)
-    const child = accepted.find(entry => entry.id.endsWith('/retry'))!
+    const child = accepted.flatMap(entry => entry._tag === 'record' && entry.record.id.endsWith('/retry') ? [entry.record] : [])[0]!
     expect(child).toMatchObject({ state: 'pending', phase: 'preparing', mayHaveDispatched: false })
     failAfterRevalidation = false
     // The access observer may have seen the same outage; retry refreshes grants without replacing the owner.

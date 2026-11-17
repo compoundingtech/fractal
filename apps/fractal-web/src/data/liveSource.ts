@@ -1017,7 +1017,7 @@ export const liveSource = ({
         } else if (result._tag === 'Refused' && result.reason !== 'storage' && result.reason !== 'identity-unavailable') {
           local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
             ? { _tag: 'Unconfirmed', detail: result.detail }
-            : { _tag: 'Failed', reason: result.reason, detail: result.detail } }
+            : { _tag: 'Failed', reason: result.reason === 'retry-refused' ? 'failed' : result.reason, detail: result.detail } }
         } else if (result._tag === 'Success' && result.value.status === 'completed') {
           const affected = result.value.affected_ids.filter((affected) => affected.startsWith('message/'))
           if (affected.length > 0) timeline.keepOwnSendId(affected, id)

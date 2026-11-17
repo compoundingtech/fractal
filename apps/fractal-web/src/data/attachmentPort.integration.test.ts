@@ -321,11 +321,12 @@ describe('chat durable gateway delivery', () => {
         if (!refusing || await repo.read(`${key}/retry`) === undefined) return capabilities()
         childCapabilityReads++
         if (failure === 'capability') throw new TypeError('Capability discovery unavailable')
+        const response = await capabilities()
         if (failure === 'actor' || failure === 'dispatch-scope' && childCapabilityReads === 2) {
-          return { ...base, value: { ...base.value, session_actor: 'person/other' } }
+          return { ...response, value: { ...response.value, session_actor: 'person/other' } }
         }
-        if (failure === 'grant') return { ...base, value: { ...base.value, capabilities: [] } }
-        return capabilities()
+        if (failure === 'grant') return { ...response, value: { ...response.value, capabilities: [] } }
+        return response
       })
       const readSpool = repo.readSpool.bind(repo)
       vi.spyOn(repo, 'readSpool').mockImplementation(async (id, hash) =>
