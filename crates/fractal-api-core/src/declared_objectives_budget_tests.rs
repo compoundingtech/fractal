@@ -20,7 +20,7 @@ fn tracked(gauge: Option<Gauge>) -> Tracked {
     Tracked {
         revision: "revision".into(), claim_id: "declaration".into(),
         objective: Ok(Objective { name: "example/quality".into(), about: "Example quality".into(), indicator, window: Some(Window { ms: policy().horizon_ms, min_samples: 1 }), budget: Some(policy()), targets: Vec::new(), on_breach: None }),
-        cursor: 0, samples: BTreeMap::new(), events: BTreeMap::new(), numeric: Observations::default(), seen: false, labels: BTreeMap::new(), unreadable: 0, ids: BTreeSet::new(), native_ids: BTreeSet::new(),
+        cursor: 0, samples: BTreeMap::new(), events: BTreeMap::new(), numeric: Observations::default(), seen: false, labels: BTreeMap::new(), unreadable: 0, ids: BTreeSet::new(),
     }
 }
 fn point(tracked: &mut Tracked, source: &str, at: u64, value: Option<f64>) {
