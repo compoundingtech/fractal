@@ -15,6 +15,8 @@ public enum PanelMetrics {
   /// The split is never shorter than this (less on a short screen): the detail's pinned answers
   /// and the start of its request share the column even beside a short page.
   static let splitMinHeight: CGFloat = 560
+  /// One appearance-aware tint over the window's glass: leave 55% of its backdrop contrast.
+  static let surfaceTintOpacity: Double = 0.45
   /// Leading and trailing content inset: titles, rows and section labels share this edge.
   static let inset: CGFloat = 14
   /// The hover highlight's inset from the panel edge and its corner radius.
@@ -343,7 +345,8 @@ extension ButtonStyle where Self == PanelRowButtonStyle {
   static func panelRow(selected: Bool) -> PanelRowButtonStyle { .init(selected: selected) }
 }
 
-/// A content-layer group (Control Center's platter, without glass: the panel is the glass).
+/// A content-layer group (Control Center's platter, without extra glass).
+/// The panel's window supplies the glass, with one shared root tint beneath all content.
 struct Platter<Content: View>: View {
   var padding: CGFloat = 10
   @ViewBuilder let content: () -> Content

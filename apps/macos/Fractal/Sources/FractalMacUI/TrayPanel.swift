@@ -5,8 +5,8 @@ import SwiftUI
 
 /// The menu-bar panel as a Control Center module: the top level (tiles, the inbox as one-line
 /// rows, the footer), and the pages drilled into from it, pushed within the same panel with a
-/// back chevron. It draws no background of its own: the menu-bar window's glass is the surface,
-/// and content sits on it in the content layer.
+/// back chevron. The menu-bar window supplies the glass; one light, appearance-aware tint
+/// beneath both columns softens busy backgrounds without adding another glass layer.
 ///
 /// A card is not pushed: it opens beside the page its row is on, and the panel widens into a
 /// list | detail split (`PanelMetrics.detailWidth` more), as Mail and Messages show a message
@@ -26,6 +26,7 @@ public struct TrayPanel: View {
   let build: BuildIdentity
   @Environment(\.panelWidth) private var width
   @Environment(\.panelAvailableHeight) private var availableHeight
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   /// The panel has appeared: pages it shows from now on arrive with motion. The pages it
   /// opens with (and a single-frame render) stand still.
   @State private var isShown = false
@@ -79,6 +80,8 @@ public struct TrayPanel: View {
           .transaction { $0.animation = nil }
       }
     }
+    // The system supplies an opaque surface for Reduce Transparency; do not tint it again.
+    .background(Color(nsColor: .windowBackgroundColor).opacity(reduceTransparency ? 0 : PanelMetrics.surfaceTintOpacity))
     .background(PanelFrameMarker(route: model.route))
     // Set here, not on the scene: macOS 27 resets control size inside menu-bar windows.
     .controlSize(.regular)
