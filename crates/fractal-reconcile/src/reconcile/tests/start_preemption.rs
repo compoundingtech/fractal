@@ -327,7 +327,7 @@ async fn launch_freeze_defers_a_durable_operation_then_launches_it_once() {
         "freeze-queue");
     let writer = store.clone();
     tokio::task::spawn_blocking(move || writer.set_launch_freeze(
-        "person/operator", "activation", "replace daemon", 60_000)).await.unwrap().unwrap();
+        "person/operator", "activation", "replace daemon", 60_000, 5_000)).await.unwrap().unwrap();
     assert!(launch(&reconciler, "agent/example/queued"));
     let operation = store.runtime_start_for("agent/example/queued").unwrap().unwrap();
     assert!(!operation.dispatched);
@@ -343,6 +343,55 @@ async fn launch_freeze_defers_a_durable_operation_then_launches_it_once() {
     assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
     assert!(store.runtime_start_for("agent/example/queued").unwrap().is_none());
     reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn launch_freeze_restart_adopts_the_same_queued_operation() {
+    let (directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "freeze-restart");
+    store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 0).unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    let queued = store.runtime_start_for("agent/example/queued").unwrap().unwrap();
+    drop(reconciler);
+    let reopened = Arc::new(Store::open(&directory.path().join("claims.db"), "node").unwrap());
+    let restarted = Arc::new(Reconciler::new(reopened.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new())));
+    restarted.wait_for_test_starts.store(false, Ordering::Release);
+    restarted.reconcile_start_jobs().unwrap();
+    assert!(!reopened.runtime_start_for("agent/example/queued").unwrap().unwrap().dispatched);
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    reopened.clear_launch_freeze("person/operator", "activation").unwrap();
+    restarted.reconcile_start_jobs().unwrap();
+    workers_done(&restarted).await;
+    restarted.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
+    assert!(reopened.runtime_start_for("agent/example/queued").unwrap().is_none());
+    let completed = reopened.pending_runtime_starts().unwrap();
+    assert!(completed.iter().all(|operation| operation.id != queued.id));
+}
+
+#[tokio::test]
+async fn launch_freeze_expiry_wakes_the_real_loop_without_an_external_event() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "freeze-expiry");
+    store.set_launch_freeze("person/operator", "activation", "replace daemon", 100, 0).unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    let task = tokio::spawn(reconciler.clone().run());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if runtime.inner.starts.lock().unwrap().len() == 1 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    task.abort();
+    let _ = task.await;
+    workers_done(&reconciler).await;
+    assert!(store.launch_freeze().unwrap().is_none());
     assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
 }
 

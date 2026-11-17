@@ -192,17 +192,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
-        if let Some(freeze) = self.store.launch_freeze()? {
-            self.arm_deadline_at("launch-freeze", u128::from(freeze.expires_at_unix_ms),
-                crate::reconcile_telemetry::WakeCause::Deadline);
-            return Ok(());
-        }
         let Some(launch_permit) = self.store.admit_launch()? else {
+            if let Some(freeze) = self.store.launch_freeze()? {
+                self.arm_deadline_at("launch-freeze", u128::from(freeze.expires_at_unix_ms),
+                    crate::reconcile_telemetry::WakeCause::Deadline);
+            }
             return Ok(());
         };
         let Some(lock) = self.store.try_runtime_start_lock(&operation.subject)? else {
             return Ok(());
         };
+        if operation.owner != self.start_jobs.owner
+            && !self.store.adopt_queued_runtime_start(&operation.id, &self.start_jobs.owner)?
+        {
+            return Ok(());
+        }
         if !self
             .store
             .dispatch_runtime_start(&operation.id, MAX_START_JOBS)?
@@ -218,7 +222,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let live = self.start_jobs.live.clone();
         let id = operation.id.clone();
         let subject = operation.subject.clone();
-        let owner = operation.owner.clone();
+        let owner = self.start_jobs.owner.clone();
         live.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -425,7 +429,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&operation.id);
         if !operation.finished
-            && (operation.owner != self.start_jobs.owner || (operation.dispatched && !live))
+            && operation.dispatched && (operation.owner != self.start_jobs.owner || !live)
         {
             // The kernel lock, not a PID guess, establishes that no old launch worker holds
             // admission. Late producer ownership still needs exact operation provenance.

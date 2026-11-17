@@ -2426,7 +2426,7 @@ pub struct Store {
     usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
-    pub launch_admission: Arc<tokio::sync::RwLock<()>>,
+    launch_admission: Arc<launch_freeze::Admission>,
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
