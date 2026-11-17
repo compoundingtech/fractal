@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Native one-shot agents register their exact live launch incarnation before their command can claim work, removing timing-dependent startup refusals",
+  "replay": {"status": "none", "detail": "Existing runtime observations remain authoritative; no graph replay."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "Work incarnation liveness remains running-only; unpublished and stale incarnations remain refused."},
+  "compatibility": {"status": "none", "detail": "No public API change. Native launch completion now releases a held command only after its existing desired/start-operation fence commits running authority, exporting the exact ST3_INCARNATION and FRACTAL_INCARNATION. Inherited incarnation aliases are discarded."},
+  "downtime": {"status": "none", "detail": "No service interruption; already-running commands are unchanged."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Registration refusal or write failure cancels the unreleased command and retires its exact operation-owned runtime through the existing native cleanup path."}
+}

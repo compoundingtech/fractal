@@ -1,5 +1,6 @@
 //! Each test owns its store and Unix listener; no fleet daemon or seat is touched.
 use super::*;
+use crate::RuntimeStartsStore;
 
 const SEAT: &str = "agent/garden/chooser";
 
@@ -19,6 +20,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(bound: bool) -> Self {
+        Self::with_runtime(bound, true).await
+    }
+
+    async fn with_runtime(bound: bool, running: bool) -> Self {
         fn chooser(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
             HarnessAncestry::Bound(SEAT.into())
         }
@@ -102,7 +107,9 @@ mission "catalog" state="ready" {
             server,
             step,
         };
-        fixture.runtime("chooser:one");
+        if running {
+            fixture.runtime("chooser:one");
+        }
         fixture
     }
 
@@ -140,6 +147,99 @@ mission "catalog" state="ready" {
             .unwrap();
     }
 
+    fn admit_launch(&self, operation: &str) {
+        let selected = self.state.store.selected_desired_token(SEAT).unwrap();
+        let desired = self.state.store.desired_subjects_named(&[SEAT.into()])
+            .unwrap().remove(0);
+        let mut start = crate::store::runtime_starts::RuntimeStartOperation {
+            id: operation.into(),
+            subject: SEAT.into(),
+            owner: "api-incarnation-test".into(),
+            body: json!({"subject":desired, "selected_token":selected,
+                "desired_token":"api-incarnation-test",
+                "member":{"runtime_id":SEAT, "terminal":true}}),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        self.state.store.admit_runtime_start(&mut start, 2).unwrap();
+        assert_eq!(
+            self.state.store.runtime_start_for(SEAT).unwrap().unwrap().id,
+            operation
+        );
+    }
+
+    fn register_launch(&self, admitted: &str, observed_operation: &str) -> bool {
+        self.state.store.finish_runtime_start(admitted, &json!({
+            "incarnation":"chooser:one", "verification":"operation-incarnation"
+        })).unwrap();
+        let input = |kind: &str, fields: BTreeMap<String, Value>| ClaimInput {
+            subject: SEAT.into(),
+            kind: kind.into(),
+            actor: None,
+            fields,
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let succeeded = input("runtime.action.succeeded", BTreeMap::from([
+            ("action".into(), json!("start")),
+            ("operation".into(), json!(observed_operation)),
+            ("runtime_id".into(), json!(SEAT)),
+            ("terminal".into(), json!(true)),
+            ("desired_token".into(), json!("api-incarnation-test")),
+            ("incarnation_id".into(), json!("chooser:one")),
+        ]));
+        let observed = input("runtime.observed", BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("runtime_id".into(), json!(SEAT)),
+            ("terminal".into(), json!(true)),
+            ("incarnation_id".into(), json!("chooser:one")),
+        ]));
+        self.state.store.apply_runtime_start_result(admitted, &[succeeded, observed]).unwrap()
+    }
+
+    fn completion(&self, actor: &str, incarnation: &str, key: &str) -> Value {
+        let document = self.state.store
+            .put_document("doc/garden/fence-result", b"Garden result", &None, "fence-result")
+            .unwrap();
+        json!({"actor":actor, "incarnation":incarnation,
+            "evidence":[format!("{}@{}", document.name, document.hash)],
+            "idempotency_key":key})
+    }
+
+    async fn completion_refused(&self, body: Value, code: &str) {
+        let snapshot = || {
+            let mut view = serde_json::to_value(
+                self.state.store.step_run(&self.step).unwrap().unwrap()
+            ).unwrap();
+            // Read-time clocks advance without a write; all durable fields must stay exact.
+            let fields = view.as_object_mut().unwrap();
+            fields.remove("execution_elapsed_ms");
+            fields.remove("ready_age_ms");
+            view
+        };
+        let before = snapshot();
+        let error = self.client.post::<_, Value>(
+            &format!("/v1/work/complete/{}", self.step), &body
+        ).await.unwrap_err();
+        assert_eq!(crate::client::api_error_code(&error), Some(code), "{error:#}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "a refused launch must not mutate the work claim"
+        );
+        assert!(self.state.store.latest_claim(&self.step, Some("work.submitted"))
+            .unwrap().is_none());
+        assert!(self.state.store.cached_idempotency_response::<StepRunView>(
+            body["idempotency_key"].as_str().unwrap()
+        ).unwrap().is_none());
+    }
+
     fn ask(&self) -> Value {
         json!({"person":"person/ada", "title":"Choose a format", "reason":"The catalog needs a format.",
             "actor":SEAT, "step":self.step, "idempotency_key":"format",
@@ -166,6 +266,111 @@ mission "catalog" state="ready" {
         );
         message
     }
+}
+
+#[tokio::test]
+async fn unknown_incarnation_cannot_submit_work() {
+    let fixture = Fixture::with_runtime(false, false).await;
+    fixture.completion_refused(
+        fixture.completion(SEAT, "chooser:one", "unknown-launch"),
+        "inactive-work-incarnation",
+    ).await;
+}
+
+#[tokio::test]
+async fn admitted_launch_without_running_registration_cannot_submit_work() {
+    let fixture = Fixture::with_runtime(false, false).await;
+    fixture.admit_launch("admitted-only");
+    fixture.completion_refused(
+        fixture.completion(SEAT, "chooser:one", "admitted-launch"),
+        "inactive-work-incarnation",
+    ).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn foreign_actor_cannot_submit_with_the_bound_launch() {
+    let fixture = Fixture::new(true).await;
+    fixture.completion_refused(
+        fixture.completion("agent/garden/other", "chooser:one", "foreign-launch"),
+        "foreign-agent-actor",
+    ).await;
+}
+
+#[tokio::test]
+async fn superseded_incarnation_cannot_submit_work() {
+    let fixture = Fixture::new(false).await;
+    fixture.runtime("chooser:two");
+    fixture.completion_refused(
+        fixture.completion(SEAT, "chooser:one", "superseded-launch"),
+        "inactive-work-incarnation",
+    ).await;
+}
+
+#[tokio::test]
+async fn ended_incarnation_cannot_submit_work() {
+    let fixture = Fixture::new(false).await;
+    fixture.state.store.append_claim(&ClaimInput {
+        subject: SEAT.into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("status".into(), json!("exited")),
+            ("incarnation_id".into(), json!("chooser:one")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    fixture.completion_refused(
+        fixture.completion(SEAT, "chooser:one", "ended-launch"),
+        "inactive-work-incarnation",
+    ).await;
+}
+
+#[tokio::test]
+async fn wrong_operation_cannot_register_a_launch_or_submit_work() {
+    let fixture = Fixture::with_runtime(false, false).await;
+    fixture.admit_launch("expected-operation");
+    // The caller supplies the claim's correct incarnation. Registration, not that
+    // supplied ID, must prevent a different operation from acquiring running authority.
+    assert!(!fixture.register_launch("expected-operation", "other-operation"));
+    for kind in ["runtime.action.succeeded", "runtime.observed"] {
+        assert!(fixture.state.store.latest_claim(SEAT, Some(kind)).unwrap().is_none());
+    }
+    fixture.completion_refused(
+        fixture.completion(SEAT, "chooser:one", "wrong-operation-launch"),
+        "inactive-work-incarnation",
+    ).await;
+}
+
+#[tokio::test]
+async fn proven_current_launch_can_submit_work_with_an_exact_receipt() {
+    let fixture = Fixture::with_runtime(false, false).await;
+    fixture.admit_launch("current-operation");
+    assert!(fixture.register_launch("current-operation", "current-operation"));
+    let running = fixture.state.store.latest_claim(SEAT, Some("runtime.observed"))
+        .unwrap().unwrap();
+    assert_eq!(running.body["fields"]["status"], "running");
+    assert_eq!(running.body["fields"]["incarnation_id"], "chooser:one");
+    let start = fixture.state.store.latest_claim(SEAT, Some("runtime.action.succeeded"))
+        .unwrap().unwrap();
+    assert_eq!(start.body["fields"]["operation"], "current-operation");
+    let body = fixture.completion(SEAT, "chooser:one", "current-launch");
+    let submitted: StepRunView = fixture.client.post(
+        &format!("/v1/work/complete/{}", fixture.step), &body
+    ).await.unwrap();
+    assert_eq!(submitted.submitted_incarnation.as_deref(), Some("chooser:one"));
+    assert!(submitted.claimant.is_none());
+    assert!(submitted.claim_incarnation.is_none());
+    let receipt = fixture.state.store.latest_claim(&fixture.step, Some("work.submitted"))
+        .unwrap().unwrap();
+    let evidence: Vec<String> = serde_json::from_value(body["evidence"].clone()).unwrap();
+    assert!(crate::model::work_submission_matches(
+        &receipt, &fixture.step, submitted.attempt, SEAT, Some("chooser:one"), &evidence
+    ));
+    assert_eq!(receipt.actor.as_deref(), Some(SEAT));
+    assert_eq!(receipt.body["fields"]["submitted_incarnation"], "chooser:one");
 }
 
 #[cfg(target_os = "linux")]

@@ -16,6 +16,8 @@ pub mod host;
 pub mod host_envelope;
 mod isolate;
 mod lane;
+mod launch_gate;
+pub use launch_gate::{LaunchRelease, NativeLaunchGate};
 mod priority;
 mod peer_process;
 mod process;

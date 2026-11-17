@@ -14,12 +14,14 @@ pub const OPERATION_ENV: &str = "ST3_START_OPERATION";
 pub struct StartJobs {
     owner: String,
     pub live: Arc<(Mutex<HashSet<String>>, Condvar)>,
+    pub(super) held: Arc<Mutex<HashMap<String, Box<dyn fractal_runtime::LaunchRelease>>>>,
 }
 impl Default for StartJobs {
     fn default() -> Self {
         Self {
             owner: uuid::Uuid::now_v7().to_string(),
             live: Arc::default(),
+            held: Arc::default(),
         }
     }
 }
@@ -208,6 +210,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let events = self.event_notify.clone();
         let incremental = self.incremental.clone();
         let live = self.start_jobs.live.clone();
+        let held_launches = self.start_jobs.held.clone();
         let id = operation.id.clone();
         let subject = operation.subject.clone();
         let owner = operation.owner.clone();
@@ -236,6 +239,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let mut backend_entered = false;
             let mut contract = None;
+            let mut held = None;
             let result = caught(|| {
                 guard()?;
                 if prepared.subject.kind == "agent" {
@@ -247,7 +251,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
                     runtime.start_resource_guarded(&store, &prepared.launch_member, &guard)?;
                 } else {
-                    runtime.start_guarded(&prepared.launch_member, &guard)?;
+                    held = if prepared.subject.kind == "agent" {
+                        runtime.start_held(&prepared.launch_member, &guard)?
+                    } else {
+                        runtime.start_guarded(&prepared.launch_member, &guard)?;
+                        None
+                    };
                 }
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
                     Ok(observation) => (observation, None),
@@ -292,6 +301,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             result["terminal"] = Value::from(prepared.member.terminal);
             result["start_request"] = Value::from(prepared.start_request);
             result["control_request"] = serde_json::json!(prepared.control_request);
+            if let Some(held) = held {
+                held_launches.lock().unwrap_or_else(PoisonError::into_inner).insert(id.clone(), held);
+            }
             if let Err(error) = store.finish_runtime_start(&id, &result) {
                 eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
             }
@@ -511,9 +523,30 @@ impl<R: RuntimeControl> Reconciler<R> {
                     Some(error) => Err(anyhow::anyhow!(error.to_owned())),
                     None => Ok(result["incarnation"].as_str().map(str::to_owned)),
                 };
-                let completed = self.finish_start(
+                let completed = match self.finish_start(
                     &operation.id, &prepared, outcome, result.get("launch_contract").filter(|value| !value.is_null()),
-                )?;
+                ) {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        self.cancel_held_start(&operation, &prepared)?;
+                        return Err(error);
+                    }
+                };
+                if matches!(&completed, StartCompletion::Applied(None)) {
+                    let held = self.start_jobs.held.lock().unwrap_or_else(PoisonError::into_inner)
+                        .remove(&operation.id);
+                    if let Some(held) = held {
+                        let incarnation = result["incarnation"].as_str()
+                            .context("registered held launch lacks incarnation")?;
+                        if let Err(error) = held.release(incarnation) {
+                            self.revoke_start(&operation.subject)?;
+                            self.cleanup_held_runtime(&operation, &prepared)?;
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    self.cancel_held_start(&operation, &prepared)?;
+                }
                 if let StartCompletion::Applied(Some(error)) = &completed {
                     if let Some(request) = &prepared.request
                         && self.store.runtime_start_request_retained(request)?
@@ -622,11 +655,43 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.start_changed(&operation.subject);
         }
         if operation.revoked_by.is_some() {
+            self.cancel_held_start(&operation, &prepared)?;
             self.cleanup_revoked_start(&operation, &prepared, snapshot)?;
         } else {
             self.start_queued_job(&operation)?;
         }
         Ok(())
+    }
+
+    fn cancel_held_start(&self, operation: &RuntimeStartOperation, prepared: &PreparedStart) -> Result<()> {
+        let held = self.start_jobs.held.lock().unwrap_or_else(PoisonError::into_inner)
+            .remove(&operation.id);
+        if let Some(held) = held {
+            // Keep the user command blocked through exact, provenance-fenced native
+            // retirement. Drop is cancellation, including when retirement errors.
+            let result = self.cleanup_held_runtime(operation, prepared);
+            drop(held);
+            result?;
+        }
+        Ok(())
+    }
+
+    fn cleanup_held_runtime(&self, operation: &RuntimeStartOperation, prepared: &PreparedStart) -> Result<()> {
+        self.revoke_start(&operation.subject)?;
+        let snapshot = PassPtySnapshot::new();
+        if prepared.member.terminal {
+            let mut physical = PtyRegistrySnapshot::default();
+            if let Some(observation) = self.runtime.observe_start(&prepared.member)? {
+                if let Some(incarnation) = &observation.incarnation_id
+                    && let Some(operation) = self.runtime.start_operation(&prepared.member.runtime_id, true, incarnation)?
+                {
+                    physical.start_operations.insert(prepared.member.runtime_id.clone(), (incarnation.clone(), operation));
+                }
+                physical.observations.push(observation);
+            }
+            let _ = snapshot.set(Ok(physical));
+        }
+        self.cleanup_revoked_start(operation, prepared, &snapshot)
     }
 
     fn cleanup_revoked_start(

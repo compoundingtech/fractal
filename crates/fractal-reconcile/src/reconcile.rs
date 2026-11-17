@@ -580,6 +580,12 @@ pub trait RuntimeControl: Send + Sync + 'static {
         guard()?;
         self.start(member)
     }
+    /// Allocate the actual native launch without releasing its user command. The
+    /// caller owns registration and must retire the exact runtime on refusal.
+    fn start_held(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<Option<Box<dyn fractal_runtime::LaunchRelease>>> {
+        self.start_guarded(member, guard)?;
+        Ok(None)
+    }
     /// A finite resource grant must never silently fall back to an ordinary detached start.
     fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
         anyhow::bail!("runtime does not support finite resource memberships")
@@ -693,6 +699,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
 pub struct NativeRuntime {
     pty: fractal_runtime::PtyRuntime,
     exec: fractal_runtime::ExecRuntime,
+    launch_gate_root: PathBuf,
     /// Goes first on every member's PATH so its `git` and `gh` calls are recorded.
     recorder: Option<PathBuf>,
 }
@@ -707,6 +714,7 @@ impl NativeRuntime {
             )
             .with_binary(pty_binary.to_string_lossy()),
             exec: fractal_runtime::ExecRuntime::new(state_dir.join("exec"), state_dir.join("logs")),
+            launch_gate_root: state_dir.join("launch-gates"),
             recorder: None,
         }
     }
@@ -761,6 +769,8 @@ fn member_environment_from(
         }
     }
     let mut environment = crate::environment::overlay(inherited, declared, executable)?;
+    // Incarnation is runtime authority, never an inherited or declared launch input.
+    crate::environment::remove_aliases(&mut environment, "ST3_INCARNATION");
     record_member_commands(&mut environment, recorder)?;
     Ok(environment)
 }
@@ -986,6 +996,18 @@ impl RuntimeControl for NativeRuntime {
     }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, Some(guard))
+    }
+    fn start_held(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<Option<Box<dyn fractal_runtime::LaunchRelease>>> {
+        let operation = member.tags.get(start_jobs::OPERATION_TAG)
+            .context("held native launch lacks start operation")?;
+        let gate = fractal_runtime::NativeLaunchGate::prepare(&self.launch_gate_root, operation)?;
+        let mut held = member.clone();
+        let fractal_runtime::Launch::Argv(argv) = gate.wrap(&fractal_runtime::Launch::from(&member.launch)) else {
+            unreachable!("native launch gate always uses argv")
+        };
+        held.launch = crate::model::LaunchSpec::Argv(argv);
+        self.start_checked(&held, Some(guard))?;
+        Ok(Some(Box::new(gate)))
     }
     fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
@@ -8499,6 +8521,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 fields.insert("runtime_pid_start_token".into(), Value::String(token.to_string()));
             }
         }
+        let held = self.start_jobs.held.lock().unwrap_or_else(PoisonError::into_inner)
+            .contains_key(operation_id);
+        anyhow::ensure!(!held || fields.contains_key("runtime_pid_start_token"),
+            "held launch lacks operation-bound physical process identity");
         let succeeded = ClaimInput {
             subject: subject.subject.clone(),
             kind: "runtime.action.succeeded".into(),
@@ -8508,10 +8534,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        // Native drivers must bind before readiness can be established. Publish running
-        // authority at launch completion only for the physically observed incarnation
-        // owned by this start operation; readiness and restart completion remain separate.
-        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
+        // A held native command is physically allocated but cannot issue work until
+        // this exact operation's running authority commits. Readiness stays separate.
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some() || held) {
             self.runtime.observe_start(member)?.is_some_and(|observation| {
                 observation.status == "running"
                     && observation.incarnation_id.as_deref() == Some(incarnation)
@@ -8520,6 +8545,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             false
         };
+        anyhow::ensure!(!held || running, "held native launch is not the current running start operation");
         let mut starting = member_fields(
             member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
         );
