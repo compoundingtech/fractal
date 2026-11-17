@@ -2388,6 +2388,18 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn thread_start_context(
+        &self,
+        source_id: &str,
+        episode: &str,
+    ) -> Result<Envelope<ThreadStartContext>, ClientError> {
+        self.get(&format!(
+            "/v1/client/threads/start-context?source_id={}&episode={}",
+            percent_encode(source_id),
+            percent_encode(episode)
+        ))
+        .await
+    }
     pub async fn thread_get(&self, id: &str) -> Result<Envelope<ThreadSummary>, ClientError> {
         self.get(&format!("/v1/client/threads/{}", thread_path_segment(id)?))
             .await
@@ -2425,6 +2437,29 @@ impl Client {
         );
         if let Some(limit) = limit {
             path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
+    pub async fn thread_request_history(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<RequestHistoryPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/threads/{}/request-history",
+            thread_path_segment(id)?
+        );
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
         }
         self.get(&path).await
     }
