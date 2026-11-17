@@ -3419,6 +3419,12 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["slo", "ls"],
         vec!["slo", "explain", "cpu"],
         vec!["slo", "chart", "cpu", "--over", "1h", "--width", "20"],
+        vec!["series", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec![
+            "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+            "--subject-prefix", "custom/acme/inbox/", "--group-by", "type",
+            "--from", "1000", "--to", "4000", "--bucket-seconds", "1",
+        ],
         vec!["terminals", "ls"],
         vec!["machines"],
         vec!["launch", "ls"],
@@ -3476,6 +3482,20 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 assert_eq!(response["value"]["mission"], "mission/example/inspect");
                 assert_eq!(response["value"]["person"], PERSON);
                 assert_eq!(response["value"]["inclusive"], 0);
+            }
+            if command.first() == Some(&"series") {
+                let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(response["from"], 1000);
+                assert_eq!(response["to"], 4000);
+                let grouped = command.contains(&"--group-by");
+                assert_eq!(response["bucket_seconds"], if grouped { 1 } else { 86_400 });
+                let buckets = response["buckets"].as_array().unwrap();
+                assert_eq!(buckets.len(), if grouped { 3 } else { 1 });
+                assert!(buckets.iter().all(|bucket| bucket["count"] == 0));
+                if grouped {
+                    assert_eq!(response["group_by"], "type");
+                    assert!(buckets.iter().all(|bucket| bucket["groups"] == json!([])));
+                }
             }
         }
         daemon.restart().await;

@@ -834,6 +834,18 @@ TODO is to bound or reference bodies and account for their cleanup without
 weakening fencing or releasing uncertain execution custody. Neither queue order,
 capacity counts nor the host-local authority proves value sizes.
 
+The same producer owns `lv-h156314ba7532`, reviewed for PR #6665: replacement
+of one historical profile-less installed policy binds its existing host/lane TEXT
+keys and reclaims that policy row inside the admission writer transaction. It
+does not delete membership custody or synthesize a new body; the existing
+`lv-hacf1fd1c6d10` insertion installs the first explicit profile only after member
+limit and coverage are checked. These keys and policy values remain inline to
+preserve the atomic authority transition, not because their encoded size or
+cleanup cost has been proved bounded. The producer's
+`bound-or-reference-values-and-reclamation` obligation includes moving policy
+keys/values to a bounded or referenced representation and carrying this
+transactional replacement and custody preservation into its cleanup path.
+
 ### Composer history source headers
 
 `fractal_store::store::input_history` owns schema site `lv-h34f56ac109e6`

@@ -342,6 +342,8 @@ enum Command {
     /// List every objective and budget with its target, current value and what is left, and
     /// explain one in plain words.
     Slo(SloArgs),
+    /// Count a claim selection per time bucket, optionally split by a field.
+    Series(SeriesArgs),
     /// Inspect and control missions.
     ///
     /// A mission records an authorized goal, its plan, owners, verification and result.
@@ -2198,6 +2200,31 @@ enum SloCommand {
         #[arg(long)]
         width: Option<usize>,
     },
+}
+
+#[derive(Args)]
+struct SeriesArgs {
+    /// Exact declared objective id; mutually exclusive with explicit claim selection.
+    #[arg(long, required_unless_present = "kind", conflicts_with_all = ["kind", "subject_prefix", "group_by"])]
+    objective: Option<String>,
+    /// Claim kind to count; repeat to include more than one kind.
+    #[arg(long, required_unless_present = "objective")]
+    kind: Vec<String>,
+    /// Restrict explicit claims to subjects beginning with this prefix.
+    #[arg(long, requires = "kind")]
+    subject_prefix: Option<String>,
+    /// Split explicit claim counts by this top-level claim field.
+    #[arg(long, requires = "kind")]
+    group_by: Option<String>,
+    /// Inclusive range start, in Unix milliseconds.
+    #[arg(long)]
+    from: u64,
+    /// Exclusive range end, in Unix milliseconds (at most 31 days after --from).
+    #[arg(long)]
+    to: u64,
+    /// Bucket width in seconds; at most 1000 buckets are returned.
+    #[arg(long, default_value_t = 86_400)]
+    bucket_seconds: u64,
 }
 
 #[derive(Args)]
@@ -6385,6 +6412,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Slo(args) => run_slo(&immediate, args, cli.json).await,
+        Command::Series(args) => run_series(&immediate, args, cli.json).await,
         Command::Launch { command } => {
             run_launch(&client, &endpoint, command, &config.planner, cli.json).await
         }
@@ -11507,6 +11535,43 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
         report["coordination"] = counts;
     }
     print!("{}", render_usage_report(&report, args.hours, args.by));
+    Ok(())
+}
+
+async fn run_series(client: &Client, args: SeriesArgs, json_output: bool) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut path = format!("/v1/series?from={}&to={}&bucket_seconds={}", args.from, args.to, args.bucket_seconds);
+    for (key, value) in [
+        ("objective", args.objective.as_deref()),
+        ("subject_prefix", args.subject_prefix.as_deref()),
+        ("group_by", args.group_by.as_deref()),
+    ] {
+        if let Some(value) = value {
+            write!(path, "&{key}={}", urlencoding::encode(value))?;
+        }
+    }
+    for kind in &args.kind {
+        write!(path, "&kind={}", urlencoding::encode(kind))?;
+    }
+    let series: Value = client.get(&path).await?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&series)?);
+    } else {
+        let grouped = args.group_by.is_some();
+        println!("START\tEND\tCOUNT{}", if grouped { "\tGROUP" } else { "" });
+        for bucket in series["buckets"].as_array().into_iter().flatten() {
+            if grouped {
+                for group in bucket["groups"].as_array().into_iter().flatten() {
+                    println!("{}\t{}\t{}\t{}", bucket["start"], bucket["end"], group["count"], group["value"]);
+                }
+                if bucket["count"] == 0 {
+                    println!("{}\t{}\t0\t-", bucket["start"], bucket["end"]);
+                }
+            } else {
+                println!("{}\t{}\t{}", bucket["start"], bucket["end"], bucket["count"]);
+            }
+        }
+    }
     Ok(())
 }
 
