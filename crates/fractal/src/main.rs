@@ -6690,6 +6690,10 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
+        Command::Hosts { command: hosts_cli::HostsCommand::LaunchFreeze {
+            command: hosts_cli::LaunchFreezeCommand::Set { actor, .. }
+                | hosts_cli::LaunchFreezeCommand::Clear { actor, .. },
+        } } => actor.as_deref(),
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
