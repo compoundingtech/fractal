@@ -4479,10 +4479,9 @@ fn auto_resolved_sources_start_through_their_typed_key_and_canonical_recipient()
 
 fn golden_start_refusal(name: &str) -> ClientError {
     let mut envelopes: BTreeMap<String, fractal_client::ErrorEnvelope> =
-        serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/st3/client-v0/fixtures/thread-start-refusals.json"
-        )))
+        serde_json::from_str(include_str!(
+            "../../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json"
+        ))
         .unwrap();
     let envelope = envelopes.remove(name).expect("canonical refusal fixture");
     let expected = match name {
