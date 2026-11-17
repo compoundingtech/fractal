@@ -47,14 +47,65 @@ The optional digest restricts evidence to the exact planned request.
 
 ### Factory source transition carrier
 
-Factory can author a typed transition in source with `kind`, `from`, `to`,
-`expected_naming_revision`, `expected_declaration`, and `request_digest`.
+Factory authors the full typed transition
+`{kind, request: RenameRequest, request_digest}` in source. `request` contains
+`from`, `to`, `actor`, `reason`, `idempotency_key`, `expected_naming_revision`,
+and `expected_declaration`; it is not stored separately from the carrier.
 The first PLAN supplies the pre-rename pins. If those pins are added to the
-request, run PLAN again: the digest covers the entire echoed request, including
-both pins, actor, reason, and idempotency key. Preview requires an admissible
-PLAN with matching pins and digest, and the eventual rename submits that exact
-echoed request. Final admission requires PROOF availability `selected` or
-`superseded` and the carried digest. No claim ID belongs in the source carrier.
+request, run PLAN again: the digest covers the entire echoed request.
+Preview POSTs exactly the carrier's `request`, requires `admissible: true`,
+and compares the echoed request, pins, and digest. The execution slot submits
+exactly that same request. No claim ID belongs in the source carrier.
+
+#### Rename claim body and final admission
+
+The native writer constructs these claim fields in
+[`identities.rs:482–491`](../../crates/fractal-store/src/store/identities.rs#L482-L491):
+
+```text
+body.fields = {
+  from: string, to: string, reason: string, owner_host: string,
+  declaration: string, previous_revision?: string,
+  request: {
+    from: string, to: string, actor: string, reason: string,
+    idempotency_key: string,
+    expected_naming_revision: string | null,
+    expected_declaration: string | null
+  },
+  preserved_incarnation?: string
+}
+body.evidence = []
+```
+
+`previous_revision` is omitted before the first rename, not serialized as null.
+`preserved_incarnation` is omitted when unavailable (including mission renames).
+Both request pins remain present as null when unpinned. The `from` field is the
+pre-rename canonical name; `request.from` preserves the caller's spelling.
+[`store.rs:24887–24897`](../../crates/fractal-store/src/store.rs#L24887-L24897)
+wraps the fields and evidence and adds
+`body._operation = {id: string, request_digest: string}`. `ClaimRecord` also
+exposes that operation ID and digest as top-level metadata.
+
+Final Factory admission must require:
+
+- PROOF availability `selected` or `superseded`, and proof kind/from/to matching
+  the carried kind/request transition.
+- Both proof and embedded claim request digests equal the carried digest, and
+  `claim.body.fields.request` deeply equal the full carried request.
+- Claim kind `agent.renamed` or `mission.renamed` matching the carried kind;
+  claim ID/subject matching proof claim ID/identity; and claim fields `from`,
+  `to`, and `reason` matching the intended source transition/request.
+- Claim declaration and previous revision matching the carried pins (an absent
+  previous revision represents a null pre-first-rename pin), and matching the
+  proof's declaration/previous revision. A final Factory request pins declaration.
+- Claim `owner_host` matching claim origin and proof owner host; operation ID
+  and digest matching the claim's `_operation` metadata; and evidence `[]`.
+
+Compare the request's actor within the exact request, not by blindly equating
+it with `claim.actor`: the native writer resolves an actor alias to immutable
+identity. `preserved_incarnation` is descriptive, not a source rename pin.
+For `superseded`, do not require current canonical ID to equal the edge target
+or current naming revision to equal this historical claim ID.
 
 `selected` means the requested edge is the current naming head; `superseded`
 means it remains on the selected chain but a later rename advanced the head.
