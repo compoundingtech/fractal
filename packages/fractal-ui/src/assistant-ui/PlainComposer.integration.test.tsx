@@ -12,6 +12,8 @@ it('PlainComposer honors sendDisabled for pointer, keyboard and form submission 
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
   Object.defineProperty(window, 'matchMedia', { configurable: true, value: (media: string) => ({ media, matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }) })
+  // jsdom has no font-loading API; preserve actual event delivery for the kit's layout observer.
+  Object.defineProperty(document, 'fonts', { configurable: true, value: Object.assign(new EventTarget(), { ready: Promise.resolve(), status: 'loaded' }) })
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
