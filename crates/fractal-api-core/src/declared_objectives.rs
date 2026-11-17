@@ -285,7 +285,7 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 let mut produced = Vec::new();
                 for source_row in native_rows {
                     let Some(id) = source_row["id"].as_str() else { continue };
-                    if !owns(source, id) { continue; }
+                    if !native_owns(source, id) { continue; }
                     let mut row = source_row.clone();
                     row["id"] = Value::String(format!("{}{}", objective.name, &id[source.len()..]));
                     row["about"] = Value::String(objective.about.clone());
@@ -415,10 +415,15 @@ pub fn check(store: &Store, rows: &[Value]) -> Result<ObjectiveFaults, FractalEr
             ObjectiveResponse { reviewer: &breach.owner, condition: &breach.condition, title: &name },
         )?;
         total.opened += check.opened;
-        total.recovered += check.recovered + end_unjudged(store, |id| owns(&name, id), &ids)?;
+        total.recovered += check.recovered + end_unjudged(store, |id| if native { native_owns(&name, id) } else { owns(&name, id) }, &ids)?;
         total.unowned += check.unowned;
     }
     Ok(total)
+}
+
+/// Native objectives can expose independent child rows (transactions, remote paths, CPU modes).
+fn native_owns(name: &str, id: &str) -> bool {
+    id.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('{'))
 }
 
 /// Whether row `id` is one of objective `name`'s: `NAME` or `NAME/pNN`, either with a
