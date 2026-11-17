@@ -597,7 +597,24 @@ Each pane retains its mapped runtime items and transcript turns across clock/syn
 and semantically unchanged frames, including a replacement decode with new object references.
 The cache uses the conversation model's schema equivalence and retains only the latest projection.
 A confirmed Sent row stays visible until its authoritative in-window echo, even if a later
-read omits remotely owned mail. Neither drafts nor the outbox are persisted in the browser.
+read omits remotely owned mail. The active send path still uses its runtime outbox; it is not
+yet connected to the durable storage adapter.
+
+`src/data/outbox/` provides an isolated IndexedDB repository and attachment spool, not a
+send-path migration. Its temporary local contract mirrors the pending client-core interface.
+Intent and content-hashed image bytes commit together before acceptance; transaction completion
+is the acknowledgement barrier, with strict durability requested where supported. Revision CAS
+grants a single ready-to-dispatched permit across connections. Opening classifies unresolved
+dispatch markers as unknown; unsupported or corrupt records remain quarantined and cannot send.
+Storage failures are typed, without a memory fallback, and persistent-storage permission is
+reported as granted, denied or unsupported. Browser eviction, site-data deletion and device
+loss are not covered by this durability guarantee.
+
+Cleanup never expires unresolved attempts. Terminal content/spool lasts seven days (delivered
+content additionally waits for exact timeline observation), then minimal identity/evidence
+tombstones last another thirty days. Explicit dismissal preserves uncertainty in a tombstone;
+it does not cancel an action. Quota exhaustion refuses new acceptance without evicting old work.
+The adapter performs no upload, signing, dispatch, retry or UI integration.
 
 Only `grants.messageSend` authorizes the composer. An absent send port shows Unknown, and
 non-retryable refusals disable new submissions with their classified human-readable reason. Retryable send failures
