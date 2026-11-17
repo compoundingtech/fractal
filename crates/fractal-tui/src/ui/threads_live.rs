@@ -220,7 +220,8 @@ impl Delivery {
                         fractal_client::ErrorCode::Internal
                             | fractal_client::ErrorCode::Unknown
                             | fractal_client::ErrorCode::RemoteUnavailable
-                            | fractal_client::ErrorCode::ResponseBudgetExceeded,
+                            | fractal_client::ErrorCode::ResponseBudgetExceeded
+                            | fractal_client::ErrorCode::RecipientUnassigned,
                         ..
                     )
                 );
@@ -457,6 +458,9 @@ fn start_context_error(error: ClientError) -> String {
     match error {
         ClientError::Api(fractal_client::ErrorCode::RecipientRetired, ..) => {
             "The recipient is retired. No discussion was started; your draft is kept.".into()
+        }
+        ClientError::Api(fractal_client::ErrorCode::RecipientUnassigned, ..) => {
+            "No recipient is configured for this Inbox source. Setup is required before sending; your draft is kept.".into()
         }
         error => thread_read_error(error),
     }
@@ -3333,7 +3337,11 @@ impl Threads {
             {
                 if matches!(
                     &error,
-                    ClientError::Api(fractal_client::ErrorCode::RecipientRetired, ..)
+                    ClientError::Api(
+                        fractal_client::ErrorCode::RecipientRetired
+                            | fractal_client::ErrorCode::RecipientUnassigned,
+                        ..
+                    )
                 ) {
                     let notice = start_context_error(error);
                     self.start_contexts.remove(item);

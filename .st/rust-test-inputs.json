@@ -392,6 +392,7 @@
     "clients",
     "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json",
+    "docs/st3/client-v0/fixtures/thread-start-refusals.json",
     "fixtures/clients",
     "fixtures/scenarios/fleet-mid-refactor/attention.json",
     "fixtures/scenarios/fleet-mid-refactor/conversation.json",
