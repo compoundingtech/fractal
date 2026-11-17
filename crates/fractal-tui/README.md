@@ -60,6 +60,8 @@ not the natural unread badge or count. Opening a marked row seeks its return anc
 The open Inbox thread stays keyed by its identity when a reminder clears and the marked row
 leaves the list. Its body, composer and scroll remain until explicit navigation or collapse;
 connection/owner changes and read revocation still clear protected thread state.
+Thread evidence uses the same resolved detail pane and host as rendering, including an Inbox
+thread opened from its list. A focused reply composer or saved draft does not exclude reading.
 Read-only connections show neither action. Pending or refused anchor seeks show no message
 body or unread badge; unavailable anchors get a neutral note rather than invented content.
 
