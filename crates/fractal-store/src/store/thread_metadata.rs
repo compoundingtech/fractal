@@ -1204,7 +1204,7 @@ pub fn start_context(
 ) -> Result<StartContext, FractalError> {
     store.graph.read_snapshot_unindexed(|| Ok((|| {
         let connection = store.readers.get();
-        let (selected, _) = inbox_source::resolve_discussion(
+        let selected = inbox_source::resolve_discussion(
             store, &connection, person, origin, now_ms(),
         )?;
         let start_recipient = inbox::start_recipient_at(&connection, &selected.item)?
@@ -1351,13 +1351,8 @@ pub fn start_from_inbox_as(
             let mut creation_body = creation_body.clone();
             creation_body["fields"]["person"] = json!(identities::resolve_reference_conn(tx, person)?);
             creation_body["fields"]["agent"] = json!(identities::resolve_reference_conn(tx, agent)?);
-            let (selected, retained) = inbox_source::resolve_discussion(store, tx, person, origin, now_ms())?;
+            let selected = inbox_source::resolve_discussion(store, tx, person, origin, now_ms())?;
             selected.require_agent(store, tx, agent)?;
-            if retained
-                && let Some(existing) = newest_owned_origin(tx, person, source, episode, agent)?
-            {
-                return Ok((existing, false));
-            }
             if latest_claim_id_tx(tx, thread).map_err(internal)?.is_some() {
                 return Err(FractalError::new(
                     "stale-subject",
@@ -1422,37 +1417,6 @@ pub fn start_from_inbox_as(
         .map_err(internal)?
 }
 
-/// The writer transaction serializes this lookup with the eventual creation. Only
-/// retained starts coalesce; live Inbox starts retain their existing semantics.
-fn newest_owned_origin(
-    connection: &Connection, person: &str, source: &str, episode: &str, agent: &str,
-) -> Result<Option<ClaimRecord>, FractalError> {
-    let person = identities::resolve_reference_conn(connection, person)?;
-    let agent = identities::resolve_reference_conn(connection, agent)?;
-    let mut query = connection.prepare_cached(
-        "SELECT claims.subject, claims.id FROM claims INDEXED BY claims_thread_inbox_origin_index
-         JOIN operations ON operations.canonical_claim_id=claims.id AND operations.state='active'
-         WHERE claims.kind='thread.created'
-           AND json_extract(claims.body,'$.fields.person')=?1
-           AND coalesce(json_extract(claims.body,'$.fields.origin_source'),json_extract(claims.body,'$.fields.origin_ask'))=?2
-           AND coalesce(json_extract(claims.body,'$.fields.origin_episode'),json_extract(claims.body,'$.fields.origin_ask_episode'))=?3
-           AND json_extract(claims.body,'$.fields.agent')=?4
-           AND NOT EXISTS (SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
-         ORDER BY claims.store_index DESC",
-    ).map_err(internal)?;
-    let mut rows = query.query(params![person, source, episode, agent]).map_err(internal)?;
-    while let Some(row) = rows.next().map_err(internal)? {
-        let thread: String = row.get(0).map_err(internal)?;
-        let id: String = row.get(1).map_err(internal)?;
-        match owned_creation(connection, &thread, &person, false) {
-            Ok(Some(creation)) if creation.id == id && origin_pair(&creation) == Some((source, episode)) => return Ok(Some(creation)),
-            Ok(_) => {}
-            Err(error) if error.code == "thread-unavailable" => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
-}
 
 #[cfg(test)]
 mod marked_read_helper_tests {

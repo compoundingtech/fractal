@@ -96,19 +96,18 @@ pub(in crate::store) fn resolve(
 }
 
 /// Compose unchanged live admission with the single durable-opening qualifier.
-/// The boolean distinguishes retained starts for recipient-scoped coalescing.
 pub(in crate::store) fn resolve_discussion(
     store: &Store, connection: &Connection, person: &str, origin: &InboxOrigin, at: u128,
-) -> Result<(ResolvedSource, bool), FractalError> {
+) -> Result<ResolvedSource, FractalError> {
     match resolve(store, connection, person, origin, at) {
-        Ok(source) => Ok((source, false)),
+        Ok(source) => Ok(source),
         Err(error) if error.code == "thread-unavailable" => {
             let key = thread_metadata::request_history::SourceEpisode {
                 source_id: origin.source_id.clone(), episode: origin.episode.clone(),
             };
             let source = discussion_source::qualify(connection, person, &key, at)?
                 .ok_or_else(unavailable)?.into_resolved();
-            Ok((source, true))
+            Ok(source)
         }
         Err(error) => Err(error),
     }

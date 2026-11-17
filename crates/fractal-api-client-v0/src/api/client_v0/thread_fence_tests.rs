@@ -289,10 +289,17 @@ pub(crate) mod retained_discussion {
         assert_eq!(replay["operation_id"], first["operation_id"]);
     }
 
+    fn assert_first_message(state: &AppState, result: &Value, content: &str) {
+        let message = result["affected_ids"][1].as_str().unwrap();
+        let claims = state.store.claims_for(message, Some("message.sent")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].body["fields"]["content"], content);
+    }
+
     pub(crate) fn request(state: &AppState, origin: &InboxOrigin, thread: &str, key: &str) -> ActionRequest {
         serde_json::from_value(json!({
             "api_version":CLIENT_API_VERSION, "id":format!("action/{key}"),
-            "type":"thread.start", "idempotency_key":key,
+            "type":"thread.start", "idempotency_key":format!("fixture-thread:{key}"),
             "fence":{"snapshot_id":new_client_snapshot(state).id},
             "parameters":{"target_id":thread, "agent_id":AGENT,
                 "origin":origin, "title":"Discuss retained review", "content":"Explain the decision."},
@@ -309,46 +316,63 @@ pub(crate) mod retained_discussion {
     }
 
     #[tokio::test]
-    async fn resolved_custom_start_replays_and_different_key_opens_existing_thread_without_message() {
+    async fn resolved_custom_start_replays_same_key_but_new_key_preserves_independent_message() {
         let (_root, state, origin) = fixture(true);
         let owner = ClientSession::local(Some(PERSON)).unwrap();
         assert_not_in_attention(&state);
         let first_request = request(&state, &origin, "thread/retained-first", "retained-first");
         let first = start(&state, &owner, first_request.clone()).await.unwrap();
-        let replay = start(&state, &owner, first_request).await.unwrap();
+        let replay = start(&state, &owner, first_request.clone()).await.unwrap();
         assert_eq!(replay["affected_ids"], first["affected_ids"]);
         assert_eq!(replay["operation_id"], first["operation_id"]);
-        let existing = start(&state, &owner,
-            request(&state, &origin, "thread/retained-unused", "retained-different")).await.unwrap();
-        assert_eq!(existing["affected_ids"], first["affected_ids"]);
-        assert_eq!(existing["operation_id"], first["operation_id"]);
-        assert!(state.store.claims_for("thread/retained-unused", None).unwrap().is_empty());
+        let mut conflict = first_request;
+        conflict.parameters["content"] = json!("Changed same-key content.");
+        assert_eq!(start(&state, &owner, conflict).await.unwrap_err().status, StatusCode::CONFLICT);
+        let mut second_request = request(&state, &origin, "thread/retained-second", "retained-different");
+        second_request.parameters["content"] = json!("A distinct retained discussion.");
+        let second = start(&state, &owner, second_request.clone()).await.unwrap();
+        assert_ne!(second["affected_ids"], first["affected_ids"]);
+        assert_ne!(second["operation_id"], first["operation_id"]);
+        assert_eq!(second["affected_ids"][0], "thread/retained-second");
+        assert_first_result(&start(&state, &owner, second_request).await.unwrap(), &second);
+        assert_first_message(&state, &first, "Explain the decision.");
+        assert_first_message(&state, &second, "A distinct retained discussion.");
         let history = thread_metadata::list_context(&state.store, PERSON,
             ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap();
-        assert_eq!(history.items.len(), 1);
-        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/retained-first").unwrap().message_count, 1);
+        assert_eq!(history.items.len(), 2);
+        for thread in ["thread/retained-first", "thread/retained-second"] {
+            assert_eq!(thread_metadata::summary(&state.store, PERSON, thread).unwrap().message_count, 1);
+        }
         assert_not_in_attention(&state);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn concurrent_retained_starts_share_the_real_store_writer_and_return_one_creation() {
+    async fn concurrent_retained_starts_serialize_through_real_store_writer_and_create_independent_messages() {
         let (_root, state, origin) = fixture(true);
         let owner = ClientSession::local(Some(PERSON)).unwrap();
-        let a = request(&state, &origin, "thread/retained-race-a", "retained-race-a");
-        let b = request(&state, &origin, "thread/retained-race-b", "retained-race-b");
+        let mut a = request(&state, &origin, "thread/retained-race-a", "retained-race-a");
+        a.parameters["content"] = json!("Concurrent discussion A.");
+        let mut b = request(&state, &origin, "thread/retained-race-b", "retained-race-b");
+        b.parameters["content"] = json!("Concurrent discussion B.");
         // Different action keys bypass the per-key API lock; both reach the batched store writer.
         let (a, b) = tokio::join!(start(&state, &owner, a), start(&state, &owner, b));
         let (a, b) = (a.unwrap(), b.unwrap());
-        assert_eq!(a["affected_ids"], b["affected_ids"]);
-        assert_eq!(a["operation_id"], b["operation_id"]);
+        assert_ne!(a["affected_ids"], b["affected_ids"]);
+        assert_ne!(a["operation_id"], b["operation_id"]);
+        assert_eq!(a["affected_ids"][0], "thread/retained-race-a");
+        assert_eq!(b["affected_ids"][0], "thread/retained-race-b");
+        assert_first_message(&state, &a, "Concurrent discussion A.");
+        assert_first_message(&state, &b, "Concurrent discussion B.");
         let history = thread_metadata::list_context(&state.store, PERSON,
             ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap();
-        assert_eq!(history.items.len(), 1);
-        let thread = a["affected_ids"][0].as_str().unwrap();
-        assert_eq!(thread_metadata::summary(&state.store, PERSON, thread).unwrap().message_count, 1);
+        assert_eq!(history.items.len(), 2);
+        for thread in ["thread/retained-race-a", "thread/retained-race-b"] {
+            assert_eq!(thread_metadata::summary(&state.store, PERSON, thread).unwrap().message_count, 1);
+        }
         let creations = ["thread/retained-race-a", "thread/retained-race-b"].iter()
             .map(|thread| state.store.claims_for(thread, Some("thread.created")).unwrap().len()).sum::<usize>();
-        assert_eq!(creations, 1);
+        assert_eq!(creations, 2);
+        assert_not_in_attention(&state);
     }
 
     #[tokio::test]
@@ -378,7 +402,7 @@ pub(crate) mod retained_discussion {
         }
         let reply: ActionRequest = serde_json::from_value(json!({
             "api_version":CLIENT_API_VERSION, "id":"action/current-reply", "type":"thread.reply",
-            "idempotency_key":"current-reply", "fence":{"snapshot_id":new_client_snapshot(&state).id},
+            "idempotency_key":"fixture-thread:current-reply", "fence":{"snapshot_id":new_client_snapshot(&state).id},
             "parameters":{"target_id":"thread/current-a", "content":"A current follow-up."},
         })).unwrap();
         start(&state, &owner, reply).await.unwrap();
@@ -453,7 +477,7 @@ pub(crate) mod retained_discussion {
     }
 
     #[tokio::test]
-    async fn retained_start_chooses_newest_owned_creation_from_current_source_history() {
+    async fn retained_start_creates_independent_thread_despite_existing_current_source_history() {
         let (_root, state, origin) = fixture(false);
         let owner = ClientSession::local(Some(PERSON)).unwrap();
         let older = start(&state, &owner, request(&state, &origin, "thread/newest-old", "newest-old")).await.unwrap();
@@ -464,15 +488,22 @@ pub(crate) mod retained_discussion {
             fields:serde_json::from_value(json!({"request":origin.episode,"selection":"keep","text":"Proceed."})).unwrap(),
             evidence:vec![], expected_subject:None, idempotency_key:Some("newest-answer".into()),
         }).unwrap();
-        let retained = start(&state, &owner, request(&state, &origin, "thread/newest-unused", "newest-retained")).await.unwrap();
-        assert_eq!(retained["affected_ids"], newer["affected_ids"]);
-        assert_eq!(retained["operation_id"], newer["operation_id"]);
-        assert!(state.store.claims_for("thread/newest-unused", None).unwrap().is_empty());
+        let mut retained_request = request(&state, &origin, "thread/after-resolution", "after-resolution");
+        retained_request.parameters["content"] = json!("Independent after resolution.");
+        let retained = start(&state, &owner, retained_request).await.unwrap();
+        assert_eq!(retained["affected_ids"][0], "thread/after-resolution");
+        for previous in [&older, &newer] {
+            assert_ne!(retained["affected_ids"], previous["affected_ids"]);
+            assert_ne!(retained["operation_id"], previous["operation_id"]);
+        }
+        assert_first_message(&state, &retained, "Independent after resolution.");
+        assert_eq!(thread_metadata::list_context(&state.store, PERSON,
+            ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap().items.len(), 3);
         assert_not_in_attention(&state);
     }
 
     #[tokio::test]
-    async fn resolved_authored_step_without_recipient_bearing_opening_cannot_start() {
+    async fn resolved_literal_authored_step_with_proven_opening_can_start_and_list_history() {
         let (_root, state, _) = fixture(true);
         state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
         let intent = crate::graph::parse_intent(
@@ -492,10 +523,23 @@ pub(crate) mod retained_discussion {
         state.store.set_step_state(&step.subject, "completed", None).unwrap();
         let origin = InboxOrigin { source_id:step.subject.clone(), episode:current.episode };
         let owner = ClientSession::local(Some(PERSON)).unwrap();
-        let denied = start(&state, &owner, request(&state, &origin,
+        let never_opened = InboxOrigin {
+            source_id: origin.source_id.clone(),
+            episode: format!("{}:99:99", origin.episode.rsplit_once(':').unwrap().0.rsplit_once(':').unwrap().0),
+        };
+        let denied = start(&state, &owner, request(&state, &never_opened,
             "thread/never-opened-authored", "never-opened-authored")).await.unwrap_err();
         assert_eq!(denied.status, StatusCode::NOT_FOUND);
         assert!(state.store.claims_for("thread/never-opened-authored", None).unwrap().is_empty());
+        let result = start(&state, &owner, request(&state, &origin,
+            "thread/resolved-authored", "resolved-authored")).await.unwrap();
+        assert_eq!(result["affected_ids"][0], "thread/resolved-authored");
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/resolved-authored").unwrap().message_count, 1);
+        let history = thread_metadata::list_context(&state.store, PERSON,
+            ThreadContext::Inbox { source:&origin.source_id, episode:&origin.episode }, None, 20).unwrap();
+        assert_eq!(history.items.len(), 1);
+        assert!(!state.store.attention_items(Some(PERSON)).unwrap().iter()
+            .any(|item| item.subject == step.subject));
     }
 
     #[tokio::test]
@@ -533,9 +577,11 @@ pub(crate) mod retained_discussion {
         }).unwrap();
         let retained = start(&state, &owner, request(&state, &origin,
             "thread/non-claim-retained", "non-claim-retained")).await.unwrap();
-        assert_eq!(retained["affected_ids"], current["affected_ids"]);
-        assert_eq!(retained["operation_id"], current["operation_id"]);
-        assert!(state.store.claims_for("thread/non-claim-retained", None).unwrap().is_empty());
+        assert_ne!(retained["affected_ids"], current["affected_ids"]);
+        assert_ne!(retained["operation_id"], current["operation_id"]);
+        assert_eq!(retained["affected_ids"][0], "thread/non-claim-retained");
+        assert_first_message(&state, &retained, "Explain the decision.");
+        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/non-claim-retained").unwrap().message_count, 1);
         let denied = start(&state, &owner, request(&state, &unproven,
             "thread/non-claim-retained-denied", "non-claim-retained-denied")).await.unwrap_err();
         assert_eq!(denied.status, StatusCode::NOT_FOUND);
@@ -631,7 +677,7 @@ pub(crate) mod retained_discussion {
     }
 
     #[tokio::test]
-    async fn terminal_retirement_preserves_existing_thread_and_first_key_result_but_deduplicates_by_recipient() {
+    async fn terminal_retirement_preserves_frozen_thread_and_replay_but_new_keys_create_independent_fallback_threads() {
         for resolved in [false, true] {
             let (_root, state, origin) = fixture(resolved);
             let owner = ClientSession::local(Some(PERSON)).unwrap();
@@ -654,14 +700,20 @@ pub(crate) mod retained_discussion {
             let history = thread_metadata::list_context(&state.store, PERSON,
                 ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap();
             assert_eq!(history.items.len(), 2);
-            if resolved {
-                let another = start(&state, &owner, fallback_request(&state, &origin,
-                    "thread/after-retirement-unused", "after-retirement-new-key")).await.unwrap();
-                assert_eq!(another["affected_ids"], created["affected_ids"]);
-                assert_eq!(another["operation_id"], created["operation_id"]);
-                assert!(state.store.claims_for("thread/after-retirement-unused", None).unwrap().is_empty());
-                assert_not_in_attention(&state);
-            }
+            let mut another_request = fallback_request(&state, &origin,
+                "thread/after-retirement-independent", "after-retirement-new-key");
+            another_request.parameters["content"] = json!("A separate fallback discussion.");
+            let another = start(&state, &owner, another_request).await.unwrap();
+            assert_eq!(another["affected_ids"][0], "thread/after-retirement-independent");
+            assert_ne!(another["affected_ids"], created["affected_ids"]);
+            assert_ne!(another["operation_id"], created["operation_id"]);
+            assert_first_message(&state, &created, "Explain the decision.");
+            assert_first_message(&state, &another, "A separate fallback discussion.");
+            assert_eq!(thread_metadata::summary(&state.store, PERSON,
+                "thread/after-retirement-independent").unwrap().agent_id, "agent/garden/fallback");
+            assert_eq!(thread_metadata::list_context(&state.store, PERSON,
+                ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap().items.len(), 3);
+            if resolved { assert_not_in_attention(&state); }
         }
     }
 

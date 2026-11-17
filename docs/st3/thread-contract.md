@@ -79,20 +79,24 @@ mismatch refuses without rewriting the signed packet. Refresh the preview before
 a changed recipient. The scoped MCP thread-read family mirrors this metadata-only preview
 under its existing exact conversation binding; MCP remains read-only.
 
-Authored human steps are not covered: their retained `step-run.state` opening does not
-carry the recipient at opening. Harness prompts, seat login, planning, revision proposals
-and operational faults likewise have no supported retained proof. An unknown, fabricated
-or unsupported retained episode receives the same unavailable error. Phase A history
-uses this same qualifier, so a syntax-valid but never-opened authored key exposes no
-historical row content.
+Authored human steps require an exact retained ready opening, its generation-pinned
+validated mission revision and exact materialization inputs. The opening recipient is
+reconstructed from that pinned selector and canonically ordered assignment mutations
+before the opening; today's assignee alone is never proof. Literal person selectors are
+supported. Interpolated selectors require retained exact inputs; missing inputs, an
+unrecoverable readiness epoch or unorderable assignment evidence fail closed.
+Harness prompts, seat login, planning, revision proposals and operational faults have no
+supported retained proof. An unknown, fabricated or unsupported retained episode receives
+the same unavailable error. Phase A history uses this same qualifier, so a syntax-valid
+but never-opened authored key exposes no historical row content.
 
-Retained starts are serialized with origin discovery in the writer transaction. The first
-start commits only the existing `thread.created` and `message.sent` claims. A different
-start key opens the newest owned thread for the exact source/episode AND selected recipient
-agent (highest creation store index), without creating another thread or sending its draft.
-A newly selected fallback therefore never reuses a retired-recipient discussion. The action result
-names the actual thread and its first message. Same-key receipt replay is unchanged.
-Current-source independent starts retain their existing behavior. Starting or replying to a retained
+Start never coalesces by origin, for current or retained sources. Every new operation
+key creates an independent thread and persists that request's first message, even if
+another discussion already links the exact source episode and recipient. Same-key
+replay recovers its original result; changed intent under that key conflicts. Recovery
+keeps its existing current-principal checks and works after source changes or retirement.
+A fallback Start creates its own discussion without retargeting existing participants.
+Open/list is navigation, not Start deduplication. Starting or replying to a retained
 discussion does not reactivate its resolved Inbox source or settle its original work.
 
 Unread Inbox-position lookup batch-qualifies the selected exact episodes through that

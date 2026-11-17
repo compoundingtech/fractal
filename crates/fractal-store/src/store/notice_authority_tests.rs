@@ -618,6 +618,13 @@ fn discussion_agent(fleet: &Fleet) {
     }).collect();
     fleet.alder.apply_as(&intent, &expected, "notice-discussion-agent", Some("person/example")).unwrap();
     fleet.alder.configure_thread_write_rollout([]);
+    // Every admitted reader must advertise the existing thread privacy floor.
+    for reader in [&fleet.a, &fleet.alder, &fleet.birch] {
+        reader.append_claim(&input(&format!("daemon/{}", reader.origin()), "daemon.started", RUNTIME,
+            json!({"status":"running","features":{"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION}}))).unwrap();
+    }
+    sync(&fleet.birch, &fleet.alder);
+    sync(&fleet.a, &fleet.alder);
 }
 
 fn discuss_notice(store: &Store, person: &str, source: &str, episode: &str, key: &str) -> Result<(ClaimRecord, bool), FractalError> {
@@ -663,8 +670,11 @@ fn label_about_and_arbitrary_attention_claims_never_establish_notice_discussion_
     let fleet = written();
     discussion_agent(&fleet);
     for (source, kind, fields) in [
-        ("resource/notice-label", "label.applied", json!({"label":"attention","person":"person/example"})),
-        ("resource/notice-about", "message.sent", json!({
+        ("message/notice-label", "message.sent", json!({
+            "label":"attention","person":"person/example","from":"agent/example/producer",
+            "to":"person/example","content":"Attention label only","status":"sent",
+        })),
+        ("message/notice-about", "message.sent", json!({
             "from":"agent/example/producer","to":"person/example","content":"About this notice","status":"sent",
             "about":[SOURCE],
         })),
