@@ -43,6 +43,36 @@ Focused certainty and pure client tests use the existing workspace Vitest depend
 `CI=1 node_modules/.bin/vitest run --config clients/typescript/fractal-client/vitest.config.ts`
 from the repository root.
 
+The pure outbox core is exported separately from immediate delivery. It provides no
+storage adapter, startup worker, signing service, or server reconciliation endpoint:
+
+- `OutboxRepository<TPacket>` binds `commit`, revision-based `compareAndSwap`,
+  `list`, and `read` permanently to an original principal/deployment/member scope.
+  Successful writes mean durable transaction completion; adapters must reject
+  storage failures rather than silently fall back to memory.
+- `createOutboxRecord` captures an immutable packet as pending. Commit it before
+  acknowledging local acceptance. Persist `markOutboxDispatched` using CAS before
+  making the single POST; only the successful CAS owner may dispatch.
+- `observeOutbox` records a validated completed receipt, explicit nonapplication,
+  or unknown. Pass `appliedAnswer(error)` for failure evidence; validate completed
+  receipts against the original packet first. Earlier ambiguity survives a later
+  refusal and serialization, and unknown never regains dispatch permission.
+- `restoreOutboxRecord` retains never-dispatched pending attempts, but turns
+  dispatch-marked nonterminal records into unknown even if a crash happened before
+  the socket call. Persist changed restoration/observation records by revision CAS.
+  Definitive completed receipts and unambiguous nonapplication remain terminal.
+- `prepareMessageSendPacket`, `prepareThreadStartPacket`, and
+  `prepareThreadReplyPacket` return complete serializable action POST bodies.
+  Supply the original ID, key, fence and all prepared parameters; persist the
+  returned body rather than a send closure. Existing signatures pass through
+  unchanged; authorized unsigned web bodies remain unsigned. Preparation performs
+  no signing, transport selection or ID generation. Submit the retained packet
+  unchanged through `submitAction` only when the core permits dispatch.
+
+`OutboxRepository<PreparedPacket>` is the shared adapter boundary. Concrete browser
+and native repositories, acceptance UI, and dispatch owners must implement these
+durability barriers; importing this pure module alone does not persist messages.
+
 The manifest read ids `harness-questions.list` and `harness-questions.get` map to
 `harnessQuestions(queryOptions, requestOptions)` and `harnessQuestion(id, requestOptions)`;
 their public helper names do not include the manifest's `list`/`get` suffixes.
