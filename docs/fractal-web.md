@@ -655,11 +655,11 @@ or internal store error code determines this state. Other failed reads offer Ret
 
 A signed Start is definitive only with explicit `applied: none` under the shared
 application-certainty interpreter; absent metadata is NOT proof. Unknown in either
-metadata location dominates none. A definitive `409 stale-fence`, `recipient-retired`
-or recipient-mismatch 404 visibly re-reads the exact preview. The draft stays;
-a changed recipient needs a NEW explicit Send and a refused preview stays refused.
-Without that positive evidence (including bare golden stale-fence or unassigned
-refusals), retain the original signed packet, recipient, identities and retry key
+metadata location dominates none. A definitive `409 stale-fence`, `recipient-retired`,
+`recipient-unassigned` or recipient-mismatch 404 visibly re-reads the exact preview.
+The draft stays; a changed recipient needs a NEW explicit Send and a refused preview
+stays refused. The canonical unassigned golden carries none in both metadata locations.
+Without positive evidence (including bare golden stale-fence), retain the original signed packet, recipient, identities and retry key
 for explicit receipt recovery, even if the displayed preview changes. Never
 silently resend or retarget. Replies use the existing thread's stored
 participants, regardless of later routing policy. Storybook's

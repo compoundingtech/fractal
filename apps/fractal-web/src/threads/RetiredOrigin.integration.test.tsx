@@ -45,7 +45,7 @@ const context = (url: URL, start_recipient: object) => Response.json({ ...base, 
   kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'), start_recipient,
 } })
 
-// Whole canonical envelopes from 465ff949; never infer application certainty from the code.
+// Whole canonical envelopes from cc060eea; never infer application certainty from the code.
 const wireRefusal = (code: keyof typeof startRefusalWire) => Response.json(startRefusalWire[code], { status: 409 })
 
 it.each(Object.values(startRefusalWire))('decodes a golden server 409 envelope through the generated contract', body => {
@@ -208,7 +208,7 @@ it('offers no Start and names no recipient on a source without the preview reade
   } finally { await view.dispose() }
 })
 
-it.each(['stale-snapshot', 'recipient-unassigned'] as const)('retains the original signed Start when golden %s has no applied metadata', async code => {
+it.each(['stale-snapshot'] as const)('retains the original signed Start when golden %s has no applied metadata', async code => {
   const view = await mount(<LiveInboxThreads alert={ask} />, {
     preview: (url, actions) => context(url, actions.length === 0 ? originalRecipient : configuredRecipient),
     action: (action, actions) => actions.length === 1 ? wireRefusal(code) : receipt(action),
@@ -228,7 +228,7 @@ it.each(['stale-snapshot', 'recipient-unassigned'] as const)('retains the origin
   } finally { await view.dispose() }
 })
 
-it.each(['outer', 'details'] as const)('keeps unknown dominant over golden retirement none in %s metadata and a later definitive refusal', async location => {
+it.each(['outer', 'details'] as const)('keeps unknown dominant over golden retirement none in %s metadata and a later unassigned none', async location => {
   const golden = startRefusalWire['recipient-retired']
   const uncertain = location === 'outer'
     ? { ...golden, applied: 'unknown' }
@@ -236,7 +236,7 @@ it.each(['outer', 'details'] as const)('keeps unknown dominant over golden retir
   const view = await mount(<LiveInboxThreads alert={ask} />, {
     preview: (url, actions) => context(url, actions.length === 0 ? originalRecipient : configuredRecipient),
     action: (action, actions) => actions.length === 1 ? Response.json(uncertain, { status: 409 })
-      : actions.length === 2 ? wireRefusal('recipient-retired') : receipt(action),
+      : actions.length === 2 ? wireRefusal('recipient-unassigned') : receipt(action),
   })
   try {
     await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
@@ -255,6 +255,31 @@ it.each(['outer', 'details'] as const)('keeps unknown dominant over golden retir
     await vi.waitFor(() => expect(view.actions).toHaveLength(3))
     expect(view.actions[2]).toEqual(view.actions[0])
     expect(startParameters(view.actions[2])?.agent_id).toBe(original)
+  } finally { await view.dispose() }
+})
+
+it('treats golden unassigned applied:none as a definitive blocked setup refusal with no further sends', async () => {
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    preview: (url, actions) => actions.length === 0 ? context(url, originalRecipient) : wireRefusal('recipient-unassigned'),
+    action: () => wireRefusal('recipient-unassigned'),
+  })
+  try {
+    await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
+    await act(async () => view.button('Start thread')?.click())
+    await view.type('Keep the refused setup draft.')
+    await act(async () => view.button('Send')?.click())
+    await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient="unassigned"]')).not.toBeNull())
+    expect(view.host.querySelector('[role="alert"]')?.textContent).toContain("Couldn't start this thread.")
+    expect(view.button('Retry')).toBeUndefined()
+    expect(view.button('Retry thread start')).toBeUndefined()
+    expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
+    expect(view.host.querySelector('textarea')?.value).toBe('Keep the refused setup draft.')
+    const reads = view.previews.length
+    await act(async () => view.button('Send')?.click())
+    await view.settle()
+    expect(view.previews).toHaveLength(reads)
+    expect(view.actions).toHaveLength(1)
+    expect(startParameters(view.actions[0])?.agent_id).toBe(original)
   } finally { await view.dispose() }
 })
 

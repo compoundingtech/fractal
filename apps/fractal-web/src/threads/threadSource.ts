@@ -1,6 +1,7 @@
 import { actionReceiptCheck, appliedAnswer, sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import type { RequestHistoryPage, ThreadStartContext, ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
+import type { ErrorEnvelope } from '@fractal/client/schema'
 import type { FollowEvent, ThreadWindow } from '@fractal/sdk/read'
 import { Effect, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -422,6 +423,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   }
   const drafts = Atom.family((_destination: string) => Atom.keepAlive(Atom.make<ThreadDraft>({ content: '' })))
   type Request = { id: string; idempotency_key: string; fence: { snapshot_id: string; subject_revisions: Record<string, string> } }
+  const recipientUnassigned: Extract<ErrorEnvelope, { readonly code: 'recipient-unassigned' }>['code'] = 'recipient-unassigned'
   type Attempt = {
     readonly fingerprint: string
     readonly key: string
@@ -512,7 +514,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         if (error instanceof ClientError && error.status < 500) {
           if (kind === 'thread.start' && start !== undefined && appliedAnswer(error) === 'none' && (
             (error.status === 404 && error.response.code === 'not-found')
-            || (error.status === 409 && (error.response.code === 'stale-fence' || error.response.code === 'recipient-retired'))
+            || (error.status === 409 && (error.response.code === 'stale-fence' || error.response.code === 'recipient-retired' || error.response.code === recipientUnassigned))
           )) {
             // The definitive refusal applied nothing. Re-read visibly; only a new explicit Send may use the new preview.
             await reloadStartContext(start.origin.source_id, start.origin.episode)
