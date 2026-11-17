@@ -1008,7 +1008,7 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
 
   const send = async (run: () => Promise<ThreadEditResult>) => {
     setSending(true);
-    const submittedDraft = start && !thread ? draftCache.current.get(key) ?? JSON.stringify(draft) : undefined;
+    const submittedDraft = start && !thread ? JSON.stringify(draft) : undefined;
     try {
       const next = await run();
       if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);

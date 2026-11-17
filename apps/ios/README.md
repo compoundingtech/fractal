@@ -66,9 +66,10 @@ recovers that result. Unconfirmed starts appear separately in Inbox recovery,
 including when their source remains listed. They never replace the current
 source/episode or disable a fresh Start. Listing existing discussions is navigation,
 not Start deduplication.
-Before releasing an unconfirmed first composer, its exact dispatch-time serialized
-text and quote move to the attempt's own durable draft key. Only an unchanged
-origin entry is removed: typing after navigation/remount remains independent.
+Before releasing an unconfirmed first composer, the rendered draft used to build
+its submitted content and quote is serialized into the attempt's own durable key.
+Only a matching origin snapshot is removed: shared-cache edits before invocation
+or while the send is pending remain independent.
 Minimal target/origin/title discovery metadata is saved beside the draft, never a
 bound action, operation key or signature. Inbox discovers these drafts after restart.
 With the live ledger, recovery retries the original signed request. Without it, the

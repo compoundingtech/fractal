@@ -1596,7 +1596,7 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   assert.equal(store.draftCache.current.has(attemptKey), false);
 });
 
-test('a delayed Start hands off its dispatch snapshot without deleting later remounted origin typing', async () => {
+for (const divergence of ['before invocation', 'while pending']) test(`a Start preserves its rendered submission and concurrent cache typing diverged ${divergence}`, async () => {
   const origin = { sourceId: 'notice/delayed', episode: 'episode/one' }, client = {};
   const originKey = 'thread-draft/["notice/delayed","episode/one"]';
   const original = JSON.stringify({ text: 'Submitted original', quote: { id: 'message/quote', from: 'Agent', text: 'Original quote' } });
@@ -1623,11 +1623,12 @@ test('a delayed Start hands off its dispatch snapshot without deleting later rem
     Crypto: { randomUUID: () => 'first' }, View: 'View', T: 'T', Button: 'Button',
     ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
   })({ start, canReply: true, selectionVersion: 0 });
+  if (divergence === 'before invocation') store.draftCache.current.set(originKey, later);
   find(composer, 'ThreadComposeField').props.onSend();
   assert.equal(calls.length, 1);
   assert.equal(calls[0][3], 'Submitted original');
   // Remounting while the network is pending can legitimately create later typing.
-  store.draftCache.current.set(originKey, later);
+  if (divergence === 'while pending') store.draftCache.current.set(originKey, later);
   const remounted = find(createPanel()(props), 'InlineThread').props.start;
   assert.equal(remounted.target, undefined);
   pending.resolve({ how: 'unconfirmed', retry: async () => ({ how: 'sent' }) });
