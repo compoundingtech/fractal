@@ -1783,6 +1783,14 @@ impl SeatsStore for Store {
             mode.as_deref() == Some("eval"),
             "only eval runs can retire their desired graph"
         );
+        let removed_subjects = transaction.prepare(
+            "SELECT subject FROM desired WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (
+               SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1)",
+        )?.query_map([run_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for subject in removed_subjects {
+            fractal_store::store::runtime_cleanup::forget_subject(&transaction, &subject)?;
+        }
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h738ce7626839 owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
              WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (

@@ -7836,7 +7836,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if let Some(incarnation) = incarnation.filter(|_| !terminal)
                     && self.runtime.leftovers_settled(runtime_id, incarnation).unwrap_or(false)
                 {
-                    self.store.settle_runtime_cleanup(runtime_id, incarnation)?;
+                    self.store.settle_runtime_cleanup(subject, runtime_id, incarnation)?;
                 }
             }
             let desired = self.store.selected_desired_token(subject)?;

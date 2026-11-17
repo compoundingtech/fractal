@@ -17760,6 +17760,12 @@ fn rebuild_base_aggregate_tx(
     }
     if let Aggregate::Desired(subject) = aggregate {
         retirements::project_subject(transaction, subject)?;
+        let retained: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM desired WHERE subject=?1)", [subject], |row| row.get(0),
+        ).map_err(internal)?;
+        if !retained {
+            runtime_cleanup::forget_subject(transaction, subject).map_err(internal)?;
+        }
     }
     Ok(())
 }
