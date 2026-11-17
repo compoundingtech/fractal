@@ -1651,9 +1651,10 @@ Locally, `scripts/install-git-hooks` installs a lightweight, blocking content-on
 guard, using the trusted base's scanner before the existing evidence-signing path. The guard
 does not run candidate code, builds, tests or signing. `ST_SKIP_EVIDENCE=1` and
 `ST_EVIDENCE_LOCAL=off` do not skip it; bypassing the local hook does not bypass the hosted
-required check. Existing evidence-signing waits, background execution and non-blocking
-signing failures are unchanged. A landing-signing transition is a separate change, not part
-of this guard.
+required check. The accepted `"pr-proof": "hosted"` setting in `main`'s
+`.fractal/prepush-policy.json` (or `.st/prepush-policy.json` when absent) skips all local evidence work,
+including for agents with listed signers, and records `hosted_proof`; PR proof is hosted CI at the exact head.
+Without that setting, evidence-signing waits, background execution and non-blocking signing failures are unchanged.
 
 Release workflows remain separate from the required gate; neither package verification nor
 the Nix package/check graph is made redundant by workspace nextest.
