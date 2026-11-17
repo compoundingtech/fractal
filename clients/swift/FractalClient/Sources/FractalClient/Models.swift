@@ -706,9 +706,10 @@ public struct Limits: Codable, Sendable {
 }
 public struct Capabilities: Codable, Sendable {
     public let machineVersion: String?
+    public let issuer: String?; public let issuerKey: String?
     public let kind: String; public let sessionActor: String; public let transport: String; public let capabilities: [Capability]; public let limits: Limits; public let eventCursor: String; public let oldestEventCursor: String; public let schemas: [String]
     public let principal: AssistantPrincipal?; public let senderClass: AssistantSenderClass?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?
-    enum CodingKeys: String, CodingKey { case machineVersion = "machine_version", kind, sessionActor = "session_actor", transport, capabilities, limits, eventCursor = "event_cursor", oldestEventCursor = "oldest_event_cursor", schemas, principal, senderClass = "sender_class", grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
+    enum CodingKeys: String, CodingKey { case machineVersion = "machine_version", issuer, issuerKey = "issuer_key", kind, sessionActor = "session_actor", transport, capabilities, limits, eventCursor = "event_cursor", oldestEventCursor = "oldest_event_cursor", schemas, principal, senderClass = "sender_class", grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
 }
 
 public struct PageInfo: Codable, Sendable { public let limit: Int; public let hasMore: Bool; public let nextCursor: String?; public let cursorExpiresAt: String?; public let omittedItems: Int?; enum CodingKeys: String, CodingKey { case limit, hasMore = "has_more", nextCursor = "next_cursor", cursorExpiresAt = "cursor_expires_at", omittedItems = "omitted_items" } }

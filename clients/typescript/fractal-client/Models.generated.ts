@@ -1375,6 +1375,8 @@ export type Capabilities = {
   grant_expires_at?: Timestamp;
   grant_id?: Id;
   grant_kind?: "person" | "assistant";
+  issuer?: string;
+  issuer_key?: string;
   kind: "capabilities";
   limits: {
   default_assistant_response_bytes?: number;
