@@ -22,7 +22,7 @@ Manual builds realize the toolchain normally, including building on a cache miss
 
 The package is exposed only on Darwin. Its source is the Git checkout (including linked worktrees), so ignored build outputs, `rust/target`, and `node_modules` are not imported into the Nix store when resolving the toolchain.
 
-Build Debug for an arm64 simulator of your own (`ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`); the proof framework has no x86_64 simulator slice. The script targets iOS 16.4, including its C/assembly dependencies, and writes the XCFramework under `ios/build` inside the pod root. On a shared build host, wait until `pgrep -x xcodebuild` finds no process before starting Xcode. Generated static libraries and the device/simulator XCFramework are ignored; do not commit them. To restore the default build, reinstall pods without `FRACTAL_FABRIC` (`FRACTAL_FABRIC_PROOF`, or either legacy `ST3_` counterpart).
+Build Debug for an arm64 simulator of your own (`ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`); the proof framework has no x86_64 simulator slice. The script targets iOS 16.4, including its C/assembly dependencies, and writes the XCFramework under `ios/build` inside the pod root. Packaging reads only this module's static libraries and headers, so it does not wait for unrelated `xcodebuild` processes. Callers own build admission; release delivery holds its heavy slot throughout the worker. Do not run two builders against the same module output directory. Generated static libraries and the device/simulator XCFramework are ignored; do not commit them. To restore the default build, reinstall pods without `FRACTAL_FABRIC` (`FRACTAL_FABRIC_PROOF`, or either legacy `ST3_` counterpart).
 
 ## Isolated proof
 
