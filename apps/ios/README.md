@@ -61,16 +61,34 @@ image tray and dictation occupy capability slots; threads supply quote/removal a
 while retaining their canonical recipient policy. The shared component does not add thread
 attachments or choose send authority.
 
-`conversationAttempts.ts` owns process-lifetime draft snapshots, send/result phases and guarded
-original-retry ownership for both contexts. Ordinary rows adapt its results to image restoration,
-the warned Send as new action and transcript reconciliation; thread deliveries project the same
-controller into the existing client-scoped ledger, retaining independent Start attempt keys and
-Start/Reply completion fences. `conversationPresentation.tsx` supplies common recovery feedback;
-wording and available recovery actions remain context capabilities. Signed packet/member retention,
-receipt checks and prior-unknown dominance still come from the existing fractal-client delivery
-helpers and the stricter `sendStart` adapter, not from a new transport or certainty policy.
-Draft text/quote formats remain separate. There is no durable packet/outbox or original retry after
-process restart; saved Start discovery metadata remains only a warning and saved-copy capability.
+`conversationAttempts.ts` is the common subscription/row controller, not a certainty
+policy. For protected profiles, chat, Start and reply accept immutable intent/spool
+before clearing the submitted draft, prepare and persist the complete signed packet,
+then commit the one-shot dispatch marker before a single POST. Their recovery rows
+are projections of SQLite/shared-core state, not retry closures or text matching.
+Acceptance clears only the captured draft revision under the original owner/generation;
+later text, quote or image edits remain in the composer. The store's reply cleanup
+also checks the captured generation before deleting or saving: identical restored
+draft bytes after a cache reset are not the original submitted revision.
+Legacy profiles without a verified persisted issuer tuple keep the existing
+nonpersistent delivery paths and receive the one-time re-pair notice; the notice is
+also explained in connection settings. No protection is silently inferred from a pin.
+Draft formats, ordinary images/dictation/rich tools, thread text/quote, and each
+context's separate viewport/read/paging semantics remain unchanged.
+On launch/foreground, never-dispatched work can resume on its original authorized
+member. Dispatched work restores unknown and is never automatically replayed.
+Recovery offers Check status, Open conversation, Copy and warned local Discard;
+damaged entries expose only status and Discard. Check status uses exact authoritative
+timeline identities only; absent/unsupported lookup remains unknown, not not-applied.
+There is no exclusion/seal protocol, and no claim to reconcile every lost receipt.
+Storage failure preserves drafts and recovery, with a retry-later storage action.
+Saved Start metadata remains packetless unknown. Protected-profile migration commits
+its original text/title/origin/target and serialized draft before removing the exact
+old source; import/discard is idempotent. A conflicting saved import never authorizes
+source deletion: the stored text, serialized draft and discovery metadata must match
+exactly. Newer conflicting content stays in the original draft rather than creating
+another recovery identity for the same legacy Start. Legacy profiles keep the
+warning/saved-copy reader. Neither path fabricates an original packet, identity or dispatch permission.
 
 The common conversation frame owns keyboard avoidance and the composer dock; it accepts each
 context's existing history viewport unchanged. Common message heading/body presentation retains
@@ -125,6 +143,124 @@ to its old target. The person may paste
 into a current Inbox Start to deliberately send a separate message with a fresh
 UUID/key and current recipient; the warning explains the original may have arrived.
 Recovery acceptance/discard touches only that attempt's draft, not later typing.
+
+Fresh pairing saves the verified root-grant issuer and issuer key with a new local
+profile incarnation in the same secure profile write. Renewal preserves that
+incarnation only when its verified authority tuple matches. `outboxBinding.ts`
+maps profile ID to `principalId`, the original member to `memberId`, and the exact
+JSON two-string tuple `[issuer, issuerKey]` to `deploymentId` through the shared
+client's `outboxDeploymentId`, with no local encoding implementation. JSON escaping and
+ordered tuple parsing make this encoding injective; concatenation and URLs do not.
+This tuple identifies the host authority, **not a distinct store incarnation**.
+The person-root fingerprint pins a different key and cannot reconstruct the tuple.
+
+The binding adapter exposes legacy profiles as `unprotected`, with one-time
+re-pair notice state; acknowledging the notice confers no binding. A mismatched or
+unavailable binding returns unknown access feedback without reading/rebinding the
+repository. The shared client owns restoration/CAS state transitions and packets.
+This is a JS contract boundary only: delivery has **not** switched to a durable
+outbox, and the notice is not yet wired into the UI. No crash-safe sending is
+claimed. `expo-sqlite` 57.0.3 is now a direct dependency and Expo config plugin.
+The narrow `NSURLIsExcludedFromBackupKey` bridge/readback and private attachment
+spool are authored under `modules/fractal-outbox-files`, but not compiled/installed.
+Protected storage failures must reject acceptance and keep the draft, never fall
+back to legacy sending; that delivery integration remains outside this step.
+The binding contract tests retain immutable intent and private attachment references
+in `pending/preparing`, then persist `prepareOutboxRecord` with the exact packet and
+shared packet-derived identities in `pending/ready` before dispatch can be marked.
+Attachment bytes belong to the private iOS spool, not the serialized intent.
+Repository CAS must call `isAllowedOutboxTransition` inside the same transaction;
+revision equality alone is insufficient. Exact original authoritative timeline
+identity observations use the shared core; absence never proves nonapplication.
+`outboxSqlite.ts` implements the repository over a narrow SQL executor. Its dedicated
+database migrates from `user_version = 0` to 1 without dropping records. Scope
+columns plus attempt ID form the primary key; every read/list/write filters the
+same immutable scope. The read, shared transition authorization and conditional
+revision UPDATE occur in one write transaction. `list()` returns shared tagged
+`OutboxEntry` values: valid records plus corrupt-row IDs/revisions, without dropping
+damaged rows or hiding healthy records. Shared restoration makes damage a persistent
+“storage damaged; delivery unknown” entry: Discard only, no Copy/Send/Retry or expiry.
+Direct reads/CAS of damaged rows throw `OutboxCorruptionError`; no sendable packet
+is fabricated. Unsupported schema versions fail closed instead of resetting storage.
+
+`outboxSqliteNative.ts` supplies an Expo SQLite connection with serialized operations,
+`BEGIN IMMEDIATE`/commit/rollback, FULL synchronization and queued close. The path
+is `defaultDatabaseDirectory/fractal-outbox/outbox.sqlite` (app-private Documents
+on iOS), not a purgeable cache. Before SQLite opens, the optional native files
+module creates and excludes both this directory and its `spool` subdirectory from
+backup, then reads each flag back using fresh resource-value URLs. The JS gate
+requires both read-backs and the exact SQLite directory; missing module, mismatched
+path or a false flag raises `OutboxStorageProtectionError` with mode
+`unprotected-storage` and `keepDraft: true`, never legacy-send fallback. SQLite
+loads only after that gate so older installed binaries fail closed.
+Native I/O, locked/unreadable storage and database-open failures instead raise
+`OutboxStorageUnavailableError` (`storage-unavailable`, retry later, draft kept).
+They do not manufacture corruption rows or erase recovery records. Root and spool
+directories use `completeUntilFirstUserAuthentication`, including existing roots;
+actual first-unlock/lock behavior still requires native verification.
+The factory is connected to protected production chat/Start/reply. Normal Expo local-module
+autolinking/prebuild/Pods and a rebuilt installed binary are still required; no
+generated native files were hand-edited. JS fake-bridge and Node SQLite tests do
+not establish native compilation, actual backup exclusion or installed crash proof.
+
+Protected binding also requires the current authenticated capabilities `issuer` and
+`issuer_key` to exactly match the persisted verified pairing tuple. The store loads
+that profile under the existing capabilities epoch/profile guard; stale clients,
+missing/partial pairs and mismatches cannot authorize protected writes. A mismatch
+shows a once-per-profile re-pair notice, acknowledged in separate local metadata
+without changing pairing identity. Persisted-scope records remain visible through
+`restoreBoundEntries`, which uses the core `restoreOutboxEntries` (including corrupt
+discard-only recovery entries); they are never silently moved, re-signed or sent.
+`openNativeOutbox` requires the store's live authorization callback for acceptance
+and transition writes; the runtime repeats it before preparation, status reads and
+dispatch on the original client. Ordinary legacy sending is unchanged. Neither URL
+nor `host_id` can grant issuer binding.
+The native opener snapshots/freezes the requested scope before awaiting storage;
+every write guard and exposed authorization check uses the repository's immutable
+scope, never the caller-owned object. Mutating that object cannot change which
+profile, deployment or member is authorized for the captured database.
+
+`outboxRuntime.ts` is the durable transport owner: acceptance precedes preparation,
+the complete packet precedes the SQL dispatch marker, and that marker precedes a
+single POST. It delegates every certainty transition to the shared core, and projects
+records through the existing `ConversationAttempts` controller. Restart can resume
+never-dispatched preparation/ready packets; dispatched work restores unknown without
+signing or sending again. Check status only reads the original authoritative timeline
+for an exact derived identity. Absence remains unknown. Screen sends distinguish
+durable local acceptance from server-confirmed delivery; accepted content stays in
+the recovery projection until its terminal retention rules allow deletion.
+
+The core exports a reference repository but no reusable runnable contract suite.
+One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope
+contracts against both `createMemoryOutboxRepository` and real `node:sqlite`.
+File-reopen, migration, rollback and corrupt-row tests additionally exercise SQLite.
+Transaction errors survive rollback failures: an aggregate retains the original
+error as its cause/first member and the rollback failure as its second member.
+Repository lifecycle support retains terminal payload for seven days, and delivered
+payload longer until its exact timeline identity is observed. Removing content keeps
+a minimal tombstone for 30 further days; that ID cannot be accepted again meanwhile.
+Pending/unknown/damaged rows never automatically expire. Explicit discard removes
+local recovery only, not a server action or proof of nonapplication.
+Append-only upload checkpoints survive preparation interruption. Terminal spool
+deletions are queued durably, retried after reopen, and run only after proving no
+record in any scope references the file. Any damaged row blocks that proof. Native
+acceptance and cleanup share a filesystem queue, preventing a spool-before-commit
+race with deletion. Discarded unknown/corrupt and pre-acceptance orphan files are
+not automatically deleted without terminal/reference evidence.
+
+`acceptProtectedOutboxIntent` captures text/images, checks protected storage, hashes
+each attachment, and awaits immutable native file writes before committing the
+shared `pending/preparing` intent. That intent contains only SHA-256 names, private
+relative references and media metadata, never base64 bytes or expiring picker URLs.
+The native module verifies hashes, synchronizes a private temporary file, links it
+without overwriting the final hash name, and synchronizes the spool directory.
+An existing final file must pass digest verification; reads verify contents again.
+The bridge exposes no arbitrary path access; deletion accepts only a hash-named spool reference.
+Failed acceptance leaves the caller draft unchanged. Unaccepted temporary files
+are removed during native writes; final files are deleted only by the proven-terminal
+cleanup path. No upload/network action runs in this adapter.
+Actual iOS flag readback, directory synchronization and process-kill recovery still
+require the later native build/capture; no sudden-power-loss guarantee is claimed.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.

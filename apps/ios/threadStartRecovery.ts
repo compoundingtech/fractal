@@ -1,4 +1,5 @@
 import type { ThreadStartOrigin } from './store';
+import type { LegacyStartRecovery } from './outboxMessage.ts';
 
 export type SavedThreadStart = { target: string; origin: ThreadStartOrigin; title: string };
 export const startRecoveryKey = (target: string): string => `thread-start-recovery/${target}`;
@@ -20,4 +21,29 @@ export const savedThreadStarts = (cache: ReadonlyMap<string, string>): readonly 
     } catch { /* A malformed discovery record cannot authorize or fabricate a Start. */ }
   }
   return starts;
+};
+
+/** Commit packetless metadata before removing the exact old draft/discovery pair. */
+export const importSavedThreadStarts = async (
+  cache: Map<string, string>, current: () => boolean,
+  commit: (entry: LegacyStartRecovery) => Promise<boolean>, save: () => Promise<void>,
+): Promise<void> => {
+  for (const start of savedThreadStarts(cache)) {
+    const key = `thread-draft/start/${start.target}`, discoveryKey = startRecoveryKey(start.target);
+    const serializedDraft = cache.get(key), discovery = cache.get(discoveryKey);
+    if (serializedDraft === undefined || discovery === undefined || !current()) return;
+    let text: unknown;
+    try { text = JSON.parse(serializedDraft)?.text; } catch { continue; }
+    if (typeof text !== 'string') continue;
+    const retained = await commit({ id: `legacy-start/${start.target}`, message: { kind: 'start', target: start.target, title: start.title, origin: start.origin }, text, serializedDraft });
+    if (!retained) continue; // Keep newer source drafts when the deterministic import id is occupied.
+    if (!current() || cache.get(key) !== serializedDraft || cache.get(discoveryKey) !== discovery) continue;
+    cache.delete(key); cache.delete(discoveryKey);
+    try { await save(); }
+    catch (error) {
+      // The durable import is idempotent; retain the old source if draft-store removal failed.
+      if (current()) { if (!cache.has(key)) cache.set(key, serializedDraft); if (!cache.has(discoveryKey)) cache.set(discoveryKey, discovery); }
+      throw error;
+    }
+  }
 };

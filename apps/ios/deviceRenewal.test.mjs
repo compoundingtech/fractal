@@ -147,3 +147,32 @@ test('every approval tuple field and the candidate affect the signed bytes', () 
   assert.notEqual(renewalApprovalText({ ...value, grant_expires_at_unix_ms: value.grant_expires_at_unix_ms + 1 }, 'candidate'), text);
   assert.notEqual(renewalApprovalText(value, 'another-candidate'), text);
 });
+
+test('renewal preserves protected profile incarnation and requires the same verified authority', async () => {
+  for (const changed of [false, true]) {
+    const t = setup();
+    t.previous.profileId = 'profile/avery';
+    t.previous.pairingIssuer = {
+      issuer: vector.proofs[1].body.fields.issuer,
+      issuerKey: changed ? 'authority/different' : vector.proofs[1].body.fields.issuer_key,
+    };
+    t.ports.read = async () => structuredClone(t.previous);
+    if (changed) {
+      await assert.rejects(approveRenewal('profile/avery', t.previous, t.previous.url, t.challenge, 'st3.client.v0', t.ports), /different pairing authority/);
+      assert.equal(t.events.some(event => event[0] === 'save'), false);
+    } else {
+      const next = await approveRenewal('profile/avery', t.previous, t.previous.url, t.challenge, 'st3.client.v0', t.ports);
+      assert.equal(next.profileId, t.previous.profileId);
+      assert.deepEqual(next.pairingIssuer, t.previous.pairingIssuer);
+    }
+  }
+});
+
+test('renewal rejects an issuer-only change even when the authority key matches', async () => {
+  const t = setup();
+  t.previous.profileId = 'profile/avery';
+  t.previous.pairingIssuer = { issuer: 'host/different', issuerKey: vector.proofs[1].body.fields.issuer_key };
+  t.ports.read = async () => structuredClone(t.previous);
+  await assert.rejects(approveRenewal('profile/avery', t.previous, t.previous.url, t.challenge, 'st3.client.v0', t.ports), /different pairing authority/);
+  assert.equal(t.events.some(event => event[0] === 'save'), false);
+});
