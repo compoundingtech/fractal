@@ -31,6 +31,9 @@ WHERE kind='thread.unread-marked';
 CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
 ON claims(actor, store_index DESC)
 WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
+CREATE INDEX IF NOT EXISTS claims_thread_history_link_index
+ON claims(json_extract(body, '$.fields.thread_id'), json_extract(body, '$.fields.ask'), json_extract(body, '$.fields.ask_episode'), subject)
+WHERE kind='thread.ask-linked';
 ",
     )
 }
@@ -43,6 +46,9 @@ pub use inbox_source::InboxOrigin;
 #[path = "thread_message_window.rs"]
 mod message_window;
 pub use message_window::{ThreadMessage, TimelineAnchor, TimelineAnchorState, TimelineItem, TimelinePage, mark_read, mixed_message_content, mixed_timeline};
+
+#[path = "thread_request_history.rs"]
+pub mod request_history;
 
 pub enum Edit<'a> {
     Create {
@@ -850,16 +856,16 @@ fn owns_ask_episode(
     ask: &str,
     episode: &str,
 ) -> Result<bool, FractalError> {
-    let assigned = person_work::step(connection, ask)
-        .map_err(internal)?
-        .and_then(|step| step.assigned_to)
-        .is_some_and(|assignee| {
-            identities::resolve_reference_conn(connection, &assignee)
-                .is_ok_and(|owner| owner == person)
-        });
-    Ok(assigned && person_work::request(connection, ask)
-        .map_err(internal)?
-        .is_some_and(|request| request.id == episode))
+    let key = request_history::SourceEpisode { source_id: ask.into(), episode: episode.into() };
+    if !person_work::authorize_retained_episode(connection, person, &key)? {
+        return Ok(false);
+    }
+    // This existing discovery qualifier remains runtime-ask-only. The shared policy helper
+    // also admits authored identities, but does not establish an asking claim's existence.
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND subject=?2 AND kind='work.person-asked')",
+        params![episode, ask], |row| row.get(0),
+    ).map_err(internal)
 }
 
 /// Qualify the exact ask and person before resolving its private sidecar. Otherwise

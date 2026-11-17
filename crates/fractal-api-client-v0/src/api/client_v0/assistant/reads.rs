@@ -33,7 +33,7 @@ pub async fn project_with_context(
     match projection {
         "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
             conversation_reads::project_bound_with_context(state, snapshot, projection, parameters, max_bytes, binding, context).await,
-        "threads" | "thread-detail" | "thread-timeline" =>
+        "threads" | "thread-detail" | "thread-timeline" | "thread-request-history" =>
             thread_read(state, projection, parameters, max_bytes, binding, context).await,
         "conversation-content" => {
             let mut parameters = parameters.clone();
@@ -49,6 +49,8 @@ pub async fn project_with_context(
 }
 /// The assistant gateway revalidates the grant before serving each response. All
 /// thread data and the exact conversation identity use one store snapshot.
+/// Request history returns the complete retained-history page shape, with the store's
+/// opaque cursor unchanged; it does not use transcript content continuation handles.
 async fn thread_read(
     state: &AppState,
     projection: &str,
@@ -61,11 +63,12 @@ async fn thread_read(
 
     let list = projection == "threads";
     let timeline = projection == "thread-timeline";
+    let history = projection == "thread-request-history";
     let mut fields = vec!["agent_id", "session_id", "max_response_bytes"];
     if !list {
         fields.push("thread_id");
     }
-    if list || timeline {
+    if list || timeline || history {
         fields.extend(["cursor", "limit"]);
     }
     allow(parameters, &fields, max_bytes)?;
@@ -95,6 +98,7 @@ async fn thread_read(
     ));
     let content_collection = format!("{collection}content:");
     let (cursor, content_cursor) = match parameters.get("cursor") {
+        Some(cursor) if history => (Some(cursor.clone()), None),
         Some(cursor) if timeline && cursor.starts_with(&content_collection) => {
             if parameters.contains_key("limit") {
                 return Err(validation("a thread content cursor cannot be combined with limit"));
@@ -124,6 +128,7 @@ async fn thread_read(
                 let store_error = |error: FractalError| match error.code {
                     "thread-unavailable" => unavailable(),
                     "stale-thread-cursor" => stale(&error.message),
+                    "invalid-thread-cursor" => validation(&error.message),
                     _ => ApiError::bad(error),
                 };
                 let bind = |cursor: Option<&str>| {
@@ -133,6 +138,14 @@ async fn thread_read(
                 let value = if let Some(id) = id.as_deref() {
                     let summary = thread_metadata::summary_for_conversation(&state.store, &person, &agent, id)
                         .map_err(store_error)?;
+                    if history {
+                        // The retained-history cursor is owned and scoped by the store.
+                        // Do not translate it into an assistant transcript cursor.
+                        let page = crate::store::missions::thread_request_history(
+                            &state.store, &person, id, cursor.as_deref(), limit,
+                        ).map_err(store_error)?;
+                        return Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?));
+                    }
                     if timeline {
                         let budget = ThreadResponseBudget {
                             context: &context, snapshot: &snapshot, max_bytes, content_collection: &content_collection,

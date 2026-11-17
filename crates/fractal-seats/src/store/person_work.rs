@@ -11,6 +11,9 @@ pub use fractal_missions::store::person_work::{AskImages, current, declaration_l
 mod reconcile_candidates_tests;
 #[cfg(test)]
 mod deadline_clock_tests;
+#[cfg(test)]
+#[path = "thread_request_history_tests.rs"]
+mod thread_request_history_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {

@@ -168,13 +168,16 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_threads_list` | `read.assistant.conversation` | Read | List threads for one selected conversation. |
 | `fractal_thread_get` | `read.assistant.conversation` | Read | Read one thread's title, lifecycle state and revisions. |
 | `fractal_thread_timeline` | `read.assistant.conversation` | Read | Page messages and accepted rename, close and reopen events for a thread. Use a message’s `next_content_cursor` as `cursor` without `limit` to fetch remaining text. |
+| `fractal_thread_request_history` | `read.assistant.conversation` | Read | Read related retained requests, availability, source episodes and explanatory relations for one thread. Pass `next_cursor` unchanged as `cursor`; optional `limit` is 1–50. |
 
 These thread tools are available through the `fractal-mcp` stdio server. Use the agent
-and current session IDs returned by conversation discovery for all three.
+and current session IDs returned by conversation discovery for all four.
 The same revocable `read.assistant.conversation` grant authorizes these reads;
 thread discovery does not create a new grant. Exact thread reads also verify the
-selected conversation and owner before exposing metadata or messages. Private
-thread messages remain unavailable through generic conversation content handles.
+selected conversation and owner before exposing metadata, messages or request history.
+History reauthorizes each source for the current person; its relations explain past
+requests and grant no mutation authority. Private thread messages remain unavailable
+through generic conversation content handles.
 These tools do not start, reply to, rename, close or reopen threads, and do not
 support thread attachments.
 
