@@ -19,7 +19,21 @@ const findBy = (node, match) => !node || typeof node !== 'object' ? undefined : 
 const button = (node, label) => findBy(node, candidate => candidate.type === 'Button' && candidate.props.label === label);
 // The store's unread service; bodies bind it per thread. Tests needing behavior pass their own.
 const unreadClient = { forThread: () => ({ state: 'ready', actions: {} }), listMarked: async () => ({ kind: 'empty' }) };
-let lineEvidence;
+let lineEvidence, draftReader;
+// Mirrors store.tsx: each Start attempt's delivery is keyed by its origin and new thread ID.
+const attemptScope = (origin, thread) => JSON.stringify([origin.sourceId, origin.episode, thread]);
+class ReadyStartContext {
+  constructor(_client, origin) {
+    this.value = { kind: 'ready', changed: false, context: {
+      kind: 'thread-start-context', source_id: origin.sourceId, episode: origin.episode,
+      start_recipient: { agent_id: 'agent/one', basis: { _tag: 'configured' } },
+    } };
+  }
+  subscribe = () => () => {};
+  getSnapshot = () => this.value;
+  async load() {}
+  close() {}
+}
 
 function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -31,11 +45,17 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   });
   const exports = {};
   // Components rendered as children stay inspectable without mounting a second hook scope.
-  dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', threadClock, threadExactTime, threadRelativeTime,
+  dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', RequestHistory: 'RequestHistory', threadClock, threadExactTime, threadRelativeTime,
+    HistoryStart: 'HistoryStart', StartRecipientPreview: 'StartRecipientPreview', ThreadStartContextReader: ReadyStartContext,
+    Clipboard: { setStringAsync: async () => {} }, useMemo: create => create(), useEffect() {}, useFocusEffect() {}, useCallback: callback => callback,
+    threadStartAttemptScope: attemptScope,
+    threadStartSlot: thread => `start/${thread}`,
+    threadStartScope: origin => JSON.stringify([origin.sourceId, origin.episode]),
     reminderFromSummary, anchorPresentation, pendingUnreadAPI, useUnreadVisit: nativeVisitPorts().useUnreadVisit,
     savedThreadStarts, startRecoveryKey,
     useUnreadVisitEntry: nativeVisitPorts().useUnreadVisitEntry,
     renderedLineEvidence: (...args) => (lineEvidence ??= compile('renderedLineEvidence', 'function threadTextIssue', {}))(...args),
+    readThreadDraft: (...args) => (draftReader ??= compile('readThreadDraft', 'function ThreadComposer', {}))(...args),
     useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(), ...dependencies };
   if (dependencies.useStore) {
     const useStore = dependencies.useStore;
@@ -175,7 +195,7 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   const state = hooks();
   const page = { items: [thread], snapshots: new Map(), loading: false, live: false, reload() {}, replace() {} };
   const list = compile('ContextThreadList', 'function ContextThreadHeader', {
-    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {},
+    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {}, useFocusEffect() {},
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => 1, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 20,
     useThreadPage: () => page, useTextAppearance: () => ({ system: false, palette: {} }), theme: {},
     View: 'View', Pressable: 'Pressable', T: 'T', ScrollView: 'ScrollView', ThreadViewport: 'ThreadViewport', Button: 'Button',
@@ -458,7 +478,7 @@ test('thread groups read in system text, titles wrap at accessibility sizes and 
   let viewports = [];
   const page = { items: [{ id: 'thread/one', title: 'Review', state: 'open' }], snapshots: new Map(), loading: false, live: true, reload() {}, replace() {} };
   const list = compile('ContextThreadList', 'function ContextThreadHeader', {
-    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {},
+    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {}, useFocusEffect() {},
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => undefined, useThreadViewports: () => viewports,
     THREAD_WINDOW_SIZE: 20, useThreadPage: () => page, useTextAppearance: () => ({ system: true, colors: {} }), theme: {},
     View: 'View', Pressable: 'Pressable', T: 'T', ScrollView: 'ScrollView', ThreadViewport: 'ThreadViewport', Button: 'Button',
@@ -479,9 +499,10 @@ test('the first draft uses the retained composer through its receipt and accepte
   const state = hooks();
   const draftCache = { current: new Map() };
   let accepted = false;
+  const submitted = [];
   const start = {
     cacheKey: 'draft-origin', accepted: false, origin: { agentId: 'agent/reviewer', sourceId: 'notice/source', episode: 'episode/exact' },
-    title: 'Review', onAccepted: target => { assert.equal(target, id); accepted = true; }, onCancel() {},
+    title: 'Review', onSubmitted: target => { submitted.push(target); }, onAccepted: target => { assert.equal(target, id); accepted = true; }, onCancel() {},
   };
   const store = {
     status: 'online', draftCache, draftsReady: true, saveDrafts() {},
@@ -508,6 +529,7 @@ test('the first draft uses the retained composer through its receipt and accepte
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(accepted, true);
   assert.deepEqual(calls, [['start', id, start.origin, start.title, 'First message']]);
+  assert.deepEqual(submitted, [], 'a confirmed first send needs no unknown-delivery draft handoff');
   state.reset();
   field = find(composer({ ...props, start: { ...start, target: id, accepted: true } }), 'ThreadComposeField');
   assert.equal(field.props.text, '');
@@ -552,7 +574,7 @@ test('an origin-scoped first draft survives navigating away and starts without a
   const client = {};
   const component = compile('InboxThreadStart', 'function InlineThread', {
     useStore: () => ({ status: 'online', threadRefresh: 0, draftCache, draftsReady: true, saveDrafts() {} }),
-    useState: initial => [initial, () => {}], threadStartScope: value => JSON.stringify([value.sourceId, value.episode]),
+    useState: initial => [initial, () => {}], useRef: current => ({ current }), threadStartScope: value => JSON.stringify([value.sourceId, value.episode]),
     threadDraftKey: value => `thread-draft/${value}`, threadTitleFromAsk: value => value,
     View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
   });
@@ -562,7 +584,7 @@ test('an origin-scoped first draft survives navigating away and starts without a
     assert.equal(inline.props.id, undefined);
     assert.equal(inline.props.start.target, undefined);
     assert.equal(inline.props.start.cacheKey, cacheKey);
-    assert.deepEqual(inline.props.start.origin, { ...origin, agentId: 'agent/canonical' });
+    assert.deepEqual(inline.props.start.origin, { ...origin, agentId: 'agent/one' });
     assert.deepEqual(find(tree, 'ThreadGroup').props.context, { origin_source: origin.sourceId, origin_episode: origin.episode });
   }
 });
@@ -611,8 +633,8 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   const original = Object.freeze({ origin: { source_id: origin.sourceId, episode: origin.episode }, agent_id: origin.agentId, content: 'Original content', title: 'Original title', signature: 'original-signature', idempotency_key: 'original-key' });
   const observed = [];
   const retry = async () => { exactRetries++; observed.push(original); return { how: 'sent' }; };
-  const scope = target => `start/${target}`;
-  await exports.track(scope('thread/original'), 'thread/original', async () => ({ how: 'unconfirmed', retry }), undefined,
+  const scope = value => JSON.stringify([value.sourceId, value.episode]);
+  await exports.track(attemptScope(origin, 'thread/original'), 'thread/original', async () => ({ how: 'unconfirmed', retry }), undefined,
     { origin: { ...origin }, title: original.title });
   const ledger = byClient.current.get(client);
   const cache = { current: new Map() };
@@ -626,13 +648,13 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   });
   // A fresh component instance sees the same valid source, but the new row carries no
   // usable episode or assigned conversation. Its changed title cannot rewrite the retry.
-  const props = entry({ sourceId: origin.sourceId, pendingScope: scope('thread/original'), initialTitle: 'Changed title', onOpen() {} }).props;
+  const props = entry({ sourceId: origin.sourceId, pendingScope: attemptScope(origin, 'thread/original'), initialTitle: 'Changed title', onOpen() {} }).props;
   assert.deepEqual(props.origin, origin);
-  assert.equal(props.agentId, origin.agentId);
+  assert.deepEqual(props.pending, { target: 'thread/original', agentId: origin.agentId });
   assert.equal(props.initialTitle, original.title);
   assert.equal(props.canStart, false);
   const startPanel = compile('InboxThreadStart', 'function InlineThread', {
-    useStore: () => store, useState: initial => [initial, () => {}], threadStartScope: scope,
+    useStore: () => store, useState: initial => [initial, () => {}], useRef: current => ({ current }), threadStartScope: scope,
     threadDraftKey: value => value, threadTitleFromAsk: value => value,
     View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
   });
@@ -676,6 +698,138 @@ test('Inbox recovery lists each independent pending attempt separately, includin
   assert.deepEqual(recovered.map(node => node.props.sourceId), [listed.sourceId, orphan.sourceId, orphan.sourceId]);
   assert.deepEqual(recovered.map(node => node.props.pendingScope), ['listed', 'orphan-first', 'orphan-second']);
   assert.ok(recovered.every(node => node.props.origin === undefined), 'retained context never authorizes a new Start');
+});
+
+const findAll = (node, type) => !node || typeof node !== 'object' ? [] : [
+  ...(node.type === type ? [node] : []), ...(node.children ?? []).flatMap(child => findAll(child, type)),
+];
+const episodeScope = value => JSON.stringify([value.sourceId, value.episode]);
+
+test('Starts never coalesce by origin: a retained attempt keeps its own receipt beside an independent new Start', () => {
+  const origin = { sourceId: 'step-run/authored-step', episode: 'episode/one' };
+  const retained = { ...origin, agentId: 'agent/original' };
+  const ledger = new Map([[attemptScope(retained, 'thread/first'), { target: 'thread/first', retry: async () => ({ how: 'sent' }), start: { origin: retained, title: 'First' } }]]);
+  const cacheKey = `thread-draft/${episodeScope(origin)}`;
+  const render = ({ cached, status = 'online', pendingTarget }) => compile('InboxThreadStart', 'function InlineThread', {
+    useStore: () => ({ status, threadRefresh: 0, threadDeliveries: ledger, draftsReady: true, saveDrafts() {},
+      draftCache: { current: new Map(cached ? [[cacheKey, JSON.stringify({ text: 'A second question' })]] : []) } }),
+    useState: initial => [initial, () => {}], useRef: current => ({ current }), threadStartScope: episodeScope,
+    threadDraftKey: value => `thread-draft/${value}`, threadTitleFromAsk: value => value,
+    View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+  })({ client: {}, origin: pendingTarget ? retained : origin,
+    initialTitle: 'Authored step', canStart: !pendingTarget,
+    pending: pendingTarget ? { target: pendingTarget, agentId: retained.agentId } : undefined, onOpen() {} });
+
+  const attempt = find(render({ cached: false, pendingTarget: 'thread/first' }), 'InlineThread');
+  const fresh = find(render({ cached: true }), 'InlineThread');
+  assert.equal(attempt.props.id, 'thread/first');
+  assert.equal(attempt.props.start.target, 'thread/first');
+  assert.deepEqual(attempt.props.start.origin, retained, 'the retained attempt keeps its exact recipient');
+  assert.equal(attempt.props.start.cacheKey, 'thread-draft/start/thread/first');
+  assert.equal(fresh.props.id, undefined, 'the new Start has no server thread until it is sent');
+  assert.equal(fresh.props.start.target, undefined);
+  assert.deepEqual(fresh.props.start.origin, { ...origin, agentId: 'agent/one' });
+  assert.equal(fresh.props.start.cacheKey, cacheKey);
+
+  const idle = render({ cached: false });
+  assert.equal(findAll(idle, 'InlineThread').length, 0);
+  assert.equal(button(idle, 'Start thread').props.disabled, false, 'an unconfirmed attempt never blocks a new Start');
+  assert.equal(button(render({ cached: false, status: 'offline' }), 'Start thread').props.disabled, true, 'offline Starts stay unavailable');
+});
+
+test('a retained Start of another episode never folds into this resolved notice row and stays recoverable', () => {
+  const earlier = { sourceId: 'notice/typed', episode: 'episode/one', agentId: 'agent/original' };
+  const later = { sourceId: 'notice/typed', episode: 'episode/two' };
+  const ledger = new Map([[attemptScope(earlier, 'thread/earlier'), { target: 'thread/earlier', start: { origin: earlier, title: 'Earlier' } }]]);
+  const entry = compile('InboxThread', 'type ThreadStartDraft', {
+    useStore: () => ({ threadClient: {}, threadActions: new Set(['thread.start']), threadDeliveries: ledger }),
+    threadStartScope: episodeScope, InboxThreadStart: 'InboxThreadStart', T: 'T',
+  });
+  for (const origin of [later, { sourceId: earlier.sourceId, episode: earlier.episode }]) {
+    const props = entry({ sourceId: later.sourceId, origin, agentId: 'agent/current', initialTitle: 'Notice', onOpen() {} }).props;
+    assert.deepEqual(props.origin, origin);
+    assert.equal(props.pending, undefined, 'fresh recipient is read from canonical context, not the Inbox row');
+    assert.equal(props.initialTitle, 'Notice');
+    assert.equal(props.canStart, true, 'each resolved episode can Start independently');
+  }
+  const pending = compile('PendingInboxThreads', 'type ThreadStartDraft', {
+    useStore: () => ({ threadClient: {}, threadDeliveries: ledger, data: { attention: [{ source_id: later.sourceId, episode: later.episode }] } }),
+    threadStartScope: episodeScope, View: 'View', T: 'T', InboxThread: 'InboxThread',
+  })({ onOpen() {} });
+  assert.deepEqual(findAll(pending, 'InboxThread').map(node => node.props.pendingScope), [attemptScope(earlier, 'thread/earlier')],
+    'the earlier episode is recovered on its own, not under the listed later episode');
+});
+
+test('an unconfirmed first send keeps its text with its attempt; a refused one returns it to the composer', async () => {
+  const origin = { agentId: 'agent/reviewer', sourceId: 'notice/source', episode: 'episode/exact' };
+  const originKey = `thread-draft/${episodeScope(origin)}`;
+  const attemptKey = 'thread-draft/start/thread/new';
+  for (const outcome of [{ how: 'unconfirmed', retry: async () => ({ how: 'sent' }) }, { how: 'failed', error: 'Refused' }]) {
+    const draftCache = { current: new Map([[originKey, JSON.stringify({ text: 'First message' })]]) };
+    const store = { status: 'online', threadRefresh: 0, threadDeliveries: new Map(), draftCache, draftsReady: true, saveDrafts() {}, actions: { startThread: async () => outcome } };
+    const panel = compile('InboxThreadStart', 'function InlineThread', {
+      ...hooks(), useStore: () => store, threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
+      View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+    });
+    const start = find(panel({ client: {}, origin, agentId: origin.agentId, initialTitle: 'Review', canStart: true, onOpen() {} }), 'InlineThread').props.start;
+    const composer = compile('ThreadComposer', 'function ThreadComposeField', {
+      ...hooks(), useStore: () => store, useRef: current => ({ current }),
+      useEffect() {}, useFocusEffect() {}, useCallback: fn => fn, threadDraftKey: key => `thread-draft/${key}`,
+      readThreadDraft: JSON.parse, threadTextIssue: () => undefined,
+      Crypto: { randomUUID: () => 'new' }, View: 'View', T: 'T', Button: 'Button', ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
+    });
+    find(composer({ start, canReply: true, selectionVersion: 0 }), 'ThreadComposeField').props.onSend();
+    await new Promise(resolve => setImmediate(resolve));
+    if (outcome.how === 'unconfirmed') {
+      assert.equal(JSON.parse(draftCache.current.get(attemptKey)).text, 'First message');
+      assert.equal(draftCache.current.has(originKey), false, 'the next Start for this origin begins empty');
+      assert.equal(savedThreadStarts(draftCache.current)[0].target, 'thread/new');
+    } else {
+      assert.equal(JSON.parse(draftCache.current.get(originKey)).text, 'First message');
+      assert.equal(draftCache.current.has(attemptKey), false);
+    }
+  }
+});
+
+test('a refused retained attempt keeps its text discoverable after remount, beside the origin draft', async () => {
+  const origin = { sourceId: 'step-run/authored-step', episode: 'episode/one', agentId: 'agent/original' };
+  const saved = { target: 'thread/refused', origin, title: 'Authored step' };
+  const attemptKey = 'thread-draft/start/thread/refused';
+  const originKey = `thread-draft/${episodeScope(origin)}`;
+  const draftCache = { current: new Map([
+    [attemptKey, JSON.stringify({ text: 'Refused question' })],
+    [startRecoveryKey(saved.target), JSON.stringify(saved)],
+    [originKey, JSON.stringify({ text: 'Origin draft' })],
+  ]) };
+  const store = { threadClient: {}, status: 'online', threadRefresh: 0, threadDeliveries: new Map(), draftCache, draftsReady: true, saveDrafts() {} };
+  const panel = compile('InboxThreadStart', 'function InlineThread', {
+    ...hooks(), useStore: () => store, threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
+    View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+  });
+  const fresh = find(panel({ client: {}, origin, agentId: 'agent/current', initialTitle: saved.title, canStart: true, onOpen() {} }), 'InlineThread').props.start;
+  assert.equal(fresh.cacheKey, originKey);
+  assert.equal(fresh.target, undefined, 'the origin composer never borrows a restored target');
+  const pending = compile('PendingInboxThreads', 'type ThreadStartDraft', {
+    useStore: () => store, View: 'View', T: 'T', InboxThread: 'InboxThread',
+  })({ onOpen() {} });
+  const route = find(pending, 'InboxThread');
+  assert.equal(route.props.pendingScope, attemptScope(origin, saved.target));
+  assert.equal(route.props.origin, undefined, 'restoration grants no new Start authority');
+  const copied = [];
+  const entry = compile('InboxThread', 'type ThreadStartDraft', {
+    ...hooks(), useStore: () => store, threadDraftKey: key => `thread-draft/${key}`,
+    Clipboard: { setStringAsync: async text => { copied.push(text); } },
+    View: 'View', T: 'T', Button: 'Button', InboxThreadStart: 'InboxThreadStart',
+  })(route.props);
+  const restored = entry.type(entry.props);
+  assert.equal(find(restored, 'ThreadComposeField'), undefined, 'no receipt means no reconstructed retry or changed recipient');
+  assert.ok(texts(restored).includes('Refused question'));
+  button(restored, 'Copy message').props.onPress();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(copied, ['Refused question']);
+  button(restored, 'Discard saved draft').props.onPress();
+  assert.equal(draftCache.current.has(attemptKey), false);
+  assert.equal(draftCache.current.has(originKey), true, 'discard never deletes the independent origin draft');
 });
 
 test('thread buttons and inline rename act immediately without dialogs, flash after acceptance, and show reverted failures', async context => {
@@ -1232,9 +1386,10 @@ test('the marked unread list reads through the bounded unread client; typed erro
   const read = async (list, enabled = true) => {
     const state = hooks();
     let focus, calls = 0;
+    const reader = { listMarked: async maxPages => { calls++; assert.equal(maxPages, undefined, 'the client default bound applies'); return list; } };
     const hook = compile('useMarkedUnreadPage', 'type ThreadClient', {
       ...state, useRef: current => ({ current }), useCallback: fn => fn, useFocusEffect: effect => { focus = effect; },
-      useStore: () => ({ unreadClient: { listMarked: async maxPages => { calls++; assert.equal(maxPages, undefined, 'the client default bound applies'); return list; } } }),
+      useStore: () => ({ unreadClient: reader }),
       markedUnreadIssue, NO_THREADS: [], NO_SNAPSHOTS: new Map(),
     });
     state.reset(); hook(enabled, 0);
@@ -1274,7 +1429,7 @@ test('the marked unread list reads through the bounded unread client; typed erro
   const marked = { items: [], snapshots: new Map(), loading: false, live: false, issue: 'This connection can\'t read marked threads.', reload() {}, replace() {} };
   const list = compile('ContextThreadList', 'function ContextThreadHeader', {
     ...state, useStore: () => ({ threadRefresh: 0, feed: { belongsTo: () => true, followThreadSummaries: () => assert.fail('marked lists are not followed') } }),
-    useMemo: compute => compute(), useCallback: fn => fn, useEffect() {},
+    useMemo: compute => compute(), useCallback: fn => fn, useEffect() {}, useFocusEffect() {},
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => 1, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 20,
     useThreadPage: (read, _refresh, follow) => { reader = read; follower = follow; return { items: contextItems, snapshots: new Map() }; },
     useMarkedUnreadPage: enabled => enabled ? marked : { items: [] },
@@ -1437,20 +1592,20 @@ test('pending episode A never replaces or disables the fresh Start for episode B
   const old = { sourceId: 'notice/same', episode: 'episode/A', agentId: 'agent/old' };
   const origin = { sourceId: old.sourceId, episode: 'episode/B' };
   const store = { threadClient: {}, threadActions: new Set(['thread.start']), threadDeliveries: new Map([
-    ['start/thread/old', { target: 'thread/old', start: { origin: old, title: 'Earlier' } }],
+    [attemptScope(old, 'thread/old'), { target: 'thread/old', start: { origin: old, title: 'Earlier' } }],
   ]) };
   const entry = compile('InboxThread', 'type ThreadStartDraft', {
     useStore: () => store, InboxThreadStart: 'InboxThreadStart', T: 'T',
   });
   const fresh = entry({ sourceId: origin.sourceId, origin, agentId: 'agent/new', initialTitle: 'Current', onOpen() {} });
   assert.equal(fresh.props.origin, origin);
-  assert.equal(fresh.props.agentId, 'agent/new');
+  assert.equal(fresh.props.pending, undefined);
   assert.equal(fresh.props.initialTitle, 'Current');
   assert.equal(fresh.props.canStart, true);
-  assert.equal(fresh.props.pendingTarget, undefined);
-  const recovered = entry({ sourceId: old.sourceId, pendingScope: 'start/thread/old', initialTitle: 'Ignored', onOpen() {} });
+  assert.equal(fresh.props.pending, undefined);
+  const recovered = entry({ sourceId: old.sourceId, pendingScope: attemptScope(old, 'thread/old'), initialTitle: 'Ignored', onOpen() {} });
   assert.equal(recovered.props.origin, old);
-  assert.equal(recovered.props.pendingTarget, 'thread/old');
+  assert.deepEqual(recovered.props.pending, { target: 'thread/old', agentId: old.agentId });
   assert.equal(recovered.props.canStart, false);
 });
 
@@ -1458,7 +1613,7 @@ test('same-origin Starts have independent slots and action keys; first recovery 
   const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
   const track = source.slice(source.indexOf('  async function trackThreadDelivery('), source.indexOf('  const actions ='));
   const start = source.slice(source.indexOf('    startThread(thread:'), source.indexOf('    replyToThread('));
-  const scope = source.slice(source.indexOf('export function threadStartScope('), source.indexOf('export function threadEditScope(')).replace('export ', '');
+  const scope = source.slice(source.indexOf('export function threadStartScope('), source.indexOf('export function threadEditScope(')).replaceAll('export ', '');
   const { outputText } = ts.transpileModule(`${scope}\n${track}\nconst actions = {${start}}; exports.start = actions.startThread;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
@@ -1486,10 +1641,10 @@ test('same-origin Starts have independent slots and action keys; first recovery 
   assert.notEqual(sent[0].id, sent[1].id);
   assert.notEqual(sent[0].idempotency_key, sent[1].idempotency_key);
   const ledger = byClient.current.get(client);
-  assert.deepEqual([...ledger.keys()], ['start/thread/first', 'start/thread/second']);
+  assert.deepEqual([...ledger.keys()], [attemptScope(origin, 'thread/first'), attemptScope(origin, 'thread/second')]);
   assert.equal((await first.retry()).how, 'sent');
   assert.deepEqual(sent[2], sent[0], 'first recovery retains only its original signed intent and key');
-  assert.deepEqual([...ledger.keys()], ['start/thread/second'], 'only the first slot is released');
+  assert.deepEqual([...ledger.keys()], [attemptScope(origin, 'thread/second')], 'only the first slot is released');
   assert.equal((await second.retry()).how, 'sent');
   assert.deepEqual(sent[3], sent[1]);
   assert.equal(ledger.size, 0);
@@ -1500,21 +1655,21 @@ test('an unconfirmed first composer moves to separate recovery and leaves a fres
   const draftCache = { current: new Map() }, threadDeliveries = new Map();
   const component = compile('InboxThreadStart', 'function InlineThread', {
     ...state, useStore: () => ({ status: 'online', threadRefresh: 0, threadDeliveries, draftCache, draftsReady: true, saveDrafts() {} }),
-    threadStartScope: target => `start/${target}`, threadDraftKey: value => value, threadTitleFromAsk: value => value,
+    threadStartScope: episodeScope, threadDraftKey: value => value, threadTitleFromAsk: value => value,
     View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
   });
   const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
   const render = () => { state.reset(); return component(props); };
   button(render(), 'Start thread').props.onPress();
   const first = find(render(), 'InlineThread').props.start;
-  threadDeliveries.set('start/thread/first', { target: 'thread/first', start: { origin, title: 'Notice' }, retry() {} });
+  threadDeliveries.set(attemptScope(origin, 'thread/first'), { target: 'thread/first', start: { origin, title: 'Notice' }, retry() {} });
   first.onSubmitted('thread/first', JSON.stringify({ text: '' }));
   const after = render();
   assert.equal(find(after, 'InlineThread'), undefined, 'the first signed request is recovered separately');
   assert.equal(button(after, 'Start thread').props.disabled, false);
   button(after, 'Start thread').props.onPress();
   assert.equal(find(render(), 'InlineThread').props.start.target, undefined, 'the next send allocates a new thread UUID');
-  assert.ok(threadDeliveries.has('start/thread/first'), 'the first attempt remains recoverable');
+  assert.ok(threadDeliveries.has(attemptScope(origin, 'thread/first')), 'the first attempt remains recoverable');
 });
 
 test('a nonempty Start draft transfers intact to its own recovery across remount and a durable store restart', async () => {
@@ -1529,14 +1684,14 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   let store = {
     status: 'online', threadRefresh: 0, draftsReady: true,
     draftCache: { current: new Map([[originKey, original]]) },
-    threadDeliveries: new Map([['start/thread/first', { target: 'thread/first', retry() {} }]]),
+    threadDeliveries: new Map([[attemptScope(origin, 'thread/first'), { target: 'thread/first', retry() {} }]]),
     saveDrafts() { writes.push(persistence.save('person/one', store.draftCache.current)); },
   };
   store.saveDrafts(); await Promise.all(writes);
   const panel = () => {
     const state = hooks();
     const component = compile('InboxThreadStart', 'function InlineThread', {
-      ...state, useStore: () => store, threadStartScope: target => `start/${target}`,
+      ...state, useStore: () => store, threadStartScope: episodeScope,
       threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
       View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
     });
@@ -1553,7 +1708,7 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
     const fresh = panel()(props);
     assert.equal(find(fresh, 'InlineThread'), undefined, 'the fresh origin composer is empty and independent');
     assert.equal(button(fresh, 'Start thread').props.disabled, false);
-    const recovery = find(panel()({ ...props, canStart: false, pendingTarget: 'thread/first', showHistory: false }), 'InlineThread').props.start;
+    const recovery = find(panel()({ ...props, canStart: false, pending: { target: 'thread/first', agentId: 'agent/one' }, showHistory: false }), 'InlineThread').props.start;
     assert.equal(recovery.cacheKey, attemptKey);
     assert.deepEqual(parse(store.draftCache.current.get(recovery.cacheKey)), JSON.parse(original), 'the recovered composer reads the original text and quote');
     return recovery;
@@ -1573,14 +1728,14 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   assert.equal(await persistence.restore('person/one', store.draftCache.current), 2);
   store.threadClient = client;
   const pending = compile('PendingInboxThreads', 'type ThreadStartDraft', {
-    useStore: () => store, threadStartScope: target => `start/${target}`,
+    useStore: () => store, threadStartScope: episodeScope,
     View: 'View', T: 'T', InboxThread: 'InboxThread',
   })({ onOpen() {} });
   const route = find(pending, 'InboxThread');
   assert.ok(route, 'production PendingInboxThreads discovers the restored attempt without a ledger');
   const copied = [], state = hooks();
   const entry = compile('InboxThread', 'type ThreadStartDraft', {
-    ...state, useStore: () => store, threadStartScope: target => `start/${target}`,
+    ...state, useStore: () => store, threadStartScope: episodeScope,
     threadDraftKey: key => `thread-draft/${key}`, readThreadDraft: parse,
     Clipboard: { setStringAsync: async text => { copied.push(text); } },
     View: 'View', T: 'T', Button: 'Button', InboxThreadStart: 'InboxThreadStart',
@@ -1602,7 +1757,7 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
 });
 
 for (const divergence of ['before invocation', 'while pending', 'owner switched', 'generation reset'])
-for (const outcome of divergence === 'owner switched' || divergence === 'generation reset' ? ['unconfirmed', 'sent'] : ['unconfirmed'])
+for (const outcome of ['unconfirmed', 'sent'])
 test(`a Start fences its ${outcome} draft result when ${divergence}`, async () => {
   const origin = { sourceId: 'notice/delayed', episode: 'episode/one' }, client = {};
   const originKey = 'thread-draft/["notice/delayed","episode/one"]';
@@ -1618,7 +1773,7 @@ test(`a Start fences its ${outcome} draft result when ${divergence}`, async () =
   };
   const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
   const createPanel = () => compile('InboxThreadStart', 'function InlineThread', {
-    ...hooks(), useStore: () => store, threadStartScope: target => `start/${target}`,
+    ...hooks(), useStore: () => store, threadStartScope: episodeScope,
     threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
     View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
   });
@@ -1626,7 +1781,7 @@ test(`a Start fences its ${outcome} draft result when ${divergence}`, async () =
   const composer = compile('ThreadComposer', 'function ThreadComposeField', {
     ...hooks(), useStore: () => store, useRef: current => ({ current }), useEffect() {}, useFocusEffect() {},
     useCallback: callback => callback,
-    threadDraftKey: key => `thread-draft/${key}`, threadStartScope: target => `start/${target}`,
+    threadDraftKey: key => `thread-draft/${key}`, threadStartScope: episodeScope,
     readThreadDraft: JSON.parse, threadTextIssue: () => undefined,
     Crypto: { randomUUID: () => 'first' }, View: 'View', T: 'T', Button: 'Button',
     ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
@@ -1654,6 +1809,13 @@ test(`a Start fences its ${outcome} draft result when ${divergence}`, async () =
     assert.deepEqual([...store.draftCache.current], [[originKey, original]], 'no old-owner draft, metadata or cleanup touches the reset cache');
     assert.deepEqual(saves, [], 'the old completion cannot persist into the new owner');
     assert.equal(calls.length, 1, 'no reconstruction or resend');
+    return;
+  }
+  if (outcome === 'sent') {
+    assert.equal(store.draftCache.current.get(originKey), later, 'an accepted older Start cannot delete newer origin typing');
+    assert.equal(store.draftCache.current.has('thread-draft/start/thread/first'), false);
+    assert.deepEqual(savedThreadStarts(store.draftCache.current), []);
+    assert.equal(calls.length, 1);
     return;
   }
   assert.equal(store.draftCache.current.get('thread-draft/start/thread/first'), original);

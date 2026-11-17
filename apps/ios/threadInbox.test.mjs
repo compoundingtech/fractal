@@ -75,7 +75,8 @@ test('the active Inbox ask mounts inline start with the exact origin and keeps i
   for (const attention_kind of ['person-step', 'agent-request']) {
     const { screen, entry, gated } = render({ ...ask, attention_kind });
     assert.deepEqual(entry.props.origin, { sourceId: 'step-run/review', episode: 'episode/now' });
-    assert.equal(entry.props.agentId, 'agent/authoritative');
+    assert.equal('agentId' in entry.props, false, 'the Inbox agent never selects the Start recipient');
+    assert.equal(gated.props.pending, undefined, 'a listed row is a fresh Start, never a handed-off attempt');
     assert.equal(gated.type, 'InboxThreadStart');
     assert.equal(gated.props.canStart, true);
     assert.ok(find(screen, 'RequestAnswers'));
@@ -83,11 +84,11 @@ test('the active Inbox ask mounts inline start with the exact origin and keeps i
   }
 });
 
-test('all existing Inbox item kinds use their canonical source and server-resolved agent', () => {
+test('all existing Inbox item kinds Start on their canonical source; the StartContext selects the recipient', () => {
   for (const attention_kind of ['person-step', 'agent-request', 'notice', 'message', 'harness-prompt', 'harness-login']) {
     const { entry, gated } = render({ ...ask, attention_kind, actions: [], source_id: 'notice/source' });
     assert.deepEqual(entry.props.origin, { sourceId: 'notice/source', episode: ask.episode });
-    assert.equal(entry.props.agentId, 'agent/authoritative');
+    assert.equal('agentId' in entry.props, false);
     assert.equal(gated.props.canStart, true);
   }
   const { entry } = render({ ...ask, attention_kind: 'notice', closedElsewhere: true });
@@ -96,15 +97,15 @@ test('all existing Inbox item kinds use their canonical source and server-resolv
 
 test('an Inbox update retains the same thread component beside its existing controls', () => {
   const { entry } = render({ ...ask, attention_kind: 'notice', update: { about: 'agent/worker', summary: 'Ready' } });
-  assert.equal(entry.props.agentId, 'agent/authoritative');
+  assert.equal('agentId' in entry.props, false);
   assert.deepEqual(entry.props.origin, { sourceId: ask.source_id, episode: ask.episode });
 });
 
-test('missing canonical agent disables starts without guessing requester responsibility', () => {
-  const item = { ...ask, conversation_id: undefined };
+test('a typed notice without an assigned agent still Starts; only the origin and thread.start grant gate it', () => {
+  const item = { ...ask, attention_kind: 'notice', conversation_id: undefined };
   const { entry, gated } = render(item);
-  assert.equal(entry.props.agentId, undefined);
-  assert.equal(gated.props.canStart, false);
+  assert.equal('agentId' in entry.props, false);
+  assert.equal(gated.props.canStart, true, 'no current agent or roster entry is required');
   assert.equal(render(ask, false).gated, null);
   assert.equal(render(ask, true, false).gated.props.canStart, false);
   assert.ok(render({ ...ask, episode: undefined }).entry);

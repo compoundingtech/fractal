@@ -160,7 +160,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const threadEntry = <ThreadViewport viewport={requestScroll}><InboxThread sourceId={item.source_id}
     origin={item.source_id && item.episode ? { sourceId: item.source_id, episode: item.episode } : undefined}
-    agentId={agentId} initialTitle={item.title} onOpen={(id, title) => navigation.navigate('Thread', { id, title })} /></ThreadViewport>;
+    initialTitle={item.title} onOpen={(id, title) => navigation.navigate('Thread', { id, title })} /></ThreadViewport>;
   const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
   // Closed elsewhere, so nothing here can be answered; it stays until the person clears it. One Fractal
   // resolved by its deadline may still take the person's own answer instead of the default.
