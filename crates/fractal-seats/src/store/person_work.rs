@@ -2052,6 +2052,53 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
     }
 
     #[test]
+    fn cancelled_ask_unresolvable_origin_finishes_migration_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("absent-origin.sqlite3");
+        let (store, _origin, input) = fixture_with_store(Store::open(&path, "alder").unwrap());
+        let ask = store.ask_person(&input).unwrap();
+        let mut body = request(&store.readers.get(), &ask.subject).unwrap().unwrap().body;
+        body["fields"]["origin_step"] = json!("step-run/absent-generation/absent-step");
+        body["fields"]["key"] = json!("absent-origin-history");
+        let subject = format!("{}-absent", ask.subject);
+        store.connection.batched(|tx| -> Result<()> {
+            let asking = append_claim_tx(tx, "alder", &subject, "work.person-asked",
+                Some(&input.actor), &body, &[], None)?;
+            append_claim_tx(tx, "alder", &subject, "work.person-cancelled",
+                Some(&input.actor), &json!({"fields": {
+                    "attempt": 1, "status": "cancelled", "episode": asking.id,
+                    "summary": "Historical owner is absent", "key": "absent-origin-response"
+                }}), std::slice::from_ref(&asking.id), None)?;
+            tx.execute("DELETE FROM meta WHERE key='person_cancellation_projection_rules'", [])?;
+            Ok(())
+        }).unwrap().unwrap();
+        drop(store);
+        let repaired = Store::open(&path, "alder").unwrap();
+        let marker: String = repaired.readers.get().query_row(
+            "SELECT value FROM meta WHERE key='person_cancellation_projection_rules'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(marker, "1", "unrepairable history must not strand the migration");
+        repaired.connection.batched(|tx| -> Result<()> {
+            tx.execute_batch(
+                "CREATE TRIGGER absent_origin_no_repeat_marker BEFORE INSERT ON meta
+                 WHEN NEW.key='person_cancellation_projection_rules'
+                 BEGIN SELECT RAISE(ABORT, 'migration must not repeat'); END;
+                 CREATE TRIGGER absent_origin_no_repeat_refold BEFORE DELETE ON step_runs
+                 BEGIN SELECT RAISE(ABORT, 'migration must not repeat'); END;",
+            )?;
+            Ok(())
+        }).unwrap().unwrap();
+        drop(repaired);
+        let unchanged = Store::open(&path, "alder").unwrap();
+        let marker: String = unchanged.readers.get().query_row(
+            "SELECT value FROM meta WHERE key='person_cancellation_projection_rules'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(marker, "1");
+    }
+
+    #[test]
     fn cancelled_ask_historical_ready_is_repaired_once_on_disk_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cancelled-ask.sqlite3");

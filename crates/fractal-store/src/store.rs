@@ -11391,6 +11391,8 @@ fn migrate_person_cancellation_projections_tx(transaction: &Transaction<'_>) -> 
     )? {
         return Ok(());
     }
+    let timing = std::env::var_os("ST3_PROJECTION_MIGRATION_TIMING")
+        .map(|_| std::time::Instant::now());
     let subjects = transaction.prepare(
         "SELECT DISTINCT json_extract(asking.body, '$.fields.origin_step')
          FROM claims cancelled JOIN claims asking ON asking.subject=cancelled.subject
@@ -11399,27 +11401,40 @@ fn migrate_person_cancellation_projections_tx(transaction: &Transaction<'_>) -> 
     )?.query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut aggregates = BTreeSet::new();
-    let mut complete = true;
+    let mut unresolved = 0usize;
     for subject in subjects {
         if let Some(aggregate) = run_part_of_tx(transaction, &subject).map_err(anyhow::Error::new)? {
             aggregates.insert(aggregate);
         } else {
-            complete = false;
+            unresolved += 1;
         }
     }
+    let selected = aggregates.len();
+    let mut degraded = 0usize;
     for aggregate in aggregates {
         let result = match aggregate {
             Aggregate::RunPart(top) => rebuild_run_part_with_notifications_tx(transaction, &top, false),
             Aggregate::RunTree(root) => rebuild_run_tree_with_notifications_tx(transaction, &root, false),
             _ => unreachable!("run_part_of_tx only returns run aggregates"),
         };
-        complete &= settle_run_refold_result(result).map_err(anyhow::Error::new)?;
+        degraded += usize::from(!settle_run_refold_result(result).map_err(anyhow::Error::new)?);
     }
-    if complete {
-        transaction.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('person_cancellation_projection_rules','1')",
-            [],
-        )?;
+    // Missing historical owners and persistently degraded runs cannot become repairable by
+    // reopening. Keep their existing health state, but do not repeat every successful refold.
+    // Actual errors (including contention/deadlines) propagate and roll this marker back.
+    transaction.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('person_cancellation_projection_rules','1')",
+        [],
+    )?;
+    if unresolved != 0 || degraded != 0 {
+        tracing::warn!(unresolved_origins = unresolved, degraded_aggregates = degraded,
+            "person cancellation projection migration skipped unrepairable history");
+    }
+    if let Some(started) = timing {
+        tracing::info!(migration = "person_cancellation", selected_aggregates = selected,
+            unresolved_origins = unresolved, degraded_aggregates = degraded,
+            elapsed_ms = %started.elapsed().as_millis(),
+            "projection migration completed");
     }
     Ok(())
 }

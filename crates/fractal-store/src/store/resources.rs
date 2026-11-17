@@ -126,11 +126,17 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
         )
         .optional()?;
     if version.as_deref() != Some(VERSION) {
+        let timing = std::env::var_os("ST3_PROJECTION_MIGRATION_TIMING")
+            .map(|_| std::time::Instant::now());
         rebuild(transaction)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h410ffbe8c264 owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_observations_version',?1)",
             [VERSION],
         )?;
+        if let Some(started) = timing {
+            tracing::info!(migration = "resource_observations", version = VERSION,
+                elapsed_ms = %started.elapsed().as_millis(), "projection migration completed");
+        }
     } else {
         flush(transaction)?;
     }
