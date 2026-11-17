@@ -2072,6 +2072,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "recipient-unassigned"
         | "agents-publication-row-too-large"
         | "identity-cycle"
         | "identity-occupied"

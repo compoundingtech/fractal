@@ -59,6 +59,23 @@ test('human-gate attention read schema accepts the source step-run Id, never its
     assert.throws(() => decode({ ...wire, step_run_id: 'approve' }));
 });
 
+test('recipient unassigned decodes as a known nonretryable error and preserves future codes', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+        request_id: 'request/unassigned', code: 'recipient-unassigned',
+        message: 'this Inbox source has no responsible agent or configured fallback', retryable: false, details: {},
+    };
+    const decoded = Rich.decodeUnknownSync(Rich.ErrorEnvelope, 'strict')(wire);
+    assert.equal(decoded.code, 'recipient-unassigned');
+    assert.equal(decoded.retryable, false);
+    assert.equal(Object.hasOwn(decoded.details, 'reason'), false);
+    assert.equal(Schema.encodeSync(Rich.ErrorEnvelope)(decoded).code, 'recipient-unassigned');
+    const future = Rich.decodeUnknownSync(Rich.ErrorEnvelope)({ ...wire, code: 'future-recipient-error' });
+    assert.deepEqual(future.code, { _tag: 'Unknown', raw: 'future-recipient-error' });
+    assert.equal(Schema.encodeSync(Rich.ErrorEnvelope)(future).code, 'future-recipient-error');
+});
+
 test('thread start context and Attention share the emitted recipient proof schema', async () => {
     const read = await import('./ReadSchema.generated.ts');
     const decode = schema => read.decodeUnknownSync(schema, 'strict');

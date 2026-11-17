@@ -796,6 +796,39 @@ pub(crate) mod retained_discussion {
         (status, serde_json::from_slice(&body).unwrap())
     }
 
+    async fn opening_post(state: &AppState, packet: ActionRequest) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let response = crate::api::router(state.clone()).oneshot(
+            axum::http::Request::builder().method("POST").uri("/v1/client/actions")
+                .header(LOCAL_PERSON_HEADER, PERSON).header("Content-Type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&packet).unwrap())).unwrap(),
+        ).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn assert_start_refusal_fixture(status: StatusCode, mut body: Value, name: &str) {
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+        body["request_id"] = json!("<request-id>");
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json")).unwrap();
+        assert_eq!(body, fixtures[name], "{name}");
+        assert!(body["details"].get("reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn thread_start_refusal_stale_snapshot_router_matches_fixture() {
+        let (_root, state, origin) = fixture(true);
+        let mut packet = request(&state, &origin, "thread/stale-start", "stale-start");
+        packet.fence.snapshot_id = "snapshot/another-host/0/digest".into();
+        let before = state.store.read_snapshot(Ok).unwrap();
+        let (status, body) = opening_post(&state, packet).await;
+        assert_start_refusal_fixture(status, body, "stale-snapshot");
+        assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+    }
+
     #[tokio::test]
     async fn thread_start_context_person_owned_typed_notice_has_no_implicit_agent() {
         for suppressed in [false, true] {
@@ -817,6 +850,9 @@ pub(crate) mod retained_discussion {
                 key.public(),
             ), state.store.origin()).unwrap();
             state.store.apply_internal(&intent, "preview-notice-owner").unwrap();
+            // Notice authority reads persisted envelope signatures, not the local signer
+            // shortcut. Seal the anchor admission before asking it to validate snapshots.
+            state.store.replication_inventory().unwrap();
             state.store.configure_thread_write_rollout([]);
             state.store.append_claim(&ClaimInput {
                 subject:"daemon/notice-preview".into(), kind:"daemon.started".into(),
@@ -854,14 +890,12 @@ pub(crate) mod retained_discussion {
             let origin = InboxOrigin { source_id:source.into(), episode:opening.id };
             let before = state.store.read_snapshot(Ok).unwrap();
             let (status, refused) = opening_preview(&state, PERSON, &origin).await;
-            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-            assert_eq!(refused["message"], "this Inbox source has no configured responsible agent");
+            assert_start_refusal_fixture(status, refused.clone(), "recipient-unassigned");
             assert!(refused["value"]["start_recipient"].is_null());
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
-            let owner = ClientSession::local(Some(PERSON)).unwrap();
-            assert_eq!(start(&state, &owner, request(&state, &origin,
-                "thread/unconfigured-notice", "unconfigured-notice")).await.unwrap_err().status,
-                StatusCode::CONFLICT);
+            let (status, refused) = opening_post(&state, request(&state, &origin,
+                "thread/unconfigured-notice", "unconfigured-notice")).await;
+            assert_start_refusal_fixture(status, refused, "recipient-unassigned");
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
             let intent = crate::graph::parse_intent(
                 "version 2\nagent \"garden/seed\" { workspace \"/work/garden\"; harness \"omp\" {} }",
@@ -917,55 +951,69 @@ pub(crate) mod retained_discussion {
 
     #[tokio::test]
     async fn thread_start_context_previews_retained_native_handoff_original_recipient() {
-        let (_root, state, _) = fixture(true);
-        let intent = crate::graph::parse_intent(
-            "version 2\nmission \"preview-handoff\" state=\"ready\" { goal \"Review work\"; step \"review\" { assigned-to \"agent/garden/seed\"; goal \"Choose a path\"; } }",
-            state.store.origin(),
-        ).unwrap();
-        state.store.apply_internal(&intent, "preview-handoff-mission").unwrap();
-        let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
-            mission:"preview-handoff".into(), revision:None, workspace:"/work/garden".into(),
-            requester:Some(PERSON.into()), mode:Some("run".into()), inputs:BTreeMap::new(),
-            idempotency_key:"preview-handoff-run".into(),
-        }).unwrap();
-        let step = &run.steps[0];
-        state.store.set_step_state(&step.subject, "ready", None).unwrap();
-        for (kind, fields) in [
-            ("runtime.observed", json!({"status":"running","runtime_id":"preview-worker","incarnation_id":"preview-worker-one"})),
-            ("harness.observed", json!({"state":"idle","driver":"codex","incarnation_id":"preview-worker-one"})),
-        ] {
-            state.store.append_claim(&ClaimInput {
-                subject:AGENT.into(), kind:kind.into(), actor:Some("daemon/runtime".into()),
-                fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
-                expected_subject:None, idempotency_key:Some(format!("preview-handoff-{kind}")),
+        for requester in [AGENT, PERSON] {
+            let (_root, state, _) = fixture(true);
+            let intent = crate::graph::parse_intent(
+                "version 2\nmission \"preview-handoff\" state=\"ready\" { goal \"Review work\"; step \"review\" { assigned-to \"agent/garden/seed\"; goal \"Choose a path\"; } }",
+                state.store.origin(),
+            ).unwrap();
+            state.store.apply_internal(&intent, "preview-handoff-mission").unwrap();
+            let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
+                mission:"preview-handoff".into(), revision:None, workspace:"/work/garden".into(),
+                requester:Some(requester.into()), mode:Some("run".into()), inputs:BTreeMap::new(),
+                idempotency_key:"preview-handoff-run".into(),
             }).unwrap();
+            let step = &run.steps[0];
+            state.store.set_step_state(&step.subject, "ready", None).unwrap();
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running","runtime_id":"preview-worker","incarnation_id":"preview-worker-one"})),
+                ("harness.observed", json!({"state":"idle","driver":"codex","incarnation_id":"preview-worker-one"})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject:AGENT.into(), kind:kind.into(), actor:Some("daemon/runtime".into()),
+                    fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+                    expected_subject:None, idempotency_key:Some(format!("preview-handoff-{kind}")),
+                }).unwrap();
+            }
+            state.store.work_action(&step.subject, "claim", &crate::model::WorkRequest {
+                wait_ms:None, actor:Some(AGENT.into()), incarnation:Some("preview-worker-one".into()),
+                summary:None, reason:None, evidence:vec![], idempotency_key:"preview-handoff-claim".into(),
+            }).unwrap();
+            let handed = state.store.handoff_work(&step.subject, &crate::model::WorkHandoffRequest {
+                actor:AGENT.into(), incarnation:Some("preview-worker-one".into()), to:PERSON.into(),
+                note:"Please review this request.".into(), evidence:vec![],
+                idempotency_key:"preview-native-handoff".into(),
+            }).unwrap();
+            let origin = InboxOrigin { source_id:handed.subject,
+                episode:format!("{}:{}:{}", handed.generation, handed.attempt, handed.readiness_epoch) };
+            let released = state.store.newest_claim_for_subject_kind(&origin.source_id, "work.released")
+                .unwrap().unwrap();
+            assert_eq!(released.body["fields"]["status"], "ready");
+            assert_eq!(released.body["fields"]["handoff_to"], PERSON);
+            state.store.set_step_state(&origin.source_id, "completed", None).unwrap();
+            assert!(!state.store.attention_items(Some(PERSON)).unwrap().iter()
+                .any(|item| item.subject == origin.source_id));
+            // Handoff proves the human opening, not an original discussion agent.
+            // Once assigned to a person, only an agent requester supplies that association.
+            if requester == PERSON {
+                let before = state.store.read_snapshot(Ok).unwrap();
+                let (status, refused) = opening_preview(&state, PERSON, &origin).await;
+                assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+                assert_eq!(refused["code"], "stale-fence");
+                assert_eq!(refused["message"], "this Inbox source has no configured responsible agent");
+                assert!(refused["value"]["start_recipient"].is_null());
+                assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+                state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
+            }
+            let before = state.store.read_snapshot(Ok).unwrap();
+            let (status, preview) = opening_preview(&state, PERSON, &origin).await;
+            assert_eq!(status, StatusCode::OK, "{preview}");
+            assert_eq!(preview["value"]["source_id"], origin.source_id);
+            assert_eq!(preview["value"]["episode"], origin.episode);
+            assert_eq!(preview["value"]["start_recipient"],
+                json!({"agent_id":AGENT,"basis":{"_tag":if requester == AGENT {"original"} else {"configured"}}}));
+            assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
         }
-        state.store.work_action(&step.subject, "claim", &crate::model::WorkRequest {
-            wait_ms:None, actor:Some(AGENT.into()), incarnation:Some("preview-worker-one".into()),
-            summary:None, reason:None, evidence:vec![], idempotency_key:"preview-handoff-claim".into(),
-        }).unwrap();
-        let handed = state.store.handoff_work(&step.subject, &crate::model::WorkHandoffRequest {
-            actor:AGENT.into(), incarnation:Some("preview-worker-one".into()), to:PERSON.into(),
-            note:"Please review this request.".into(), evidence:vec![],
-            idempotency_key:"preview-native-handoff".into(),
-        }).unwrap();
-        let origin = InboxOrigin { source_id:handed.subject,
-            episode:format!("{}:{}:{}", handed.generation, handed.attempt, handed.readiness_epoch) };
-        let released = state.store.newest_claim_for_subject_kind(&origin.source_id, "work.released")
-            .unwrap().unwrap();
-        assert_eq!(released.body["fields"]["status"], "ready");
-        assert_eq!(released.body["fields"]["handoff_to"], PERSON);
-        state.store.set_step_state(&origin.source_id, "completed", None).unwrap();
-        assert!(!state.store.attention_items(Some(PERSON)).unwrap().iter()
-            .any(|item| item.subject == origin.source_id));
-        let before = state.store.read_snapshot(Ok).unwrap();
-        let (status, preview) = opening_preview(&state, PERSON, &origin).await;
-        assert_eq!(status, StatusCode::OK, "{preview}");
-        assert_eq!(preview["value"]["source_id"], origin.source_id);
-        assert_eq!(preview["value"]["episode"], origin.episode);
-        assert_eq!(preview["value"]["start_recipient"],
-            json!({"agent_id":AGENT,"basis":{"_tag":"original"}}));
-        assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
     }
 
     #[tokio::test]
@@ -991,14 +1039,13 @@ pub(crate) mod retained_discussion {
             if resolved { state.store.set_step_state(&step.subject, "completed", None).unwrap(); }
             let before = state.store.read_snapshot(Ok).unwrap();
             let (status, refused) = opening_preview(&state, PERSON, &origin).await;
-            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-            assert_eq!(refused["message"], "this Inbox source has no configured responsible agent");
+            assert_start_refusal_fixture(status, refused.clone(), "recipient-unassigned");
             assert!(refused["value"]["start_recipient"].is_null());
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+            let (status, refused) = opening_post(&state, request(&state, &origin,
+                "thread/unconfigured-system", "unconfigured-system")).await;
+            assert_start_refusal_fixture(status, refused, "recipient-unassigned");
             let owner = ClientSession::local(Some(PERSON)).unwrap();
-            assert_eq!(start(&state, &owner, request(&state, &origin,
-                "thread/unconfigured-system", "unconfigured-system")).await.unwrap_err().status,
-                StatusCode::CONFLICT);
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
             state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
             let before = state.store.read_snapshot(Ok).unwrap();
@@ -1117,12 +1164,10 @@ pub(crate) mod retained_discussion {
         state.store.configure_inbox_fallback_agent(None).unwrap();
         let before = state.store.read_snapshot(Ok).unwrap();
         let (status, refused) = opening_preview(&state, PERSON, &origin).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-        assert_eq!(refused["code"], "recipient-retired");
-        let owner = ClientSession::local(Some(PERSON)).unwrap();
-        let refused = start(&state, &owner,
-            request(&state, &origin, "thread/no-retirement-fallback", "no-retirement-fallback")).await.unwrap_err();
-        assert_eq!(refused.code, "recipient-retired");
+        assert_start_refusal_fixture(status, refused, "recipient-retired");
+        let (status, refused) = opening_post(&state,
+            request(&state, &origin, "thread/no-retirement-fallback", "no-retirement-fallback")).await;
+        assert_start_refusal_fixture(status, refused, "recipient-retired");
         assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
         assert_not_in_attention(&state);
     }

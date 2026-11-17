@@ -150,6 +150,14 @@ describe('public changelog build gate', () => {
       .rejects.toThrow('Public build leaked private changelog modules')
   })
 
+  it('rejects a private module when the configured registry uses a symlink spelling', async () => {
+    privateRegistry()
+    const alias = join(root, 'private-alias')
+    symlinkSync(join(root, 'private'), alias, 'dir')
+    await expect(buildPublic(`import leaked from ${JSON.stringify(join(alias, '.changelog', syntheticFile))}\nglobalThis.leak = leaked`, { public: publicRegistry, private: join(alias, '.changelog/mod.ts') }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
   it('fails before bundling when a public registry carries a private entry', async () => {
     writeRegistry(join(root, 'public/.changelog'), `{ file: '${syntheticFile}', source: synthetic, visibility: 'private' }`, `export const changelogDeployment = 'main'\n`)
     await expect(buildPublic('', { public: join(root, 'public/.changelog/mod.ts'), private: join(root, 'absent/.changelog/mod.ts') }))

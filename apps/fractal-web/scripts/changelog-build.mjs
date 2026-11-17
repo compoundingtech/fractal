@@ -60,13 +60,14 @@ export const prepareChangelogBuild = async ({ privateBuild, deployment, registri
     deployment: selected,
     entryIds: entries.map(({ id }) => id),
     privateEntries,
-    // Protect configured and native paths, including a registry file symlinked
-    // outside its directory. Vite may retain or resolve either identity.
+    // Protect configured, canonical and native identities, including a registry file
+    // symlinked outside its directory. Bundlers may retain or resolve either spelling.
     privateDirectories: hasPrivate ? [...new Set([
       dirname(registries.private),
-      realpathSync.native(dirname(registries.private)),
+      dirname(realpathSync(registries.private)),
       dirname(realpathSync.native(registries.private)),
-    ].map((directory) => directory.replaceAll('\\', '/')))] : [],
+    ].flatMap((directory) => [directory, realpathSync(directory), realpathSync.native(directory)])
+      .map((directory) => directory.replaceAll('\\', '/')))] : [],
     compile: (build) => compileChangelog({ build, sources, audience, inventory }),
   }
 }

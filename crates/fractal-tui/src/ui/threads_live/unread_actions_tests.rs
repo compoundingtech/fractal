@@ -245,6 +245,28 @@ fn unread_action_menu_keeps_pre_palette_visible_anchor_evidence() {
 }
 
 #[test]
+fn unread_action_menu_marks_only_presented_replies_read_before_auto_read_dwell() {
+    let mut ui = fixture(true, &[]);
+    assert!(present_at(&mut ui, std::time::Instant::now()).contains("Meaningful reply content"));
+    // A reply can load after the last frame without having been presented to the reader.
+    ui.threads.histories.get_mut(ID).unwrap().head.push(event(
+        "message/unpresented", "Loaded but not presented",
+    ));
+    assert!(ui.threads.writes().is_empty(), "one frame cannot satisfy the auto-read dwell");
+    ui.open_palette(None, Open::Here);
+    ui.paste("Mark read".into());
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let writes = ui.threads.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].id, ID);
+    assert_eq!(writes[0].host, HOST);
+    let Mutation::MarkRead(read) = &writes[0].mutation else {
+        panic!("palette must mark naturally unread replies read")
+    };
+    assert_eq!(read.seen_message_ids, ["message/visible"]);
+}
+
+#[test]
 fn unread_marked_row_is_a_private_reminder_and_opening_it_seeks_the_anchor() {
     let mark = smallclaims::store::operation_id_for_key("unread/return");
     let mut ui = fixture(false, &[(mark.as_str(), "message/anchor")]);
@@ -277,6 +299,80 @@ fn unread_marked_row_is_a_private_reminder_and_opening_it_seeks_the_anchor() {
     let write = ui.threads.writes().pop().expect("viewed return anchor clears captured mark");
     let Mutation::ClearUnread(clear) = write.mutation else { panic!("expected clear") };
     assert_eq!(clear.observed_marks, [mark]);
+}
+
+#[test]
+fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
+    const OTHER: &str = "thread/other-marked";
+    const DRAFT: &str = "Unsent reply stays here";
+    let mark = smallclaims::store::operation_id_for_key("unread/inbox-context");
+    let mut ui = fixture(false, &[(mark.as_str(), "message/visible")]);
+    ui.threads.set_access(ThreadAccess {
+        mark_read: true, reply: true, ..ThreadAccess::default()
+    });
+    let mut other = ui.threads.summaries[ID].clone();
+    other.value.id = OTHER.into();
+    other.value.title = "Other marked thread".into();
+    let generation = ui.threads.marked_due(&Pane::Home(None)).unwrap();
+    ui.threads.marked_loaded(generation, Ok(vec![ui.threads.summaries[ID].clone(), other.clone()]));
+    ui.open_home();
+    let index = ui.listing_for(0, 40).ids.iter().position(|id| id == ID).unwrap();
+    ui.click(super::super::doc::Hit::Row(index));
+    assert_eq!(ui.focused_pane(), Some(Pane::List(0)), "exercise Inbox, not an independent thread tab");
+    let host = Pane::Home(Some(ID.into())).key();
+    ui.click(super::super::doc::Hit::Thread(host.clone(), thread::Tap::Compose(ID.into())));
+    ui.paste(DRAFT.into());
+    let now = std::time::Instant::now();
+    assert!(present_at(&mut ui, now).contains("Meaningful reply content"));
+    assert!(ui.threads.writes().is_empty(), "opening alone does not clear the reminder");
+    present_at(&mut ui, now + std::time::Duration::from_millis(500));
+    let write = ui.threads.writes().pop().expect("500 ms dwell clears the reminder");
+    let Mutation::ClearUnread(clear) = &write.mutation else { panic!("expected clear") };
+    assert_eq!(clear.observed_marks, [mark]);
+    let mut accepted = ui.threads.summaries[ID].clone();
+    accepted.value.unread_reminder = None;
+    ui.threads.complete(Receipt { write, confirmation: Confirmation::Applied(Some(accepted)) },
+        &mut ui.conversation_state.drafts);
+    assert_eq!(ui.selected_id().as_deref(), Some(ID), "loading marked rows must not change the keyboard target");
+    assert_eq!(ui.main_pane(), Pane::Home(Some(ID.into())));
+    let pane = ui.main_pane();
+    let generation = ui.threads.marked_due(&pane).expect("clear invalidates marked list");
+    ui.threads.marked_loaded(generation, Ok(vec![other]));
+    assert!(!ui.listing_for(0, 40).ids.iter().any(|id| id == ID));
+    assert!(ui.listing_for(0, 40).ids.iter().any(|id| id == OTHER));
+    let rendered = present_at(&mut ui, now + std::time::Duration::from_millis(501));
+    assert_eq!(ui.main_pane(), Pane::Home(Some(ID.into())), "refetch must not switch the detail by index");
+    assert!(rendered.contains("Meaningful reply content"));
+    assert!(rendered.contains(DRAFT));
+    assert!(ui.threads.summary(ID).unwrap().unread_reminder.is_none());
+    assert!(ui.threads.focused.as_ref().is_some_and(|(place, input)|
+        place == &host && matches!(input, Input::Reply(id) if id == ID)));
+    assert_eq!(ui.conversation_state.drafts.get(&Input::Reply(ID.into()).key()).map(String::as_str), Some(DRAFT));
+    let index = ui.listing_for(0, 40).ids.iter().position(|id| id == OTHER).unwrap();
+    ui.click(super::super::doc::Hit::Row(index));
+    assert_eq!(ui.main_pane(), Pane::Home(Some(OTHER.into())));
+    assert!(!present_at(&mut ui, now + std::time::Duration::from_millis(502)).contains("Meaningful reply content"));
+}
+
+#[test]
+fn unread_inbox_detail_releases_on_collapse_disable_and_read_refusal() {
+    for release in ["collapse", "disable", "read-refusal"] {
+        let mut ui = fixture(false, &[]);
+        ui.open_home();
+        ui.threads.select_inbox_detail(Some(ID.into()));
+        assert_eq!(ui.main_pane(), Pane::Home(Some(ID.into())));
+        match release {
+            "collapse" => ui.click(super::super::doc::Hit::Thread(
+                Pane::Home(Some(ID.into())).key(), thread::Tap::Toggle(ID.into()))),
+            "disable" => ui.threads.enable(false),
+            "read-refusal" => ui.threads.failure(
+                ThreadInterest::Timeline(ID.into()), Some(fractal_client::ErrorCode::Forbidden),
+                "Read permission revoked".into(), true),
+            _ => unreachable!(),
+        }
+        assert!(ui.threads.inbox_detail().is_none(), "{release}: release the identity pin");
+        assert_ne!(ui.main_pane(), Pane::Home(Some(ID.into())), "{release}: stop mounting the pinned detail");
+    }
 }
 
 #[test]
