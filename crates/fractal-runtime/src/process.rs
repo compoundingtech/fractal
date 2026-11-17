@@ -15,6 +15,26 @@ use sha2::{Digest as _, Sha256};
 
 const SCHEMA: &str = "st.runtime.exec-generation.v1";
 
+// All receipt updates and rotations share the generation fence, including fresh observers.
+static RECORD_WRITES: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OwnedChildKey {
+    id: String,
+    generation: String,
+    pid: u32,
+}
+
+impl OwnedChildKey {
+    fn new(id: &str, generation: &ExecGeneration) -> Self {
+        Self { id: id.into(), generation: generation.generation_id.clone(), pid: generation.pid }
+    }
+
+    fn matches(&self, generation: &ExecGeneration) -> bool {
+        self.generation == generation.generation_id && self.pid == generation.pid
+    }
+}
+
 /// Positive producer evidence: this exact attempt returned before creating any child.
 /// Absence of a generation record after a child was created is not this proof.
 #[derive(Debug)]
@@ -134,7 +154,10 @@ impl FiniteLane {
 pub struct ExecRuntime {
     state_dir: PathBuf,
     log_dir: PathBuf,
-    owned_children: Arc<Mutex<BTreeMap<u32, OwnedChild>>>,
+    owned_children: Arc<Mutex<BTreeMap<OwnedChildKey, OwnedChild>>>,
+    reaper_running: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    reap_automatically: bool,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
     scope_join_limit: Duration,
     finite_lane: Option<FiniteLane>,
@@ -223,11 +246,20 @@ impl ExecRuntime {
             state_dir,
             log_dir,
             owned_children: Arc::new(Mutex::new(BTreeMap::new())),
+            reaper_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            reap_automatically: true,
             unlaned_seat: None,
             scope_join_limit: crate::isolate::SCOPE_JOIN_LIMIT,
             finite_lane: None,
             resource_membership: None,
         }
+    }
+
+    #[cfg(test)]
+    fn without_background_reaper(mut self) -> Self {
+        self.reap_automatically = false;
+        self
     }
 
     #[cfg(test)]
@@ -471,7 +503,15 @@ impl ExecRuntime {
         *child_created = true;
         let pid = child.id();
         let mut payload_gate = child.stdin.take();
-        let start_token = process_start_token(pid)?;
+        let start_token = match process_start_token(pid) {
+            Ok(token) => token,
+            Err(error) => {
+                // No receipt can be named yet, but even this failed launch owns a wait.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         let created_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -492,11 +532,14 @@ impl ExecRuntime {
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
         };
-        self.write_generation(id, &generation)?;
-        self.owned_children
-            .lock()
-            .expect("exec child mutex poisoned")
-            .insert(pid, OwnedChild::Running(child));
+        let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
+        children.insert(OwnedChildKey::new(id, &generation), OwnedChild::Running(child));
+        let receipt = self.write_generation(id, &generation);
+        // A pre-existing reaper cannot retire this obligation before the initial write finishes.
+        drop(children);
+        // Registration precedes fallible receipt persistence. Even a failed launch must reap.
+        self.start_owned_reaper();
+        receipt?;
         // `systemd-run` joins its scope only when the user manager starts it, and runs the task
         // after. Until then it is in this process's cgroup and ends with it, so the exec outlives
         // this process only once it has joined.
@@ -538,7 +581,7 @@ impl ExecRuntime {
                     released_at = Some(timestamp);
                     let mut receipt = generation.clone();
                     receipt.payload_released_at_unix_ms = released_at;
-                    self.write_generation(id, &receipt)
+                    self.update_generation(id, &receipt)
                         .context("persist released payload receipt; execution custody retained on failure")?;
                     persisted = true;
                     Ok(timestamp)
@@ -584,6 +627,9 @@ impl ExecRuntime {
                 generation.schema
             ))));
         }
+        // Containment may have been finalized by a runtime without this child's handle.
+        // Consume our wait status before trusting any durable terminal shortcut.
+        self.reap_owned(id, &mut generation)?;
         // A terminal group is durable evidence about this exact exec. In particular, do not
         // let an unrelated process that later reuses the PID make a completed generation look
         // live again on platforms whose best available start token is the PID itself.
@@ -591,13 +637,6 @@ impl ExecRuntime {
             return Ok(Some(ExecObservation::Exited(generation)));
         }
         if generation.exit_code.is_some() || generation.exit_signal.is_some() {
-            return self.observe_exited_group(id, generation).map(Some);
-        }
-        let running = self.reap_owned(id, &mut generation)?;
-        if generation.group_exited {
-            return Ok(Some(ExecObservation::Exited(generation)));
-        }
-        if !running && (generation.exit_code.is_some() || generation.exit_signal.is_some()) {
             return self.observe_exited_group(id, generation).map(Some);
         }
         #[cfg(test)]
@@ -667,17 +706,19 @@ impl ExecRuntime {
     /// the record again. Otherwise an observer that read the record before the exit would find
     /// the process gone and record the exit without its code.
     fn reap_owned(&self, id: &str, generation: &mut ExecGeneration) -> Result<bool> {
+        let key = OwnedChildKey::new(id, generation);
         let exited = {
             let mut children = self
                 .owned_children
                 .lock()
                 .expect("exec child mutex poisoned");
-            match children.get_mut(&generation.pid) {
-                Some(OwnedChild::Running(child)) => {
+            match children.get_mut(&key) {
+                Some(owned @ OwnedChild::Running(_)) => {
+                    let OwnedChild::Running(child) = owned else { unreachable!() };
                     let Some(status) = child.try_wait()? else {
                         return Ok(true);
                     };
-                    children.insert(generation.pid, OwnedChild::Exited(status));
+                    *owned = OwnedChild::Exited(status);
                     Some(status)
                 }
                 Some(OwnedChild::Exited(status)) => Some(*status),
@@ -694,13 +735,13 @@ impl ExecRuntime {
                 }
             });
             // A failed write keeps the mark, so a later observer writes the exit again.
-            self.write_generation(id, generation)?;
+            self.persist_owned_exit(&key, status)?;
             let mut children = self
                 .owned_children
                 .lock()
                 .expect("exec child mutex poisoned");
-            if matches!(children.get(&generation.pid), Some(OwnedChild::Exited(_))) {
-                children.remove(&generation.pid);
+            if matches!(children.get(&key), Some(OwnedChild::Exited(_))) {
+                children.remove(&key);
             }
             return Ok(false);
         }
@@ -713,6 +754,77 @@ impl ExecRuntime {
             *generation = current;
         }
         Ok(false)
+    }
+
+    /// Spawn custody, not mission membership, owns completion. One small nonblocking sweep per
+    /// owning runtime waits only on registered children; it never steals another subsystem's wait.
+    /// The worker retains the runtime until all waits and fallible receipt writes are finished.
+    fn start_owned_reaper(&self) {
+        #[cfg(test)]
+        if !self.reap_automatically {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        if self.reaper_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let runtime = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut children = runtime.owned_children.lock().expect("exec child mutex poisoned");
+            if children.is_empty() {
+                // Clear under the map lock: a concurrent registration either keeps this worker
+                // alive or observes false and starts the next one.
+                runtime.reaper_running.store(false, Ordering::Release);
+                break;
+            }
+            let mut exited = Vec::new();
+            for (key, child) in children.iter_mut() {
+                if let OwnedChild::Running(running) = child {
+                    match running.try_wait() {
+                        Ok(Some(status)) => *child = OwnedChild::Exited(status),
+                        Ok(None) => continue,
+                        Err(error) => {
+                            tracing::warn!(runtime_id = key.id, generation = key.generation, pid = key.pid,
+                                %error, "owned child wait failed");
+                            continue;
+                        }
+                    }
+                }
+                if let OwnedChild::Exited(status) = child {
+                    exited.push((key.clone(), *status));
+                }
+            }
+            drop(children);
+            for (key, status) in exited {
+                match runtime.persist_owned_exit(&key, status) {
+                    Ok(()) => {
+                        runtime.owned_children.lock().expect("exec child mutex poisoned").remove(&key);
+                    }
+                    Err(error) => {
+                        // The Exited mark is the only remaining copy of the kernel wait status.
+                        tracing::warn!(runtime_id = key.id, generation = key.generation, pid = key.pid,
+                            %error, "owned child exit receipt remains pending");
+                    }
+                }
+            }
+        });
+    }
+
+    fn persist_owned_exit(&self, key: &OwnedChildKey, status: std::process::ExitStatus) -> Result<()> {
+        // Rotation can move an old generation to the previous slot. Update only exact receipts,
+        // under the same fence as rotation; never recreate a removed receipt or replace a new one.
+        let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
+        for path in [self.record_path(&key.id), self.previous_record_path(&key.id)] {
+            if let Some(mut generation) = self.read_generation_path(&path)?
+                && key.matches(&generation)
+            {
+                generation.exit_code = status.code();
+                generation.exit_signal = exit_signal(&status);
+                self.write_generation_file(&path, &generation)?;
+            }
+        }
+        Ok(())
     }
 
     fn observe_exited_group(
@@ -736,7 +848,7 @@ impl ExecRuntime {
         match observe_exited_group(generation)? {
             ExecObservation::Exited(mut generation) => {
                 generation.group_exited = true;
-                self.write_generation(id, &generation)?;
+                self.update_generation(id, &generation)?;
                 Ok(ExecObservation::Exited(generation))
             }
             observation => Ok(observation),
@@ -906,7 +1018,7 @@ impl ExecRuntime {
                 && current.scope_unit == generation.scope_unit,
                 "finite execution generation changed during scope reconciliation");
             generation.group_exited = true;
-            self.write_generation(id, &generation)?;
+            self.update_generation(id, &generation)?;
         }
         crate::isolate::mark_ended(unit);
         Ok(true)
@@ -1003,6 +1115,7 @@ impl ExecRuntime {
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the exec's work scope.
         self.end_leftovers_for(id, ExecTeardownCaller::Remove)?;
+        let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
         for path in [
             self.record_path(id),
             self.previous_record_path(id),
@@ -1043,6 +1156,7 @@ impl ExecRuntime {
     }
 
     fn rotate_generation(&self, id: &str) -> Result<()> {
+        let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
         rotate_file(&self.record_path(id), &self.previous_record_path(id))?;
         rotate_file(&self.log_path(id, false), &self.log_path(id, true))?;
         for stream in ["stdout", "stderr"] {
@@ -1061,11 +1175,23 @@ impl ExecRuntime {
     }
 
     fn write_generation(&self, id: &str, generation: &ExecGeneration) -> Result<()> {
+        self.write_generation_inner(id, generation, true)
+    }
+
+    fn update_generation(&self, id: &str, generation: &ExecGeneration) -> Result<()> {
+        self.write_generation_inner(id, generation, false)
+    }
+
+    fn write_generation_inner(&self, id: &str, generation: &ExecGeneration, create: bool) -> Result<()> {
         // Release receipts and exit evidence are monotonic facts. A concurrent observer may have
         // read the pre-release record; serialize read/merge/write so it cannot erase the receipt.
-        static RECORD_WRITES: Mutex<()> = Mutex::new(());
         let _writer = RECORD_WRITES.lock().expect("exec generation writer mutex poisoned");
         let current = self.read_generation_path(&self.record_path(id))?;
+        if !create && !current.as_ref().is_some_and(|current|
+            current.generation_id == generation.generation_id && current.pid == generation.pid)
+        {
+            return Ok(());
+        }
         let mut generation = std::borrow::Cow::Borrowed(generation);
         if let Some(current) = current.filter(|current| current.generation_id == generation.generation_id) {
             if generation.resource_membership.is_none() && current.resource_membership.is_some() {
@@ -1086,7 +1212,10 @@ impl ExecRuntime {
                 generation.to_mut().group_exited = true;
             }
         }
-        let path = self.record_path(id);
+        self.write_generation_file(&self.record_path(id), generation.as_ref())
+    }
+
+    fn write_generation_file(&self, path: &Path, generation: &ExecGeneration) -> Result<()> {
         // Two observers in this process can write one record at once.
         static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1096,7 +1225,7 @@ impl ExecRuntime {
             .write(true)
             .mode(0o600)
             .open(&temporary)?;
-        serde_json::to_writer(&mut file, generation.as_ref())?;
+        serde_json::to_writer(&mut file, generation)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
@@ -2024,7 +2153,8 @@ mod tests {
     #[test]
     fn an_owned_exec_that_exits_while_it_is_observed_keeps_its_exit_code() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let go = root.path().join("go");
         runtime
             .spawn(
@@ -2065,7 +2195,8 @@ mod tests {
     #[test]
     fn an_exit_reaped_by_a_concurrent_observer_keeps_its_exit_code() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let go = root.path().join("go");
         runtime
             .spawn(
@@ -2115,7 +2246,8 @@ mod tests {
     #[test]
     fn an_observer_between_a_reap_and_its_record_takes_the_exit_code() {
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let launched = runtime
             .spawn(
                 "work",
@@ -2157,12 +2289,151 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn owned_reap_regression_nonowning_terminal_observer() {
+        owned_reap_regression(false, false, false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_reap_regression_receipt_write_retry() {
+        owned_reap_regression(true, false, false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_reap_regression_replacement_receipt_is_fenced() {
+        owned_reap_regression(false, true, false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_reap_regression_terminal_shortcut_reaps_first() {
+        owned_reap_regression(false, false, true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn owned_reap_regression(fail_write: bool, replace: bool, observe_owner: bool) {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("exec");
+        let owner = ExecRuntime::new(state.clone(), root.path().join("logs"));
+        let owner = if observe_owner { owner.without_background_reaper() } else { owner };
+        let observer = ExecRuntime::new(state.clone(), root.path().join("logs"));
+        let release_path = root.path().join("release");
+        let release_name = std::ffi::CString::new(release_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(release_name.as_ptr(), 0o600) }, 0);
+        let generation = owner.spawn(
+            "work",
+            &crate::Launch::Argv(vec![
+                "sh".into(), "-c".into(), "read release < \"$1\"".into(),
+                "sh".into(), release_path.to_str().unwrap().into(),
+            ]),
+            root.path(), &std::env::vars().collect(),
+        ).unwrap();
+        let _release = fs::OpenOptions::new().write(true).open(release_path).unwrap();
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        let exited = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        // Freeze only the owner's map. A different runtime can cancel and publish terminal
+        // containment, but cannot consume the parent's wait status.
+        let children = owner.owned_children.lock().unwrap();
+        observer.stop_if("work", Some(&generation.generation_id)).unwrap();
+        let mut event = libc::pollfd {
+            fd: exited.as_raw_fd(), events: libc::POLLIN, revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut event, 1, 5000) }, 1);
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+        let Some(ExecObservation::Exited(terminal)) = observer.observe("work").unwrap() else {
+            panic!("non-owner must see terminal containment");
+        };
+        assert!(terminal.group_exited);
+        assert_eq!(terminal.exit_signal, None);
+        let mut neighbor = terminal.clone();
+        neighbor.generation_id = "unrelated-generation".into();
+        neighbor.pid = std::process::id();
+        observer.write_generation("neighbor", &neighbor).unwrap();
+        let neighbor_before = fs::read(observer.record_path("neighbor")).unwrap();
+        let receipt = if replace {
+            observer.rotate_generation("work").unwrap();
+            observer.write_generation("work", &neighbor).unwrap();
+            observer.previous_record_path("work")
+        } else {
+            observer.record_path("work")
+        };
+        let replacement_before = replace.then(|| fs::read(observer.record_path("work")).unwrap());
+        if fail_write {
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        drop(children);
+        if observe_owner {
+            let Some(ExecObservation::Exited(ended)) = owner.observe("work").unwrap() else {
+                panic!("owner must observe the terminal receipt");
+            };
+            assert_eq!(ended.exit_signal, Some(libc::SIGTERM));
+        }
+        // No owner.observe(), mission membership, or reconciliation after cancellation:
+        // the successful spawn alone must carry its wait/receipt obligation to completion.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while process_identity(generation.pid).is_ok() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let reaped = process_identity(generation.pid).is_err();
+        let retained = owner.owned_children.lock().unwrap().values()
+            .any(|child| matches!(child, OwnedChild::Exited(_)));
+        let write_failed = if fail_write && retained {
+            // Prove a real receipt-write failure while the consumed wait status is retained.
+            let status = match owner.owned_children.lock().unwrap().values().next().unwrap() {
+                OwnedChild::Exited(status) => *status,
+                OwnedChild::Running(_) => unreachable!(),
+            };
+            owner.persist_owned_exit(&OwnedChildKey::new("work", &generation), status).is_err()
+        } else {
+            false
+        };
+        if fail_write {
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if !reaped {
+            for child in owner.owned_children.lock().unwrap().values_mut() {
+                if let OwnedChild::Running(child) = child {
+                    let _ = child.try_wait();
+                }
+            }
+        }
+        assert!(!fail_write || retained,
+            "failed receipt persistence must retain the consumed wait status");
+        assert!(!fail_write || write_failed, "receipt persistence must fail before retry");
+        // Restore permissions before any assertion unwinds, so temporary files can be removed.
+        assert!(reaped, "owning runtime never reaped the cancelled child after non-owner terminal observation");
+        let ended = loop {
+            let ended = owner.read_generation_path(&receipt).unwrap().unwrap();
+            if ended.exit_signal.is_some() || std::time::Instant::now() >= deadline {
+                break ended;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(ended.generation_id, generation.generation_id);
+        assert_eq!(ended.exit_code, None);
+        assert_eq!(ended.exit_signal, Some(libc::SIGTERM));
+        assert!(ended.group_exited);
+        assert_eq!(fs::read(observer.record_path("neighbor")).unwrap(), neighbor_before);
+        if let Some(before) = replacement_before {
+            assert_eq!(fs::read(observer.record_path("work")).unwrap(), before);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn reaps_an_owned_child_before_committing_its_terminal_record() {
         use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
         use std::os::unix::ffi::OsStrExt as _;
 
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let release_path = root.path().join("release");
         let release_name = std::ffi::CString::new(release_path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(release_name.as_ptr(), 0o600) }, 0);
@@ -2191,7 +2462,7 @@ mod tests {
                 .owned_children
                 .lock()
                 .unwrap()
-                .get_mut(&generation.pid)
+                .get_mut(&OwnedChildKey::new("work", &generation))
                 .map(|child| match child {
                     OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
                     OwnedChild::Exited(_) => false,
@@ -2235,7 +2506,8 @@ mod tests {
         use std::os::unix::ffi::OsStrExt as _;
 
         let root = tempfile::tempdir().unwrap();
-        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .without_background_reaper();
         let _kill = KillOnDrop(runtime.clone());
         let descendant_release = root.path().join("descendant-release");
         let descendant_pid = root.path().join("descendant-pid");
@@ -2288,7 +2560,7 @@ mod tests {
                 .owned_children
                 .lock()
                 .unwrap()
-                .get_mut(&generation.pid)
+                .get_mut(&OwnedChildKey::new("work", &generation))
                 .map(|child| match child {
                     OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
                     OwnedChild::Exited(_) => false,
@@ -2404,7 +2676,7 @@ libc.pthread_exit(None)
         // It must also bypass observe, which blocks in the broken implementation.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
         assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
-        struct Cleanup(ExecRuntime, u32, OwnedFd);
+        struct Cleanup(ExecRuntime, OwnedChildKey, OwnedFd);
         impl Cleanup {
             fn kill(&self) -> std::io::Result<()> {
                 let result = unsafe {
@@ -2437,7 +2709,7 @@ libc.pthread_exit(None)
                 }
             }
         }
-        let cleanup = Cleanup(runtime.clone(), generation.pid, unsafe {
+        let cleanup = Cleanup(runtime.clone(), OwnedChildKey::new("work", &generation), unsafe {
             OwnedFd::from_raw_fd(fd as i32)
         });
         let mut event = libc::pollfd {
@@ -2459,7 +2731,7 @@ libc.pthread_exit(None)
                 .owned_children
                 .lock()
                 .unwrap()
-                .get_mut(&generation.pid)
+                .get_mut(&OwnedChildKey::new("work", &generation))
                 .map(|child| match child {
                     OwnedChild::Running(child) => child.try_wait().unwrap().is_none(),
                     OwnedChild::Exited(_) => false,
