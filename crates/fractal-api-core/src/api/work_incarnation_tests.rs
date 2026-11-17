@@ -267,6 +267,7 @@ mission "catalog" state="ready" {
             },
         });
         state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hc143d361eb67 owner=fractal_api_core::api::work_incarnation_tests TODO=bound-or-reference-values-and-reclamation */
             "INSERT INTO local_runtime_starts(id,subject,owner,body,finished,result,applied,dispatched,receipted)
              VALUES(?1,?2,'fixture',?3,1,?4,?5,1,?5)",
             rusqlite::params![operation, SEAT, body.to_string(), result.to_string(), applied],
@@ -296,17 +297,20 @@ mission "catalog" state="ready" {
             result.as_object_mut().unwrap().remove("runtime_pid");
             result.as_object_mut().unwrap().remove("runtime_pid_start_token");
             state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h2519c27cb02c owner=fractal_api_core::api::work_incarnation_tests TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE local_runtime_starts SET result=?2 WHERE id=?1",
                 rusqlite::params![operation, result.to_string()],
             ).unwrap();
         }
         if mismatch == "revoked" {
             state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hc3b8ab661222 owner=fractal_api_core::api::work_incarnation_tests TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE local_runtime_starts SET revoked_by='stop' WHERE id=?1", [operation],
             ).unwrap();
         }
         if mismatch == "incomplete" {
             state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h2b140334f07c owner=fractal_api_core::api::work_incarnation_tests TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE local_runtime_starts SET finished=0 WHERE id=?1", [operation],
             ).unwrap();
         }
@@ -325,12 +329,14 @@ mission "catalog" state="ready" {
         }
         if mismatch == "request-retracted" {
             state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h21aa596bea94 owner=fractal_api_core::api::work_incarnation_tests TODO=bound-or-reference-values-and-reclamation */
                 "DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.requested'",
                 [SEAT],
             ).unwrap();
         }
         if mismatch == "request-repaired" {
             state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hd2266ef36f4b owner=fractal_api_core::api::work_incarnation_tests TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE local_observations SET body=json_set(body,'$.fields.reason','repaired')
                  WHERE subject=?1 AND kind='runtime.action.requested'", [SEAT],
             ).unwrap();

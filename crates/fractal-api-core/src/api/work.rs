@@ -710,7 +710,8 @@ pub async fn post_work_action(
     if request.actor.as_deref().is_some_and(|actor| actor.starts_with("exec/")) {
         return exec_clock_response(state, action, subject, request).await;
     }
-    work_action_response_viewing(state, action, subject, request, None, None, lease_view, starting_claim).await
+    work_action_response_viewing(state, action, subject, request, None, None,
+        WorkResponseOptions { lease_view, starting_claim }).await
 }
 
 /// `work wait` and `work resume` from a step's own exec, which holds no claim. The exec's launch

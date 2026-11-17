@@ -12956,7 +12956,13 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
-    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false, false).await
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, WorkResponseOptions::default()).await
+}
+
+#[derive(Default)]
+struct WorkResponseOptions {
+    lease_view: bool,
+    starting_claim: bool,
 }
 
 /// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
@@ -12968,9 +12974,9 @@ async fn work_action_response_viewing(
     request: WorkRequest,
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
-    lease_view: bool,
-    starting_claim: bool,
+    options: WorkResponseOptions,
 ) -> Result<Json<StepRunView>, ApiError> {
+    let WorkResponseOptions { lease_view, starting_claim } = options;
     let actor = request
         .actor
         .as_deref()
@@ -13035,7 +13041,10 @@ async fn work_action_response_viewing(
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_admitting(&subject, &action, &request, extend_ms, None, !lease_view, |tx| {
+            store.work_action_admitting(&subject, &action, &request,
+                crate::store::missions::WorkActionOptions {
+                    extend_ms, handoff: None, enrich_renewal: !lease_view,
+                }, |tx| {
                 if let Some(host) = starting_host.as_deref() {
                     let incarnation = request.incarnation.as_deref().expect("explicit claim fence");
                     let admitted = crate::store::runtime_starts::admit_starting_work_claim_tx(

@@ -287,16 +287,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             if result["verification"] == "operation-incarnation"
                 && prepared.subject.kind == "agent" && prepared.member.driver.is_none()
                 && let Some(incarnation) = result["incarnation"].as_str()
-            {
-                if let Ok(Some((pid, token))) =
+                && let Ok(Some((pid, token))) =
                     runtime.start_process_identity(&prepared.launch_member, incarnation)
-                {
-                    let fields = member_fields(&prepared.member, "starting", Some(incarnation), false);
-                    result["runtime_pid"] = Value::from(pid);
-                    result["runtime_pid_start_token"] = Value::from(token.to_string());
-                    result["runtime_start_fields"] = serde_json::json!(fields);
-                    result["runtime_before_start"] = serde_json::json!(runtime_before_start);
-                }
+            {
+                let fields = member_fields(&prepared.member, "starting", Some(incarnation), false);
+                result["runtime_pid"] = Value::from(pid);
+                result["runtime_pid_start_token"] = Value::from(token.to_string());
+                result["runtime_start_fields"] = serde_json::json!(fields);
+                result["runtime_before_start"] = serde_json::json!(runtime_before_start);
             }
             result["launch_contract"] = serde_json::json!(contract);
             result["operation_id"] = Value::from(id.clone());

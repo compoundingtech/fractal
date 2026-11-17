@@ -1500,6 +1500,12 @@ fn apply_step_states_tx(
     Ok(())
 }
 
+pub struct WorkActionOptions<'a> {
+    pub extend_ms: Option<u64>,
+    pub handoff: Option<&'a crate::model::WorkHandoffRequest>,
+    pub enrich_renewal: bool,
+}
+
 pub trait MissionsStore {
     /// Whether a refresher keeps the roster published, so readers must never fold it.
     fn agent_roster_refresher_running(&self) -> bool;
@@ -2082,9 +2088,7 @@ pub trait MissionsStore {
             subject: &str,
             action: &str,
             request: &WorkRequest,
-            extend_ms: Option<u64>,
-            handoff: Option<&crate::model::WorkHandoffRequest>,
-            enrich_renewal: bool,
+            options: WorkActionOptions<'_>,
             admit: impl Fn(&Transaction<'_>) -> Result<(), FractalError> + Send + Sync,
         ) -> Result<StepRunView, FractalError>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
@@ -6304,7 +6308,8 @@ impl MissionsStore for Store {
             handoff: Option<&crate::model::WorkHandoffRequest>,
             enrich_renewal: bool,
         ) -> Result<StepRunView, FractalError> {
-        self.work_action_admitting(subject, action, request, extend_ms, handoff, enrich_renewal, |_| Ok(()))
+        self.work_action_admitting(subject, action, request,
+            WorkActionOptions { extend_ms, handoff, enrich_renewal }, |_| Ok(()))
     }
 
     fn work_action_admitting(
@@ -6312,11 +6317,10 @@ impl MissionsStore for Store {
             subject: &str,
             action: &str,
             request: &WorkRequest,
-            extend_ms: Option<u64>,
-            handoff: Option<&crate::model::WorkHandoffRequest>,
-            enrich_renewal: bool,
+            options: WorkActionOptions<'_>,
             admit: impl Fn(&Transaction<'_>) -> Result<(), FractalError> + Send + Sync,
         ) -> Result<StepRunView, FractalError> {
+        let WorkActionOptions { extend_ms, handoff, enrich_renewal } = options;
         if action == "extend" {
             if !extend_ms.is_some_and(|by| (1..=MAX_STEP_EXTENSION_MS).contains(&by)) {
                 return Err(FractalError::new(

@@ -49,6 +49,7 @@ pub fn admit_starting_work_claim_tx(
     alive: impl Fn(u32, u64) -> Result<bool>,
 ) -> Result<bool> {
     let current: Option<String> = tx.query_row(
+        /* sqlite-large-value: allow-for-now lv-hc2a32f40789d owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */
         &format!("{} LIMIT 1", newest_claims_of_kind_query("claims.id", "runtime.observed")),
         params![subject, i64::MAX], |row| row.get(0),
     ).optional()?;

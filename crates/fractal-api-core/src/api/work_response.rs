@@ -355,8 +355,7 @@ mod tests {
                 request(key),
                 None,
                 None,
-                lease_view,
-                false,
+                WorkResponseOptions { lease_view, starting_claim: false },
             )
         };
         let lean = renew("lease-renew", true).await.unwrap().0;
