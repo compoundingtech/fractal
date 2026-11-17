@@ -568,6 +568,7 @@ impl Threads {
         self.available = available;
         if !available {
             self.leave_view();
+            self.select_inbox_detail(None);
             self.seeks.clear();
             self.invalidate_marked();
             self.marked_in_home = false;
@@ -620,6 +621,25 @@ impl Threads {
 
     pub(super) fn available(&self) -> bool {
         self.available
+    }
+
+    /// Inbox's open detail is a subject, not an index into its changing reminder list.
+    /// Reuse the host selection map; this carries no body or read authority.
+    pub(super) fn select_inbox_detail(&mut self, id: Option<String>) {
+        let host = "list:home";
+        if let Some(id) = id.filter(|id| id.starts_with("thread/")) {
+            self.selected.insert(host.into(), id);
+        } else {
+            self.selected.remove(host);
+        }
+    }
+
+    pub(super) fn inbox_detail(&self) -> Option<&str> {
+        if self.available {
+            self.selected.get("list:home").map(String::as_str)
+        } else {
+            None
+        }
     }
 
     pub(super) fn can_start(&self, id: &str) -> bool {
@@ -1147,6 +1167,11 @@ impl Threads {
             _ => fractal_client::human_message(code.as_ref(), &message),
         };
         if permanent {
+            if let ThreadInterest::Timeline(id) | ThreadInterest::Summary(id) = &interest
+                && self.inbox_detail() == Some(id.as_str())
+            {
+                self.select_inbox_detail(None);
+            }
             match &interest {
                 ThreadInterest::Timeline(id) => {
                     self.histories.remove(id);
@@ -1817,6 +1842,9 @@ impl Threads {
                 if host.starts_with("home:thread/") {
                     if !self.folded_inbox_details.remove(host) {
                         self.folded_inbox_details.insert(host.into());
+                        if self.inbox_detail() == Some(id.as_str()) {
+                            self.select_inbox_detail(None);
+                        }
                         self.blur_thread(host, &id);
                         if self.selected.get(host) == Some(&id) {
                             self.selected.remove(host);
