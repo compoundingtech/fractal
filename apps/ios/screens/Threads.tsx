@@ -691,6 +691,7 @@ function InboxThreadStart({ client, origin, pending, initialTitle, onOpen, canSt
   } : undefined;
   const recipient = !reading ? null
     : context.kind === 'loading' ? <T dim>Reading who this Start reaches…</T>
+    : context.kind === 'blocked' ? <ThreadReadIssue message={context.message} />
     : context.kind === 'error' ? <View style={{ gap: 6 }}>
       <ThreadReadIssue message={context.message} />
       <Button label="Retry" accessibilityLabel="Retry reading the Start recipient" disabled={status !== 'online'}

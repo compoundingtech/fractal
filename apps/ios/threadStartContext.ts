@@ -1,8 +1,10 @@
 import type { FractalClient, SourceEpisode, ThreadStartContext } from '../../clients/typescript/fractal-client';
+import { ClientError } from '../../clients/typescript/fractal-client';
 
 export type ThreadStartContextState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
+  | { kind: 'blocked'; reason: 'recipient-unassigned' | 'recipient-retired'; message: string }
   | { kind: 'ready'; context: ThreadStartContext; changed: boolean };
 
 /** Server-selected first-send audience. A refresh never sends or edits a signed request.
@@ -41,8 +43,14 @@ export class ThreadStartContextReader {
       const changed = refresh || this.lastRecipient !== undefined && this.lastRecipient !== value.start_recipient.agent_id;
       this.lastRecipient = value.start_recipient.agent_id;
       this.publish({ kind: 'ready', context: value, changed });
-    } catch {
+    } catch (error) {
       if (request.signal.aborted || generation !== this.generation) return;
+      if (error instanceof ClientError && (error.response.code === 'recipient-unassigned' || error.response.code === 'recipient-retired')) {
+        this.publish({ kind: 'blocked', reason: error.response.code, message: error.response.code === 'recipient-unassigned'
+          ? 'No Start recipient is configured. Configure a responsible agent before starting a discussion. Your draft is unchanged.'
+          : 'This Start recipient is retired and no replacement is available. Your draft is unchanged.' });
+        return;
+      }
       this.publish({ kind: 'error', message: 'The Start recipient is unavailable. Refresh to try again. Your draft is unchanged.' });
     }
   };
