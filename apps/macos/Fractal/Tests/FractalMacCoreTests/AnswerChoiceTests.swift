@@ -21,8 +21,14 @@ final class AnswerChoiceTests: XCTestCase {
     XCTAssertEqual(
       Fixture.record(kind: "harness-prompt", actions: ["prompt.respond"]).role, .ignored,
       "a terminal-only prompt offers no answer")
+    for action in ["review.approve", "review.reject", "review.request-changes"] {
+      XCTAssertEqual(
+        Fixture.record(kind: "human-gate", actions: [action]).role, .ask(.inFractal))
+    }
+    XCTAssertEqual(Fixture.record(kind: "human-gate", actions: []).role, .ignored)
+    XCTAssertEqual(Fixture.record(kind: "human-gate", actions: ["work.done"]).role, .ignored)
     XCTAssertEqual(
-      Fixture.record(kind: "human-gate", actions: ["review.approve", "review.reject"]).role, .ignored)
+      Fixture.record(kind: "human-gate", state: "resolved", actions: ["review.approve"]).role, .ignored)
   }
 
   // MARK: Choices (web alertChoices / partitionChoices)

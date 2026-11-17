@@ -13,8 +13,9 @@ final class AttentionModelTests: XCTestCase {
   func testFreshReadPublishesAsksUpdatesAndObjectives() async {
     let ask = Fixture.record()
     let update = Fixture.record(id: "attention/update", update: UpdateNote(about: "deploy", summary: "Done"))
-    let ignored = Fixture.record(id: "attention/gate", kind: "human-gate", actions: ["review.approve"])
-    let adapter = FakeAdapter(attention: [.success(.init(records: [ask, update, ignored], canAnswer: true))], slo: [.success(slo)])
+    let gate = Fixture.record(id: "attention/gate", kind: "human-gate", actions: ["review.approve"])
+    let ignored = Fixture.record(id: "attention/closed", state: "resolved")
+    let adapter = FakeAdapter(attention: [.success(.init(records: [ask, update, gate, ignored], canAnswer: true))], slo: [.success(slo)])
     let model = AttentionModel(adapter: adapter)
     XCTAssertEqual(model.connection, .loading)
     XCTAssertEqual(model.signalBoard.signals.count, 10)
@@ -24,9 +25,9 @@ final class AttentionModelTests: XCTestCase {
 
     await model.refresh(now: now)
 
-    XCTAssertEqual(model.asks, [ask])
+    XCTAssertEqual(model.asks, [ask, gate])
     XCTAssertEqual(model.updates, [update])
-    XCTAssertEqual(model.openAskCount, 1, "updates ask nothing and are not counted")
+    XCTAssertEqual(model.openAskCount, 2, "human reviews count, updates ask nothing")
     XCTAssertEqual(model.sloBoard?.objectives.map(\.id), ["read"])
     XCTAssertEqual(model.signalBoard, SignalBoard(rows: slo.rows))
     XCTAssertTrue(model.canAnswer)
