@@ -810,8 +810,8 @@ pub(crate) mod retained_discussion {
 
     fn assert_start_refusal_fixture(status: StatusCode, mut body: Value, name: &str) {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
-        body["request_id"] = json!("<request-id>");
+        assert!(body["request_id"].as_str().is_some_and(|id| id.starts_with("request/")));
+        body["request_id"] = json!("request/normalized");
         let fixtures: Value = serde_json::from_str(include_str!(
             "../../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json")).unwrap();
         assert_eq!(body, fixtures[name], "{name}");

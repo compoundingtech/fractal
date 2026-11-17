@@ -3790,7 +3790,7 @@ configured; this is not a race reported as `stale-fence` and does not change
 `recipient-retired` behavior.
 The router's serialized refusal examples are in
 [`fixtures/thread-start-refusals.json`](fixtures/thread-start-refusals.json);
-only the per-request `request_id` is normalized to `<request-id>`.
+only the per-request `request_id` is normalized to `request/normalized`.
 
 `agent.retire.parameters.successor` optionally names an existing eligible agent. It is recorded in the signed retirement claim after the all-member registry gate. The successor's read and close claims carry `acting_for` and the retirement claim as evidence; `Agent.mail_custody` reports `{ successor, state: "pending" }` for OLD. Numeric unread counts and completion are not available in this increment.
 
