@@ -218,17 +218,16 @@ it.each(['stale-snapshot'] as const)('retains the original signed Start when gol
     await act(async () => view.button('Start thread')?.click())
     await view.type('Keep the original signed intent.')
     await act(async () => view.button('Send')?.click())
-    await vi.waitFor(() => expect(view.button('Retry thread start')).toBeDefined())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Fractal has not confirmed this action. Do not send it again.'))
     await view.settle()
+    expect(view.button('Retry thread start')).toBeUndefined()
     expect(view.actions).toHaveLength(1)
-    await act(async () => view.button('Retry thread start')?.click())
-    await vi.waitFor(() => expect(view.actions).toHaveLength(2))
-    expect(view.actions[1]).toEqual(view.actions[0])
-    expect(startParameters(view.actions[1])?.agent_id).toBe(original)
+    expect(startParameters(view.actions[0])?.agent_id).toBe(original)
+    expect(view.host.textContent).toContain('Keep the original signed intent.')
   } finally { await view.dispose() }
 })
 
-it.each(['outer', 'details'] as const)('keeps unknown dominant over golden retirement none in %s metadata and a later unassigned none', async location => {
+it.each(['outer', 'details'] as const)('keeps golden retirement unknown dominant in %s metadata without reaching a later unassigned none', async location => {
   const golden = startRefusalWire['recipient-retired']
   const uncertain = location === 'outer'
     ? { ...golden, applied: 'unknown' }
@@ -243,18 +242,12 @@ it.each(['outer', 'details'] as const)('keeps unknown dominant over golden retir
     await act(async () => view.button('Start thread')?.click())
     await view.type('Preserve the ambiguous action.')
     await act(async () => view.button('Send')?.click())
-    await vi.waitFor(() => expect(view.button('Retry thread start')).toBeDefined())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Fractal has not confirmed this action. Do not send it again.'))
     await view.settle()
+    expect(view.button('Retry thread start')).toBeUndefined()
     expect(view.actions).toHaveLength(1)
-    await act(async () => view.button('Retry thread start')?.click())
-    await vi.waitFor(() => expect(view.actions).toHaveLength(2))
-    await view.settle()
-    expect(view.button('Retry thread start')).toBeDefined()
-    expect(view.actions[1]).toEqual(view.actions[0])
-    await act(async () => view.button('Retry thread start')?.click())
-    await vi.waitFor(() => expect(view.actions).toHaveLength(3))
-    expect(view.actions[2]).toEqual(view.actions[0])
-    expect(startParameters(view.actions[2])?.agent_id).toBe(original)
+    expect(startParameters(view.actions[0])?.agent_id).toBe(original)
+    expect(view.host.textContent).toContain('Preserve the ambiguous action.')
   } finally { await view.dispose() }
 })
 
@@ -380,13 +373,12 @@ it('keeps an unknown Start outcome on the exact original identity and retry key 
     await act(async () => view.button('Start thread')?.click())
     await view.type('Recover the original intent.')
     await act(async () => view.button('Send')?.click())
-    await vi.waitFor(() => expect(view.button('Retry thread start')).toBeDefined())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Fractal has not confirmed this action. Do not send it again.'))
     await view.settle()
+    expect(view.button('Retry thread start')).toBeUndefined()
     expect(view.actions).toHaveLength(1)
-    await act(async () => view.button('Retry thread start')?.click())
-    await vi.waitFor(() => expect(view.actions).toHaveLength(2))
-    expect(view.actions[1]).toEqual(view.actions[0])
-    expect(startParameters(view.actions[1])?.agent_id).toBe(original)
+    expect(startParameters(view.actions[0])?.agent_id).toBe(original)
+    expect(view.host.textContent).toContain('Recover the original intent.')
   } finally { await view.dispose() }
 })
 
