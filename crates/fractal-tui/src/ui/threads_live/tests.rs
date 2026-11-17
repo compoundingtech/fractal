@@ -4478,6 +4478,76 @@ fn auto_resolved_sources_start_through_their_typed_key_and_canonical_recipient()
 }
 
 #[test]
+fn post_start_recipient_retired_keeps_the_draft_without_resending_or_refreshing() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/resolved";
+    let pane = Pane::Home(Some(item.into()));
+    let host = pane.key();
+    threads.saved_origins.insert(
+        item.into(),
+        origin(resolved_source(), Some("agent/atlas"), "Original request"),
+    );
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/chief-of-staff",
+        retired("agent/atlas"),
+    );
+    let input = threads.start_input(item).unwrap();
+    let mut texts = HashMap::new();
+    threads
+        .start_with_text(&host, item, "Please keep this draft", &mut texts)
+        .unwrap();
+    let write = threads
+        .writes()
+        .pop()
+        .expect("the explicit Send posts Start");
+    assert!(matches!(&write.mutation, Mutation::Start(_)));
+    assert!(threads.writes().is_empty());
+    assert!(threads.take_start_context_reads().is_empty());
+    let notice = threads
+        .complete(
+            Receipt {
+                write,
+                confirmation: Confirmation::Failed(refused(
+                    fractal_client::ErrorCode::RecipientRetired,
+                    "recipient-retired",
+                    "The selected recipient is permanently retired.",
+                )),
+            },
+            &mut texts,
+        )
+        .unwrap();
+    assert!(notice.contains("recipient is retired"), "{notice}");
+    assert!(notice.contains("draft is kept"), "{notice}");
+    assert!(threads.start_context(item).is_none());
+    assert!(
+        threads
+            .drafts
+            .get(&input.key())
+            .and_then(|draft| draft.delivery.as_ref())
+            .is_none(),
+        "a definitively refused POST is not retained as an unknown delivery"
+    );
+    for _ in 0..3 {
+        threads.submit(&host, input.clone(), &texts);
+        assert!(
+            threads.writes().is_empty(),
+            "no automatic or stale-recipient POST"
+        );
+        assert!(
+            threads.take_start_context_reads().is_empty(),
+            "no automatic preview re-read"
+        );
+    }
+    let visible = wide_rendering(&threads, &pane, &texts);
+    assert!(visible.contains(&notice), "{visible}");
+    assert!(!visible.contains("Checking recipient"), "{visible}");
+    assert!(!visible.contains("New discussion to "), "{visible}");
+    assert_eq!(texts[&input.key()], "Please keep this draft");
+}
+
+#[test]
 fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_send() {
     for (stale, stale_basis, fresh, fresh_basis) in [
         (
@@ -4508,6 +4578,7 @@ fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_
             .start_with_text(&host, item, "Please follow up", &mut texts)
             .unwrap();
         let refused_write = threads.writes().pop().unwrap();
+        assert!(matches!(&refused_write.mutation, Mutation::Start(_)));
         assert_eq!(refused_write.agent, stale);
         let notice = threads
             .complete(
