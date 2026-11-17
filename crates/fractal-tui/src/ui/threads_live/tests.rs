@@ -29,6 +29,85 @@ fn snapshot() -> Snapshot {
     .unwrap()
 }
 
+/// An exact Inbox source association. `agent` is the historical source agent, never the
+/// first-Start recipient: that comes only from the canonical start context.
+fn origin(context: ThreadInterest, agent: Option<&str>, title: &str) -> Origin {
+    Origin { context, agent: agent.map(Into::into), title: title.into() }
+}
+
+fn preview_snapshot(id: &str) -> Snapshot {
+    Snapshot { id: id.into(), ..snapshot() }
+}
+
+fn retired(original: &str) -> fractal_client::ThreadStartRecipientBasis {
+    fractal_client::ThreadStartRecipientBasis::Fallback {
+        original_agent_id: original.into(),
+        retirement: fractal_client::ThreadStartRetirement {
+            claim_id: format!("claim/retired/{original}"),
+            kind: fractal_client::ThreadStartRetirementKind::AgentRetired,
+            state: fractal_client::ThreadStartRetirementState::Retired,
+        },
+    }
+}
+
+/// The generated canonical DTO exactly as `thread_start_context` returns it.
+fn start_context_envelope(
+    source: &str,
+    episode: &str,
+    recipient: &str,
+    basis: fractal_client::ThreadStartRecipientBasis,
+    at: &str,
+) -> Envelope<fractal_client::ThreadStartContext> {
+    Envelope {
+        value: fractal_client::ThreadStartContext {
+            kind: fractal_client::ThreadStartContextKind::ThreadStartContext,
+            source_id: source.into(),
+            episode: episode.into(),
+            start_recipient: fractal_client::ThreadStartRecipient {
+                agent_id: recipient.into(),
+                basis,
+            },
+        },
+        snapshot: preview_snapshot(at),
+        request_id: "request/start-context".into(),
+        api_version: fractal_client::API_VERSION.into(),
+    }
+}
+
+/// The one canonical read the model queued for `item` (other items' reads are dropped).
+fn take_start_context_read(threads: &mut Threads, item: &str) -> StartContextRead {
+    let mut reads = threads.take_start_context_reads();
+    let at = reads
+        .iter()
+        .position(|read| read.item == item)
+        .unwrap_or_else(|| panic!("a canonical start-context read for {item}"));
+    reads.swap_remove(at)
+}
+
+/// Ask for and answer the canonical preview of `item`'s exact current or saved source.
+fn install_start_context(
+    threads: &mut Threads,
+    item: &str,
+    recipient: &str,
+    basis: fractal_client::ThreadStartRecipientBasis,
+) {
+    threads.request_start_context(item);
+    let read = take_start_context_read(threads, item);
+    let ThreadInterest::Inbox { source, episode } = threads.start_origin(item).unwrap().context.clone()
+    else {
+        panic!("an Inbox origin")
+    };
+    threads.start_context_loaded(
+        &read.item,
+        &read.key,
+        Ok(start_context_envelope(&source, &episode, recipient, basis, "snapshot/start-context")),
+    );
+    assert_eq!(
+        threads.start_context(item).map(|context| context.value.start_recipient.agent_id.as_str()),
+        Some(recipient)
+    );
+}
+
 #[test]
 fn live_head_keeps_the_rows_between_it_and_a_loaded_older_page() {
     fn event(id: &str) -> ThreadTimelineEvent {
@@ -91,12 +170,7 @@ fn native_mounts_share_the_same_timeline_and_a_direct_reply() {
     enable_editing(&mut threads);
     threads.origins.insert(
         "attention/ask".into(),
-        Origin {
-            context: ask.clone(),
-            agent: "agent/atlas".into(),
-            title: "Worker test".into(),
-            snapshot: snapshot().id,
-        },
+        origin(ask.clone(), Some("agent/atlas"), "Worker test"),
     );
     for interest in [
         ask,
@@ -335,11 +409,15 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     }
     let inbox = Pane::Home(Some(ask.subject.clone()));
     let context = ThreadInterest::Inbox { source: ask.subject.clone(), episode: ask_item.episode.clone() };
-    let origin_snapshot = client.thread_get(id).await.unwrap().snapshot.id;
-    ui.threads.origins.insert(ask.subject.clone(), Origin {
-        context: context.clone(), agent: agent.into(), title: ask_item.title.clone(),
-        snapshot: origin_snapshot,
-    });
+    ui.threads.origins.insert(ask.subject.clone(), origin(context.clone(), Some(agent), &ask_item.title));
+    // The recipient comes from the real daemon's canonical start-context read, never the card.
+    ui.threads.request_start_context(&ask.subject);
+    let read = take_start_context_read(&mut ui.threads, &ask.subject);
+    let preview = read.read(&client).await.expect("real canonical start context");
+    assert_eq!(preview.value.start_recipient.agent_id, agent);
+    assert_eq!(preview.value.start_recipient.basis, fractal_client::ThreadStartRecipientBasis::Original);
+    let preview_fence = preview.snapshot.id.clone();
+    ui.threads.start_context_loaded(&read.item, &read.key, Ok(preview));
     ui.threads.lists.insert(context, Vec::new());
     ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
     capture(&mut ui, &inbox, "harness-socket-start-before");
@@ -350,6 +428,9 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(ask.subject.clone())));
     ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let start = ui.threads.writes().pop().expect("native first-message start action");
+    let Mutation::Start(parameters) = &start.mutation else { panic!("native Start") };
+    assert_eq!(parameters.agent_id, agent, "the submitted recipient is the displayed canonical one");
+    assert_eq!(start.fence.snapshot_id, preview_fence, "the Start fence is the canonical preview snapshot");
     let started_id = start.id.clone();
     let receipt = start.perform(client.clone()).await;
     assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real first message committed");
@@ -561,12 +642,13 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     let older = summary();
     threads.origins.insert(
         "attention/ask".into(),
-        Origin {
-            context: context.clone(),
-            agent: older.agent_id.clone(),
-            title: older.title.clone(),
-            snapshot: snapshot().id,
-        },
+        origin(context.clone(), Some(older.agent_id.as_str()), &older.title),
+    );
+    install_start_context(
+        &mut threads,
+        "attention/ask",
+        "agent/atlas",
+        fractal_client::ThreadStartRecipientBasis::Original,
     );
     threads.window(
         context.clone(),
@@ -592,11 +674,16 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
             .collect::<Vec<_>>()
     };
     let draft = lines(&threads, &texts);
-    assert!(!draft.join("\n").contains("agent/"), "{draft:?}");
     let slot = draft
         .iter()
-        .position(|line| line == "▾ Worker test · Draft · to Atlas")
+        .position(|line| line.trim_end() == "▾ Worker test · New discussion · Draft")
         .unwrap();
+    assert_eq!(
+        draft[slot + 1].trim_end(),
+        "New discussion to agent/atlas",
+        "the exact canonical recipient is visible before the first send"
+    );
+    assert_eq!(draft[slot + 2].trim_end(), "Original source recipient");
     assert!(
         draft[slot + 1..]
             .iter()
@@ -610,16 +697,28 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     ));
     let write = threads.writes().pop().unwrap();
     assert_ne!(write.id, older.id);
+    let Mutation::Start(parameters) = &write.mutation else { panic!("first-message Start") };
+    assert_eq!(parameters.agent_id, "agent/atlas");
+    assert_eq!(write.fence.snapshot_id, "snapshot/start-context");
     let queued = lines(&threads, &texts);
     let action_row = draft
         .iter()
         .position(|line| line.contains("Send first message"))
         .unwrap();
+    let panel_end = draft
+        .iter()
+        .position(|line| line.contains("Refresh recipient"))
+        .unwrap();
     let mut pending_layout = draft.clone();
     pending_layout[action_row] = "Send first message…".into();
+    // While sending, the recipient preview is frozen to the exact packet recipient.
+    pending_layout.splice(
+        slot + 1..=panel_end,
+        ["Original delivery to agent/atlas is pending or unconfirmed. Retrying keeps this exact recipient.".to_owned()],
+    );
     assert_eq!(
         queued, pending_layout,
-        "only the existing action row changes while sending; draft identity, composer and sibling positions stay fixed"
+        "only the action row and the frozen recipient line change while sending; draft identity, composer and sibling order stay fixed"
     );
     let pending_doc = threads.mount(&inbox, 100, &cursor, &world, &texts);
     assert!(
@@ -1494,15 +1593,7 @@ fn starting_adopts_compatible_legacy_drafts_and_reports_conflicts_without_losing
         (Some("Canonical draft"), "", "Canonical draft"),
     ] {
         let mut threads = observed_threads(ThreadState::Open);
-        threads.origins.insert(
-            item.into(),
-            Origin {
-                context: context.clone(),
-                agent: "agent/atlas".into(),
-                title: "Review".into(),
-                snapshot: snapshot().id,
-            },
-        );
+        threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Review"));
         let mut texts = HashMap::from([(format!("chat:{item}"), legacy.into())]);
         if let Some(canonical) = canonical {
             texts.insert(input.key(), canonical.into());
@@ -1516,14 +1607,12 @@ fn starting_adopts_compatible_legacy_drafts_and_reports_conflicts_without_losing
         );
     }
     let mut threads = observed_threads(ThreadState::Open);
-    threads.origins.insert(
-        item.into(),
-        Origin {
-            context: context.clone(),
-            agent: "agent/atlas".into(),
-            title: "Review".into(),
-            snapshot: snapshot().id,
-        },
+    threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Review"));
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/atlas",
+        fractal_client::ThreadStartRecipientBasis::Original,
     );
     threads.lists.insert(context.clone(), Vec::new());
     let mut texts = HashMap::from([
@@ -1602,14 +1691,12 @@ fn locked_start_requests_never_offer_or_apply_saved_draft_combination() {
     };
     for unknown in [false, true] {
         let mut threads = observed_threads(ThreadState::Open);
-        threads.origins.insert(
-            item.into(),
-            Origin {
-                context: context.clone(),
-                agent: "agent/atlas".into(),
-                title: "Review".into(),
-                snapshot: snapshot().id,
-            },
+        threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Review"));
+        install_start_context(
+            &mut threads,
+            item,
+            "agent/atlas",
+            fractal_client::ThreadStartRecipientBasis::Original,
         );
         threads.lists.insert(context.clone(), Vec::new());
         let mut texts = HashMap::new();
@@ -1688,15 +1775,20 @@ fn feedback_preflights_both_saved_drafts_and_only_adopts_after_a_request_is_reta
         let mut threads = observed_threads(ThreadState::Open);
         threads.origins.insert(
             item.into(),
-            Origin {
-                context: ThreadInterest::Inbox {
+            origin(
+                ThreadInterest::Inbox {
                     source: "agent/example".into(),
                     episode: "claim/feedback".into(),
                 },
-                agent: "agent/atlas".into(),
-                title: "Review".into(),
-                snapshot: snapshot().id,
-            },
+                Some("agent/atlas"),
+                "Review",
+            ),
+        );
+        install_start_context(
+            &mut threads,
+            item,
+            "agent/atlas",
+            fractal_client::ThreadStartRecipientBasis::Original,
         );
         let mut texts = HashMap::from([
             (input.key(), canonical.into()),
@@ -1754,17 +1846,23 @@ fn feedback_adopts_only_an_empty_or_identical_original_thread_draft() {
         item: item.into(),
         episode: "claim/feedback".into(),
     };
+    // A step-run feedback source has no historical source agent; its recipient is canonical.
     threads.origins.insert(
         item.into(),
-        Origin {
-            context: ThreadInterest::Inbox {
+        origin(
+            ThreadInterest::Inbox {
                 source: "step-run/feedback".into(),
                 episode: "claim/feedback".into(),
             },
-            agent: "agent/atlas".into(),
-            title: "Review".into(),
-            snapshot: snapshot().id,
-        },
+            None,
+            "Review",
+        ),
+    );
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/atlas",
+        fractal_client::ThreadStartRecipientBasis::Configured,
     );
     let mut texts = HashMap::from([(format!("chat:{item}"), "Old private draft".into())]);
     assert!(
@@ -1793,6 +1891,7 @@ fn feedback_adopts_only_an_empty_or_identical_original_thread_draft() {
         panic!("durable thread start")
     };
     assert_eq!(start.content, "Revision feedback");
+    assert_eq!(start.agent_id, "agent/atlas");
     assert!(threads.drafts[&input.key()].delivery.is_some());
 }
 
@@ -1826,18 +1925,13 @@ fn embedded_thread_disclosures_are_independent_in_agent_mission_and_inbox_hosts(
         let mut threads = observed_threads(ThreadState::Open);
         let first = "thread/worker";
         let second = "thread/sibling";
-        let origin = ThreadInterest::Inbox {
+        let source = ThreadInterest::Inbox {
             source: "agent/example".into(),
             episode: "claim/notice".into(),
         };
         threads.origins.insert(
             "attention/notice".into(),
-            Origin {
-                context: origin,
-                agent: "agent/atlas".into(),
-                title: "Notice".into(),
-                snapshot: snapshot().id,
-            },
+            origin(source, Some("agent/atlas"), "Notice"),
         );
         let context = threads.context(&pane).unwrap();
         threads.window(
@@ -2490,14 +2584,12 @@ fn accepting_a_new_inbox_thread_keeps_the_existing_expanded_thread_and_its_draft
         source: "agent/example".into(),
         episode: "claim/notice".into(),
     };
-    threads.origins.insert(
-        item.into(),
-        Origin {
-            context: context.clone(),
-            agent: "agent/atlas".into(),
-            title: "Notice".into(),
-            snapshot: snapshot().id,
-        },
+    threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Notice"));
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/atlas",
+        fractal_client::ThreadStartRecipientBasis::Original,
     );
     threads.lists.insert(context, vec![first.into()]);
     let mut texts = HashMap::new();
@@ -2582,15 +2674,14 @@ fn inbox_summary_timeline_and_lists_all_remain_requested() {
     let pane = Pane::Home(Some(item.into()));
     threads.origins.insert(
         item.into(),
-        Origin {
-            context: ThreadInterest::Inbox {
+        origin(
+            ThreadInterest::Inbox {
                 source: "agent/example".into(),
                 episode: "claim/fault".into(),
             },
-            agent: "agent/atlas".into(),
-            title: "Fault".into(),
-            snapshot: snapshot().id,
-        },
+            Some("agent/atlas"),
+            "Fault",
+        ),
     );
     threads
         .open
@@ -2617,16 +2708,25 @@ fn feedback_refusals_leave_both_drafts_unchanged_and_success_is_retained() {
         let mut threads = observed_threads(ThreadState::Open);
         threads.origins.insert(
             item.into(),
-            Origin {
-                context: ThreadInterest::Inbox {
+            origin(
+                ThreadInterest::Inbox {
                     source: "agent/example".into(),
                     episode: "claim/feedback".into(),
                 },
-                agent: "agent/atlas".into(),
-                title: "Review".into(),
-                snapshot: snapshot().id,
-            },
+                Some("agent/atlas"),
+                "Review",
+            ),
         );
+        // "missing-recipient": the exact source is known but its canonical recipient preview
+        // has not loaded, so nothing may be prepared or sent.
+        if scenario != "missing-recipient" {
+            install_start_context(
+                &mut threads,
+                item,
+                "agent/atlas",
+                fractal_client::ThreadStartRecipientBasis::Original,
+            );
+        }
         let input = Input::Start {
             item: item.into(),
             episode: "claim/feedback".into(),
@@ -2639,9 +2739,7 @@ fn feedback_refusals_leave_both_drafts_unchanged_and_success_is_retained() {
         let mut texts = HashMap::from([("revision:original".into(), text.clone())]);
         match scenario {
             "unavailable" => threads.enable(false),
-            "missing-recipient" => {
-                threads.origins.clear();
-            }
+            "missing-recipient" => {}
             "different-draft" => {
                 texts.insert(input.key(), "Existing thread draft".into());
             }
@@ -2682,15 +2780,20 @@ fn feedback_refusals_leave_both_drafts_unchanged_and_success_is_retained() {
     let mut threads = observed_threads(ThreadState::Open);
     threads.origins.insert(
         item.into(),
-        Origin {
-            context: ThreadInterest::Inbox {
+        origin(
+            ThreadInterest::Inbox {
                 source: "agent/example".into(),
                 episode: "claim/feedback".into(),
             },
-            agent: "agent/atlas".into(),
-            title: "Review".into(),
-            snapshot: snapshot().id,
-        },
+            Some("agent/atlas"),
+            "Review",
+        ),
+    );
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/atlas",
+        fractal_client::ThreadStartRecipientBasis::Original,
     );
     let mut texts = HashMap::new();
     threads
@@ -2710,6 +2813,7 @@ fn feedback_refusals_leave_both_drafts_unchanged_and_success_is_retained() {
         panic!("thread.start")
     };
     assert_eq!(parameters.origin.source_id, "agent/example");
+    assert_eq!(parameters.agent_id, "agent/atlas");
     assert_eq!(parameters.content, "Feedback");
 }
 
@@ -2719,15 +2823,20 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
     let item = "attention/notice";
     threads.origins.insert(
         item.into(),
-        Origin {
-            context: ThreadInterest::Inbox {
+        origin(
+            ThreadInterest::Inbox {
                 source: "agent/example".into(),
                 episode: "claim/source".into(),
             },
-            agent: "agent/atlas".into(),
-            title: "Fault context".into(),
-            snapshot: snapshot().id,
-        },
+            Some("agent/atlas"),
+            "Fault context",
+        ),
+    );
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/atlas",
+        fractal_client::ThreadStartRecipientBasis::Original,
     );
     let mut texts = HashMap::new();
     threads
@@ -2746,18 +2855,16 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
     threads.lists.insert(replacement.clone(), Vec::new());
     threads.origins.insert(
         item.into(),
-        Origin {
-            context: replacement,
-            agent: "agent/replacement".into(),
-            title: "Replacement title".into(),
-            snapshot: snapshot().id,
-        },
+        origin(replacement, Some("agent/replacement"), "Replacement title"),
     );
     let home = Pane::Home(Some(item.into()));
     assert_eq!(threads.context(&home), Some(captured.clone()));
     assert!(
         matches!(threads.start_input(item), Some(Input::Start { episode, .. }) if episode == "claim/source")
     );
+    // A pending packet is immutable: no new preview is read for it, whatever the card says now.
+    threads.request_start_context(item);
+    assert!(threads.take_start_context_reads().is_empty());
     let assert_captured = |threads: &Threads, pane: &Pane, texts: &HashMap<String, String>| {
         let doc = threads.mount(
             pane,
@@ -2773,11 +2880,15 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            rendered.contains("Fault context · Draft · to an agent"),
+            rendered.contains("Fault context · New discussion · Draft"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Original delivery to agent/atlas is pending or unconfirmed"),
             "{rendered}"
         );
         assert!(!rendered.contains("Replacement title"), "{rendered}");
-        assert!(!rendered.contains("agent/"), "{rendered}");
+        assert!(!rendered.contains("agent/replacement"), "{rendered}");
     };
     assert_captured(&threads, &home, &texts);
     threads.complete(
@@ -2806,7 +2917,7 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
     assert!(
         doc.lines
             .iter()
-            .any(|line| line.to_string().contains("Fault context · Draft"))
+            .any(|line| line.to_string().contains("Fault context · New discussion · Draft"))
     );
     assert!(doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(key)) if key == &original.key)));
     threads.tap(
@@ -3065,10 +3176,13 @@ fn thread_preview_evidence() {
     let item = "attention/preview";
     let inbox = Pane::Home(Some(item.into()));
     let context = ThreadInterest::Inbox { source: "agent/atlas".into(), episode: "claim/preview".into() };
-    ui.threads.origins.insert(item.into(), Origin {
-        context: context.clone(), agent: "agent/atlas".into(),
-        title: "Calibration review".into(), snapshot: snapshot().id,
-    });
+    ui.threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Calibration review"));
+    install_start_context(
+        &mut ui.threads,
+        item,
+        "agent/atlas",
+        fractal_client::ThreadStartRecipientBasis::Original,
+    );
     ui.threads.lists.insert(context.clone(), Vec::new());
     ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
     capture(&mut ui, &inbox, &dir, "harness-start-before");
@@ -3090,6 +3204,7 @@ fn thread_preview_evidence() {
     ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let start = ui.threads.writes().pop().expect("first-message start dispatch");
     let Mutation::Start(parameters) = start.mutation else { panic!("start mutation") };
+    assert_eq!(parameters.agent_id, "agent/atlas");
     assert!(parameters.content.contains("Different recovered draft"));
     assert!(parameters.content.contains("First message stays inline"));
     capture(&mut ui, &inbox, &dir, "harness-start-pending");
@@ -3473,20 +3588,138 @@ fn request_history_revocation_and_departure_discard_pages_and_late_results() {
     assert!(!threads.request_history.contains_key(id));
 }
 
-fn resolved_card(kind: &str, person: &str) -> Envelope<fractal_client::Resource> {
-    let item: fractal_client::Attention = serde_json::from_value(serde_json::json!({
-        "id":"attention/resolved", "kind":"attention", "revision":"claim/resolved",
-        "updated_at":"2026-11-17T00:00:00Z",
-        "attention_kind":kind, "source_kind":kind, "source_id":"step-run/resolved",
-        "person_id":person, "conversation_id":"agent/atlas", "episode":"original:1:1",
-        "title":"Original request", "detail":"Original text", "priority":"normal",
-        "state":"resolved", "requested_at":"2026-11-17T00:00:00Z",
-        "requester_id":null, "launch_id":null, "variant_id":null, "message_id":null,
-        "preview_token":null, "preview":null, "what":null, "because":null, "fix":null,
-        "review_mode":null, "mission_id":null, "mission_run_id":null, "step_run_id":null
-    })).unwrap();
-    Envelope { value: fractal_client::Resource::Attention(item), snapshot: snapshot(),
-        request_id:"request/resolved".into(), api_version:fractal_client::API_VERSION.into() }
+fn wide_rendering(threads: &Threads, pane: &Pane, texts: &HashMap<String, String>) -> String {
+    threads
+        .mount(pane, 240, &edit::Cursor::default(), &super::super::demo::test_world(), texts)
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn refused(code: fractal_client::ErrorCode, wire: &str, message: &str) -> ClientError {
+    let envelope = serde_json::from_value(serde_json::json!({
+        "api_version":fractal_client::API_VERSION,"error_version":"st3.client.error.v0",
+        "request_id":"request/refused","code":wire,"message":message,
+        "retryable":false,"details":{}
+    }))
+    .unwrap();
+    ClientError::Api(code, message.into(), Box::new(envelope))
+}
+
+fn resolved_source() -> ThreadInterest {
+    ThreadInterest::Inbox { source: "step-run/resolved".into(), episode: "original:1:1".into() }
+}
+
+const FALLBACK_LINE: &str = "Fallback recipient · original source agent agent/atlas is retired. Existing discussions and participants are unchanged.";
+
+#[test]
+fn canonical_previews_show_and_submit_the_exact_recipient_for_every_basis() {
+    struct Case {
+        label: &'static str,
+        item: &'static str,
+        source: &'static str,
+        episode: &'static str,
+        historical_agent: Option<&'static str>,
+        current: bool,
+        recipient: &'static str,
+        basis: fractal_client::ThreadStartRecipientBasis,
+        basis_line: &'static str,
+    }
+    for case in [
+        Case {
+            label: "original recipient of a current ask",
+            item: "attention/ask", source: "step-run/ask", episode: "claim/ask",
+            historical_agent: Some("agent/atlas"), current: true, recipient: "agent/atlas",
+            basis: fractal_client::ThreadStartRecipientBasis::Original,
+            basis_line: "Original source recipient",
+        },
+        Case {
+            label: "configured recipient of a saved system notice",
+            item: "attention/system", source: "system/fleet-health", episode: "claim/system",
+            historical_agent: None, current: false, recipient: "agent/chief-of-staff",
+            basis: fractal_client::ThreadStartRecipientBasis::Configured,
+            basis_line: "Configured source recipient",
+        },
+        Case {
+            label: "fallback for a saved typed notice with no listed agent",
+            item: "attention/notice", source: "notice/retired-source", episode: "claim/notice",
+            historical_agent: None, current: false, recipient: "agent/chief-of-staff",
+            basis: retired("agent/atlas"), basis_line: FALLBACK_LINE,
+        },
+        Case {
+            label: "fallback for a resolved ask whose source agent retired",
+            item: "attention/resolved", source: "step-run/resolved", episode: "original:1:1",
+            historical_agent: Some("agent/atlas"), current: false, recipient: "agent/chief-of-staff",
+            basis: retired("agent/atlas"), basis_line: FALLBACK_LINE,
+        },
+    ] {
+        let Case { label, item, source, episode, historical_agent, current, recipient, basis, basis_line } = case;
+        let mut threads = observed_threads(ThreadState::Open);
+        let source_origin = origin(
+            ThreadInterest::Inbox { source: source.into(), episode: episode.into() },
+            historical_agent,
+            "Original request",
+        );
+        if current {
+            threads.origins.insert(item.into(), source_origin);
+        } else {
+            threads.saved_origins.insert(item.into(), source_origin);
+        }
+        let pane = Pane::Home(Some(item.into()));
+        let host = pane.key();
+        let mut texts = HashMap::new();
+        assert!(threads.can_start(item), "{label}");
+        assert!(threads.begin(&host, item, &mut texts), "{label}: the draft opens while the preview loads");
+        let input = threads.start_input(item).unwrap();
+        let read = take_start_context_read(&mut threads, item);
+        let loading = wide_rendering(&threads, &pane, &texts);
+        assert!(loading.contains("Checking recipient before first send…"), "{label}: {loading}");
+        assert!(!loading.contains("New discussion to "), "{label}: {loading}");
+        texts.insert(input.key(), "First discussion".into());
+        threads.submit(&host, input.clone(), &texts);
+        assert!(threads.writes().is_empty(), "{label}: nothing is sent before the canonical preview");
+
+        threads.start_context_loaded(
+            &read.item,
+            &read.key,
+            Ok(start_context_envelope(source, episode, recipient, basis.clone(), "snapshot/preview")),
+        );
+        assert!(threads.writes().is_empty(), "{label}: a loaded preview never sends by itself");
+        let shown = wide_rendering(&threads, &pane, &texts);
+        assert!(shown.contains(&format!("New discussion to {recipient}")), "{label}: {shown}");
+        assert!(shown.contains(basis_line), "{label}: {shown}");
+
+        let first = threads.prepare_write(&host, &input, "First discussion", &Draft::default()).unwrap();
+        let second = threads.prepare_write(&host, &input, "Second discussion", &Draft::default()).unwrap();
+        let (Mutation::Start(a), Mutation::Start(b)) = (&first.mutation, &second.mutation) else {
+            panic!("{label}: independent Starts")
+        };
+        assert_ne!(a.target_id, b.target_id, "{label}: every new Start has its own target");
+        assert_ne!(first.key, second.key, "{label}: every new Start has its own idempotency key");
+        for (write, start) in [(&first, a), (&second, b)] {
+            assert_eq!(start.agent_id, recipient, "{label}: the submitted recipient is the displayed one");
+            assert_eq!(write.agent, recipient, "{label}");
+            assert_eq!(write.fence.snapshot_id, "snapshot/preview", "{label}: fenced by the canonical preview");
+            assert_eq!(start.origin.source_id, source, "{label}");
+            assert_eq!(start.origin.episode, episode, "{label}");
+        }
+        assert_eq!(
+            threads.start_origin(item).unwrap().agent.as_deref(),
+            historical_agent,
+            "{label}: the historical source agent stays separate from the recipient"
+        );
+        if let fractal_client::ThreadStartRecipientBasis::Fallback { original_agent_id, .. } = &basis {
+            assert_ne!(&a.agent_id, original_agent_id, "{label}: a fallback never sends to the retired agent");
+        }
+        threads.submit(&host, input, &texts);
+        let sent = threads.writes().pop().expect("the person's Send dispatches once");
+        let Mutation::Start(sent) = sent.mutation else { panic!("{label}: Start") };
+        assert_eq!(sent.agent_id, recipient, "{label}");
+        assert_eq!(sent.content, "First discussion", "{label}");
+        assert_eq!(threads.summary("thread/worker").unwrap(), &summary(), "{label}: existing discussion untouched");
+    }
 }
 
 #[test]
@@ -3494,26 +3727,409 @@ fn resolved_asks_authored_steps_and_notices_start_independent_discussions() {
     for kind in ["person-step", "authored-step", "notice"] {
         let mut threads = observed_threads(ThreadState::Open);
         let id = "attention/resolved";
-        threads.resolved_origin(id, "person/avery", "snapshot/now", resolved_card(kind, "person/avery"));
-        assert!(threads.can_start(id));
-        let input = threads.start_input(id).unwrap();
-        let first = threads.prepare_write("home:attention/resolved", &input, "First discussion", &Draft::default()).unwrap();
-        let second = threads.prepare_write("home:attention/resolved", &input, "Second discussion", &Draft::default()).unwrap();
-        let (Mutation::Start(a), Mutation::Start(b)) = (&first.mutation, &second.mutation) else { panic!("independent Starts") };
-        assert_ne!(a.target_id, b.target_id);
-        assert_ne!(first.key, second.key);
-        assert_eq!(a.origin, b.origin);
-        assert_eq!(a.agent_id, "agent/atlas", "an offline origin is not redirected by the TUI");
-        assert_eq!(b.agent_id, "agent/atlas");
-        assert_eq!(threads.summary("thread/worker").unwrap(), &summary(), "existing discussion is untouched");
+        let host = format!("home:{id}");
+        threads.saved_origins.insert(id.into(), origin(resolved_source(), Some("agent/atlas"), kind));
+        install_start_context(&mut threads, id, "agent/atlas", fractal_client::ThreadStartRecipientBasis::Original);
+        let mut texts = HashMap::new();
+        threads.start_with_text(&host, id, "First discussion", &mut texts).unwrap();
+        let first = threads.writes().pop().unwrap();
+        let Mutation::Start(a) = &first.mutation else { panic!("{kind}: Start") };
+        threads.complete(
+            Receipt {
+                write: first.clone(),
+                confirmation: Confirmation::Applied(Some(Envelope {
+                    value: ThreadSummary { id: a.target_id.clone(), ..summary() },
+                    snapshot: snapshot(),
+                    request_id: "request/first".into(),
+                    api_version: fractal_client::API_VERSION.into(),
+                })),
+            },
+            &mut texts,
+        );
+        if threads.start_context(id).is_none() {
+            install_start_context(&mut threads, id, "agent/atlas", fractal_client::ThreadStartRecipientBasis::Original);
+        }
+        threads.start_with_text(&host, id, "Second discussion", &mut texts).unwrap();
+        let second = threads.writes().pop().unwrap();
+        let Mutation::Start(b) = &second.mutation else { panic!("{kind}: Start") };
+        assert_ne!(a.target_id, b.target_id, "{kind}");
+        assert_ne!(first.key, second.key, "{kind}");
+        assert_eq!(a.origin, b.origin, "{kind}");
+        assert_eq!(a.agent_id, "agent/atlas", "{kind}: an offline original is not retired or redirected");
+        assert_eq!(b.agent_id, "agent/atlas", "{kind}");
+        assert_eq!(threads.summary("thread/worker").unwrap(), &summary(), "{kind}: existing discussion is untouched");
     }
 }
 
 #[test]
-fn retained_resolved_cards_never_supply_another_persons_start_authority() {
+fn auto_resolved_sources_start_through_their_typed_key_and_canonical_recipient() {
     let mut threads = observed_threads(ThreadState::Open);
-    threads.resolved_origin("attention/resolved", "person/avery", "snapshot/now", resolved_card("notice", "person/other"));
-    assert!(!threads.can_start("attention/resolved"));
-    threads.resolved_origin("attention/wrong", "person/avery", "snapshot/now", resolved_card("notice", "person/avery"));
-    assert!(!threads.can_start("attention/wrong"));
+    threads.auto_resolved_sources(&fractal_client::AutoResolvedAsks {
+        items: vec![fractal_client::AutoResolvedAsk {
+            resolution_id: "resolution/1".into(),
+            title: "Auto-resolved review".into(),
+            requester_id: "agent/atlas".into(),
+            resolved_at: "2026-11-17T00:00:00Z".into(),
+            target_id: "step-run/auto".into(),
+            episode: "claim/auto".into(),
+            default_answer: None,
+            request: None,
+            action_parameters: None,
+        }],
+        complete: true,
+    });
+    let item = "auto-resolved/resolution/1";
+    assert_eq!(threads.start_origin(item).unwrap().agent, None, "a requester is not a recipient");
+    install_start_context(&mut threads, item, "agent/chief-of-staff", retired("agent/atlas"));
+    let mut texts = HashMap::new();
+    threads.start_with_text(&format!("home:{item}"), item, "Why was this auto-resolved?", &mut texts).unwrap();
+    let Mutation::Start(start) = threads.writes().pop().unwrap().mutation else { panic!("Start") };
+    assert_eq!(start.agent_id, "agent/chief-of-staff");
+    assert_eq!(start.origin.source_id, "step-run/auto");
+    assert_eq!(start.origin.episode, "claim/auto");
+}
+
+#[test]
+fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_send() {
+    for (stale, stale_basis, fresh, fresh_basis) in [
+        ("agent/atlas", fractal_client::ThreadStartRecipientBasis::Original, "agent/chief-of-staff", retired("agent/atlas")),
+        ("agent/chief-of-staff", retired("agent/atlas"), "agent/deputy", retired("agent/atlas")),
+    ] {
+        let mut threads = observed_threads(ThreadState::Open);
+        let item = "attention/resolved";
+        let pane = Pane::Home(Some(item.into()));
+        let host = pane.key();
+        threads.saved_origins.insert(item.into(), origin(resolved_source(), Some("agent/atlas"), "Original request"));
+        install_start_context(&mut threads, item, stale, stale_basis);
+        let input = threads.start_input(item).unwrap();
+        let mut texts = HashMap::new();
+        threads.start_with_text(&host, item, "Please follow up", &mut texts).unwrap();
+        let refused_write = threads.writes().pop().unwrap();
+        assert_eq!(refused_write.agent, stale);
+        let notice = threads
+            .complete(
+                Receipt {
+                    write: refused_write.clone(),
+                    confirmation: Confirmation::Failed(refused(
+                        fractal_client::ErrorCode::RecipientRetired,
+                        "recipient-retired",
+                        "The selected recipient is no longer current.",
+                    )),
+                },
+                &mut texts,
+            )
+            .unwrap();
+        assert!(notice.starts_with("Start was refused:"), "{notice}");
+        assert!(notice.contains("review it before sending. Your draft is kept."), "{notice}");
+        assert!(threads.writes().is_empty(), "{stale}: a refusal never re-sends or retargets");
+        assert_eq!(texts[&input.key()], "Please follow up", "the draft is kept");
+        assert!(
+            threads.drafts.get(&input.key()).and_then(|draft| draft.delivery.as_ref()).is_none(),
+            "the refused packet is dropped"
+        );
+        assert!(threads.start_context(item).is_none(), "the stale recipient is no longer offered");
+        let refresh = take_start_context_read(&mut threads, item);
+        let refreshing = wide_rendering(&threads, &pane, &texts);
+        assert!(!refreshing.contains(&format!("New discussion to {stale}")), "{refreshing}");
+        assert!(refreshing.contains("Checking recipient before first send…"), "{refreshing}");
+        assert!(threads.start_with_text(&host, item, "Please follow up", &mut texts).is_err());
+        assert!(threads.writes().is_empty(), "no send until the refreshed recipient is shown");
+
+        threads.start_context_loaded(
+            &refresh.item,
+            &refresh.key,
+            Ok(start_context_envelope("step-run/resolved", "original:1:1", fresh, fresh_basis, "snapshot/refreshed")),
+        );
+        assert!(threads.writes().is_empty(), "the refreshed recipient is shown, never sent automatically");
+        let refreshed = wide_rendering(&threads, &pane, &texts);
+        assert!(refreshed.contains(&format!("New discussion to {fresh}")), "{refreshed}");
+        assert!(!refreshed.contains(&format!("New discussion to {stale}")), "{refreshed}");
+        assert!(refreshed.contains(FALLBACK_LINE), "{refreshed}");
+
+        threads.start_with_text(&host, item, "Please follow up", &mut texts).unwrap();
+        let fresh_write = threads.writes().pop().unwrap();
+        let (Mutation::Start(old), Mutation::Start(new)) = (&refused_write.mutation, &fresh_write.mutation) else {
+            panic!("Starts")
+        };
+        assert_eq!(new.agent_id, fresh);
+        assert_eq!(fresh_write.fence.snapshot_id, "snapshot/refreshed");
+        assert_ne!(new.target_id, old.target_id, "a fresh Start is a new target");
+        assert_ne!(fresh_write.key, refused_write.key, "a fresh Start is a new key");
+        assert_eq!(new.origin, old.origin);
+    }
+
+    // A server-side rejection also drops its packet and re-reads the recipient without sending.
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/resolved";
+    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Original request"));
+    install_start_context(&mut threads, item, "agent/chief-of-staff", retired("agent/atlas"));
+    let mut texts = HashMap::new();
+    threads.start_with_text(&format!("home:{item}"), item, "Please follow up", &mut texts).unwrap();
+    let write = threads.writes().pop().unwrap();
+    assert_eq!(
+        threads.complete(Receipt { write, confirmation: Confirmation::Rejected }, &mut texts).as_deref(),
+        Some("The original thread action was rejected")
+    );
+    take_start_context_read(&mut threads, item);
+    assert!(threads.start_context(item).is_none());
+    assert!(threads.writes().is_empty());
+}
+
+#[test]
+fn pending_or_unknown_start_retries_keep_the_exact_packet_recipient() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/notice";
+    let pane = Pane::Home(Some(item.into()));
+    let host = pane.key();
+    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Notice"));
+    install_start_context(&mut threads, item, "agent/chief-of-staff", retired("agent/atlas"));
+    let mut texts = HashMap::new();
+    threads.start_with_text(&host, item, "What happened?", &mut texts).unwrap();
+    let original = threads.writes().pop().unwrap();
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport("lost receipt".into())),
+        },
+        &mut texts,
+    );
+    threads.request_start_context(item);
+    assert!(threads.take_start_context_reads().is_empty(), "an unknown packet is never re-previewed");
+    threads.start_context_loaded(
+        item,
+        "late/unrequested",
+        Ok(start_context_envelope("step-run/resolved", "original:1:1", "agent/deputy", retired("agent/atlas"), "snapshot/late")),
+    );
+    let rendered = wide_rendering(&threads, &pane, &texts);
+    assert!(
+        rendered.contains("Original delivery to agent/chief-of-staff is pending or unconfirmed. Retrying keeps this exact recipient."),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("agent/deputy"), "{rendered}");
+    assert!(!rendered.contains("Refresh recipient"), "{rendered}");
+    threads.tap(&host, thread::Tap::Retry(original.key.clone()), &mut texts);
+    let retry = threads.writes().pop().expect("the original retry");
+    assert_eq!(retry.key, original.key);
+    assert_eq!(retry.id, original.id);
+    assert_eq!(retry.fence, original.fence);
+    assert_eq!(retry.agent, "agent/chief-of-staff");
+    let Mutation::Start(parameters) = retry.mutation else { panic!("original Start") };
+    assert_eq!(parameters.agent_id, "agent/chief-of-staff");
+    assert_eq!(parameters.content, "What happened?");
+}
+
+#[test]
+fn late_or_mismatched_start_contexts_are_rejected() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/resolved";
+    let other = "attention/other";
+    let other_pane = Pane::Home(Some(other.into()));
+    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Original request"));
+    threads.saved_origins.insert(
+        other.into(),
+        origin(ThreadInterest::Inbox { source: "step-run/other".into(), episode: "claim/other".into() }, None, "Other"),
+    );
+    let exact = |recipient: &str| {
+        start_context_envelope("step-run/resolved", "original:1:1", recipient, retired("agent/atlas"), "snapshot/preview")
+    };
+    let other_exact = start_context_envelope(
+        "step-run/other", "claim/other", "agent/chief-of-staff", fractal_client::ThreadStartRecipientBasis::Configured, "snapshot/preview",
+    );
+    threads.request_start_context(item);
+    threads.request_start_context(other);
+    threads.request_start_context(item);
+    let reads = threads.take_start_context_reads();
+    assert_eq!(reads.len(), 2, "one read per item while pending");
+    let a = reads.iter().find(|read| read.item == item).unwrap();
+    let b = reads.iter().find(|read| read.item == other).unwrap();
+    let mut texts = HashMap::new();
+    assert!(threads.begin(&other_pane.key(), other, &mut texts), "the draft opens while its read is pending");
+    assert!(threads.take_start_context_reads().is_empty(), "begin does not duplicate a pending read");
+
+    // Another member's read cannot answer this item, in either direction.
+    threads.start_context_loaded(item, &b.key, Ok(exact("agent/chief-of-staff")));
+    threads.start_context_loaded(other, &a.key, Ok(other_exact.clone()));
+    assert!(threads.start_context(item).is_none());
+    assert!(threads.start_context(other).is_none());
+
+    // A result for a different source is refused and said.
+    threads.start_context_loaded(
+        item,
+        &a.key,
+        Ok(start_context_envelope("step-run/other", "original:1:1", "agent/chief-of-staff", retired("agent/atlas"), "snapshot/preview")),
+    );
+    assert!(threads.start_context(item).is_none());
+    assert_eq!(threads.start_context_failures[item], "The Inbox source changed. Check its recipient again.");
+
+    // A result for a different episode of the same source is refused.
+    threads.request_start_context(item);
+    let wrong_episode = take_start_context_read(&mut threads, item);
+    threads.start_context_loaded(
+        item,
+        &wrong_episode.key,
+        Ok(start_context_envelope("step-run/resolved", "original:1:2", "agent/chief-of-staff", retired("agent/atlas"), "snapshot/preview")),
+    );
+    assert!(threads.start_context(item).is_none());
+
+    // A superseded read's late answer is ignored; only the current read installs.
+    threads.request_start_context(item);
+    let superseded = take_start_context_read(&mut threads, item);
+    threads.keep_inbox_sources(&[]);
+    assert!(threads.saved_origins.is_empty(), "live bounds saved sources to its current keys");
+    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Original request"));
+    threads.request_start_context(item);
+    let current = take_start_context_read(&mut threads, item);
+    threads.start_context_loaded(item, &superseded.key, Ok(exact("agent/deputy")));
+    assert!(threads.start_context(item).is_none());
+    threads.start_context_loaded(item, &current.key, Ok(exact("agent/chief-of-staff")));
+    assert_eq!(threads.start_context(item).unwrap().value.start_recipient.agent_id, "agent/chief-of-staff");
+
+    // A pruned source's late result never brings it back.
+    assert!(!threads.can_start(other));
+    threads.start_context_loaded(other, &b.key, Ok(other_exact));
+    assert!(threads.start_context(other).is_none());
+
+    // A refused read says why and offers nothing to send.
+    threads.saved_origins.insert(
+        other.into(),
+        origin(ThreadInterest::Inbox { source: "step-run/other".into(), episode: "claim/other".into() }, None, "Other"),
+    );
+    threads.request_start_context(other);
+    let failed = take_start_context_read(&mut threads, other);
+    threads.start_context_loaded(other, &failed.key, Err("You no longer have access to this source.".into()));
+    assert!(threads.start_context(other).is_none());
+    let rendered = wide_rendering(&threads, &other_pane, &texts);
+    assert!(rendered.contains("You no longer have access to this source."), "{rendered}");
+    assert!(rendered.contains("Refresh recipient"), "{rendered}");
+
+    // A preview of an older episode is not offered once the source moves on.
+    threads.saved_origins.insert(
+        item.into(),
+        origin(ThreadInterest::Inbox { source: "step-run/resolved".into(), episode: "original:2:1".into() }, None, "Original request"),
+    );
+    assert!(threads.start_context(item).is_none());
+    let input = threads.start_input(item).unwrap();
+    assert!(threads.prepare_write(&format!("home:{item}"), &input, "Hello", &Draft::default()).is_err());
+    assert!(threads.writes().is_empty(), "no context result ever sends");
+}
+
+#[test]
+fn a_saved_source_alone_never_authorizes_a_start() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/resolved";
+    threads.saved_origins.insert(item.into(), origin(resolved_source(), Some("agent/atlas"), "Original request"));
+    let input = threads.start_input(item).unwrap();
+    assert!(threads.prepare_write(&format!("home:{item}"), &input, "Hello", &Draft::default()).is_err());
+    let mut texts = HashMap::new();
+    assert!(threads.start_with_text(&format!("home:{item}"), item, "Hello", &mut texts).is_err());
+    assert!(texts.is_empty());
+    assert!(threads.writes().is_empty());
+}
+
+/// Layout evidence for the canonical first-Start recipient. Production `Ui::draw_pane` on an
+/// in-process model with fixture data, NOT the installed binary or a daemon transport. Run with
+/// THREAD_PREVIEW_CAPTURE_DIR and --ignored --nocapture.
+#[test]
+#[ignore = "writes explicitly requested recipient layout evidence"]
+fn start_recipient_layout_evidence() {
+    use ratatui::{buffer::Buffer, layout::Rect};
+    const FIXTURE: &str = "FIXTURE: retired source agent/atlas · canonical fallback agent/chief-of-staff · stale refusal refreshes to agent/deputy";
+    let dir = std::path::PathBuf::from(
+        std::env::var("THREAD_PREVIEW_CAPTURE_DIR").expect("THREAD_PREVIEW_CAPTURE_DIR"),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    fn capture(ui: &mut super::super::Ui, pane: &Pane, dir: &std::path::Path, name: &str) -> String {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut screen = Buffer::empty(area);
+        ui.draw_pane(&mut screen, area, pane);
+        let mut text = format!(
+            "HARNESS, NOT PRODUCTION BINARY PATH — production Ui::draw_pane, in-process fixture model\n{FIXTURE}\n"
+        );
+        for row in screen.content.chunks(120) {
+            text.push_str(&row.iter().map(|cell| cell.symbol()).collect::<String>());
+            text.push('\n');
+        }
+        std::fs::write(dir.join(format!("{name}.txt")), &text).unwrap();
+        text
+    }
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    ui.threads = observed_threads(ThreadState::Open);
+
+    // History: the existing discussion keeps its participant and shows the original request.
+    let tab = Pane::Thread("thread/worker".into());
+    ui.open_in_glass(tab.clone(), super::super::glass::Open::Tab);
+    let accepted_at = chrono::Utc::now().timestamp_millis() - 120_000;
+    let message: ThreadTimelineEvent = serde_json::from_value(serde_json::json!({
+        "id":"message/history", "actor_id":"agent/atlas", "accepted_at_unix_ms":accepted_at,
+        "kind":"message", "content":"I will look at the calibration drift.", "thread_quote_id":null
+    })).unwrap();
+    ui.threads.window(
+        ThreadInterest::Timeline("thread/worker".into()), snapshot(), true,
+        ThreadCollectionRows::Timeline(vec![message]), vec![], vec!["message/history".into()], false,
+    );
+    ui.threads.read_request_history("thread/worker".into(), true);
+    let read = ui.threads.take_request_history_reads().pop().unwrap();
+    ui.threads.request_history_loaded(&read.id, &read.key, Ok(fractal_client::RequestHistoryPage {
+        items: vec![fractal_client::RequestHistoryItem {
+            key: fractal_client::SourceEpisode { source_id: "step-run/resolved".into(), episode: "original:1:1".into() },
+            payload: fractal_client::HistoricalPayload::Available {
+                title: Some("Calibration review".into()),
+                text: "Please review the sensor calibration.".into(),
+                request: None,
+                references: Vec::new(),
+                provenance: fractal_client::RequestProvenance::RuntimeAsk { asking_claim_id: "claim/asking".into() },
+            },
+            state: fractal_client::EpisodeState::Available { status: "resolved".into(), answers: Vec::new() },
+            complete: true,
+        }],
+        ..request_history_page(None)
+    }));
+    let history = capture(&mut ui, &tab, &dir, "recipient-history-related-requests");
+    assert!(history.contains("Related requests") && history.contains("original:1:1"), "{history}");
+
+    // Fallback composer for the resolved item whose source agent retired.
+    let item = "attention/resolved";
+    let inbox = Pane::Home(Some(item.into()));
+    ui.threads.saved_origins.insert(item.into(), origin(resolved_source(), Some("agent/atlas"), "Calibration review"));
+    ui.threads.lists.insert(resolved_source(), Vec::new());
+    ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
+    ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(item.into())));
+    let read = take_start_context_read(&mut ui.threads, item);
+    ui.paste("Who owns the calibration follow-up now?".into());
+    let checking = capture(&mut ui, &inbox, &dir, "recipient-fallback-checking");
+    assert!(checking.contains("Checking recipient before first send…"), "{checking}");
+    ui.threads.start_context_loaded(&read.item, &read.key, Ok(start_context_envelope(
+        "step-run/resolved", "original:1:1", "agent/chief-of-staff", retired("agent/atlas"), "snapshot/preview",
+    )));
+    let composer = capture(&mut ui, &inbox, &dir, "recipient-fallback-composer");
+    assert!(composer.contains("New discussion to agent/chief-of-staff"), "{composer}");
+    assert!(composer.contains("Fallback recipient"), "{composer}");
+    assert!(ui.threads.writes().is_empty(), "showing the recipient never sends");
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let start = ui.threads.writes().pop().expect("the person's Send");
+    assert_eq!(start.agent, "agent/chief-of-staff");
+    capture(&mut ui, &inbox, &dir, "recipient-fallback-pending");
+    let notice = ui.threads.complete(
+        Receipt {
+            write: start,
+            confirmation: Confirmation::Failed(refused(
+                fractal_client::ErrorCode::RecipientRetired,
+                "recipient-retired",
+                "The selected recipient is no longer current.",
+            )),
+        },
+        &mut ui.conversation_state.drafts,
+    );
+    assert!(notice.is_some_and(|notice| notice.starts_with("Start was refused:")));
+    let read = take_start_context_read(&mut ui.threads, item);
+    let refreshing = capture(&mut ui, &inbox, &dir, "recipient-stale-refused-refreshing");
+    assert!(refreshing.contains("Checking recipient before first send…"), "{refreshing}");
+    ui.threads.start_context_loaded(&read.item, &read.key, Ok(start_context_envelope(
+        "step-run/resolved", "original:1:1", "agent/deputy", retired("agent/atlas"), "snapshot/refreshed",
+    )));
+    let refreshed = capture(&mut ui, &inbox, &dir, "recipient-stale-refreshed-before-send");
+    assert!(refreshed.contains("New discussion to agent/deputy"), "{refreshed}");
+    assert!(refreshed.contains("Who owns the calibration follow-up now?"), "{refreshed}");
+    assert!(ui.threads.writes().is_empty(), "the refreshed recipient waits for the person's Send");
+    println!("HARNESS recipient evidence: {}", dir.display());
 }

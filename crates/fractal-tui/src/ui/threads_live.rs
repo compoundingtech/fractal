@@ -119,9 +119,8 @@ fn start_draft_text<'a>(
 #[derive(Clone)]
 struct Origin {
     context: ThreadInterest,
-    agent: String,
+    agent: Option<String>,
     title: String,
-    snapshot: String,
 }
 
 #[derive(Default)]
@@ -444,6 +443,19 @@ impl Earlier {
     }
 }
 
+pub(super) struct StartContextRead {
+    pub item: String,
+    pub key: String,
+    origin: fractal_client::ThreadStartOrigin,
+}
+
+impl StartContextRead {
+    pub(super) async fn read(&self, client: &Client) -> Result<Envelope<fractal_client::ThreadStartContext>, String> {
+        client.thread_start_context(&self.origin.source_id, &self.origin.episode)
+            .await.map_err(thread_read_error)
+    }
+}
+
 /// One server-owned request-history page, never an accumulated client lifecycle fold.
 pub(super) struct RequestHistoryRead {
     pub id: String,
@@ -492,7 +504,11 @@ pub(super) struct Threads {
     access: ThreadAccess,
     origins: BTreeMap<String, Origin>,
     retained_origins: BTreeMap<String, Origin>,
-    resolved_origins: BTreeMap<String, (String, Origin)>,
+    saved_origins: BTreeMap<String, Origin>,
+    start_contexts: BTreeMap<String, Envelope<fractal_client::ThreadStartContext>>,
+    start_context_pending: BTreeMap<String, String>,
+    start_context_failures: BTreeMap<String, String>,
+    start_context_reads: Vec<StartContextRead>,
     unread_items: BTreeSet<String>,
     sessions: BTreeMap<String, String>,
     lists: BTreeMap<ThreadInterest, Vec<String>>,
@@ -552,7 +568,7 @@ impl Threads {
                 anyhow::anyhow!("Demo thread {} has no readable Inbox origin {}", row.summary.id, row.origin_attention_id)
             })?;
             anyhow::ensure!(
-                origin.agent == row.summary.agent_id,
+                origin.agent.as_deref() == Some(row.summary.agent_id.as_str()),
                 "Demo thread {} and its Inbox origin have different conversations",
                 row.summary.id
             );
@@ -598,7 +614,11 @@ impl Threads {
             self.access = ThreadAccess::default();
             self.lists.clear();
             self.origins.clear();
-            self.resolved_origins.clear();
+            self.saved_origins.clear();
+            self.start_contexts.clear();
+            self.start_context_pending.clear();
+            self.start_context_failures.clear();
+            self.start_context_reads.clear();
             self.unread_items.clear();
             self.start_slot = None;
             self.summaries.clear();
@@ -651,7 +671,7 @@ impl Threads {
     }
 
     pub(super) fn can_start(&self, id: &str) -> bool {
-        self.available && self.access.start && self.origins.contains_key(id)
+        self.available && self.access.start && self.start_origin(id).is_some()
     }
 
     pub(super) fn editing_in(&self, pane: &Pane) -> bool {
@@ -701,6 +721,9 @@ impl Threads {
         texts.insert(key.clone(), selected);
         self.drafts.entry(key).or_default();
         self.focused = Some((host.into(), input));
+        if self.start_context(item).is_none() {
+            self.request_start_context(item);
+        }
         true
     }
 
@@ -723,10 +746,8 @@ impl Threads {
                     .into(),
             );
         }
-        let origin = self
-            .origins
-            .get(item)
-            .ok_or("This Inbox item has no current thread recipient")?;
+        let origin = self.start_origin(item)
+            .ok_or("This Inbox item's exact source is unavailable")?;
         let ThreadInterest::Inbox { source, episode } = &origin.context else {
             return Err("The Inbox origin is unavailable".into());
         };
@@ -742,8 +763,7 @@ impl Threads {
             let Mutation::Start(start) = &delivery.write.mutation else {
                 return Err("The original action has a different intent".into());
             };
-            if start.agent_id != origin.agent
-                || start.origin.source_id != *source
+            if start.origin.source_id != *source
                 || start.origin.episode != *episode
                 || start.content != text
             {
@@ -752,7 +772,13 @@ impl Threads {
                 );
             }
         }
-        let write = self.prepare_write(host, &input, text, draft)?;
+        let write = match self.prepare_write(host, &input, text, draft) {
+            Ok(write) => write,
+            Err(reason) => {
+                if self.start_context(item).is_none() { self.request_start_context(item); }
+                return Err(reason);
+            }
+        };
         // Preparation has validated the current origin, recipient and immutable retry. From
         // here there are no refusal paths: caller feedback is released only after retention.
         texts.remove(&format!("chat:{item}"));
@@ -842,6 +868,7 @@ impl Threads {
         });
         retained
             .or_else(|| self.origins.get(item))
+            .or_else(|| self.saved_origins.get(item))
             .or_else(|| self.retained_origins.get(item))
     }
 
@@ -958,13 +985,13 @@ impl Threads {
                         .map(|(id, session)| (id.clone(), session.owner_id.clone())),
                 ),
         );
-        self.origins.clear();
+        self.saved_origins.extend(std::mem::take(&mut self.origins));
         self.unread_items.clear();
-        let Some(snapshot) = &model.now.snapshot else {
+        if model.now.snapshot.is_none() {
             return;
-        };
-        self.resolved_origins.retain(|_, (at, _)| *at == snapshot.id);
-        self.origins.extend(self.resolved_origins.iter().map(|(id, (_, origin))| (id.clone(), origin.clone())));
+        }
+        // Saved exact keys are only lookup inputs. Every first send still needs a
+        // successful canonical start-context read and the writer's atomic recheck.
         for item in model.now.items.iter().filter_map(|row| match row {
             fractal_client::Resource::Attention(item) if item.person_id == model.actor => Some(item),
             _ => None,
@@ -975,13 +1002,7 @@ impl Threads {
             if item.episode.is_empty() || item.source_id.is_empty() {
                 continue;
             }
-            let Some(agent) = item
-                .conversation_id
-                .as_ref()
-                .filter(|id| id.starts_with("agent/"))
-            else {
-                continue;
-            };
+            let agent = item.conversation_id.as_ref().filter(|id| id.starts_with("agent/")).cloned();
             self.origins.insert(
                 item.header.id.clone(),
                 Origin {
@@ -989,28 +1010,99 @@ impl Threads {
                         source: item.source_id.clone(),
                         episode: item.episode.clone(),
                     },
-                    agent: agent.clone(),
+                    agent,
                     title: item.title.clone(),
-                    snapshot: snapshot.id.clone(),
                 },
             );
         }
     }
 
-    /// Resolved cards leave Now: admit their origin through a fresh owner-authorized
-    /// attention read, never through the locally retained card's prose.
-    pub(super) fn resolved_origin(&mut self, id: &str, person: &str, at: &str, row: Envelope<fractal_client::Resource>) {
-        let fractal_client::Resource::Attention(item) = row.value else { return };
-        if item.header.id != id || item.person_id != person || item.episode.is_empty() || item.source_id.is_empty() {
+
+    /// Saved exact keys are lookup inputs, not authority to start a discussion.
+    pub(super) fn keep_inbox_sources(&mut self, ids: &[String]) {
+        self.saved_origins.retain(|id, _| ids.contains(id));
+        self.start_contexts.retain(|id, _| ids.contains(id) || self.retained_origins.contains_key(id));
+        self.start_context_pending.retain(|id, _| ids.contains(id) || self.retained_origins.contains_key(id));
+        self.start_context_failures.retain(|id, _| ids.contains(id));
+        self.start_context_reads.retain(|read| self.start_context_pending.get(&read.item) == Some(&read.key));
+    }
+
+    pub(super) fn auto_resolved_sources(&mut self, asks: &fractal_client::AutoResolvedAsks) {
+        for ask in &asks.items {
+            if ask.target_id.is_empty() || ask.episode.is_empty() { continue; }
+            self.saved_origins.insert(format!("auto-resolved/{}", ask.resolution_id), Origin {
+                context: ThreadInterest::Inbox { source: ask.target_id.clone(), episode: ask.episode.clone() },
+                agent: None,
+                title: ask.title.clone(),
+            });
+        }
+    }
+
+    pub(super) fn start_context(&self, item: &str) -> Option<&Envelope<fractal_client::ThreadStartContext>> {
+        let ThreadInterest::Inbox { source, episode } = &self.start_origin(item)?.context else { return None };
+        self.start_contexts.get(item).filter(|context|
+            context.value.source_id == *source && context.value.episode == *episode)
+    }
+
+    pub(super) fn request_start_context(&mut self, item: &str) {
+        if !self.available || self.start_context_pending.contains_key(item) { return; }
+        let Some(input) = self.start_input(item) else { return };
+        if self.drafts.get(&input.key()).is_some_and(Draft::locked) { return; }
+        let Some(Origin { context: ThreadInterest::Inbox { source, episode }, .. }) = self.start_origin(item) else { return };
+        let origin = fractal_client::ThreadStartOrigin { source_id: source.clone(), episode: episode.clone() };
+        let key = uuid::Uuid::now_v7().to_string();
+        self.start_contexts.remove(item);
+        self.start_context_failures.remove(item);
+        self.start_context_pending.insert(item.into(), key.clone());
+        self.start_context_reads.push(StartContextRead { item: item.into(), key, origin });
+    }
+
+    pub(super) fn take_start_context_reads(&mut self) -> Vec<StartContextRead> {
+        std::mem::take(&mut self.start_context_reads)
+    }
+
+    pub(super) fn start_context_loaded(&mut self, item: &str, key: &str,
+        result: Result<Envelope<fractal_client::ThreadStartContext>, String>) {
+        if self.start_context_pending.get(item).map(String::as_str) != Some(key) { return; }
+        self.start_context_pending.remove(item);
+        match result {
+            Ok(context) => {
+                let valid = self.start_origin(item).is_some_and(|origin| matches!(&origin.context,
+                    ThreadInterest::Inbox { source, episode } if *source == context.value.source_id && *episode == context.value.episode));
+                if valid {
+                    self.start_contexts.insert(item.into(), context);
+                } else {
+                    self.start_context_failures.insert(item.into(), "The Inbox source changed. Check its recipient again.".into());
+                }
+            }
+            Err(reason) => { self.start_contexts.remove(item); self.start_context_failures.insert(item.into(), reason); }
+        }
+    }
+
+    fn start_recipient_panel(&self, doc: &mut Doc, host: &str, item: &str, width: usize) {
+        let frozen = self.start_input(item).and_then(|input| self.drafts.get(&input.key()))
+            .and_then(|draft| draft.delivery.as_ref()).filter(|delivery| delivery.pending || delivery.unknown);
+        if let Some(Delivery { write: Write { mutation: Mutation::Start(start), .. }, .. }) = frozen {
+            doc.wrap(&[text::run(format!("Original delivery to {} is pending or unconfirmed. Retrying keeps this exact recipient.", start.agent_id), theme::dim())], width);
             return;
         }
-        let Some(agent) = item.conversation_id.filter(|agent| agent.starts_with("agent/")) else { return };
-        let origin = Origin {
-            context: ThreadInterest::Inbox { source: item.source_id, episode: item.episode },
-            agent, title: item.title, snapshot: row.snapshot.id,
-        };
-        self.resolved_origins.insert(id.into(), (at.into(), origin.clone()));
-        self.origins.insert(id.into(), origin);
+        if let Some(context) = self.start_context(item) {
+            let recipient = &context.value.start_recipient;
+            doc.wrap(&[text::run(format!("New discussion to {}", recipient.agent_id), theme::soft())], width);
+            let basis = match &recipient.basis {
+                fractal_client::ThreadStartRecipientBasis::Original => "Original source recipient".to_owned(),
+                fractal_client::ThreadStartRecipientBasis::Configured => "Configured source recipient".to_owned(),
+                fractal_client::ThreadStartRecipientBasis::Fallback { original_agent_id, .. } =>
+                    format!("Fallback recipient · original source agent {original_agent_id} is retired. Existing discussions and participants are unchanged."),
+            };
+            doc.wrap(&[text::run(basis, theme::dim())], width);
+        } else {
+            let notice = self.start_context_failures.get(item).map_or("Checking recipient before first send…", String::as_str);
+            doc.wrap(&[text::run(notice, theme::dim())], width);
+        }
+        if !self.start_context_pending.contains_key(item) {
+            doc.buttons(&[("", "Refresh recipient", Hit::Thread(host.into(), thread::Tap::RefreshStart(item.into())), theme::SAPPHIRE)]);
+        }
     }
 
     fn context(&self, pane: &Pane) -> Option<ThreadInterest> {
@@ -1390,15 +1482,12 @@ impl Threads {
                 {
                     doc.line(thread::heading(
                         &origin.title,
-                        &format!(" · Draft · to {}", world.agents.items().iter()
-                            .find(|agent| agent.id == origin.agent)
-                            .map(|agent| agent.name.as_str())
-                            .filter(|name| !name.trim().is_empty() && *name != origin.agent)
-                            .unwrap_or("an agent")),
+                        " · New discussion · Draft",
                         true,
                         false,
                         width,
                     ));
+                    self.start_recipient_panel(&mut doc, &host, item, width);
                 }
                 self.editor(
                     &mut doc,
@@ -1439,6 +1528,7 @@ impl Threads {
             if let Some(Input::Start { item, .. }) = start.as_ref()
                 && drafting.is_none()
             {
+                self.start_recipient_panel(&mut doc, &host, item, width);
                 doc.buttons(&[(
                     "t",
                     "Start thread",
@@ -1454,16 +1544,14 @@ impl Threads {
     /// agent whose first message is pending or unknown.
     fn start_for(&self, pane: &Pane, context: &ThreadInterest) -> Option<Input> {
         match pane {
-            Pane::Home(Some(item)) if self.lists.contains_key(context) => self.start_input(item),
-            _ => self.retained_origins.iter().find_map(|(item, origin)| {
-                if *context != ThreadInterest::Agent(origin.agent.clone()) {
-                    return None;
-                }
+            Pane::Home(Some(item)) => self.start_input(item),
+            _ => self.retained_origins.keys().find_map(|item| {
                 let input = self.start_input(item)?;
                 self.drafts
                     .get(&input.key())
                     .and_then(|draft| draft.delivery.as_ref())
-                    .filter(|delivery| delivery.unknown || delivery.pending)
+                    .filter(|delivery| (delivery.unknown || delivery.pending)
+                        && *context == ThreadInterest::Agent(delivery.write.agent.clone()))
                     .map(|_| input)
             }),
         }
@@ -1930,6 +2018,7 @@ impl Threads {
                     }
                 }
             }
+            thread::Tap::RefreshStart(item) => self.request_start_context(&item),
             thread::Tap::CombineSavedDrafts(item) => self.combine_saved_drafts(host, &item, texts),
             thread::Tap::Rename(id) => {
                 if !self.access.rename {
@@ -2252,7 +2341,7 @@ impl Threads {
                     item,
                     episode: observed_episode,
                 } => {
-                    let Some(ask) = self.origins.get(item) else {
+                    let Some(ask) = self.start_origin(item) else {
                         return Err("The thread context is not ready".into());
                     };
                     let ThreadInterest::Inbox { source, episode } = &ask.context else {
@@ -2261,16 +2350,19 @@ impl Threads {
                     if episode != observed_episode {
                         return Err("The thread context is not ready".into());
                     }
+                    let preview = self.start_context(item).ok_or(
+                        "Check the recipient before sending. Your draft is kept."
+                    )?;
                     let target_id = format!("thread/{}", uuid::Uuid::now_v7());
                     (
                         target_id.clone(),
                         Fence {
-                            snapshot_id: ask.snapshot.clone(),
+                            snapshot_id: preview.snapshot.id.clone(),
                             ..Fence::default()
                         },
                         Mutation::Start(ThreadStartParameters {
                             target_id,
-                            agent_id: ask.agent.clone(),
+                            agent_id: preview.value.start_recipient.agent_id.clone(),
                             origin: fractal_client::ThreadStartOrigin {
                                 source_id: source.clone(),
                                 episode: episode.clone(),
@@ -2817,6 +2909,11 @@ impl Threads {
                     self.pending_actions.remove(&write.id);
                 }
             }
+            if !keep && !not_sent && matches!(write.mutation, Mutation::Start(_))
+                && let Some(item) = write.host.strip_prefix("home:") {
+                self.request_start_context(item);
+                return Some(format!("Start was refused: {} Checking the recipient again; review it before sending. Your draft is kept.", error.human()));
+            }
             if !keep
                 && !not_sent
                 && let Some(refusal) = ActionRefusal::of(&write.mutation, &error)
@@ -2840,6 +2937,10 @@ impl Threads {
                 let draft = self.drafts.get_mut(key).unwrap();
                 draft.delivery = None;
                 draft.rename_observed = None;
+            }
+            if matches!(write.mutation, Mutation::Start(_))
+                && let Some(item) = write.host.strip_prefix("home:") {
+                self.request_start_context(item);
             }
             return Some("The original thread action was rejected".into());
         }
