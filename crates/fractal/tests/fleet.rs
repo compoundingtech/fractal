@@ -9888,10 +9888,23 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     }).await;
 
     if release_has_plugin {
-        wait_until("the elder holds the poller's active observer declaration", 90, || async {
-            observer_declarations(&elder).await.into_iter()
-                .rfind(|(origin, _)| origin == "fixture-poller")
-                .is_some_and(|(_, stopped)| !stopped)
+        // Replication admits claims before projecting desired state. The plugin reads the
+        // selected observer and its claim's origin, not the latest raw declaration.
+        wait_until("the elder selects the poller's active repository observer", 90, || async {
+            let selected: Value = elder.client().get(
+                "/v1/desired?subject=observer/github/fixture/app",
+            ).await.unwrap();
+            let Some(observer) = selected["items"].as_array().unwrap().first() else {
+                return false;
+            };
+            observer["kind"] == "observer"
+                && fractal_daemon::graph::observer_spec(&observer["desired"]).is_some_and(|spec| {
+                    spec.provider == "github.repository" && !spec.stopped
+                        && spec.locator.eq_ignore_ascii_case("fixture/app")
+                })
+                && elder.claims().await.iter().any(|claim| {
+                    claim["id"] == observer["desired_token"] && claim["origin"] == "fixture-poller"
+                })
         }).await;
         let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
         assert_eq!(pull["pull"]["facts"]["head_sha"], "c".repeat(40), "{pull}");
