@@ -75,7 +75,7 @@ impl Store {
 
     pub fn shell_resources(&self, host: &str, active_only: bool) -> Result<Vec<Execution>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare("SELECT body FROM shell_resources_v1 WHERE host=?1 AND (?2=0 OR state IN ('waiting','admitted','running','retiring','finishing')) ORDER BY id")?;
+        let mut statement = connection.prepare("SELECT body FROM shell_resources_v1 WHERE host=?1 AND (?2=0 OR state IN ('waiting','admitted','running','retiring','finishing','failing','finishing-refused')) ORDER BY id")?;
         let mut executions = statement.query_map(rusqlite::params![host,active_only], |row| row.get::<_,String>(0))?
             .map(|body| Ok(serde_json::from_str(&body?)?)).collect::<Result<Vec<Execution>>>()?;
         executions.sort_by(|left, right| left.command.lane.class.cmp(&right.command.lane.class)

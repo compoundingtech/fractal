@@ -15,6 +15,8 @@ pub(super) fn append_tx(transaction: &Transaction<'_>, origin: &str, execution: 
     let request = &execution.command.lane;
     anyhow::ensure!(request.host == origin, "only the executing host may record its receipt");
     let result = execution.result.as_ref();
+    anyhow::ensure!(execution.started_at.is_none() || result.is_some(),
+        "launched shell execution must persist its outcome before terminal retirement");
     let head_start = result.and_then(|result| result.head_start.as_deref()).or(execution.head_start.as_deref());
     let class = match request.class {
         RequestClass::Landing => "landing",
@@ -130,6 +132,17 @@ mod tests {
         let store = Store::open_memory("host-a").unwrap();
         let mut execution = terminal(&store, "one", "completed");
         execution.command.lane.host = "host-b".into();
+        assert!(store.update_shell_resource(&execution).is_err());
+        assert_eq!(store.shell_resource("one").unwrap().state, "waiting");
+        assert!(claims(&store, None).is_empty());
+    }
+
+    #[test]
+    fn launched_execution_cannot_commit_an_observationless_terminal_claim() {
+        let store = Store::open_memory("host-a").unwrap();
+        let mut execution = terminal(&store, "one", "cancelled");
+        execution.started_at = Some(20);
+        execution.result = None;
         assert!(store.update_shell_resource(&execution).is_err());
         assert_eq!(store.shell_resource("one").unwrap().state, "waiting");
         assert!(claims(&store, None).is_empty());

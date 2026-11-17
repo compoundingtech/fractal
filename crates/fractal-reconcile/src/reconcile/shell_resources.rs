@@ -5,19 +5,26 @@ use crate::store::shell_resources::{Execution, PayloadResult, PARENT_ENV};
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn reconcile_shell_resources(&self) -> Result<()> {
-        let executions = self.store.shell_resources(&self.host, true)?;
-        if executions.is_empty() { return Ok(()); }
+        if self.store.shell_resources(&self.host, true)?.is_empty() { return Ok(()); }
         self.ensure_resource_authority()?;
-        for mut execution in executions {
+        for mut execution in self.store.shell_resources(&self.host, true)? {
             if let Err(error) = self.drive_shell_resource(&mut execution) {
-                execution.reason = format!("{error:#}");
-                // A failed preparation is not proof of absence. Retain custody until native
-                // retirement proves every prepared root gone, including after daemon recovery.
-                execution.state = match self.retire_shell_resource(&execution) {
-                    Ok(true) => "refused",
-                    Ok(false) => "retiring",
-                    Err(retirement) => { execution.reason.push_str(&format!("; retirement: {retirement:#}")); "retiring" }
-                }.into();
+                let launched = execution.started_at.is_some() || self.store.resource_memberships_for_host(&self.host)?.into_iter()
+                    .flat_map(|member| member.roots).any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some());
+                let already_failing = matches!(execution.state.as_str(), "failing" | "finishing-refused");
+                if !already_failing { execution.reason = format!("{error:#}"); }
+                if launched {
+                    // Observation failures never authorize destructive teardown. Re-enter the
+                    // same bounded cancellation path, retaining the original refusal reason.
+                    execution.state = "failing".into();
+                    if !already_failing { self.signal_changed(); }
+                } else {
+                    execution.state = match self.retire_shell_resource(&execution) {
+                        Ok(true) => "refused",
+                        Ok(false) => "retiring",
+                        Err(retirement) => { execution.reason.push_str(&format!("; retirement: {retirement:#}")); "retiring" }
+                    }.into();
+                }
             }
             if matches!(execution.state.as_str(), "completed" | "refused" | "cancelled") {
                 let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
@@ -34,7 +41,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn shell_result_path(&self, id: &str) -> PathBuf {
+    pub(super) fn shell_result_path(&self, id: &str) -> PathBuf {
         self.driver_state_dir.parent().unwrap_or(&self.driver_state_dir).join("resource-exec").join(format!("{id}.json"))
     }
 
@@ -90,11 +97,82 @@ impl<R: RuntimeControl> Reconciler<R> {
         })
     }
 
+    fn read_shell_payload_result(&self, execution: &mut Execution) -> Result<bool> {
+        match fs::read(self.shell_result_path(&execution.command.id)) {
+            Ok(bytes) => {
+                let result: PayloadResult = serde_json::from_slice(&bytes)?;
+                execution.exit_code = result.exit_code; execution.exit_signal = result.exit_signal;
+                execution.head_start.clone_from(&result.head_start); execution.clean_start = result.clean_start;
+                execution.result = Some(result);
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Snapshot predecessor shells before rotating the epoch or destroying their cgroups.
+    pub(super) fn prepare_shell_resource_recovery(&self) -> Result<()> {
+        let members = self.store.resource_memberships_for_host(&self.host)?;
+        for mut execution in self.store.shell_resources(&self.host, true)? {
+            let Some(root) = members.iter().flat_map(|member| &member.roots)
+                .find(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()) else { continue; };
+            let generation = root.execution.as_ref().context("released shell has no generation")?.generation_id.clone();
+            execution.started_at = root.payload_released_at;
+            if !self.read_shell_payload_result(&mut execution)? && execution.result.is_none() {
+                if let Ok(bytes) = fs::read(self.shell_result_path(&execution.command.id).with_extension("started")) {
+                    let (head, clean) = serde_json::from_slice(&bytes)?;
+                    execution.head_start = head; execution.clean_start = clean;
+                }
+                execution.result = Some(self.shell_payload_observation(&execution, &generation,
+                    u64::try_from(now_ms()).unwrap_or(u64::MAX))?);
+            }
+            execution.state = if matches!(execution.state.as_str(), "failing" | "finishing-refused") {
+                "finishing-refused"
+            } else { "finishing" }.into();
+            if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
+            if self.runtime.observe_exec(&execution.command.id)?
+                .is_some_and(|observation| observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(generation.as_str())) {
+                // Ask the helper to publish before predecessor recovery takes over bounded
+                // native retirement. Finalization re-reads any atomic shutdown publication.
+                self.runtime.cancel_resource_exec(&execution.command.id, &generation)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Retirement may finish asynchronously. Hydrate final evidence only after native
+    /// absence is proved, preferring any helper publication made during shutdown.
+    fn finalize_retired_shell_result(&self, execution: &mut Execution) -> Result<()> {
+        let member = self.store.resource_membership_record(&execution.command.lane.id, &execution.command.lane.owner)?;
+        let root = member.roots.iter().find(|root| root.runtime_id == execution.command.id).context("retired shell root missing")?;
+        let generation = &root.execution.as_ref().context("retired shell generation missing")?.generation_id;
+        let observation = self.runtime.observe_exec(&execution.command.id)?.context("retired shell record missing")?;
+        anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation.as_str()) && observation.status == "exited",
+            "retired shell lacks generation-fenced exit evidence");
+        let (stdout, stderr) = self.runtime.resource_exec_output(&execution.command.id, generation)?;
+        execution.stdout = stdout; execution.stderr = stderr;
+        execution.exit_code = observation.exit_code.map(i32::try_from).transpose()?;
+        execution.exit_signal = self.runtime.resource_exec_signal(&execution.command.id, generation)?;
+        if !self.read_shell_payload_result(execution)? {
+            let mut result = self.shell_payload_observation(execution, generation, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
+            if let Some(previous) = &execution.result {
+                result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
+                result.wall_duration_ms = result.wall_duration_ms.max(previous.wall_duration_ms);
+            }
+            execution.result = Some(result);
+        }
+        Ok(())
+    }
+
     fn drive_shell_resource(&self, execution: &mut Execution) -> Result<()> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
-        if execution.state == "finishing" {
+        if matches!(execution.state.as_str(), "finishing" | "finishing-refused") {
+            let refused = execution.state == "finishing-refused";
             if self.retire_shell_resource(execution)? {
-                execution.state = if execution.cancel { "cancelled" } else { "completed" }.into();
+                self.finalize_retired_shell_result(execution)?;
+                execution.state = if refused { "refused" } else if execution.cancel { "cancelled" } else { "completed" }.into();
                 execution.ended_at = Some(now);
             }
             return Ok(());
@@ -116,8 +194,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(());
         }
-        if !execution.cancel { self.store.shell_resource_owner_live(&request.owner)?; }
-        let grant: Grant = if let Some(grant) = cancelling_grant {
+        let live_member = self.store.resource_memberships_for_host(&self.host)?.into_iter()
+            .find(|member| member.request.id == request.id
+                && member.roots.iter().any(|root| root.runtime_id == execution.command.id && root.payload_released_at.is_some()));
+        if !execution.cancel && execution.state != "failing" {
+            if let Err(error) = self.store.shell_resource_owner_live(&request.owner) {
+                if live_member.is_none() { return Err(error); }
+                execution.state = "failing".into();
+                execution.reason = format!("{error:#}");
+            }
+        }
+        let grant: Grant = if let Some(member) = live_member {
+            member.grant.context("launched shell has no grant")?
+        } else if let Some(grant) = cancelling_grant {
             grant
         } else if let Some(parent) = &execution.command.parent {
             let record = self.store.resource_membership_for_grant(parent)?;
@@ -143,6 +232,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Admission::Admitted(grant) => grant,
             }
         };
+        let refusing = execution.state == "failing";
         let record = self.store.resource_membership_for_grant(&grant)?;
         let result_path = self.shell_result_path(&execution.command.id);
         let newly_started = !record.roots.iter().any(|root| root.runtime_id == execution.command.id);
@@ -198,7 +288,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation.generation_id.as_str()), "shell execution generation changed");
         if observation.status == "running" {
             // Keep the admitted transition visible until the next native wake.
-            if !newly_started { execution.state = "running".into(); }
+            if !newly_started && !refusing { execution.state = "running".into(); }
             let elapsed = self.store.resource_execution_elapsed(&request.id, &request.owner, &execution.command.id, now)?.context("shell release clock missing")?;
             if let Some(timeout) = execution.command.timeout_ms.filter(|_| !execution.timed_out) {
                 if elapsed >= timeout { execution.timed_out = true; }
@@ -206,7 +296,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.arm_restart(&format!("shell-timeout:{}", execution.command.id), now_ms().saturating_add(u128::from(timeout - elapsed)));
                 }
             }
-            if execution.cancel || execution.timed_out {
+            if execution.cancel || execution.timed_out || refusing {
                 // This is an elapsed execution-clock offset, not wall time; the host clock
                 // remains monotonic while live and is reconstructed conservatively on recovery.
                 let began = *execution.cancellation_started_at.get_or_insert(elapsed);
@@ -224,12 +314,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     return self.drive_shell_resource(execution);
                 }
+                self.arm_restart(&format!("shell-cancel:{}", execution.command.id), now_ms().saturating_add(u128::from(remaining)));
                 if execution.cancellation_started_at == Some(elapsed) {
                     // Commit the deadline before signalling so recovery cannot restart grace.
                     if self.store.update_shell_resource(execution)? { self.signal_changed(); }
                     self.runtime.cancel_resource_exec(&execution.command.id, &generation.generation_id)?;
                 }
-                self.arm_restart(&format!("shell-cancel:{}", execution.command.id), now_ms().saturating_add(u128::from(remaining)));
             }
             return Ok(());
         }
@@ -256,15 +346,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             Err(error) => return Err(error.into()),
         }
         self.store.end_resource_execution(&grant, &execution.command.id, now)?;
-        execution.state = "finishing".into();
-        execution.reason = if execution.cancel { "cancelled by the shell caller" }
-            else if execution.timed_out { "payload execution timeout; custody retired" }
-            else { "payload exited and execution custody retired" }.into();
+        execution.state = if refusing { "finishing-refused" } else { "finishing" }.into();
+        if !refusing {
+            execution.reason = if execution.cancel { "cancelled by the shell caller" }
+                else if execution.timed_out { "payload execution timeout; custody retired" }
+                else { "payload exited and execution custody retired" }.into();
+        }
         // Commit the result before retirement can destroy the cgroup or a daemon crash
         // can turn a completed payload into an observation-less cancellation.
         if self.store.update_shell_resource(execution)? { self.signal_changed(); }
         if !self.retire_shell_resource(execution)? { return Ok(()); }
-        execution.state = if execution.cancel { "cancelled" } else { "completed" }.into();
+        execution.state = if refusing { "refused" } else if execution.cancel { "cancelled" } else { "completed" }.into();
         execution.ended_at = Some(now);
         self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
         Ok(())
