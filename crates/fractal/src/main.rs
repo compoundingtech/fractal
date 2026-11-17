@@ -6201,7 +6201,7 @@ fn daemon_is_unreachable(error: &anyhow::Error) -> bool {
 
 async fn run(cli: Cli) -> Result<()> {
     if let Command::ResourcePayload { result, argv } = cli.command {
-        return resources_cli::payload(&result, argv);
+        return resources_cli::payload(&result, argv).await;
     }
     let own = fractal_drivers::contracts::env("ST_AGENT");
     anyhow::ensure!(
