@@ -208,10 +208,17 @@ contracts against both `createMemoryOutboxRepository` and real `node:sqlite`.
 File-reopen, migration, rollback and corrupt-row tests additionally exercise SQLite.
 Transaction errors survive rollback failures: an aggregate retains the original
 error as its cause/first member and the rollback failure as its second member.
-Retention/deletion is planned for step 4 or later: seven days for terminal content
-and 30 days for minimal tombstones, retaining delivered content until exact timeline
-observation. Pending/unknown never automatically expire. No retention/delete worker
-or discard API has been implemented by the repository step.
+Repository lifecycle support retains terminal payload for seven days, and delivered
+payload longer until its exact timeline identity is observed. Removing content keeps
+a minimal tombstone for 30 further days; that ID cannot be accepted again meanwhile.
+Pending/unknown/damaged rows never automatically expire. Explicit discard removes
+local recovery only, not a server action or proof of nonapplication.
+Append-only upload checkpoints survive preparation interruption. Terminal spool
+deletions are queued durably, retried after reopen, and run only after proving no
+record in any scope references the file. Any damaged row blocks that proof. Native
+acceptance and cleanup share a filesystem queue, preventing a spool-before-commit
+race with deletion. Discarded unknown/corrupt and pre-acceptance orphan files are
+not automatically deleted without terminal/reference evidence.
 
 `acceptProtectedOutboxIntent` captures text/images, checks protected storage, hashes
 each attachment, and awaits immutable native file writes before committing the
@@ -220,10 +227,10 @@ relative references and media metadata, never base64 bytes or expiring picker UR
 The native module verifies hashes, synchronizes a private temporary file, links it
 without overwriting the final hash name, and synchronizes the spool directory.
 An existing final file must pass digest verification; reads verify contents again.
-The bridge exposes no arbitrary path read/write or final-file delete method.
-Failed acceptance leaves the caller draft unchanged; completed orphan files are
-retained until the later retention implementation. Only unaccepted temporary files
-are removed during native writes. No upload/network action runs in this adapter.
+The bridge exposes no arbitrary path access; deletion accepts only a hash-named spool reference.
+Failed acceptance leaves the caller draft unchanged. Unaccepted temporary files
+are removed during native writes; final files are deleted only by the proven-terminal
+cleanup path. No upload/network action runs in this adapter.
 Actual iOS flag readback, directory synchronization and process-kill recovery still
 require the later native build/capture; no sudden-power-loss guarantee is claimed.
 

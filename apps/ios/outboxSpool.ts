@@ -3,6 +3,8 @@ import type { OutboxIntent, OutboxPreparingRecord, OutboxRepository } from '../.
 import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import { decodeBase64, MAX_BYTES, MAX_IMAGES } from './images.ts';
 import type { Picked } from './images.ts';
+import { messageIntent } from './outboxMessage.ts';
+import type { OutboxMessageMetadata } from './outboxMessage.ts';
 
 export type OutboxStorageProtection = {
   databaseDirectory: string;
@@ -14,6 +16,7 @@ export interface OutboxFilesBridge {
   prepareStorage(): Promise<OutboxStorageProtection>;
   writeAttachment(base64: string, contentHash: string): Promise<{ reference: string; contentHash: string; bytes: number }>;
   readAttachment(reference: string): Promise<string>;
+  deleteAttachment(reference: string): Promise<void>;
 }
 export type OutboxHash = (bytes: Uint8Array) => Promise<Uint8Array>;
 
@@ -87,10 +90,11 @@ const referenceFor = (hash: string): string => `spool/${hash.slice(7)}`;
 export const acceptProtectedOutboxIntent = async (
   repository: OutboxRepository<PreparedPacket>, bridge: OutboxFilesBridge | null | undefined,
   databaseDirectory: string, sha256: OutboxHash,
-  id: string, text: string, images: readonly Picked[] = [],
+  id: string, text: string, images: readonly Picked[] = [], metadata?: OutboxMessageMetadata,
 ): Promise<OutboxPreparingRecord> => {
   // Capture before await: later composer edits cannot change this acceptance snapshot.
   const captured = images.map(image => ({ ...image }));
+  const capturedMetadata: OutboxMessageMetadata | undefined = metadata ? JSON.parse(JSON.stringify(metadata)) : undefined;
   try {
     await requireProtectedOutboxStorage(bridge, databaseDirectory);
     if (!bridge || captured.length > MAX_IMAGES) throw new OutboxStorageProtectionError();
@@ -106,7 +110,8 @@ export const acceptProtectedOutboxIntent = async (
       attachments.push(Object.freeze({ contentHash: hash, reference: stored.reference, mediaType: image.mediaType,
         ...(image.name ? { name: image.name } : {}) }));
     }
-    const intent: OutboxIntent = Object.freeze({ text, attachments: Object.freeze(attachments) });
+    const intent: OutboxIntent = Object.freeze({ text, attachments: Object.freeze(attachments), ...capturedMetadata });
+    if (capturedMetadata && !messageIntent(intent)) throw new OutboxStorageProtectionError();
     const record = createOutboxRecord(id, intent);
     if (!await outboxStorageOperation(() => repository.commit(record))) throw new OutboxStorageProtectionError();
     return record;

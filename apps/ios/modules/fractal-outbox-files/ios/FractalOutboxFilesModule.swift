@@ -50,6 +50,18 @@ public final class FractalOutboxFilesModule: Module {
       let url = spool.appendingPathComponent(name)
       return try self.verifyFile(url, hash: name).base64EncodedString()
     }.runOnQueue(outboxFilesQueue)
+
+    // JS queues only proven, unreferenced terminal files while acceptance is excluded.
+    AsyncFunction("deleteAttachment") { (reference: String) in
+      let (_, spool) = try self.protectedDirectories()
+      guard reference.hasPrefix("spool/") else { throw self.failure("Invalid spool reference") }
+      let name = try self.hashName("sha256:" + String(reference.dropFirst(6)))
+      let url = spool.appendingPathComponent(name)
+      if FileManager.default.fileExists(atPath: url.path) {
+        try FileManager.default.removeItem(at: url)
+      }
+      try self.synchronizeDirectory(spool)
+    }.runOnQueue(outboxFilesQueue)
   }
 
   private func protectedDirectories() throws -> (URL, URL) {

@@ -1,13 +1,22 @@
 import * as Crypto from 'expo-crypto';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { createSqliteOutboxRepository, migrateOutboxDatabase, withOutboxTransaction } from './outboxSqlite.ts';
-import type { OutboxSqlExecutor, OutboxSqlSession } from './outboxSqlite.ts';
-import type { OutboxScope, OutboxRepository } from '../../clients/typescript/fractal-client/outbox.ts';
+import type { IosOutboxRepository, OutboxSqlExecutor, OutboxSqlSession } from './outboxSqlite.ts';
+import type { OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import FractalOutboxFiles from './modules/fractal-outbox-files/index.ts';
-import { acceptProtectedOutboxIntent, openProtectedOutboxStorage, readOutboxAttachment, OutboxStorageProtectionError, outboxStorageOperation } from './outboxSpool.ts';
+import { acceptProtectedOutboxIntent, openProtectedOutboxStorage, readOutboxAttachment, requireProtectedOutboxStorage, OutboxStorageProtectionError, outboxStorageOperation } from './outboxSpool.ts';
 import type { OutboxHash } from './outboxSpool.ts';
 import type { Picked } from './images.ts';
+import type { OutboxMessageMetadata } from './outboxMessage.ts';
+
+// One filesystem acceptance/cleanup owner across all repository scopes.
+let pendingFiles = Promise.resolve();
+const serializeFiles = <TResult>(operation: () => Promise<TResult>): Promise<TResult> => {
+  const result = pendingFiles.then(operation);
+  pendingFiles = result.then(() => undefined, () => undefined);
+  return result;
+};
 
 const arrayBufferBacked = (bytes: Uint8Array): bytes is Uint8Array<ArrayBuffer> => bytes.buffer instanceof ArrayBuffer;
 
@@ -56,8 +65,13 @@ export const openNativeOutbox = async (scope: OutboxScope, authorize: (scope: Ou
       const storage = createSqliteOutboxRepository(executor, requestedScope);
       // Read/list remain available under the persisted scope during re-pair recovery.
       // All acceptance/transition writes require the live, original client's identity.
-      const repository: OutboxRepository<PreparedPacket> = {
+      const repository: IosOutboxRepository = {
         scope: storage.scope, read: id => storage.read(id), list: () => storage.list(),
+        uploads: id => storage.uploads(id),
+        saveUploads: (id, attachments) => { authorize(storage.scope); return storage.saveUploads(id, attachments); },
+        observeTimeline: (id, identity) => { authorize(storage.scope); return storage.observeTimeline(id, identity); },
+        discard: id => storage.discard(id),
+        cleanup: (now, deleteAttachment) => serializeFiles(() => storage.cleanup(now, deleteAttachment)),
         commit: record => { authorize(storage.scope); return storage.commit(record); },
         compareAndSwap: (revision, record) => { authorize(storage.scope); return storage.compareAndSwap(revision, record); },
       };
@@ -68,8 +82,16 @@ export const openNativeOutbox = async (scope: OutboxScope, authorize: (scope: Ou
         repository, close: () => executor.close(),
         // Future status/dispatch owners must invoke this immediately before network work.
         authorize: () => authorize(storage.scope),
-        acceptIntent: (id: string, text: string, images: readonly Picked[] = []) =>
-          acceptProtectedOutboxIntent(repository, bridge, directory, sha256, id, text, images),
+        acceptIntent: (id: string, text: string, images: readonly Picked[] = [], metadata?: OutboxMessageMetadata) => {
+          const captured = images.map(image => ({ ...image }));
+          const capturedMetadata: OutboxMessageMetadata | undefined = metadata ? JSON.parse(JSON.stringify(metadata)) : undefined;
+          authorize(storage.scope);
+          return serializeFiles(() => acceptProtectedOutboxIntent(repository, bridge, directory, sha256, id, text, captured, capturedMetadata));
+        },
+        cleanup: (now: number) => serializeFiles(async () => {
+          await requireProtectedOutboxStorage(bridge, directory);
+          await storage.cleanup(now, reference => outboxStorageOperation(() => bridge.deleteAttachment(reference)));
+        }),
         readAttachment: (reference: string) => readOutboxAttachment(bridge, directory, sha256, reference),
       };
     } catch (error) {

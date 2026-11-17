@@ -126,7 +126,7 @@ test('authored native module registers backup read-back and immutable spool with
   assert.match(swift, /readback.resourceValues\(forKeys: \[.isExcludedFromBackupKey\]\).isExcludedFromBackup == true/);
   assert.match(swift, /Darwin.link\(source, target\)/);
   assert.match(swift, /handle.synchronize\(\)/);
-  assert.doesNotMatch(swift, /AsyncFunction\("delete/);
+  assert.match(swift, /AsyncFunction\("deleteAttachment"\)/);
   assert.match(swift, /protectionKey: FileProtectionType.completeUntilFirstUserAuthentication/);
   assert.match(swift, /setAttributes\(\[.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication\]/);
   // Static source assertions are NOT native compilation, flag readback or crash proof.

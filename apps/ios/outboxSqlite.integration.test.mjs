@@ -121,15 +121,15 @@ contracts('SQLite', sqliteFactory);
 
 test('SQLite migrates empty schema once, rejects future version without resetting data', async t => {
   const store = await sqliteFactory(t), { db, executor } = store.connection();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 1);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
   assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 2);
   await store.repository(scope).commit(preparing());
   await migrateOutboxDatabase(executor);
   assert.equal((await store.repository(scope).list()).length, 1);
-  db.exec('PRAGMA user_version = 2;');
+  db.exec('PRAGMA user_version = 3;');
   await assert.rejects(migrateOutboxDatabase(executor), OutboxCorruptionError);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM outbox_records').get().count, 1);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
 });
 
 test('SQLite file reopen retains intent/ready packets and restores dispatched work to unknown', async t => {
@@ -202,4 +202,84 @@ test('SQLite list retains good records beside persistent corrupt-row recovery en
   assert.deepEqual(await repo.list(), expected);
   await store.reopen();
   assert.deepEqual(await store.repository(scope).list(), expected);
+});
+
+test('SQLite persists append-only upload checkpoints and forbids changing them after preparation', async t => {
+  const store = await sqliteFactory(t), repo = store.repository(scope);
+  await repo.commit(preparing());
+  const uploads = [{ blob: 'blob/original', media_type: 'image/png' }];
+  await repo.saveUploads('attempt/original', uploads);
+  await store.reopen();
+  const reopened = store.repository(scope);
+  assert.deepEqual(await reopened.uploads('attempt/original'), uploads);
+  await assert.rejects(reopened.saveUploads('attempt/original', [{ blob: 'blob/other', media_type: 'image/png' }]), OutboxCorruptionError);
+  assert.equal(await reopened.compareAndSwap(0, prepared()), true);
+  await assert.rejects(reopened.saveUploads('attempt/original', uploads), OutboxCorruptionError);
+});
+
+const terminal = async (repo, id, attachment = 'a'.repeat(64)) => {
+  const intent = { text: 'terminal payload', attachments: [{ reference: 'spool/' + attachment, contentHash: 'sha256:' + attachment, mediaType: 'image/png' }] };
+  const initial = createOutboxRecord(id, intent);
+  await repo.commit(initial);
+  const ready = prepareOutboxRecord(initial, packet, ['message/original']);
+  await repo.compareAndSwap(0, ready);
+  const dispatched = markOutboxDispatched(ready);
+  await repo.compareAndSwap(1, dispatched);
+  const delivered = observeOutbox(dispatched, { kind: 'observed', identity: 'message/original', source: 'timeline' });
+  await repo.compareAndSwap(2, delivered);
+  return delivered;
+};
+
+test('SQLite seven-day terminal retention waits for exact timeline observation; tombstones prevent reuse for 30 days', async t => {
+  const store = await sqliteFactory(t), repo = store.repository(scope), now = Date.now();
+  const delivered = await terminal(repo, 'attempt/terminal');
+  store.connection().db.prepare('UPDATE outbox_records SET timeline_observed = 0').run();
+  const deleted = [];
+  await repo.cleanup(now + 8 * 86400_000, async ref => deleted.push(ref));
+  assert.deepEqual(await repo.read(delivered.id), delivered);
+  await repo.observeTimeline(delivered.id, 'message/other');
+  await repo.cleanup(now + 8 * 86400_000, async ref => deleted.push(ref));
+  assert.deepEqual(await repo.read(delivered.id), delivered);
+  await repo.observeTimeline(delivered.id, 'message/original');
+  await repo.cleanup(now + 8 * 86400_000, async ref => deleted.push(ref));
+  assert.equal(await repo.read(delivered.id), undefined);
+  assert.deepEqual(deleted, ['spool/' + 'a'.repeat(64)]);
+  assert.equal(await repo.commit(preparing(delivered.id)), false);
+  await store.reopen();
+  const reopened = store.repository(scope);
+  assert.equal(await reopened.commit(preparing(delivered.id)), false);
+  await reopened.cleanup(now + 39 * 86400_000, async () => {});
+  assert.equal(await reopened.commit(preparing(delivered.id)), true);
+});
+
+test('SQLite never expires pending or damaged rows and preserves files shared across scopes', async t => {
+  const store = await sqliteFactory(t), repo = store.repository(scope), now = Date.now();
+  await terminal(repo, 'attempt/terminal');
+  const other = store.repository({ ...scope, principalId: 'profile/ada' });
+  const shared = createOutboxRecord('attempt/pending', { text: 'must stay', attachments: [{ reference: 'spool/' + 'a'.repeat(64), contentHash: 'sha256:' + 'a'.repeat(64), mediaType: 'image/png' }] });
+  await other.commit(shared);
+  await repo.commit(preparing('attempt/damaged'));
+  store.connection().db.prepare("UPDATE outbox_records SET record_json = 'broken' WHERE id = 'attempt/damaged'").run();
+  const deleted = [];
+  await repo.cleanup(now + 400 * 86400_000, async ref => deleted.push(ref));
+  assert.equal((await repo.list())[0]._tag, 'corrupt');
+  assert.deepEqual(await other.read(shared.id), shared);
+  assert.deepEqual(deleted, []);
+  await repo.discard('attempt/damaged');
+  await repo.cleanup(now + 400 * 86400_000, async ref => deleted.push(ref));
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(await other.read(shared.id), shared);
+});
+
+test('SQLite spool deletion queue survives failure/reopen; explicit pending discard never deletes files', async t => {
+  const store = await sqliteFactory(t), repo = store.repository(scope), now = Date.now();
+  await terminal(repo, 'attempt/terminal');
+  await assert.rejects(repo.cleanup(now + 8 * 86400_000, async () => { throw new Error('locked'); }), /locked/);
+  await store.reopen();
+  const reopened = store.repository(scope), deleted = [];
+  await reopened.cleanup(now + 8 * 86400_000, async ref => deleted.push(ref));
+  assert.deepEqual(deleted, ['spool/' + 'a'.repeat(64)]);
+  await reopened.commit(preparing('attempt/pending'));
+  await reopened.discard('attempt/pending');
+  await reopened.cleanup(now + 100 * 86400_000, async () => assert.fail('unknown files are not authorized for deletion'));
 });
