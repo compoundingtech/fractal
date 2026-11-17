@@ -4478,11 +4478,10 @@ fn auto_resolved_sources_start_through_their_typed_key_and_canonical_recipient()
 }
 
 fn golden_start_refusal(name: &str) -> ClientError {
-    let mut envelopes: BTreeMap<String, fractal_client::ErrorEnvelope> =
-        serde_json::from_str(include_str!(
-            "../../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json"
-        ))
-        .unwrap();
+    let mut envelopes: BTreeMap<String, fractal_client::ErrorEnvelope> = serde_json::from_str(
+        include_str!("../../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json"),
+    )
+    .unwrap();
     let envelope = envelopes.remove(name).expect("canonical refusal fixture");
     let expected = match name {
         "recipient-unassigned" => fractal_client::ErrorCode::RecipientUnassigned,
@@ -4570,7 +4569,12 @@ fn post_start_recipient_retired_keeps_the_draft_without_resending_or_refreshing(
 }
 
 #[test]
-fn post_start_unassigned_without_application_proof_keeps_the_original_packet() {
+fn post_start_recipient_unassigned_keeps_the_draft_without_resending_or_refreshing() {
+    assert_terminal_post_start_refusal("recipient-unassigned", "Setup is required");
+}
+
+#[test]
+fn post_start_unassigned_after_prior_unknown_keeps_the_original_packet() {
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/resolved";
     let pane = Pane::Home(Some(item.into()));
@@ -4591,12 +4595,7 @@ fn post_start_unassigned_without_application_proof_keeps_the_original_packet() {
         .start_with_text(&host, item, "Keep this signed request", &mut texts)
         .unwrap();
     let write = threads.writes().pop().unwrap();
-    let error = golden_start_refusal("recipient-unassigned");
-    assert_eq!(
-        error.applied(),
-        None,
-        "the canonical 465 envelope does not prove non-application"
-    );
+    let error = ClientError::Protocol("The first POST receipt was lost".into());
     threads.complete(
         Receipt {
             write: write.clone(),
@@ -4620,10 +4619,12 @@ fn post_start_unassigned_without_application_proof_keeps_the_original_packet() {
         panic!("Start")
     };
     assert_eq!(original, retry);
+    let refusal = golden_start_refusal("recipient-unassigned");
+    assert_eq!(refusal.applied(), Some("none"));
     threads.complete(
         Receipt {
             write: retried,
-            confirmation: Confirmation::Failed(golden_start_refusal("recipient-retired")),
+            confirmation: Confirmation::Failed(refusal),
         },
         &mut texts,
     );
