@@ -3,9 +3,19 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { appliedAnswer, ClientError, resendBoundAction } from '../../clients/typescript/fractal-client/index.ts';
 import { sendStart } from './startDelivery.ts';
+import { Schema } from 'effect';
+import { decodeUnknownSync, ErrorEnvelope } from '../../clients/typescript/fractal-client/Schema.generated.ts';
 
 const goldens = JSON.parse(readFileSync(new URL('../../docs/st3/client-v0/fixtures/thread-start-refusals.json', import.meta.url), 'utf8'));
-for (const key of ['recipient-unassigned', 'stale-snapshot']) {
+test('exact canonical golden envelopes decode and round-trip without request ID hydration', () => {
+  for (const envelope of Object.values(goldens)) {
+    const decoded = decodeUnknownSync(ErrorEnvelope, 'strict')(envelope);
+    assert.deepEqual(Schema.encodeSync(ErrorEnvelope)(decoded), envelope);
+    assert.equal(decoded.request_id, envelope.request_id);
+  }
+});
+
+for (const key of ['stale-snapshot']) {
   test(`golden POST ${key} without applied proof keeps the original signed packet, even after a later definitive refusal`, async () => {
     const packet = Object.freeze({ fence: { snapshot_id: 'snapshot/original' }, id: 'action/original', idempotency_key: 'action/original', parameters: { target_id: 'thread/original', agent_id: 'agent/original', signature: 'original-signature', content: 'Original draft' } });
     let builds = 0;
@@ -15,7 +25,7 @@ for (const key of ['recipient-unassigned', 'stale-snapshot']) {
     const result = await sendStart('fixture', {
       build: async () => { builds++; return packet; },
       fence: async () => ({ snapshot_id: 'snapshot/refreshed' }),
-      send: async request => { sent.push(request); throw sent.length === 1 ? error : new ClientError(goldens['recipient-retired'], 409); },
+      send: async request => { sent.push(request); throw sent.length === 1 ? error : new ClientError(goldens['recipient-unassigned'], 409); },
       wait: async () => { assert.fail('Start admission must not auto-resend'); },
     });
     assert.equal(result.how, 'unconfirmed');
@@ -32,8 +42,9 @@ for (const key of ['recipient-unassigned', 'stale-snapshot']) {
   });
 }
 
-test('golden POST recipient-retired proves applied:none and is a definitive failure', async () => {
-  const error = new ClientError(goldens['recipient-retired'], 409);
+for (const key of ['recipient-unassigned', 'recipient-retired']) {
+test(`golden POST ${key} proves applied:none and is a definitive failure`, async () => {
+  const error = new ClientError(goldens[key], 409);
   assert.equal(appliedAnswer(error), 'none');
   let sends = 0;
   const result = await sendStart('fixture', {
@@ -44,3 +55,4 @@ test('golden POST recipient-retired proves applied:none and is a definitive fail
   assert.deepEqual(result, { how: 'failed', error });
   assert.equal(sends, 1);
 });
+}

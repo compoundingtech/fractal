@@ -66,7 +66,7 @@ test('only definitive canonical Start recipient refusals request a visible conte
   const start = exports.make('start');
   for (const [key, envelope] of Object.entries(goldens)) {
     const error = new ClientError(envelope, 409);
-    assert.equal(start({ how: 'failed', error }).refreshStartContext, key === 'recipient-retired' ? true : undefined);
+    assert.equal(start({ how: 'failed', error }).refreshStartContext, key === 'stale-snapshot' ? undefined : true);
     assert.equal(exports.make('reply')({ how: 'failed', error }).refreshStartContext, undefined);
   }
   const original = Object.freeze({ agent_id: 'agent/A', id: 'action/original', signature: 'signed-original' });

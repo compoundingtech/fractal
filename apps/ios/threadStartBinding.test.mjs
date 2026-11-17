@@ -210,7 +210,32 @@ test('an unconfigured source with no original agent visibly refuses Start and ne
   assert.equal(h.store.draftCache.current.get(cacheKey), JSON.stringify({ text: 'Hello' }));
 });
 
-for (const key of ['stale-snapshot', 'recipient-unassigned']) {
+test('golden definitive POST recipient-unassigned invalidates the old preview and blocks setup without Retry or further sends', async () => {
+  const h = harness({
+    contexts: [context('agent/A'), wireRefusal('recipient-unassigned')],
+    outcomes: [wireRefusal('recipient-unassigned')],
+  });
+  h.panel();
+  await settle();
+  field(h.composer(startOf(h.panel()))).onSend();
+  await settle();
+  const tree = h.panel();
+  assert.equal(h.reads.length, 2, 'one visible canonical reread after definitive failure');
+  assert.equal(find(tree, 'StartRecipientPreview'), undefined);
+  assert.match(find(tree, 'ThreadReadIssue').props.message, /No Start recipient is configured/);
+  assert.equal(findAll(tree, node => node.type === 'Button' && node.props.label === 'Retry').length, 0);
+  assert.equal(startOf(tree).origin, undefined);
+  const composer = h.composer(startOf(tree));
+  assert.equal(field(composer).enabled, false);
+  field(composer).onSend();
+  await settle();
+  h.panel();
+  assert.equal(h.reads.length, 2, 'the blocked state has no automatic reread loop');
+  assert.equal(h.signed.length, 1, 'zero further sends after the refused POST');
+  assert.equal(h.store.draftCache.current.get(cacheKey), JSON.stringify({ text: 'Hello' }));
+});
+
+for (const key of ['stale-snapshot']) {
   test(`POST ${key} without applied proof retains the unknown packet and never refreshes or retargets`, async () => {
     const h = harness({ contexts: [context('agent/A')], outcomes: [wireRefusal(key)] });
     h.panel();
