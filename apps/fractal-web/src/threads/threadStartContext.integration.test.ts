@@ -129,7 +129,7 @@ it('keeps POST404 without applied metadata unknown despite a changed exact-key p
     expect((await source.retryStart!('draft/review'))._tag).toBe('Sent')
     expect(actions).toHaveLength(2)
     expect(actions[1]).toEqual(actions[0])
-    expect(actions[1]?.parameters.agent_id).toBe(original)
+    expect(actions[1]).toMatchObject({ type: 'thread.start', parameters: { agent_id: original } })
   } finally { stops.forEach(stop => stop()); registry.dispose() }
 })
 
