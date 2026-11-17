@@ -120,6 +120,17 @@ class Policy(unittest.TestCase):
             bundle['url'] = bundle['url'].replace('/smalltalk-', '/fractal-')
             baseline.validate(value, 'renamed')
 
+    def test_optional_executable_hash_is_preserved_and_validated(self):
+        value = pin()
+        bundle = value['bundles'][baseline.TARGETS[0]]
+        bundle['elf_sha256'] = 'c' * 64
+        baseline.validate(value, 'pinned executable')
+        for invalid in ('', 'c' * 63, 'g' * 64, None):
+            with self.subTest(elf_sha256=invalid):
+                bundle['elf_sha256'] = invalid
+                with self.assertRaisesRegex(baseline.BaselineError, 'hex ELF SHA256'):
+                    baseline.validate(value, 'invalid executable')
+
     def test_bundle_urls_reject_other_names_tags_targets_and_repositories(self):
         value = pin()
         bundle = value['bundles'][baseline.TARGETS[0]]
