@@ -26,6 +26,8 @@ pub enum AlertTap {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
+    /// Expand or collapse the current step's text in an agent's details.
+    DetailsPreview(String),
     /// A button on an alert shown in its agent's conversation.
     Alert(String, AlertTap),
     /// One of a structured request's named answers, by its place: chosen, then Enter sends it.
