@@ -623,11 +623,13 @@ Snapshot-acquisition failures retain their distinct `snapshot-unavailable` class
 `src/data/outbox/` implements the core fixed-scope repository with versioned storage envelopes
 and an attachment spool. Transaction completion is the acknowledgement barrier, with strict
 durability requested where supported. Opening classifies unresolved dispatch markers as
-unknown; unsupported or corrupt records remain quarantined and cannot send. Storage failures
-are typed, without a memory fallback, and persistent-storage permission is reported as granted,
-denied or unsupported. Browser eviction, site-data deletion and device loss are not covered
-by this durability guarantee. The separate startup/recovery UI and cross-tab live-owner
-coordination are not part of this chat transport integration.
+unknown; unsupported or corrupt records remain quarantined and cannot send. The recovery
+list retains readable damage as “storage damaged; delivery unknown”, with Discard as its only
+action and no expiry. Discard removes damaged bytes without claiming nonapplication.
+Storage that cannot be opened or read is instead unavailable, retry later; it is never
+manufactured into a corrupt entry. Storage failures are typed, without a memory fallback,
+and persistent-storage permission is reported as granted, denied or unsupported. Browser
+eviction, site-data deletion and device loss are not covered by this durability guarantee.
 
 Cleanup never expires unresolved attempts. Terminal content/spool lasts seven days (delivered
 content additionally waits for exact timeline observation), then minimal identity/evidence

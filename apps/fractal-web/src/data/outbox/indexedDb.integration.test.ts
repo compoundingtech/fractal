@@ -222,16 +222,20 @@ describe('durable core IndexedDB outbox', () => {
     await expect(repo.compareAndSwap(1, { ...delivered, packet: { ...packet, idempotency_key: 'key/different-attempt-a' } })).rejects.toMatchObject({ code: 'invalid-record' })
   })
 
-  it('corrupt/future/old mirror rows stay quarantined, retained and never dispatchable', async () => {
+  it('lists corrupt/future/old rows as persistent discard-only recovery, never dispatchable', async () => {
     const factory = new IDBFactory()
     const repo = await open(factory)
     const future = { localAttemptId: 'future', scope, schemaVersion: 999, secret: 'same-owner-data' }
-    const corrupt = { localAttemptId: 'corrupt', scope, schemaVersion: 2 }
+    const corrupt = { localAttemptId: 'corrupt', scope, schemaVersion: 2, record: { revision: 5 } }
     const legacy = { localAttemptId: 'legacy', scope: { account: 'old-account' }, schemaVersion: 1, intent: { bytes: [9] } }
     await raw(factory, [future, corrupt, legacy])
     repo.close()
     const reopened = await open(factory)
-    expect(await reopened.list()).toEqual([])
+    expect(await reopened.list()).toEqual([
+      { _tag: 'corrupt', id: 'corrupt', revision: 5 },
+      { _tag: 'corrupt', id: 'future' },
+      { _tag: 'corrupt', id: 'legacy' },
+    ])
     expect(await reopened.listQuarantined()).toEqual(expect.arrayContaining([
       { key: 'future', reason: 'corrupt-or-unsupported', raw: future },
       { key: 'corrupt', reason: 'corrupt-or-unsupported', raw: corrupt },
@@ -241,6 +245,9 @@ describe('durable core IndexedDB outbox', () => {
     await expect(reopened.acquireDispatchPermit('future', 0)).rejects.toMatchObject({ code: 'quarantined' })
     await reopened.cleanupTerminal()
     expect(await raw(factory)).toHaveLength(3)
+    await reopened.dismiss('corrupt')
+    expect(await reopened.list()).toEqual([{ _tag: 'corrupt', id: 'future' }, { _tag: 'corrupt', id: 'legacy' }])
+    expect(await raw(factory)).toHaveLength(2)
   })
 
   it('quota failures refuse acceptance without evicting unresolved data or memory fallback', async () => {
@@ -257,7 +264,7 @@ describe('durable core IndexedDB outbox', () => {
     repo.close()
     const reopened = await open(factory)
     expect(await reopened.read('new')).toBeUndefined()
-    expect(await reopened.list()).toEqual([attempt('unresolved')])
+    expect(await reopened.list()).toEqual([{ _tag: 'record', record: attempt('unresolved') }])
   })
 
   it('disabled/denied storage reports typed errors and persistence is reported honestly', async () => {
@@ -285,7 +292,7 @@ describe('durable core IndexedDB outbox', () => {
     await raw(factory, [{ localAttemptId: 'owner-corrupt', scope, schemaVersion: 999, secret: 'private' }, { localAttemptId: 'unknown-owner', secret: 'private' }])
     for (const otherScope of [{ ...scope, principalId: 'other' }, { ...scope, deploymentId: 'other' }, { ...scope, memberId: 'other' }]) {
       const other = await open(factory, () => Number.MAX_SAFE_INTEGER, otherScope)
-      expect(await other.list()).toEqual([])
+      expect(await other.list()).toEqual([{ _tag: 'corrupt', id: 'unknown-owner' }])
       expect(await other.read(record.id)).toBeUndefined()
       expect(await other.readSpool(record.id, image.hash)).toBeUndefined()
       expect(await other.readPacketBytes(record.id)).toBeUndefined()

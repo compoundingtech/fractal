@@ -1,5 +1,5 @@
 import { gatewayThreads } from '../threads/threadSource.ts'
-import { ClientError, FractalClient, isTransient, type OutboxScope } from '@fractal/client'
+import { ClientError, FractalClient, isTransient, restoreOutboxEntries, type OutboxScope } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
@@ -1292,6 +1292,15 @@ export const liveSource = ({
       grants,
       contentSearch: gatewayContentSearch(client),
       attachments: { ...attachments, send: (request) => retainConversation(request.parameters.to).send(request) },
+      outboxRecovery: {
+        list: async () => {
+          const repository = await outbox.repository()
+          if (repository === undefined) return []
+          return restoreOutboxEntries(await repository.list()).flatMap((entry) =>
+            entry._tag === 'corrupt' ? [{ id: entry.id, status: entry.status, actions: entry.actions }] : [])
+        },
+        discard: async (id) => { await (await outbox.repository())?.dismiss(id) },
+      },
       sessionTrace: (query) => runtime.runPromise(sessionTrace(query)),
       // credentialExpired is set before readRefusal, so this derived read sees both together.
       credentialRevoked: Atom.make((get) => get(readRefusal) !== undefined && credentialExpired),

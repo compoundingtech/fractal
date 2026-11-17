@@ -1,4 +1,4 @@
-import { isAllowedOutboxTransition, markOutboxDispatched, restoreOutboxRecord, type OutboxPreparingRecord, type OutboxReceipt, type OutboxRecord, type OutboxRepository, type OutboxScope, type PreparedPacket } from '@fractal/client'
+import { isAllowedOutboxTransition, markOutboxDispatched, restoreOutboxRecord, type OutboxEntry, type OutboxPreparingRecord, type OutboxReceipt, type OutboxRecord, type OutboxRepository, type OutboxScope, type PreparedPacket } from '@fractal/client'
 import { Effect, Schema } from 'effect'
 import { loadAttachmentSchema } from '../lazySdk.ts'
 import { Count, OutboxConflict, OutboxStorageError, ScopeSchema, retentionAction, sameScope, terminal, type OutboxError, type QuarantinedAttempt, type SpoolInput } from './repository.ts'
@@ -245,9 +245,30 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
       return record
     },
     read: (id) => run('readonly', 'read', (tx, done, fail) => get(tx, id, (envelope) => done(envelope?.record), fail)),
-    list: () => run('readonly', 'list', (tx, done) => {
-      const request = tx.objectStore(attemptsStore).getAll()
-      request.onsuccess = () => done(request.result.flatMap((raw: unknown) => { const envelope = inspect(raw); return envelope !== undefined && sameScope(envelope.scope, scope) && envelope.record !== undefined ? [envelope.record] : [] }))
+    list: () => run('readonly', 'list', (tx, done, fail) => {
+      const entries: OutboxEntry<PreparedPacket>[] = []
+      const request = tx.objectStore(attemptsStore).openCursor()
+      request.onsuccess = () => {
+        try {
+          const cursor = request.result
+          if (cursor === null) { done(entries); return }
+          const owner = rawScope(cursor.value)
+          if (owner === undefined || sameScope(owner, scope)) {
+            const envelope = inspect(cursor.value)
+            if (envelope === undefined) {
+              const raw: unknown = cursor.value
+              const revision = typeof raw === 'object' && raw !== null && 'record' in raw
+                && typeof raw.record === 'object' && raw.record !== null && 'revision' in raw.record
+                && typeof raw.record.revision === 'number' && Number.isSafeInteger(raw.record.revision) && raw.record.revision >= 0
+                ? raw.record.revision : undefined
+              entries.push({ _tag: 'corrupt', id: String(cursor.primaryKey), ...(revision === undefined ? {} : { revision }) })
+            } else if (envelope.record !== undefined && envelope.dismissed === undefined) {
+              entries.push({ _tag: 'record', record: envelope.record })
+            }
+          }
+          cursor.continue()
+        } catch (cause) { fail(cause) }
+      }
     }),
     readIntentBytes: (id) => readBytes(id, 'intentBytes'), readPacketBytes: (id) => readBytes(id, 'packetBytes'),
     readSpool: (id, hash) => run('readonly', 'readSpool', (tx, done, fail) => get(tx, id, (envelope) => {
@@ -271,10 +292,25 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
         cursor.continue()
       }
     }),
-    dismiss: (id) => run('readwrite', 'dismiss', (tx, done, fail) => get(tx, id, (envelope) => {
-      if (envelope !== undefined) tx.objectStore(attemptsStore).put({ ...envelope, dismissed: { at: now() }, updatedAt: now() })
-      done(undefined)
-    }, fail)),
+    dismiss: (id) => run('readwrite', 'dismiss', (tx, done, fail) => {
+      const store = tx.objectStore(attemptsStore)
+      const request = store.get(id)
+      request.onsuccess = () => {
+        try {
+          const raw: unknown = request.result
+          const owner = rawScope(raw)
+          if (raw === undefined || owner !== undefined && !sameScope(owner, scope)) { done(undefined); return }
+          const envelope = inspect(raw)
+          if (envelope === undefined) {
+            // Explicit discard alone may remove damaged content; never claim nonapplication.
+            store.delete(id)
+            const spool = tx.objectStore(spoolStore).openCursor(IDBKeyRange.bound([id], [id, []]))
+            spool.onsuccess = () => { const item = spool.result; if (item !== null) { item.delete(); item.continue() } }
+          } else store.put({ ...envelope, dismissed: { at: now() }, updatedAt: now() })
+          done(undefined)
+        } catch (cause) { fail(cause) }
+      }
+    }),
     cleanupTerminal: () => run('readwrite', 'cleanupTerminal', (tx, done, fail) => {
       const timestamp = now()
       const request = tx.objectStore(attemptsStore).openCursor()

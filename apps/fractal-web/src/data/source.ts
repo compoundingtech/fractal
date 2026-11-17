@@ -357,6 +357,18 @@ export interface BrowserPairingPort {
 
 export type NetworkReachability = { readonly _tag: 'Online' } | { readonly _tag: 'Offline' }
 
+export interface OutboxRecoveryItem {
+  readonly id: string
+  readonly status: string
+  readonly actions: readonly ['discard']
+}
+
+/** Recovery never grants a dispatch permission; unavailable storage rejects list/discard. */
+export interface OutboxRecoveryPort {
+  readonly list: () => Promise<readonly OutboxRecoveryItem[]>
+  readonly discard: (id: string) => Promise<void>
+}
+
 /**
  * Everything a feature may read: one atom (or atom family) per projection plus the source's
  * clock, grants and usage port. Fixtures and live implement the same shape.
@@ -378,6 +390,7 @@ export interface DataSource {
   /** Native operations are optional in fixture adapters, never fabricated locally. */
   readonly contentSearch?: ContentSearchPort
   readonly attachments?: AttachmentPort
+  readonly outboxRecovery?: OutboxRecoveryPort
   readonly threads?: ThreadSource
   /** Schema-coupled native family reads; unsupported native producers carry an explicit reason. */
   readonly subjectReads: SubjectReads

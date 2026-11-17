@@ -13,7 +13,7 @@ import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './com
 import { nativeTurnFooter } from './NativeTurnFooter.tsx'
 import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { LastSeen, SeatAtRest, SendUnprotected, ThreadUnavailable } from './ConversationStates.tsx'
+import { LastSeen, OutboxRecovery, SeatAtRest, SendUnprotected, ThreadUnavailable } from './ConversationStates.tsx'
 import { sidebarRow } from './sidebarRow.ts'
 import { LiveAgentThreads } from '../threads/LiveThreads.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
@@ -299,6 +299,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+      {/* This device's outbox: only items it can no longer send, each with Discard alone. Absent port, nothing. */}
+      {source.outboxRecovery === undefined ? null : <OutboxRecovery port={source.outboxRecovery} />}
       {/* Only a composer that can send now says its messages have no on-device copy; it still sends. */}
       {binding.disabledReason === undefined && grants.sendProtection === 'unprotected' ? <SendUnprotected /> : null}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
