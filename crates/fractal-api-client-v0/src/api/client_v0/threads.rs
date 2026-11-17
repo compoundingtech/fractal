@@ -188,7 +188,7 @@ fn store_error(error: FractalError) -> ApiError {
             status: StatusCode::CONFLICT,
             code: "recipient-unassigned".into(),
             message: error.message,
-            details: Box::default(),
+            details: Box::new(serde_json::Map::from_iter([("applied".into(), json!("none"))])),
         },
         "stale-thread-cursor" | "stale-thread-title" | "stale-subject"
         | "thread-state-unchanged" | "thread-ask-already-linked" => stale(&error.message),

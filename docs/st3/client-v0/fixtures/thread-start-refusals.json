@@ -6,7 +6,8 @@
     "code": "recipient-unassigned",
     "message": "this Inbox source has no configured responsible agent",
     "retryable": false,
-    "details": {}
+    "applied": "none",
+    "details": {"applied": "none"}
   },
   "stale-snapshot": {
     "api_version": "fractal.client.v0",
