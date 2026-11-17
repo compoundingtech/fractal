@@ -13,6 +13,13 @@ reminder label, distinct from the natural-unread dot. At narrow panel widths the
 existing header grid uses a smaller gap and no forced age minimum so open and
 closed thread titles keep usable space.
 
+Every readable timeline message can anchor Mark unread, including another person's
+message and the viewer's own message. Rendering, visible-message capture and both
+jump paths share the exported `threadAnchorAttribute` contract. Natural read
+history remains separate: only live incoming agent replies qualify for the
+500 ms meaningful-body dwell and captured-reminder clearing. A message anchor
+alone does not make a message eligible for a read receipt.
+
 ## fractal-web Content Security Policy
 
 The app server and Vite's development/preview servers set an enforcing
