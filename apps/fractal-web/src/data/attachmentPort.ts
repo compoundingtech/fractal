@@ -1,7 +1,7 @@
 import {
   ClientError, appliedAnswer, actionReceiptCheck, createOutboxRecord, expectedPreparedPacketIdentities,
   observeOutbox, prepareMessageSendPacket, prepareOutboxRecord,
-  type FractalClient, type OutboxRecord, type OutboxObservation, type PreparedPacket, type PreparedMessageSendPacket, type OutboxIntent,
+  type Capabilities, type EnvelopeOf, type FractalClient, type OutboxRecord, type OutboxObservation, type PreparedPacket, type PreparedMessageSendPacket, type OutboxIntent,
 } from '@fractal/client'
 import type { ActionResult } from '@fractal/client/schema'
 import * as Native from '@fractal/client/schema/read'
@@ -17,7 +17,7 @@ import { scopeFromCapabilities } from './outbox/scoped.ts'
 /** Scope selection is local; this callback must not make send-work network requests. */
 export interface ChatOutbox {
   /** Undefined means explicitly unprotected identity mode, never a storage-error fallback. */
-  readonly repository: () => Promise<IndexedDbOutbox | undefined>
+  readonly repository: (onDiscovery?: (response: EnvelopeOf<Capabilities>) => void) => Promise<IndexedDbOutbox | undefined>
 }
 
 /** Upload, chunk reads and sending use the same gateway client, never a synthetic delivery. */
@@ -97,6 +97,7 @@ const text = new TextDecoder()
 const sendUnprotected = async (
   client: FractalClient, snapshot: () => Promise<ConversationPortResult<string>>,
   input: AttachmentSendRequest, key: string, unappliedPackets: Map<string, PreparedMessageSendPacket>,
+  discovered?: EnvelopeOf<Capabilities>,
 ): Promise<ConversationPortResult<ActionResult>> => {
   let packet = input._tag === 'Resend' ? unappliedPackets.get(key) : undefined
   if (input._tag === 'Resend' && packet === undefined) return unconfirmed()
@@ -104,7 +105,7 @@ const sendUnprotected = async (
   try {
     const schema = await Effect.runPromise(loadAttachmentSchema)
     if (packet !== undefined) {
-      const capabilities = Native.decodeUnknownSync(Native.Capabilities)((await client.capabilities()).value)
+      const capabilities = Native.decodeUnknownSync(Native.Capabilities)((discovered ?? await client.capabilities()).value)
       if (!hasConversationCapability(capabilities, 'message.send')) return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted message send.' }
       const identities = await expectedPreparedPacketIdentities(packet, capabilities.session_actor,
         async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))))
@@ -128,7 +129,7 @@ const sendUnprotected = async (
     // Text acquires its fence first; images acquire it only after their uploads.
     const textSnapshot = (input.images?.length ?? 0) === 0 ? await snapshot() : undefined
     if (textSnapshot?._tag === 'Refused') return textSnapshot
-    const capabilities = Native.decodeUnknownSync(Native.Capabilities)((await client.capabilities()).value)
+    const capabilities = Native.decodeUnknownSync(Native.Capabilities)((discovered ?? await client.capabilities()).value)
     if (!hasConversationCapability(capabilities, 'message.send')) return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted message send.' }
     const attachments = [...parameters.attachments ?? []]
     for (const image of input.images ?? []) {
@@ -171,12 +172,13 @@ export const gatewayMessageSend = (
   return async (input: AttachmentSendRequest, chosenKey?: string): Promise<ConversationPortResult<ActionResult>> => {
   const key = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
   let repo: IndexedDbOutbox | undefined
-  try { repo = await outbox.repository() } catch (cause) {
+  let discoveredIdentity: EnvelopeOf<Capabilities> | undefined
+  try { repo = await outbox.repository(response => { discoveredIdentity = response }) } catch (cause) {
     return cause instanceof OutboxIdentityUnavailable
       ? { _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.' }
       : storageRefusal()
   }
-  if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedPackets)
+  if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedPackets, discoveredIdentity)
   let record: OutboxRecord<PreparedPacket> | undefined
   try { record = await repo.read(key) } catch { return storageRefusal() }
   if (record !== undefined) {
@@ -251,7 +253,7 @@ export const gatewayMessageSend = (
       && currentRecord.intent.attachments.length === 0
     const textSnapshot = preparingText ? await snapshot() : undefined
     if (textSnapshot?._tag === 'Refused') return textSnapshot
-    const discovered = await client.capabilities()
+    const discovered = discoveredIdentity ?? await client.capabilities()
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)(discovered.value)
     const currentScope = scopeFromCapabilities(discovered)
     if (currentScope === undefined || !sameScope(repo.scope, currentScope)) {

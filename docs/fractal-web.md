@@ -604,7 +604,9 @@ The generated capabilities envelope supplies the scope: `session_actor`, the cor
 `outboxDeploymentId(issuer, issuer_key)`, and `Snapshot.host_id`. Immutable intent and
 content-hashed image bytes commit to IndexedDB before send work (upload, snapshot or POST).
 The grants observer caches identity; an uncached first send may read capabilities to identify
-its scope before acceptance. Failed identity discovery refuses acceptance and restores the draft.
+its scope before acceptance. That same answer supplies this send's permission checks, without
+a duplicate read; cached identity does not reuse stale grants. Failed identity discovery refuses
+acceptance and restores the draft.
 The complete authorized unsigned packet is prepared once and committed by revision CAS;
 only the winner of the durable dispatch permit may POST it. A validated completed receipt
 settles delivered, explicit uncontradicted `applied:none` settles not-applied, and every other
@@ -622,8 +624,8 @@ Storage refusal in protected mode makes no message request and restores text and
 In unprotected mode only an explicit `applied: none` retains the exact original packet for
 an in-session retry; ambiguous outcomes are never replayed. This transient exception does
 not provide crash recovery or replace the protected IndexedDB repository.
-Both modes preserve send preparation order: text acquires its snapshot before capability
-discovery; local images check capabilities and upload before acquiring their snapshot.
+After identity discovery, both modes preserve send preparation order: text acquires its snapshot
+before permission checks; local images check capabilities and upload before acquiring their snapshot.
 Snapshot-acquisition failures retain their distinct `snapshot-unavailable` classification.
 The readwrite permit CAS guarantees one dispatcher across tabs, including after a crash.
 If another tab recovers an in-flight marker as unknown, a receipt CAS conflict re-reads the

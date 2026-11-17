@@ -1783,6 +1783,7 @@ describe('optimistic conversation sends', () => {
         live.registry.mount(live.source.conversationInterest!(agent.id))
         const conversation = live.source.conversation(agent.id)
         live.registry.mount(conversation)
+        live.registry.mount(live.source.grants)
         yield* settle
         gateway.currentSnapshot = undefined
         const result = yield* Effect.promise(() => live.source.attachments!.send(request))
@@ -1796,6 +1797,24 @@ describe('optimistic conversation sends', () => {
             sendState: { _tag: 'Failed', reason: 'snapshot-unavailable', detail: expect.stringContaining('snapshot') },
           }] },
         })
+      }),
+    ),
+  )
+
+  it.live('refuses unavailable identity before accepting a send or retaining an optimistic row', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.conversationInterest!(agent.id))
+        const conversation = live.source.conversation(agent.id)
+        live.registry.mount(conversation)
+        yield* settle
+        gateway.capabilityFailure = true
+        const result = yield* Effect.promise(() => live.source.attachments!.send(request))
+        expect(result).toMatchObject({
+          _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.',
+        })
+        expect(gateway.messageActions).toHaveLength(0)
+        expect(live.registry.get(conversation)).toMatchObject({ _tag: 'Observed', value: { items: [] } })
       }),
     ),
   )

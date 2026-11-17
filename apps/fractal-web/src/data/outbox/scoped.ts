@@ -32,28 +32,32 @@ export const createScopedChatOutbox = (
   client: FractalClient,
   options: Pick<OpenOutboxOptions, 'indexedDB' | 'storage' | 'databaseName'> = {},
 ): ScopedChatOutbox => {
-  let cached: { readonly scope: OutboxScope | undefined } | undefined
-  let discovering: Promise<{ readonly scope: OutboxScope | undefined }> | undefined
+  type Identity = { readonly scope: OutboxScope | undefined; readonly response: EnvelopeOf<Capabilities> }
+  let cached: Identity | undefined
+  let discovering: Promise<Identity> | undefined
   const connections = new Map<string, Promise<IndexedDbOutbox>>()
   const observe = (response: EnvelopeOf<Capabilities>): typeof Native.Capabilities.Type => {
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)(response.value)
-    cached = { scope: decodedScope(capabilities, response.snapshot.host_id) }
+    cached = { scope: decodedScope(capabilities, response.snapshot.host_id), response }
     return capabilities
   }
-  const discover = async (): Promise<{ readonly scope: OutboxScope | undefined }> => {
+  const discover = async (): Promise<Identity> => {
     if (discovering !== undefined) return discovering
     discovering = (async () => {
       try {
         const response = await client.capabilities()
-        observe(response)
-        return { scope: cached?.scope }
+        const capabilities = observe(response)
+        return { scope: decodedScope(capabilities, response.snapshot.host_id), response }
       } catch { throw new OutboxIdentityUnavailable() }
       finally { discovering = undefined }
     })()
     return discovering
   }
-  const repository = async (): Promise<IndexedDbOutbox | undefined> => {
+  const repository: ScopedChatOutbox['repository'] = async (onDiscovery) => {
+    const needsDiscovery = cached === undefined
     const identity = cached ?? await discover()
+    // Share only this operation's discovery, never stale cached grants.
+    if (needsDiscovery) onDiscovery?.(identity.response)
     if (identity.scope === undefined) return undefined
     const scope = identity.scope
     const key = JSON.stringify([scope.principalId, scope.deploymentId, scope.memberId])
