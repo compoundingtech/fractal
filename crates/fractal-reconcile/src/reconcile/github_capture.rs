@@ -440,6 +440,7 @@ impl SnapshotBuilder {
 #[path = "github_capture_tests.rs"]
 mod tests;
 
+#[cfg(test)]
 pub(super) fn checkpoint(connection: &Connection, definition: &SourceDefinition, repository: &str) -> Result<Option<ScanCheckpoint>> {
     let row: Option<String> = connection.query_row("SELECT record FROM capture_v1_checkpoints WHERE source=?1 AND repository_id=?2", params![projection_key(definition)?,repository], |row| row.get(0)).optional()?;
     row.map(|value| Ok(serde_json::from_str(&value)?)).transpose()

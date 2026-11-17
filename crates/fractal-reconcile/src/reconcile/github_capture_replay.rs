@@ -161,12 +161,9 @@ mod tests {
     }
 
     #[test]
-    fn replay_remains_pending_until_known_later_captures_predecessor_arrives() {
+    fn replay_and_plugin_remain_pending_with_a_known_later_capture() {
         let store = Store::open_memory("node").unwrap();
-        let delayed = Store::open_memory("node").unwrap();
-        for store in [&store, &delayed] {
-            store.bind_fleet("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();
-        }
+        store.bind_fleet("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();
         let state = tempfile::tempdir().unwrap();
         let source = Source { host: "github.com".into(), id: "example".into(), generation: 1 };
         let grant = AuthorityGrant { version: VERSION, source: source.clone(), member: "node".into(),
@@ -182,22 +179,19 @@ github-source "example" {{
     checkpoint-every-ms 60000
     replicate-private #false
 }}"#, grant.id), "declare-delayed-replay");
-        let mut commit = CaptureCommit { version: VERSION, source, epoch: 1,
-            authority_grant: grant.id, sequence: 1, predecessor: None,
+        // An admitted writer can publish a malformed/out-of-order source sequence even
+        // though private replication preserves its own independent batch sequence.
+        let commit = CaptureCommit { version: VERSION, source, epoch: 1,
+            authority_grant: grant.id, sequence: 2, predecessor: Some("missing-first-capture".into()),
             facts: vec![], checkpoint: None, coverage: vec![], observed_at_ms: 100 };
-        let first = append(&delayed, commit.subject().unwrap(), COMMIT_KIND, &commit);
-        commit.sequence = 2;
-        commit.predecessor = Some(first.id.clone());
-        let second = append(&store, commit.subject().unwrap(), COMMIT_KIND, &commit);
+        append(&store, commit.subject().unwrap(), COMMIT_KIND, &commit);
         assert!(capture_replay(&store, state.path(), "example", None, 128).unwrap().is_none());
         assert!(capture_replay(&store, state.path(), "example", None, 128).unwrap().is_none());
-        store.import_replication("node", &delayed.export_replication(0).unwrap()).unwrap();
-        let page = capture_replay(&store, state.path(), "example", None, 128).unwrap().unwrap();
-        assert_eq!(page.through_sequence, 2);
-        assert_eq!(page.frontier.as_deref(), Some(second.id.as_str()));
-        assert_eq!(page.records.iter().map(|record| record.claim_id.as_str()).collect::<Vec<_>>(),
-            vec![first.id.as_str(), second.id.as_str()]);
-        assert!(page.snapshot_complete);
+        let pulls = super::super::repository_pull_requests(
+            &store, state.path(), "acme/garden", None, None, 128,
+        ).unwrap().unwrap();
+        assert!(!pulls.complete);
+        assert!(pulls.pulls.is_empty());
     }
 
     #[test]
