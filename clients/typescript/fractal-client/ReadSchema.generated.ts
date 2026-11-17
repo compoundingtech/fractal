@@ -1502,6 +1502,13 @@ export const PersonUpdate = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonUpdate = typeof PersonUpdate.Type
 export type PersonUpdateEncoded = typeof PersonUpdate.Encoded
 
+export const ThreadStartRecipient = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": Id,
+  "basis": Schema.Union([Schema.Struct({ "_tag": Schema.Literal("original"), "original_agent_id": Schema.optionalKey(Schema.Never), "retirement": Schema.optionalKey(Schema.Never) }), Schema.Struct({ "_tag": Schema.Literal("configured"), "original_agent_id": Schema.optionalKey(Schema.Never), "retirement": Schema.optionalKey(Schema.Never) }), Schema.Struct({ "_tag": Schema.Literal("fallback"), "original_agent_id": Id, "retirement": Schema.Struct({ "claim_id": Id, "kind": Schema.Literal("agent.retired"), "state": Schema.Literal("retired") }) })], { mode: "oneOf" })
+}).annotate({ identifier: "ThreadStartRecipient" }))()
+export type ThreadStartRecipient = typeof ThreadStartRecipient.Type
+export type ThreadStartRecipientEncoded = typeof ThreadStartRecipient.Encoded
+
 export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "action_parameters": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   "actions": Schema.Array(Schema.Literals([
@@ -1571,6 +1578,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "snoozed_until": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls." }),
   "source_id": Id,
   "source_kind": optionalKey(Schema.String),
+  /** Exact daemon-selected first-Start recipient and basis. When present, conversation_id equals agent_id. Fallback requires terminal agent.retired evidence; absence grants no recipient inference. */
+  "start_recipient": optionalKey(ThreadStartRecipient),
   "state": Schema.Literals(["open","resolved"]),
   "step_run_id": optionalKey(Id),
   "target_states": optionalKey(Schema.Array(AttentionTargetState)),
@@ -5003,6 +5012,13 @@ export const UsageHubQuota = /*#__PURE__*/ (() => Schema.Union([
 export type UsageHubQuota = typeof UsageHubQuota.Type
 export type UsageHubQuotaEncoded = typeof UsageHubQuota.Encoded
 
+export const EpisodeState = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "answers": Schema.Array(Schema.Unknown), "availability": Schema.Literal("available"), "status": Schema.String }),
+  Schema.Struct({ "availability": Schema.Literal("unavailable"), "answers": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("availability")).annotate({ identifier: "EpisodeState" }))()
+export type EpisodeState = typeof EpisodeState.Type
+export type EpisodeStateEncoded = typeof EpisodeState.Encoded
+
 export const HarnessInventoryItem = /*#__PURE__*/ (() => Schema.Struct({
   "kind": Schema.Literals(["file","directory","skill-command","slash-command"]),
   "name": Schema.String,
@@ -5029,6 +5045,40 @@ export const HarnessInventory = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "HarnessInventory" }))()
 export type HarnessInventory = typeof HarnessInventory.Type
 export type HarnessInventoryEncoded = typeof HarnessInventory.Encoded
+
+export const ReferenceSemantics = /*#__PURE__*/ (() => Schema.Literals(["retained-reference","live-reference"]).annotate({ identifier: "ReferenceSemantics" }))()
+export type ReferenceSemantics = typeof ReferenceSemantics.Type
+export type ReferenceSemanticsEncoded = typeof ReferenceSemantics.Encoded
+
+export const HistoricalReference = /*#__PURE__*/ (() => Schema.Struct({
+  "revision": Schema.OptionFromNullOr(Schema.String),
+  "semantics": ReferenceSemantics,
+  "target_id": Schema.String
+}).annotate({ identifier: "HistoricalReference" }))()
+export type HistoricalReference = typeof HistoricalReference.Type
+export type HistoricalReferenceEncoded = typeof HistoricalReference.Encoded
+
+export const PayloadUnavailable = /*#__PURE__*/ (() => Schema.Literals(["retained-definition-unavailable","retained-step-unavailable","opening-unavailable","historical-interpolation-unavailable","boundary-unavailable","payload-unavailable","read-bound-exceeded"]).annotate({ identifier: "PayloadUnavailable" }))()
+export type PayloadUnavailable = typeof PayloadUnavailable.Type
+export type PayloadUnavailableEncoded = typeof PayloadUnavailable.Encoded
+
+export const RequestProvenance = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "asking_claim_id": Schema.String, "kind": Schema.Literal("runtime-ask"), "mission_revision": Schema.optionalKey(Schema.Never), "opening_claim_id": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "kind": Schema.Literal("authored-episode"), "mission_revision": Schema.String, "opening_claim_id": Schema.String, "asking_claim_id": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "RequestProvenance" }))()
+export type RequestProvenance = typeof RequestProvenance.Type
+export type RequestProvenanceEncoded = typeof RequestProvenance.Encoded
+
+export const HistoricalPayload = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "availability": Schema.Literal("available"), "provenance": RequestProvenance, "references": Schema.Array(HistoricalReference), "request": Schema.Unknown, "text": Schema.String, "title": Schema.OptionFromNullOr(Schema.String), "reason": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "availability": Schema.Literal("unavailable"), "reason": PayloadUnavailable, "provenance": Schema.optionalKey(Schema.Never), "references": Schema.optionalKey(Schema.Never), "request": Schema.optionalKey(Schema.Never), "text": Schema.optionalKey(Schema.Never), "title": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("availability")).annotate({ identifier: "HistoricalPayload" }))()
+export type HistoricalPayload = typeof HistoricalPayload.Type
+export type HistoricalPayloadEncoded = typeof HistoricalPayload.Encoded
+
+export const HistorySourceSupport = /*#__PURE__*/ (() => Schema.Literals(["person-step","unsupported-source"]).annotate({ identifier: "HistorySourceSupport" }))()
+export type HistorySourceSupport = typeof HistorySourceSupport.Type
+export type HistorySourceSupportEncoded = typeof HistorySourceSupport.Encoded
 
 export const HostRepositories = /*#__PURE__*/ (() => Schema.Struct({
   "host_id": Schema.String,
@@ -5127,6 +5177,51 @@ export const ReadPositionPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ReadPositionPage = typeof ReadPositionPage.Type
 export type ReadPositionPageEncoded = typeof ReadPositionPage.Encoded
 
+export const SourceEpisode = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Schema.String,
+  "source_id": Schema.String
+}).annotate({ identifier: "SourceEpisode" }))()
+export type SourceEpisode = typeof SourceEpisode.Type
+export type SourceEpisodeEncoded = typeof SourceEpisode.Encoded
+
+export const RequestHistoryItem = /*#__PURE__*/ (() => Schema.Struct({
+  "complete": Schema.Boolean,
+  "key": SourceEpisode,
+  "payload": HistoricalPayload,
+  "state": EpisodeState
+}).annotate({ identifier: "RequestHistoryItem" }))()
+export type RequestHistoryItem = typeof RequestHistoryItem.Type
+export type RequestHistoryItemEncoded = typeof RequestHistoryItem.Encoded
+
+export const RequestHistoryRelation = /*#__PURE__*/ (() => Schema.Struct({
+  "predecessor": SourceEpisode,
+  "reason": Schema.String,
+  "request": SourceEpisode
+}).annotate({ identifier: "RequestHistoryRelation" }))()
+export type RequestHistoryRelation = typeof RequestHistoryRelation.Type
+export type RequestHistoryRelationEncoded = typeof RequestHistoryRelation.Encoded
+
+export const SourceEpisodeGroup = /*#__PURE__*/ (() => Schema.Struct({
+  "episodes": Schema.Array(SourceEpisode),
+  "source_id": Schema.String
+}).annotate({ identifier: "SourceEpisodeGroup" }))()
+export type SourceEpisodeGroup = typeof SourceEpisodeGroup.Type
+export type SourceEpisodeGroupEncoded = typeof SourceEpisodeGroup.Encoded
+
+export const RequestHistoryPage = /*#__PURE__*/ (() => Schema.Struct({
+  "boundary_items": Schema.Array(RequestHistoryItem),
+  /** Completeness of authorized selection and retained evidence; hidden endpoints do not affect this indicator. */
+  "complete": Schema.Boolean.annotate({ description: "Completeness of authorized selection and retained evidence; hidden endpoints do not affect this indicator." }),
+  "items": Schema.Array(RequestHistoryItem),
+  /** Opaque keyset cursor scoped to the person and thread. Each page reauthorizes its anchor and rows and reads status fresh; not a snapshot. */
+  "next_cursor": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Opaque keyset cursor scoped to the person and thread. Each page reauthorizes its anchor and rows and reads status fresh; not a snapshot." }),
+  "relations": Schema.Array(RequestHistoryRelation),
+  "source_episodes": Schema.Array(SourceEpisodeGroup),
+  "source_support": Schema.OptionFromNullOr(HistorySourceSupport)
+}).annotate({ identifier: "RequestHistoryPage" }))()
+export type RequestHistoryPage = typeof RequestHistoryPage.Type
+export type RequestHistoryPageEncoded = typeof RequestHistoryPage.Encoded
+
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Resource family. */
@@ -5206,6 +5301,15 @@ export const ThreadListQuery = /*#__PURE__*/ (() => Schema.Union([
 ], { mode: "oneOf" }).annotate({ identifier: "ThreadListQuery" }))()
 export type ThreadListQuery = typeof ThreadListQuery.Type
 export type ThreadListQueryEncoded = typeof ThreadListQuery.Encoded
+
+export const ThreadStartContext = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Revision,
+  "kind": Schema.Literal("thread-start-context"),
+  "source_id": Id,
+  "start_recipient": ThreadStartRecipient
+}).annotate({ identifier: "ThreadStartContext" }))()
+export type ThreadStartContext = typeof ThreadStartContext.Type
+export type ThreadStartContextEncoded = typeof ThreadStartContext.Encoded
 
 export const ThreadSummaryPage = /*#__PURE__*/ (() => Schema.Struct({
   "items": Schema.Array(ThreadSummary),

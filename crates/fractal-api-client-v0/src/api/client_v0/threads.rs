@@ -99,6 +99,25 @@ fn resolve_context(selection: &ThreadCollectionContext) -> Result<ThreadContext<
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StartContextQuery {
+    source_id: String,
+    episode: String,
+}
+
+pub(super) async fn start_context(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<StartContextQuery>,
+) -> ReadResult<thread_metadata::StartContext> {
+    with_person(state, session, move |store, person, _| {
+        thread_metadata::start_context(store, person, &thread_metadata::InboxOrigin {
+            source_id: query.source_id, episode: query.episode,
+        }).map_err(store_error)
+    }).await
+}
+
 pub(super) async fn detail(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
@@ -106,6 +125,28 @@ pub(super) async fn detail(
 ) -> ReadResult<Summary> {
     with_owner(state, session, id, |store, person, subject, _| {
         thread_metadata::summary(store, person, subject).map_err(store_error)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RequestHistoryQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+pub(super) async fn request_history(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<RequestHistoryQuery>,
+) -> ReadResult<thread_metadata::request_history::RequestHistoryPage> {
+    with_owner(state, session, id, move |store, person, subject, _| {
+        crate::store::missions::thread_request_history(
+            store, person, subject, query.cursor.as_deref(), query.limit.unwrap_or(40),
+        )
+        .map_err(store_error)
     })
     .await
 }
@@ -600,7 +641,10 @@ fn run_message(
             p.signature.as_ref(),
         )
         .map_err(store_error)?;
-        (p.target_id, message.subject, claim, appended)
+        let thread = claim.subject.clone();
+        let first_message = claim.body["fields"]["first_message"].as_str()
+            .ok_or_else(|| validation("the thread has no first message"))?.to_owned();
+        (thread, first_message, claim, appended)
     } else {
         let p: ReplyParameters = serde_json::from_value(request.parameters.clone())
             .map_err(|error| validation(error.to_string()))?;
@@ -719,6 +763,111 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn request_history_authorizes_owner_and_round_trips_opaque_cursor() {
+        use crate::PersonWorkStore;
+        use crate::store::thread_links::{AttachAsk, attach_ask};
+        use thread_metadata::{InboxOrigin, StartFromInbox};
+
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-request-history-api");
+        state.store.configure_thread_write_rollout([]);
+        state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        let person = "person/operator";
+        let agent = "agent/history/reviewer";
+        let thread = "thread/history-api";
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"history/reviewer\" { workspace \"/work/history\"; harness \"omp\" {} }\n",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "declare-history-api-agent").unwrap();
+        let mut origins = Vec::new();
+        for index in 0..2 {
+            let ask = state.store.ask_person(&serde_json::from_value(json!({
+                "person": person, "actor": agent, "title": format!("History request {index}"),
+                "reason": "Retained request", "new_run": format!("history-api-{index}"),
+                "idempotency_key": format!("history-api-{index}")
+            })).unwrap()).unwrap();
+            let opening = state.store.newest_claim_for_subject_kind(&ask.subject, "work.person-asked")
+                .unwrap().unwrap();
+            origins.push(InboxOrigin { source_id: ask.subject, episode: opening.id });
+        }
+        let message = ClaimInput {
+            subject: "message/history-api".into(), kind: "message.sent".into(),
+            actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)), ("to".into(), json!(agent)),
+                ("content".into(), json!("Discuss history")), ("status".into(), json!("sent")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        thread_metadata::start_from_inbox(&state.store, StartFromInbox {
+            thread, title: "History", person, origin: &origins[0],
+            key: "start-history-api", first_message: &message,
+        }).unwrap();
+        attach_ask(&state.store, agent, AttachAsk {
+            thread, ask: &origins[1].source_id, episode: &origins[1].episode,
+            key: "attach-history-api", decision: None,
+        }).unwrap();
+        let app = crate::api::router(state.clone());
+        for (reader, bound, expected) in [
+            (person, false, StatusCode::OK),
+            ("person/other", false, StatusCode::NOT_FOUND),
+            (person, true, StatusCode::FORBIDDEN),
+        ] {
+            let mut request = Request::builder().uri("/v1/client/threads/history-api/request-history")
+                .header(LOCAL_PERSON_HEADER, reader).body(Body::empty()).unwrap();
+            if bound {
+                request.extensions_mut().insert(crate::api::BoundAgent(agent.into()));
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            let body: Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap(),
+            ).unwrap();
+            if expected == StatusCode::OK {
+                assert_eq!(body["value"]["items"].as_array().unwrap().len(), 2);
+            } else {
+                assert!(!body.to_string().contains("Retained request"));
+                assert!(!body.to_string().contains(&origins[0].source_id));
+            }
+        }
+        // The store's existing bounded-page convention clamps rather than rejects.
+        for limit in [0, 1, 51] {
+            let response = app.clone().oneshot(
+                Request::builder().uri(format!("/v1/client/threads/history-api/request-history?limit={limit}"))
+                    .header(LOCAL_PERSON_HEADER, person).body(Body::empty()).unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap(),
+            ).unwrap();
+            let expected = crate::store::missions::thread_request_history(
+                &state.store, person, thread, None, limit,
+            ).unwrap();
+            assert_eq!(body["value"], json!(expected));
+            if limit <= 1 {
+                let cursor = body["value"]["next_cursor"].as_str().unwrap();
+                let response = app.clone().oneshot(
+                    Request::builder().uri(format!(
+                        "/v1/client/threads/history-api/request-history?limit=1&cursor={}",
+                        urlencoding::encode(cursor),
+                    )).header(LOCAL_PERSON_HEADER, person).body(Body::empty()).unwrap(),
+                ).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let next: Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap(),
+                ).unwrap();
+                let expected = crate::store::missions::thread_request_history(
+                    &state.store, person, thread, Some(cursor), 1,
+                ).unwrap();
+                assert_eq!(next["value"], json!(expected));
+                assert_ne!(next["value"]["items"][0]["key"], body["value"]["items"][0]["key"]);
+                assert!(next["value"]["next_cursor"].is_null());
+            }
+        }
+    }
 
     #[test]
     fn marked_unread_requires_an_exclusive_context() {

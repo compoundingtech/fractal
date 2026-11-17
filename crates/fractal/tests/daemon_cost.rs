@@ -344,6 +344,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/threads", "requires a paired assistant, a grant-bound conversation/session and per-read approval, absent from the person-client cost fixture; assistant authorization tests cover scoped discovery pagination and revocation, not populated SQLite cost"),
     ("GET /v1/client/assistant/thread-detail", "requires a paired assistant and an owner-visible thread in its granted conversation/session, absent from the person-client cost fixture; assistant authorization tests cover exact ownership, grant denial and response byte budgets, not populated SQLite cost"),
     ("GET /v1/client/assistant/thread-timeline", "requires a paired assistant and grant/session/thread-bound continuation, absent from the person-client cost fixture; assistant tests cover cursor isolation, bounded content chunks and shared receipt-slot authorization under backpressure, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-request-history", "requires an MCP conversation grant, selected current session and an owner-visible thread with retained requests, absent from the static cost fixture; assistant authorization tests cover scope, owner and source checks, not populated SQLite cost"),
     ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("GET /v1/client/assistant/slo", "requires a paired assistant granted read.assistant.slo and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the bounded objective/budget projection"),
@@ -1073,6 +1074,7 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/threads", "/v1/client/threads?agent_id={seat}"),
     get("GET /v1/client/threads/{id}", "/v1/client/threads/{thread}"),
     get("GET /v1/client/threads/{id}/timeline", "/v1/client/threads/{thread}/timeline"),
+    get("GET /v1/client/threads/{id}/request-history", "/v1/client/threads/{thread}/request-history"),
     get(
         "GET /v1/client/history/{*id}",
         "/v1/client/history/{history}",

@@ -248,9 +248,19 @@ impl Store {
         person: Option<&str>,
         now: u128,
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
+        self.attention_collection_snapshot_with_context(person, now, |_| Ok(()))
+    }
+
+    /// Preserve raw discussion evidence while retaining the collection's eligibility fence.
+    pub fn attention_collection_snapshot_with_context(
+        &self,
+        person: Option<&str>,
+        now: u128,
+        context: impl FnMut(&AttentionItemView) -> Result<()>,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
         // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
         // upper bound to -1 by passing u128::MAX through that reducer.
-        let eventual = self.attention_snapshot(person, i64::MAX as u128)?;
+        let eventual = self.attention_snapshot_with_context(person, i64::MAX as u128, context)?;
         let connection = self.readers.get();
         let subjects: BTreeSet<_> = eventual.iter()
             .filter(|item| item.kind == "person-step")

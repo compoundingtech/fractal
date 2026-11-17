@@ -371,7 +371,8 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': case 'usage-hub.quota': return [options];
             case 'arrangements.list': case 'read-positions.list': return ['person/example', {}, options];
             case 'thread.get': return ['thread/example', options];
-            case 'thread.timeline': return ['thread/example', {}, options];
+            case 'thread.start-context': return ['attention/example', 'episode/example', options];
+            case 'thread.timeline': case 'thread.request-history': return ['thread/example', {}, options];
             case 'thread.list': return [{ agent_id: 'agent/example' }, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
             case 'arrangements.memberships': return ['example', 'arrangement-id', 'person/example', {}, options];
