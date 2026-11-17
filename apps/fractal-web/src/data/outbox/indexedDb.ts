@@ -20,6 +20,17 @@ const error = (cause: unknown, operation: string): OutboxError => {
 }
 const invalid = (message: string): OutboxStorageError => new OutboxStorageError({ code: 'invalid-record', operation: 'validate', message })
 const quarantined = (): OutboxStorageError => new OutboxStorageError({ code: 'quarantined', operation: 'read', message: 'Attempt is quarantined.' })
+const rawScope = (raw: unknown): OutboxScope | undefined => {
+  if (typeof raw !== 'object' || raw === null || !('scope' in raw)) return undefined
+  try { return Schema.decodeUnknownSync(ScopeSchema)(raw.scope) } catch { return undefined }
+}
+const corruptEntry = (id: string, raw: unknown): OutboxEntry<PreparedPacket> => {
+  const revision = typeof raw === 'object' && raw !== null && 'record' in raw
+    && typeof raw.record === 'object' && raw.record !== null && 'revision' in raw.record
+    && typeof raw.record.revision === 'number' && Number.isSafeInteger(raw.record.revision) && raw.record.revision >= 0
+    ? raw.record.revision : undefined
+  return { _tag: 'corrupt', id, ...(revision === undefined ? {} : { revision }) }
+}
 
 /** Hash an owned copy before acceptance; a failed durable write never becomes an in-memory send. */
 export const spoolAttachment = Effect.fn('Outbox.spoolAttachment')(function* (bytes: Uint8Array) {
@@ -74,6 +85,72 @@ const transaction = <T>(db: IDBDatabase, mode: IDBTransactionMode, operation: st
   return promise
 }
 
+const openDatabase = Effect.fn('Outbox.openDatabase')(function* (options: Pick<OpenOutboxOptions, 'indexedDB' | 'databaseName'>) {
+  const factory = yield* Effect.try({ try: () => options.indexedDB ?? globalThis.indexedDB, catch: (cause) => error(cause, 'open') })
+  if (factory === undefined) return yield* new OutboxStorageError({ code: 'disabled', operation: 'open', message: 'IndexedDB is unavailable; Send was not accepted.' })
+  const db = yield* Effect.tryPromise({ try: () => {
+    const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase>()
+    let blocked = false
+    const request = factory.open(options.databaseName ?? defaultDatabaseName, 1)
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(attemptsStore, { keyPath: 'localAttemptId' })
+      request.result.createObjectStore(spoolStore, { keyPath: ['localAttemptId', 'hash'] })
+    }
+    request.onerror = () => reject(request.error)
+    request.onblocked = () => { blocked = true; reject(new OutboxStorageError({ code: 'disabled', operation: 'open', message: 'Outbox database upgrade is blocked.' })) }
+    request.onsuccess = () => { if (blocked) request.result.close(); else resolve(request.result) }
+    return promise
+  }, catch: (cause) => error(cause, 'open') })
+  db.onversionchange = () => db.close()
+  return db
+})
+
+export interface IndexedDbOutboxScopes {
+  readonly list: () => Promise<{ readonly scopes: readonly OutboxScope[]; readonly unscoped: readonly OutboxEntry<PreparedPacket>[] }>
+  readonly discardUnscoped: (id: string) => Promise<void>
+  readonly close: () => void
+}
+
+/** Recovery discovery only: never supplies a send repository or changes an attempt's scope/state. */
+export const openIndexedDbOutboxScopes = Effect.fn('Outbox.openScopes')(function* (options: Pick<OpenOutboxOptions, 'indexedDB' | 'databaseName'>) {
+  const db = yield* openDatabase(options)
+  const catalog: IndexedDbOutboxScopes = {
+    list: () => transaction(db, 'readonly', 'listScopes', (tx, done, fail) => {
+      const scopes = new Map<string, OutboxScope>()
+      const unscoped: OutboxEntry<PreparedPacket>[] = []
+      const request = tx.objectStore(attemptsStore).openCursor()
+      request.onsuccess = () => {
+        try {
+          const cursor = request.result
+          if (cursor === null) { done({ scopes: [...scopes.values()], unscoped }); return }
+          const scope = rawScope(cursor.value)
+          // A record without a decodable scope cannot be a valid storage envelope.
+          if (scope === undefined) unscoped.push(corruptEntry(String(cursor.primaryKey), cursor.value))
+          else scopes.set(JSON.stringify([scope.principalId, scope.deploymentId, scope.memberId]), scope)
+          cursor.continue()
+        } catch (cause) { fail(cause) }
+      }
+    }),
+    discardUnscoped: (id) => transaction(db, 'readwrite', 'discardUnscoped', (tx, done, fail) => {
+      const store = tx.objectStore(attemptsStore)
+      const request = store.get(id)
+      request.onsuccess = () => {
+        try {
+          // Recheck ownership under the write transaction; scoped rows use their fixed repository.
+          if (request.result !== undefined && rawScope(request.result) === undefined) {
+            store.delete(id)
+            const spool = tx.objectStore(spoolStore).openCursor(IDBKeyRange.bound([id], [id, []]))
+            spool.onsuccess = () => { const item = spool.result; if (item !== null) { item.delete(); item.continue() } }
+          }
+          done(undefined)
+        } catch (cause) { fail(cause) }
+      }
+    }),
+    close: () => db.close(),
+  }
+  return catalog
+})
+
 export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: OpenOutboxOptions) {
   // This write codec stays behind the existing lazy SDK boundary.
   const { ActionRequest, ActionResult } = yield* loadAttachmentSchema.pipe(Effect.mapError((cause) => error(cause, 'schema')))
@@ -125,28 +202,9 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
       return envelope
     } catch { return undefined }
   }
-  const rawScope = (raw: unknown): OutboxScope | undefined => {
-    if (typeof raw !== 'object' || raw === null || !('scope' in raw)) return undefined
-    try { return Schema.decodeUnknownSync(ScopeSchema)(raw.scope) } catch { return undefined }
-  }
-  const factory = yield* Effect.try({ try: () => options.indexedDB ?? globalThis.indexedDB, catch: (cause) => error(cause, 'open') })
-  if (factory === undefined) return yield* new OutboxStorageError({ code: 'disabled', operation: 'open', message: 'IndexedDB is unavailable; Send was not accepted.' })
   const storage = yield* Effect.try({ try: () => options.storage ?? globalThis.navigator?.storage, catch: (cause) => error(cause, 'persist') })
   const persistence = storage?.persist === undefined ? 'unsupported' : yield* Effect.tryPromise({ try: () => storage.persist().then((granted) => granted ? 'granted' as const : 'denied' as const), catch: (cause) => error(cause, 'persist') })
-  const db = yield* Effect.tryPromise({ try: () => {
-    const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase>()
-    let blocked = false
-    const request = factory.open(options.databaseName ?? defaultDatabaseName, 1)
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore(attemptsStore, { keyPath: 'localAttemptId' })
-      request.result.createObjectStore(spoolStore, { keyPath: ['localAttemptId', 'hash'] })
-    }
-    request.onerror = () => reject(request.error)
-    request.onblocked = () => { blocked = true; reject(new OutboxStorageError({ code: 'disabled', operation: 'open', message: 'Outbox database upgrade is blocked.' })) }
-    request.onsuccess = () => { if (blocked) request.result.close(); else resolve(request.result) }
-    return promise
-  }, catch: (cause) => error(cause, 'open') })
-  db.onversionchange = () => db.close()
+  const db = yield* openDatabase(options)
   const run = <T>(mode: IDBTransactionMode, operation: string, work: Parameters<typeof transaction<T>>[3]): Promise<T> => transaction(db, mode, operation, work)
   const get = (tx: IDBTransaction, id: string, done: (value: Envelope | undefined) => void, fail: (cause: unknown) => void): void => {
     const request = tx.objectStore(attemptsStore).get(id)
@@ -268,12 +326,7 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
           if (owner === undefined || sameScope(owner, scope)) {
             const envelope = inspect(cursor.value)
             if (envelope === undefined) {
-              const raw: unknown = cursor.value
-              const revision = typeof raw === 'object' && raw !== null && 'record' in raw
-                && typeof raw.record === 'object' && raw.record !== null && 'revision' in raw.record
-                && typeof raw.record.revision === 'number' && Number.isSafeInteger(raw.record.revision) && raw.record.revision >= 0
-                ? raw.record.revision : undefined
-              entries.push({ _tag: 'corrupt', id: String(cursor.primaryKey), ...(revision === undefined ? {} : { revision }) })
+              entries.push(corruptEntry(String(cursor.primaryKey), cursor.value))
             } else if (envelope.record !== undefined && envelope.dismissed === undefined) {
               entries.push({ _tag: 'record', record: envelope.record })
             }

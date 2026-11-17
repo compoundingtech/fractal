@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import fixture from '../subjectReadPort.gateway.fixtures.json'
 import { gatewayMessageSend } from '../attachmentPort.ts'
 import { createScopedChatOutbox, scopeFromCapabilities, type ScopedChatOutbox } from './scoped.ts'
+import { attemptsStore, defaultDatabaseName, spoolStore } from './indexedDb.ts'
 
 const decodedCapabilities = Native.decodeUnknownSync(Native.Capabilities)(fixture.capabilities.value)
 const base = {
@@ -15,7 +16,7 @@ const base = {
   value: { ...fixture.capabilities.value, kind: 'capabilities', transport: decodedCapabilities.transport, capabilities: [...decodedCapabilities.capabilities], issuer: 'person/example', issuer_key: 'issuer-key/a' },
 } satisfies EnvelopeOf<Capabilities>
 const owners: ScopedChatOutbox[] = []
-const setup = () => {
+const setup = (indexedDB = new IDBFactory()) => {
   let response: EnvelopeOf<Capabilities> = base
   let fail = false
   const calls: string[] = []
@@ -24,11 +25,30 @@ const setup = () => {
     if (fail) throw new TypeError('Offline')
     return Response.json(response)
   } })
-  const owner = createScopedChatOutbox(client, { indexedDB: new IDBFactory() })
+  const owner = createScopedChatOutbox(client, { indexedDB })
   owners.push(owner)
   return { client, owner, calls, respond: (next: EnvelopeOf<Capabilities>) => { response = next }, offline: () => { fail = true } }
 }
 afterEach(() => { for (const owner of owners.splice(0)) owner.close() })
+
+const openStoredDatabase = (factory: IDBFactory): Promise<IDBDatabase> => {
+  const result = Promise.withResolvers<IDBDatabase>()
+  const request = factory.open(defaultDatabaseName, 1)
+  request.onsuccess = () => result.resolve(request.result)
+  request.onerror = () => result.reject(request.error)
+  return result.promise
+}
+const storedRows = async (factory: IDBFactory, store = attemptsStore): Promise<unknown[]> => {
+  const db = await openStoredDatabase(factory)
+  try {
+    const result = Promise.withResolvers<unknown[]>()
+    const tx = db.transaction(store, 'readonly')
+    const request = tx.objectStore(store).getAll()
+    tx.oncomplete = () => result.resolve(request.result)
+    tx.onabort = () => result.reject(tx.error)
+    return await result.promise
+  } finally { db.close() }
+}
 
 describe('verified browser outbox scope', () => {
   it('reports a real blocked database upgrade as unavailable, never a corrupt recovery entry', async () => {
@@ -163,5 +183,92 @@ describe('verified browser outbox scope', () => {
     expect(await repo.read(initial.id)).toEqual(dispatched)
     expect(calls.every(path => path === '/v1/client/capabilities')).toBe(true)
     expect(scopeFromCapabilities(changed)).not.toEqual(repo.scope)
+  })
+
+  it.each([
+    ['different', false], ['different', true], ['missing', false], ['missing', true],
+  ] as const)('discovers persisted foreign attempts after reload with %s issuer identity (dispatched: %s), without changing or sending them', async (kind, didDispatch) => {
+    const factory = new IDBFactory()
+    const original = setup(factory)
+    original.owner.observe(base)
+    const first = await original.owner.repository()
+    if (first === undefined) throw new TypeError('Expected protected repository')
+    const initial = createOutboxRecord('attempt/reloaded', { text: 'retained across reload', attachments: [] })
+    const packet = prepareMessageSendPacket({ id: 'action/reloaded', idempotency_key: 'reloaded-packet-key', fence: { snapshot_id: base.snapshot.id, subject_revisions: {} }, parameters: { to: 'agent/example', content: initial.intent.text, tags: [], attachments: [] } })
+    const ready = prepareOutboxRecord(initial, packet, ['message/reloaded'])
+    if (ready === undefined) throw new TypeError('Expected ready record')
+    await first.commit(initial)
+    await first.compareAndSwap(initial.revision, ready)
+    const saved = didDispatch ? await first.acquireDispatchPermit(initial.id, ready.revision) : ready
+    const before = await storedRows(factory)
+    original.owner.close()
+
+    const reloaded = setup(factory)
+    const { issuer: _issuer, issuer_key: _key, ...value } = base.value
+    const changed = { ...base, value: { ...value, ...(kind === 'different' ? { issuer: 'person/other', issuer_key: 'issuer-key/b' } : {}) } }
+    reloaded.respond(changed)
+    reloaded.owner.observe(changed)
+    const expected = [{ id: initial.id, status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] }]
+    expect(await reloaded.owner.recovery.list()).toEqual(expected)
+    expect(await reloaded.owner.recovery.list()).toEqual(expected)
+    const current = await reloaded.owner.repository()
+    if (kind === 'different') {
+      expect(current?.scope).not.toEqual(first.scope)
+      expect(await current?.read(initial.id)).toBeUndefined()
+      expect(await current?.list()).toEqual([])
+    } else expect(current).toBeUndefined()
+    const send = gatewayMessageSend(reloaded.client, async () => { throw new TypeError('Foreign attempt must not acquire a snapshot') }, reloaded.owner)
+    expect(await send({ _tag: 'Resend', idempotencyKey: initial.id, api_version: 'st3.client.v0', type: 'message.send', id: packet.id, parameters: { ...packet.parameters, tags: [], attachments: [] } }))
+      .toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    expect(reloaded.calls.every(path => path === '/v1/client/capabilities')).toBe(true)
+    expect(await storedRows(factory)).toEqual(before)
+
+    // Discard also resolves persisted scopes without relying on a previous list/connection map.
+    reloaded.owner.close()
+    const discarder = setup(factory)
+    discarder.respond(changed)
+    discarder.owner.observe(changed)
+    await discarder.owner.recovery.discard(initial.id)
+    expect(await discarder.owner.recovery.list()).toEqual([])
+    discarder.owner.observe(base)
+    const retained = await discarder.owner.repository()
+    expect(await retained?.read(initial.id)).toEqual(saved)
+    expect(await retained?.list()).toEqual([])
+  })
+
+  it('keeps scoped and unscoped damaged persisted rows visible and explicitly discardable without an issuer', async () => {
+    const factory = new IDBFactory()
+    const original = setup(factory)
+    original.owner.observe(base)
+    const repo = await original.owner.repository()
+    if (repo === undefined) throw new TypeError('Expected protected repository')
+    const db = await openStoredDatabase(factory)
+    try {
+      const result = Promise.withResolvers<void>()
+      const tx = db.transaction([attemptsStore, spoolStore], 'readwrite')
+      tx.objectStore(attemptsStore).put({ localAttemptId: 'attempt/damaged-scoped', scope: repo.scope, schemaVersion: 999, record: { revision: 4 } })
+      tx.objectStore(attemptsStore).put({ localAttemptId: 'attempt/damaged-unscoped', scope: { invalid: true }, record: { revision: 2 } })
+      for (const id of ['attempt/damaged-scoped', 'attempt/damaged-unscoped']) {
+        tx.objectStore(spoolStore).put({ localAttemptId: id, hash: 'damaged', bytes: new Uint8Array([1, 2]) })
+      }
+      tx.oncomplete = () => result.resolve()
+      tx.onabort = () => result.reject(tx.error)
+      await result.promise
+    } finally { db.close() }
+    original.owner.close()
+    const reloaded = setup(factory)
+    const { issuer: _issuer, issuer_key: _key, ...value } = base.value
+    reloaded.respond({ ...base, value })
+    const before = await storedRows(factory)
+    const items = await reloaded.owner.recovery.list()
+    expect(items).toHaveLength(2)
+    for (const id of ['attempt/damaged-scoped', 'attempt/damaged-unscoped']) {
+      expect(items).toContainEqual({ id, status: 'storage damaged; delivery unknown', actions: ['discard'] })
+    }
+    expect(await storedRows(factory)).toEqual(before)
+    for (const item of items) await reloaded.owner.recovery.discard(item.id)
+    expect(await reloaded.owner.recovery.list()).toEqual([])
+    expect(await storedRows(factory)).toEqual([])
+    expect(await storedRows(factory, spoolStore)).toEqual([])
   })
 })

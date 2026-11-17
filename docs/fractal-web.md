@@ -620,6 +620,11 @@ or telemetry deployment label substitutes for issuer identity. Before protected 
 status checks, dispatch and outcome retention, current capabilities must match the original
 fixed tuple exactly. Missing, partial or changed identity blocks protected operations; the
 original retained records remain visible for recovery without being rebound or rewritten.
+Recovery enumerates persisted scopes independently of this page's open repositories, including
+after a reload into another identity or an answer without an issuer. Foreign-scope attempts
+offer status and explicit Discard only; enumeration never recovers their state, rebinds them
+to the current identity, or makes them dispatchable. Discard resolves the original persisted
+scope even when that scope has never been opened in the current page.
 Storage refusal in protected mode makes no message request and restores text and images.
 In unprotected mode only an explicit `applied: none` retains the exact original packet for
 an in-session retry; ambiguous outcomes are never replayed. This transient exception does
@@ -630,12 +635,16 @@ Snapshot-acquisition failures retain their distinct `snapshot-unavailable` class
 The readwrite permit CAS guarantees one dispatcher across tabs, including after a crash.
 If another tab recovers an in-flight marker as unknown, a receipt CAS conflict re-reads the
 current record and reapplies the core observation, allowing validated delivery to settle.
+Only genuine revision conflicts reread and reapply an observation. Discarding an in-flight
+attempt makes outcome retention non-writable; a later receipt settles unconfirmed without
+retrying the CAS.
 
 `src/data/outbox/` implements the core fixed-scope repository with versioned storage envelopes
 and an attachment spool. Transaction completion is the acknowledgement barrier, with strict
-durability requested where supported. Opening classifies unresolved dispatch markers as
-unknown; unsupported or corrupt records remain quarantined and cannot send. The recovery
-list retains readable damage as “storage damaged; delivery unknown”, with Discard as its only
+durability requested where supported. Recovery classifies unresolved dispatch markers as
+unknown only after verifying the current scope; unsupported or corrupt records remain
+quarantined and cannot send. The recovery list retains readable damage as
+“storage damaged; delivery unknown”, with Discard as its only
 action and no expiry. Discard removes damaged bytes without claiming nonapplication.
 Storage that cannot be opened or read is instead unavailable, retry later; it is never
 manufactured into a corrupt entry. Storage failures are typed, without a memory fallback,

@@ -3,7 +3,7 @@ import * as Native from '@fractal/client/schema/read'
 import { Effect } from 'effect'
 import type { ChatOutbox } from '../attachmentPort.ts'
 import type { OutboxRecoveryItem, OutboxRecoveryPort } from '../source.ts'
-import { openIndexedDbOutbox, type IndexedDbOutbox, type OpenOutboxOptions } from './indexedDb.ts'
+import { openIndexedDbOutbox, openIndexedDbOutboxScopes, type IndexedDbOutbox, type IndexedDbOutboxScopes, type OpenOutboxOptions } from './indexedDb.ts'
 import { OutboxIdentityUnavailable, sameScope } from './repository.ts'
 
 /** One canonical identity formula shared by wire extraction and cached observation. */
@@ -36,6 +36,15 @@ export const createScopedChatOutbox = (
   let cached: Identity | undefined
   let discovering: Promise<Identity> | undefined
   const connections = new Map<string, Promise<IndexedDbOutbox>>()
+  let catalog: Promise<IndexedDbOutboxScopes> | undefined
+  const persistedScopes = (): Promise<IndexedDbOutboxScopes> => {
+    if (catalog === undefined) {
+      const opening = Effect.runPromise(openIndexedDbOutboxScopes(options))
+      catalog = opening
+      void opening.catch(() => { if (catalog === opening) catalog = undefined })
+    }
+    return catalog
+  }
   const observe = (response: EnvelopeOf<Capabilities>): typeof Native.Capabilities.Type => {
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)(response.value)
     cached = { scope: decodedScope(capabilities, response.snapshot.host_id), response }
@@ -53,13 +62,7 @@ export const createScopedChatOutbox = (
     })()
     return discovering
   }
-  const repository: ScopedChatOutbox['repository'] = async (onDiscovery) => {
-    const needsDiscovery = cached === undefined
-    const identity = cached ?? await discover()
-    // Share only this operation's discovery, never stale cached grants.
-    if (needsDiscovery) onDiscovery?.(identity.response)
-    if (identity.scope === undefined) return undefined
-    const scope = identity.scope
+  const connectionFor = (scope: OutboxScope): Promise<IndexedDbOutbox> => {
     const key = JSON.stringify([scope.principalId, scope.deploymentId, scope.memberId])
     let connection = connections.get(key)
     if (connection === undefined) {
@@ -69,6 +72,13 @@ export const createScopedChatOutbox = (
     }
     return connection
   }
+  const repository: ScopedChatOutbox['repository'] = async (onDiscovery) => {
+    const needsDiscovery = cached === undefined
+    const identity = cached ?? await discover()
+    // Share only this operation's discovery, never stale cached grants.
+    if (needsDiscovery) onDiscovery?.(identity.response)
+    return identity.scope === undefined ? undefined : connectionFor(identity.scope)
+  }
   return {
     observe, repository,
     protection: () => cached?.scope === undefined ? 'unprotected' : 'durable',
@@ -76,32 +86,41 @@ export const createScopedChatOutbox = (
       list: async () => {
         // Initial identity discovery also supplies this operation's current comparison.
         const initial = cached === undefined ? await discover() : undefined
-        await repository()
+        const persisted = await (await persistedScopes()).list()
         const current = initial ?? await discover()
-        const items: OutboxRecoveryItem[] = []
-        for (const connection of connections.values()) {
-          const repo = await connection
-          const matches = current.scope !== undefined && sameScope(repo.scope, current.scope)
+        const items = new Map<string, OutboxRecoveryItem>()
+        for (const entry of restoreOutboxEntries(persisted.unscoped)) {
+          if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, status: entry.status, actions: entry.actions })
+        }
+        for (const scope of persisted.scopes) {
+          const repo = await connectionFor(scope)
+          const matches = current.scope !== undefined && sameScope(scope, current.scope)
           if (matches) await repo.recover()
           for (const entry of restoreOutboxEntries(await repo.list())) {
-            if (entry._tag === 'corrupt') items.push({ id: entry.id, status: entry.status, actions: entry.actions })
-            else items.push({
+            if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, status: entry.status, actions: entry.actions })
+            else items.set(entry.record.id, {
               id: entry.record.id,
               status: matches ? `Saved message: ${entry.record.state}.` : 'Identity changed; delivery unknown. Return to the original account and deployment.',
               actions: ['discard'],
             })
           }
         }
-        return items
+        return [...items.values()]
       },
       discard: async (id) => {
-        for (const connection of connections.values()) {
-          const repo = await connection
+        const scopes = await persistedScopes()
+        const persisted = await scopes.list()
+        await scopes.discardUnscoped(id)
+        for (const scope of persisted.scopes) {
+          const repo = await connectionFor(scope)
           const entries = await repo.list()
           if (entries.some((entry) => (entry._tag === 'record' ? entry.record.id : entry.id) === id)) await repo.dismiss(id)
         }
       },
     },
-    close: () => { for (const connection of connections.values()) void connection.then(repo => repo.close(), () => undefined) },
+    close: () => {
+      for (const connection of connections.values()) void connection.then(repo => repo.close(), () => undefined)
+      void catalog?.then(scopes => scopes.close(), () => undefined)
+    },
   }
 }
