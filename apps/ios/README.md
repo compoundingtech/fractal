@@ -142,8 +142,8 @@ unavailable binding returns unknown access feedback without reading/rebinding th
 repository. The shared client owns restoration/CAS state transitions and packets.
 This is a JS contract boundary only: delivery has **not** switched to a durable
 outbox, and the notice is not yet wired into the UI. No crash-safe sending is
-claimed. The approved next native work requires `expo-sqlite` 57.0.3 and a narrow
-`NSURLIsExcludedFromBackupKey` bridge with readback; neither is added by this step.
+claimed. `expo-sqlite` 57.0.3 is now a direct dependency and Expo config plugin.
+The narrow `NSURLIsExcludedFromBackupKey` bridge with readback is still not built.
 Protected storage failures must reject acceptance and keep the draft, never fall
 back to legacy sending; that delivery integration remains outside this step.
 The binding contract tests retain immutable intent and private attachment references
@@ -153,8 +153,28 @@ Attachment bytes belong to the future iOS spool, not the serialized intent.
 Repository CAS must call `isAllowedOutboxTransition` inside the same transaction;
 revision equality alone is insufficient. Exact original authoritative timeline
 identity observations use the shared core; absence never proves nonapplication.
-The iOS contracts use the shared client's `createMemoryOutboxRepository` reference
-double (`@fractal/client/test-support`), not an independent repository implementation.
+`outboxSqlite.ts` implements the repository over a narrow SQL executor. Its dedicated
+database migrates from `user_version = 0` to 1 without dropping records. Scope
+columns plus attempt ID form the primary key; every read/list/write filters the
+same immutable scope. The read, shared transition authorization and conditional
+revision UPDATE occur in one write transaction. Corrupt JSON, invalid packet
+schemas or disagreement with row revision/state throw `OutboxCorruptionError`
+(certainty unknown), never a fabricated sendable row or an empty successful read.
+Unsupported schema versions fail closed instead of resetting storage.
+
+`outboxSqliteNative.ts` supplies an Expo SQLite connection with serialized operations,
+`BEGIN IMMEDIATE`/commit/rollback, FULL synchronization and queued close. The path
+is `defaultDatabaseDirectory/fractal-outbox/outbox.sqlite` (app-private Documents
+on iOS), not a purgeable cache. Backup exclusion for this whole root, including
+journals and future spool files, belongs to step 3 and is **not established yet**.
+The factory is not connected to production sending. Expo prebuild/Pods regeneration
+and a rebuilt installed binary are still required; no generated native files were
+hand-edited. Node SQLite integration tests are not native binary/crash proof.
+
+The core exports a reference repository but no reusable runnable contract suite.
+One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope
+contracts against both `createMemoryOutboxRepository` and real `node:sqlite`.
+File-reopen, migration, rollback and corrupt-row tests additionally exercise SQLite.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.
