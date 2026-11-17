@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { AppState, FlatList, Image, Keyboard, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
 import { ownedPresentations } from '../ownedPresentation';
 import * as ImagePicker from 'expo-image-picker';
@@ -22,7 +22,7 @@ import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { ConversationComposer } from '../conversationComposer';
 import { ConversationAttempts } from '../conversationAttempts';
-import { ConversationFeedback } from '../conversationPresentation';
+import { ConversationFeedback, ConversationFrame, ConversationMessage } from '../conversationPresentation';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport } from '../visibleConversationImages';
@@ -448,7 +448,36 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const strip = [styles.strip, { borderBottomColor: palette.surface0 }];
   const bar = { backgroundColor: palette.mantle, borderTopColor: palette.surface0 };
 
-  return <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={headerHeight}>
+  const composer = agent && listening ? <View style={[styles.composer, bar, { paddingBottom: bottom, flexDirection: 'column', alignItems: 'stretch' }]}>
+      <Waveform levels={levels} />
+      <T color={heard ? theme.text : theme.overlay0}>{heard || 'Listening…'}</T>
+      <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+        <Button label="cancel" color={theme.overlay1} onPress={() => void finishListening('cancel')} />
+        <Button label="done" color={theme.subtext0} onPress={() => void finishListening('edit')} />
+        <Button label="send" disabled={!canSend} onPress={() => void finishListening('send')} />
+      </View>
+    </View> : agent ? <ConversationComposer
+      text={draft} onChange={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
+      label={`Message ${title}`} inputRef={box} enabled canSend={canSend && !sizeInfo.over && (!!draft.trim() || !!images.length)}
+      onSend={() => void send()} sendLabel="send" sendStyle={styles.send}
+      style={[styles.composer, bar, { paddingBottom: bottom }]} inputStyle={[styles.input, canDictate ? { paddingRight: 36 } : null]}
+      before={images.length || imageIssue ? <View style={[styles.tray, bar]}>
+      {images.map(image => <View key={image.key}>
+        <Image source={{ uri: `data:${image.mediaType};base64,${image.base64}` }} style={[styles.thumb, { backgroundColor: palette.surface0 }]} accessibilityLabel={image.name ?? 'image to send'} />
+        <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${image.name ?? 'image'}`} hitSlop={8} onPress={() => setImages(previous => previous.filter(other => other.key !== image.key))} style={[styles.unthumb, { backgroundColor: palette.surface1 }]}><T bold color={theme.text}>✕</T></Pressable>
+        <T dim style={{ fontSize: 10 }}>{megabytes(image.bytes)}</T>
+      </View>)}
+      {imageIssue ? <T color={theme.waiting} style={{ flex: 1 }}>{imageIssue}</T> : null}
+    </View> : null}
+      status={sendIssue || sizeInfo.note ? <View style={[styles.tray, bar]} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
+      leading={<Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
+        <T color={images.length >= MAX_IMAGES ? theme.overlay0 : theme.accent} style={{ fontSize: 18 }}>＋</T>
+      </Pressable>}
+      inputAdornment={canDictate ? <Pressable accessibilityRole="button" accessibilityLabel="Dictate a message" hitSlop={8} onPress={() => void listen()} style={styles.mic}>
+        <T style={{ fontSize: 17 }}>🎙</T>
+      </Pressable> : null}
+    /> : session ? <View style={[styles.composer, bar, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null;
+  return <ConversationFrame style={styles.screen} keyboardVerticalOffset={headerHeight} composer={composer}>
     <DraftRecoveryNote />
     <Banners />
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
@@ -503,36 +532,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     />
     </View>
     {away ? <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest" style={[styles.latest, { backgroundColor: palette.surface0 }]} onPress={() => list.current?.scrollToOffset({ offset: 0, animated: true })}><T bold color={theme.accent}>↓ latest</T></Pressable> : null}
-    {agent && listening ? <View style={[styles.composer, bar, { paddingBottom: bottom, flexDirection: 'column', alignItems: 'stretch' }]}>
-      <Waveform levels={levels} />
-      <T color={heard ? theme.text : theme.overlay0}>{heard || 'Listening…'}</T>
-      <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
-        <Button label="cancel" color={theme.overlay1} onPress={() => void finishListening('cancel')} />
-        <Button label="done" color={theme.subtext0} onPress={() => void finishListening('edit')} />
-        <Button label="send" disabled={!canSend} onPress={() => void finishListening('send')} />
-      </View>
-    </View> : agent ? <ConversationComposer
-      text={draft} onChange={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
-      label={`Message ${title}`} inputRef={box} enabled canSend={canSend && !sizeInfo.over && (!!draft.trim() || !!images.length)}
-      onSend={() => void send()} sendLabel="send" sendStyle={styles.send}
-      style={[styles.composer, bar, { paddingBottom: bottom }]} inputStyle={[styles.input, canDictate ? { paddingRight: 36 } : null]}
-      before={images.length || imageIssue ? <View style={[styles.tray, bar]}>
-      {images.map(image => <View key={image.key}>
-        <Image source={{ uri: `data:${image.mediaType};base64,${image.base64}` }} style={[styles.thumb, { backgroundColor: palette.surface0 }]} accessibilityLabel={image.name ?? 'image to send'} />
-        <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${image.name ?? 'image'}`} hitSlop={8} onPress={() => setImages(previous => previous.filter(other => other.key !== image.key))} style={[styles.unthumb, { backgroundColor: palette.surface1 }]}><T bold color={theme.text}>✕</T></Pressable>
-        <T dim style={{ fontSize: 10 }}>{megabytes(image.bytes)}</T>
-      </View>)}
-      {imageIssue ? <T color={theme.waiting} style={{ flex: 1 }}>{imageIssue}</T> : null}
-    </View> : null}
-      status={sendIssue || sizeInfo.note ? <View style={[styles.tray, bar]} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
-      leading={<Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
-        <T color={images.length >= MAX_IMAGES ? theme.overlay0 : theme.accent} style={{ fontSize: 18 }}>＋</T>
-      </Pressable>}
-      inputAdornment={canDictate ? <Pressable accessibilityRole="button" accessibilityLabel="Dictate a message" hitSlop={8} onPress={() => void listen()} style={styles.mic}>
-        <T style={{ fontSize: 17 }}>🎙</T>
-      </Pressable> : null}
-    /> : session ? <View style={[styles.composer, bar, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null}
-  </KeyboardAvoidingView>;
+  </ConversationFrame>;
 }
 
 function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof useStore>['data']['agents'][number]>; onMission: (id: string, title: string) => void }) {
@@ -753,12 +753,13 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
   }
   return <Pressable disabled={!long} accessibilityRole={long ? 'button' : undefined} accessibilityState={long ? { expanded: open } : undefined} onPress={() => onToggle(entry.id)}
     style={[styles.entry, styles.barred, { borderLeftColor: paint(c(look.edge)) }, toYou ? { backgroundColor: tokenColor(rule.to_you_fill, palette) } : null]}>
-    <T>{toYou ? <T color={c(look.edge)}>● </T> : null}<T bold={look.from_bold} color={c(look.from)}>{body.to ? `${body.from} → ${body.to}` : body.from}</T>{body.subject ? <T bold={look.from_bold} color={look.from_bold ? undefined : c(look.text)}>  {body.subject}</T> : null}<T dim>  {entry.at}</T>{body.dictated ? <T dim>  🎙</T> : null}{body.signed ? <T dim>  {body.signed}</T> : null}{mark ? <T color={c(mark.color)}>  {mark.text}</T> : null}</T>
-    <View style={long && !open ? { maxHeight: limit, overflow: 'hidden' } : null}>
-      {/* Measured at its full height and never shrunk by the fold: a measurement the fold could
-          change would fold and unfold the mail in a loop. */}
-      <View style={{ flexShrink: 0 }} onLayout={event => { const next = event.nativeEvent.layout.height; setHeight(previous => Math.max(previous, next)); }}>{whole.text ?? body.text ? <Markdown selectable={false} text={whole.text ?? body.text} color={c(look.text)} /> : null}</View>
-    </View>
+    {/* Measure full body height independently of the outside fold, avoiding fold/unfold loops. */}
+    <ConversationMessage
+      heading={<>{toYou ? <T color={c(look.edge)}>● </T> : null}<T bold={look.from_bold} color={c(look.from)}>{body.to ? `${body.from} → ${body.to}` : body.from}</T>{body.subject ? <T bold={look.from_bold} color={look.from_bold ? undefined : c(look.text)}>  {body.subject}</T> : null}<T dim>  {entry.at}</T>{body.dictated ? <T dim>  🎙</T> : null}{body.signed ? <T dim>  {body.signed}</T> : null}{mark ? <T color={c(mark.color)}>  {mark.text}</T> : null}</>}
+      text={(whole.text ?? body.text) || undefined} color={c(look.text)} selectable={false}
+      bodyContainerStyle={long && !open ? { maxHeight: limit, overflow: 'hidden' } : undefined}
+      bodyStyle={{ flexShrink: 0 }} onBodyLayout={event => { const next = event.nativeEvent.layout.height; setHeight(previous => Math.max(previous, next)); }}
+    />
     {body.whole && !(whole.text && !whole.note) ? <Pressable accessibilityRole="button" accessibilityLabel="Show the whole message" disabled={whole.loading} onPress={whole.load} hitSlop={6}>
       <T color={c(RULES.tool.collapse.color)}>{whole.loading ? '  loading the whole message…' : `  show the whole message · ${kib(body.whole.bytes)}`}</T>
     </Pressable> : null}

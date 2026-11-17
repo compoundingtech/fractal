@@ -49,6 +49,7 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', RequestHistory: 'RequestHistory', threadClock, threadExactTime, threadRelativeTime,
     ConversationComposer: props => compile('ConversationComposer', undefined, { View: 'View', Field: 'Field', Button: 'Button' }, './conversationComposer.tsx')(props),
     ConversationFeedback: props => compile('ConversationFeedback', undefined, { View: dependencies.View ?? 'View', T: dependencies.T ?? 'T', Button: dependencies.Button ?? 'Button' }, './conversationPresentation.tsx')(props),
+    ConversationMessage: props => compile('ConversationMessage', undefined, { View: dependencies.View ?? 'View', T: dependencies.T ?? 'T', Markdown: dependencies.Markdown ?? 'Markdown' }, './conversationPresentation.tsx')(props),
     HistoryStart: 'HistoryStart', StartRecipientPreview: 'StartRecipientPreview', ThreadStartContextReader: ReadyStartContext,
     Clipboard: { setStringAsync: async () => {} }, useMemo: create => create(), useEffect() {}, useFocusEffect() {}, useCallback: callback => callback,
     threadStartAttemptScope: attemptScope,
@@ -455,7 +456,8 @@ test('the thread screen docks its one composer below the scrolling history; embe
   const source = readFileSync(new URL('./screens/Threads.tsx', import.meta.url), 'utf8');
   const screen = source.slice(source.indexOf('export function ThreadScreen'), source.indexOf('function ThreadDetailContent'));
   assert.match(screen, /<SystemScreen>/, 'the thread screen reads in system text');
-  assert.match(screen, /<KeyboardAvoidingView style=\{\{ flex: 1 \}\}[^>]*>\s*<ScrollView ref=\{viewport\} style=\{\{ flex: 1 \}\}[\s\S]*?<\/ScrollView>\s*\{dock \? <View/, 'the dock is a sibling below a flex:1 scroll');
+  assert.match(screen, /ConversationFrame\(\{[\s\S]*?children: <ScrollView ref=\{viewport\} style=\{\{ flex: 1 \}\}[\s\S]*?<\/ScrollView>,\s*composer: dock,/, 'the common frame docks below the unchanged flex:1 history scroll');
+  assert.match(readFileSync(new URL('./conversationPresentation.tsx', import.meta.url), 'utf8'), /<KeyboardAvoidingView[^>]*>[\s\S]*?\{children\}\s*\{composer \? <View/, 'the dock remains a sibling after history');
   assert.match(screen, /<ThreadViewport viewport=\{viewport\}><InlineThread [^>]*frame=\{frame\}/, 'read marks still measure the history scroll');
   assert.match(readFileSync(new URL('./App.tsx', import.meta.url), 'utf8'), /name="Thread" component=\{ThreadScreen\} options=\{\(\{ route \}\) => \(\{ \.\.\.systemOptions,/);
 });
