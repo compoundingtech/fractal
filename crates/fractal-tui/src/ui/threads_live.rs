@@ -188,7 +188,6 @@ pub(super) struct Receipt {
 )]
 enum Confirmation {
     Applied(Option<Envelope<ThreadSummary>>),
-    Rejected,
     Failed(ClientError),
     NotSent(ClientError),
 }
@@ -211,20 +210,7 @@ impl Delivery {
 
     fn failed(&mut self, error: &ClientError) -> bool {
         self.pending = false;
-        self.unknown |= error.outcome_unknown()
-            || matches!(error, ClientError::Protocol(_))
-            || error.applied() != Some("none")
-                && matches!(
-                    error,
-                    ClientError::Api(
-                        fractal_client::ErrorCode::Internal
-                            | fractal_client::ErrorCode::Unknown
-                            | fractal_client::ErrorCode::RemoteUnavailable
-                            | fractal_client::ErrorCode::ResponseBudgetExceeded
-                            | fractal_client::ErrorCode::RecipientUnassigned,
-                        ..
-                    )
-                );
+        self.unknown |= error.outcome_unknown();
         self.unknown
     }
 }
@@ -312,7 +298,9 @@ impl Write {
                 ))
             }
             Ok(result) if result.value.status == fractal_client::ActionStatus::Rejected => {
-                Confirmation::Rejected
+                Confirmation::Failed(ClientError::Protocol(
+                    "The thread action was rejected without explicit nonapplication proof".into(),
+                ))
             }
             Ok(result)
                 if result.value.status == fractal_client::ActionStatus::Completed
@@ -1005,21 +993,6 @@ impl Threads {
             }
         };
         let summary = self.summary(id)?;
-        if key.code == KeyCode::Char('R') || key.code == KeyCode::Char('r') {
-            let original = self
-                .pending_actions
-                .get(id)
-                .into_iter()
-                .chain(
-                    self.drafts
-                        .values()
-                        .filter_map(|draft| draft.delivery.as_ref()),
-                )
-                .find(|delivery| {
-                    delivery.write.id == *id && delivery.unknown && !delivery.pending
-                })?;
-            return Some(thread::Tap::Retry(original.write.key.clone()));
-        }
         Some(match key.code {
             KeyCode::Char('Z' | 'z') if summary.state == ThreadState::Open && self.access.close => {
                 thread::Tap::Close(id.clone())
@@ -1242,7 +1215,7 @@ impl Threads {
             ..
         }) = frozen
         {
-            doc.wrap(&[text::run(format!("Original delivery to {} is pending or unconfirmed. Retrying keeps this exact recipient.", label(&start.agent_id)), theme::dim())], width);
+            doc.wrap(&[text::run(format!("Original delivery to {} is pending or unconfirmed. It may already have arrived and will not be sent again.", label(&start.agent_id)), theme::dim())], width);
             return;
         }
         if let Some(context) = self.start_context(item) {
@@ -2362,14 +2335,14 @@ impl Threads {
             .find(|delivery| delivery.write.key == key);
         if let Some(delivery) = delivery
             && !delivery.pending
-            && delivery.unknown
+            && !delivery.unknown
         {
             delivery.pending = true;
             self.writes.push(delivery.write.clone());
         }
     }
 
-    fn feedback(&self, doc: &mut Doc, host: &str, delivery: &Delivery, width: usize) {
+    fn feedback(&self, doc: &mut Doc, _host: &str, delivery: &Delivery, width: usize) {
         if delivery.pending {
             doc.wrap(
                 &[text::run(
@@ -2382,26 +2355,13 @@ impl Threads {
             doc.wrap(
                 &[text::run(
                     format!(
-                        "{}: outcome not confirmed. Retry the original action.",
+                        "{}: outcome not confirmed. It may already have applied and will not be sent again.",
                         delivery.write.label()
                     ),
                     theme::dim(),
                 )],
                 width,
             );
-            doc.buttons(&[(
-                match (
-                    self.hotkeys_for(host, &delivery.write.id),
-                    Self::alt_chords(host),
-                ) {
-                    (false, _) => "",
-                    (true, false) => "r",
-                    (true, true) => "alt+r",
-                },
-                &format!("Retry {}", delivery.write.label()),
-                Hit::Thread(host.into(), thread::Tap::Retry(delivery.write.key.clone())),
-                theme::ACCENT,
-            )]);
         }
     }
 
@@ -2586,9 +2546,9 @@ impl Threads {
         if draft
             .delivery
             .as_ref()
-            .is_some_and(|delivery| delivery.pending)
+            .is_some_and(|delivery| delivery.pending || delivery.unknown)
         {
-            return Err("The original action is still being sent".into());
+            return Err("The original action is pending or unknown and will not be sent again".into());
         }
         let key = input.key();
         let write = if let Some(delivery) = &draft.delivery {
@@ -3369,24 +3329,6 @@ impl Threads {
         }
         if write.input.is_none() {
             self.pending_actions.remove(&write.id);
-        }
-        if matches!(confirmation, Confirmation::Rejected) {
-            if matches!(write.mutation, Mutation::Start(_))
-                && let Some(item) = write.host.strip_prefix("home:")
-            {
-                self.retained_origins.remove(item);
-            }
-            if let Some(key) = &write.input {
-                let draft = self.drafts.get_mut(key).unwrap();
-                draft.delivery = None;
-                draft.rename_observed = None;
-            }
-            if matches!(write.mutation, Mutation::Start(_))
-                && let Some(item) = write.host.strip_prefix("home:")
-            {
-                self.request_start_context(item);
-            }
-            return Some("The original thread action was rejected".into());
         }
         let Confirmation::Applied(summary) = confirmation else {
             unreachable!()

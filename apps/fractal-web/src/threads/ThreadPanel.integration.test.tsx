@@ -182,11 +182,10 @@ it.each(['close', 'rename'] as const)('keeps the original %s reachable after its
     await act(async () => root.render(<RegistryContext.Provider value={registry}>Another view</RegistryContext.Provider>))
     await render(true)
     await press(`Retry ${kind}`)
-    expect(writes).toHaveLength(2)
-    expect(writes[1]).toEqual(writes[0])
-    expect(host.textContent).not.toContain(`Retry ${kind}`)
+    expect(writes).toHaveLength(1)
+    expect(host.textContent).toContain(`Retry ${kind}`)
     const nextAction = kind === 'close' ? 'Reopen thread' : 'Rename'
-    expect([...host.querySelectorAll('button')].find(button => button.textContent === nextAction)?.disabled).toBe(false)
+    expect([...host.querySelectorAll('button')].find(button => button.textContent === nextAction)?.disabled).toBe(true)
   } finally { stop(); await act(async () => root.unmount()); registry.dispose(); host.remove() }
 })
 

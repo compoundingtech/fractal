@@ -3569,7 +3569,7 @@ impl Ui {
                     if conversation.is_none() {
                         return false;
                     }
-                    if let Some(entry) = self.undelivered() {
+                    if let Some(entry) = self.retryable_undelivered() {
                         self.effects.push(Effect::Resend { entry });
                     }
                 }
@@ -9279,7 +9279,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_that_did_not_arrive_can_be_sent_again_or_cleared() {
+    fn unknown_message_can_be_copied_but_never_retried() {
         let mut ui = glass();
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".into())),
@@ -9302,21 +9302,11 @@ mod tests {
             });
         }
         assert!(screen(&ui).contains("unconfirmed, Fractal did not answer"));
-        // Letters type in a conversation: Ctrl+R sends it again, and Backspace takes it back
-        // into the box to change or delete there.
+        assert!(!screen(&ui).contains("ctrl+r send again"));
+        // Ctrl+R cannot replay unknown delivery. Backspace explicitly copies it to the composer.
         ctrl(&mut ui, 'r');
         press(&mut ui, KeyCode::Backspace, KeyModifiers::NONE);
-        assert_eq!(
-            std::mem::take(&mut ui.effects),
-            [
-                Effect::Resend {
-                    entry: "pending:token-1".into()
-                },
-                Effect::Forget {
-                    entry: "pending:token-1".into()
-                }
-            ]
-        );
+        assert!(ui.effects.is_empty(), "copying unknown text retains the original attempt");
         assert!(ui.editing);
         assert_eq!(
             ui.conversation_state.drafts["agent/example/atlas/builder"],

@@ -719,17 +719,14 @@ describe('ConversationPane composer/send binding', () => {
     expect(container.querySelector('[data-testid="send-unconfirmed"]')!.textContent).toContain('Not confirmed yet')
     expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
     expect(gateway!.actions).toHaveLength(1)
-    const firstAction = gateway!.actions[0]!
     const row = userRows()[0]!
     gateway!.sendMessageId = undefined
     const resend = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-unconfirmed"] button')]
-      .find(button => button.textContent === 'Send again')!
-    flushSync(() => resend.click())
-    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
-    expect(gateway!.actions).toHaveLength(2)
-    expect(gateway!.actions[1]).toMatchObject({
-      id: firstAction.id, idempotency_key: firstAction.idempotency_key, parameters: firstAction.parameters,
-    })
+      .find(button => button.textContent === 'Send again')
+    expect(resend).toBeUndefined()
+    await settle()
+    expect(userRows()[0]?.getAttribute('data-send-state')).toBe('unconfirmed')
+    expect(gateway!.actions).toHaveLength(1)
     expect(userRows()).toHaveLength(1)
     expect(userRows()[0]).toBe(row)
   })
@@ -750,52 +747,23 @@ describe('ConversationPane composer/send binding', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it('retries unconfirmed sends with one action per user retry and the original key', async () => {
+  it('retains unknown sends without offering or dispatching a resend', async () => {
     await prepareSendPane()
     const send = vi.spyOn(live!.source.attachments!, 'send')
     gateway!.abortSend = true
     await submitDraft()
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
-    const firstAction = gateway!.actions[0]!
-    const firstKey = firstAction.idempotency_key
     const rowId = userRows()[0]!.getAttribute('data-item-id')
-    const sendRows = () => userRows().filter(row => row.getAttribute('data-item-id') === rowId)
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      gateway!.conversationFrame(scratchSeat, [prompt(10, 'Previous prompt'), entry(11, 'Unrelated response')])
-      live!.registry.refresh(live!.source.grants)
-      await settle()
-      const retry = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-unconfirmed"] button')]
-        .find(button => button.textContent === 'Send again')
-      expect(retry).toBeDefined()
-      expect(retry!.disabled).toBe(false)
-      let resolve!: () => void
-      gateway!.sendGate = new Promise<void>(done => { resolve = done })
-      gateway!.abortSend = attempt < 3
-      if (attempt === 2) {
-        gateway!.socket!.onclose?.({ code: 1006, reason: 'retry freshness proof' })
-        await until(() => gateway!.subscribesFor(scratchSeat) === 2)
-        gateway!.conversationFrame(scratchSeat, [prompt(10, 'Previous prompt'), entry(11, 'New unrelated response')])
-        await settle()
-      }
-      flushSync(() => {
-        retry!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 }))
-        retry!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, detail: 1 }))
-        retry!.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0, detail: 1 }))
-      })
-      await until(() => gateway!.actions.length === attempt + 1)
-      expect(send).toHaveBeenCalledTimes(attempt + 1)
-      expect(send.mock.calls[attempt]![0]).toMatchObject({ _tag: 'Resend', idempotencyKey: firstKey })
-      await until(() => sendRows()[0]?.getAttribute('data-send-state') === 'pending')
-      expect(sendRows()[0]!.getAttribute('data-item-id')).toBe(rowId)
-      resolve()
-      await until(() => sendRows()[0]?.getAttribute('data-send-state') === (attempt < 3 ? 'unconfirmed' : 'sent'))
-      expect(gateway!.actions.map(action => ({
-        id: action.id, idempotency_key: action.idempotency_key, parameters: action.parameters,
-      }))).toEqual(Array(attempt + 1).fill({
-        id: firstAction.id, idempotency_key: firstKey, parameters: firstAction.parameters,
-      }))
-      expect(sendRows()).toHaveLength(1)
-    }
+    gateway!.abortSend = false
+    gateway!.conversationFrame(scratchSeat, [prompt(10, 'Previous prompt'), entry(11, 'Unrelated response')])
+    live!.registry.refresh(live!.source.grants)
+    await settle()
+    expect([...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-unconfirmed"] button')]
+      .some(button => button.textContent === 'Send again')).toBe(false)
+    expect(gateway!.actions).toHaveLength(1)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(userRows().filter(row => row.getAttribute('data-item-id') === rowId)).toHaveLength(1)
+    expect(userRows().find(row => row.getAttribute('data-item-id') === rowId)?.getAttribute('data-send-state')).toBe('unconfirmed')
   })
 
   it('keeps an explicitly unapplied server refusal on its row and retries it with the original key', async () => {
@@ -818,7 +786,7 @@ describe('ConversationPane composer/send binding', () => {
     expect(userRows()).toHaveLength(1)
   })
 
-  it('keeps an ambiguous server outage unconfirmed with Send again rather than failure feedback', async () => {
+  it('keeps an ambiguous server outage unconfirmed without offering resend or failure feedback', async () => {
     await prepareSendPane()
     gateway!.ambiguousSend = true
     await submitDraft()
@@ -828,8 +796,7 @@ describe('ConversationPane composer/send binding', () => {
     expect(notice.textContent).toContain('Not confirmed yet')
     const resend = [...notice.querySelectorAll<HTMLButtonElement>('button')]
       .find(button => button.textContent === 'Send again')
-    expect(resend).toBeDefined()
-    expect(resend!.disabled).toBe(false)
+    expect(resend).toBeUndefined()
     expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
     expect(gateway!.actions).toHaveLength(1)
   })

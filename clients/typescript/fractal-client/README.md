@@ -26,6 +26,91 @@ Existing query options and optional defaults keep their positions: for example,
 `resourcesList(filters, pageOptions, { signal })`. Cancellation is checked before fetching
 and after asynchronous credentials/discovery; the signal stays attached to native fetch while
 the JSON body is consumed. Cancellation does not prove an action was not delivered and never retries it.
+
+Shared action delivery distinguishes certainty from transport errors. Only explicit
+`applied: "none"` in the outer error or its details, with no unknown or malformed
+contradiction, proves nonapplication. Bare stale-fence, rate-limited, other HTTP errors,
+network failures and malformed receipts after dispatch remain `unconfirmed`.
+`failed` means a pre-dispatch build failure or a proven nonapplication refusal;
+`sent` requires the send adapter's completion check to succeed.
+`sendAction` may rebuild only after proven nonapplication. Neither automatic delivery
+nor `resendAction` / `resendBoundAction` POSTs an unknown retained attempt, refreshes
+its fence, or rebuilds/re-signs it. The retained packet and original member are for
+reconciliation, not permission to resend. This is process-lifetime retention, not a
+durable outbox or a read-only server outcome endpoint.
+
+Focused certainty and pure client tests use the existing workspace Vitest dependency:
+`CI=1 node_modules/.bin/vitest run --config clients/typescript/fractal-client/vitest.config.ts`
+from the repository root.
+
+The pure outbox core is exported separately from immediate delivery. It provides no
+storage adapter, startup worker, signing service, or server reconciliation endpoint:
+
+- `OutboxRepository<TPacket>` binds `commit`, revision-based `compareAndSwap`,
+  `list`, and `read` permanently to an original principal/deployment/member scope.
+  Successful writes mean durable transaction completion; adapters must reject
+  storage failures rather than silently fall back to memory.
+  Derive its deployment identity with `outboxDeploymentId(issuer, issuerKey)`,
+  the JSON-encoded tuple of the captured issuer and issuer key.
+- `createOutboxRecord(id, intent)` accepts immutable serializable intent (text and
+  attachment references carrying content hash, optional name, media type and a
+  storage reference) as pending/preparing, with no packet. Commit this record before
+  acknowledging local acceptance, uploading attachments or preparing the request.
+- `prepareOutboxRecord(record, packet, expectedIdentities)` proposes pending/ready
+  only from preparing. Persist it by revision CAS; the packet cannot be replaced
+  afterward. Persist `markOutboxDispatched` using CAS before making the single POST;
+  preparing cannot dispatch, and only the successful CAS owner may dispatch.
+- Adapters must call `isAllowedOutboxTransition(previous, next)` **inside** their
+  CAS transaction. It accepts only revision-incrementing transitions produced by
+  the pure core and rejects changed intent/packet, wrong revisions and fabricated
+  certainty changes, including unknown-to-not-applied.
+- `observeOutbox` records a validated completed receipt, explicit nonapplication,
+  unknown, or an exact timeline identity match. Pass `appliedAnswer(error)` for
+  failure evidence; validate completed receipts against the original packet first.
+  Earlier ambiguity survives a later refusal and serialization, and unknown never
+  regains dispatch permission. Delivered records retain receipt or timeline evidence.
+- `restoreOutboxRecord` retains never-dispatched pending attempts, including
+  preparing records whose owners resume uploads/preparation from retained intent.
+  Dispatch-marked nonterminal records become unknown even if a crash happened
+  before the socket call. Persist changed restoration/observation records by
+  revision CAS. Definitive delivery and unambiguous nonapplication remain terminal.
+- Repository `list()` returns tagged `OutboxEntry` values: `{ _tag: 'record', record }`
+  or `{ _tag: 'corrupt', id, revision? }`. Restore the list with
+  `restoreOutboxEntries`; it applies normal restoration only to valid records and
+  preserves every corrupt entry as persistent unknown recovery, never a fabricated
+  record. Display **storage damaged; delivery unknown** and offer only explicit
+  Discard. Copy is unavailable without trustworthy content; Send/Retry and automatic
+  expiry are never allowed. The reference memory repository lists only record entries.
+- `prepareMessageSendPacket`, `prepareThreadStartPacket`, and
+  `prepareThreadReplyPacket` return complete serializable action POST bodies.
+  Supply the original ID, key, fence and all prepared parameters; persist the
+  returned body rather than a send closure. Existing signatures pass through
+  unchanged; authorized unsigned web bodies remain unsigned. Preparation performs
+  no signing, transport selection or ID generation. Submit the retained packet
+  unchanged through `submitAction` only when the core permits dispatch.
+- `expectedPreparedPacketIdentities(packet, sender, sha256)` derives the message
+  identities to persist with the record. Supply the captured original authenticated
+  sender, not the current connection's actor; unsigned thread bodies do not encode
+  their sender. Supply the platform's SHA-256 implementation. Chat hashes the key;
+  thread messages use the canonical sender/thread/action/key scope and two hashes.
+  A thread ID alone is never proof that this Start or reply was delivered.
+- Unknown reconciliation is a **person-initiated status check**, never an automatic
+  replay. After an authoritative timeline read on the original member, submit
+  `{ kind: 'observed', source: 'timeline', identity }` only for an actually present
+  message identity. The core settles delivery only when it matches a retained
+  expected identity. A mismatch leaves unknown unchanged; absence has no observation
+  variant and never proves nonapplication or permits another POST.
+
+`OutboxRepository<PreparedPacket>` is the shared adapter boundary. Concrete browser
+and native repositories, acceptance UI, and dispatch owners must implement these
+durability barriers; importing this pure module alone does not persist messages.
+
+Tests can import `createMemoryOutboxRepository` from `@fractal/client/test-support`.
+This shared reference double is scoped, isolates snapshots with copy-on-read/write,
+and calls `isAllowedOutboxTransition` inside its synchronous CAS check/write section.
+It models transaction ownership and refusal behavior but is **not durable** and must
+never replace a production IndexedDB or native storage adapter.
+
 The manifest read ids `harness-questions.list` and `harness-questions.get` map to
 `harnessQuestions(queryOptions, requestOptions)` and `harnessQuestion(id, requestOptions)`;
 their public helper names do not include the manifest's `list`/`get` suffixes.

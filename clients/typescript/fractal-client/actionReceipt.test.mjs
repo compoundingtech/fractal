@@ -71,7 +71,7 @@ test('unread mark and clear require completed receipts for the exact action and 
   }
 });
 
-test('an ambiguous reply keeps the signed action and key until its matching receipt arrives', async () => {
+test('an ambiguous reply retains the signed packet without another POST', async () => {
   const received = [];
   const sdk = new FractalClient({
     baseUrl: 'https://paired.invalid',
@@ -97,14 +97,13 @@ test('an ambiguous reply keeps the signed action and key until its matching rece
   };
   const initial = await sendBoundAction('member/one', ports);
   assert.equal(initial.how, 'unconfirmed');
-  assert.deepEqual(received[0], received[1]);
+  assert.equal(received.length, 1);
   const retried = await resendBoundAction(initial.request);
-  assert.equal(retried.how, 'sent');
-  assert.deepEqual(received[2], { ...received[0], fence: await ports.fence() });
-  assert.deepEqual(received[3], received[2]);
+  assert.deepEqual(retried, initial);
+  assert.equal(received.length, 1);
 });
 
-test('an uncertain metadata action retains its observed CAS token until the claim receipt arrives', async () => {
+test('an uncertain metadata action retains its observed CAS token without another POST', async () => {
   const received = [];
   const lifecycle = { ...value, affected_ids: [targetId] };
   const sdk = new FractalClient({
@@ -126,12 +125,11 @@ test('an uncertain metadata action retains its observed CAS token until the clai
     send: input => confirm(() => sdk.threadClose(input)), wait: async () => {} };
   const initial = await sendBoundAction('member/one', ports);
   assert.equal(initial.how, 'unconfirmed');
-  assert.deepEqual(received[0], received[1]);
+  assert.equal(received.length, 1);
   const retried = await resendBoundAction(initial.request);
-  assert.equal(retried.how, 'sent');
-  assert.equal(received.length, 3);
-  assert.deepEqual(received[2], { ...received[0], fence: await ports.fence() });
-  assert.equal(received[2].fence.subject_revisions[targetId], 'opaque/observed');
+  assert.deepEqual(retried, initial);
+  assert.equal(received.length, 1);
+  assert.equal(initial.request.request.fence.subject_revisions[targetId], 'opaque/observed');
 });
 
 test('a definitive daemon refusal still reaches the caller', async () => {

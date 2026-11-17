@@ -40,22 +40,14 @@ for (const context of ['ordinary', 'start', 'reply']) {
     assert.equal(originalBound.ports.fence, ports.fence);
     assert.equal(originalBound.ports.build, ports.build);
     if (context !== 'start') assert.equal(originalBound.ports, ports);
-    const originalRetry = attempts.getSnapshot()[0].retry;
-    assert.equal((await originalRetry()).how, 'unconfirmed', 'a later explicit-none refusal cannot settle earlier unknown');
+    assert.equal(attempts.getSnapshot()[0].retry, undefined, 'unknown attempts never expose a resend operation');
     assert.equal(attempts.getSnapshot()[0].draft, draft);
     assert.equal(builds, 1);
-    assert.equal(sent.length, 2);
-    assert.equal(sent[1].parameters, packet.parameters);
-    assert.equal(sent[1].idempotency_key, packet.idempotency_key);
-    await originalRetry();
-    assert.equal(sent.length, 2, 'stale retry cannot dispatch the next recovery generation');
+    assert.equal(sent.length, 1);
     accepted = true;
-    assert.equal((await attempts.getSnapshot()[0].retry()).how, 'sent');
-    assert.equal(attempts.getSnapshot()[0].phase, 'confirmed');
+    assert.equal(attempts.getSnapshot()[0].phase, 'unconfirmed');
     assert.ok(phases.includes('sending'));
     assert.ok(phases.includes('unconfirmed'));
-    assert.equal(sent[2].parameters, packet.parameters);
-    assert.equal(builds, 1);
   });
 }
 
@@ -91,5 +83,5 @@ test('refused explicit Send as new leaves the earlier unknown and its original r
   const original = attempts.getSnapshot()[0];
   assert.equal((await attempts.sendAsNew(original.id, async () => ({ how: 'failed', error: 'refused' }))).how, 'failed');
   assert.equal(attempts.getSnapshot()[0], original);
-  assert.equal((await original.retry()).how, 'sent');
+  assert.equal(original.retry, undefined, 'unknown delivery remains retained without replay');
 });

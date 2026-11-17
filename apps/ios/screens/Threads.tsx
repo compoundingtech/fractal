@@ -772,7 +772,7 @@ function ThreadReadIssue({ message }: { message: string }) {
   </View>;
 }
 
-function ThreadActionFeedback({ result, busy, onRetry }: { result?: ThreadEditResult; busy: boolean; onRetry: () => void }) {
+function ThreadActionFeedback({ result }: { result?: ThreadEditResult }) {
   useEffect(() => {
     if (result?.how === 'failed') AccessibilityInfo.announceForAccessibility(
       `${result.action ? `Couldn't ${result.action} this thread. ` : ''}${result.error}`,
@@ -782,8 +782,7 @@ function ThreadActionFeedback({ result, busy, onRetry }: { result?: ThreadEditRe
   return ConversationFeedback({
     color: theme.waiting,
     heading: result.how === 'failed' && result.action ? `Couldn't ${result.action} this thread.` : undefined,
-    message: result.how === 'failed' ? result.error : 'The original connection has not confirmed this change.',
-    recovery: result.how === 'unconfirmed' ? { label: 'Retry original change', disabled: busy, onPress: onRetry } : undefined,
+    message: result.how === 'failed' ? result.error : 'The original connection has not confirmed this change. Do not send it again.',
   });
 }
 
@@ -848,7 +847,7 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
     setQuote(message);
     setQuoteFocus(previous => previous + 1);
   };
-  const { editable, feedback: editFeedback, busy: editBusy, run: runEdit, retry: retryEdit, setResult: setEditResult } = useThreadEditing(thread);
+  const { editable, feedback: editFeedback, run: runEdit, setResult: setEditResult } = useThreadEditing(thread);
   const [renameTitle, setRenameTitle] = useState<string>();
   const canMarkRead = !!thread?.unread && !!actor && threadActions.has('thread.read');
   // Live grants from the current capability set, re-checked again when an edit is sent.
@@ -905,10 +904,10 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
     const title = renameTitle?.trim();
     if (!thread || !title || title === displayed?.title || !editable) return;
     setRenameTitle(undefined);
-    void runEdit(() => actions.editThread(thread, { kind: 'rename', title }), true);
+    void runEdit(() => actions.editThread(thread, { kind: 'rename', title }));
   };
   const changeState = () => {
-    if (thread) void runEdit(() => actions.editThread(thread, { kind: closed ? 'reopen' : 'close' }), true);
+    if (thread) void runEdit(() => actions.editThread(thread, { kind: closed ? 'reopen' : 'close' }));
   };
 
   const earlier = page.more && !page.issue ? <Button label="Earlier history" onPress={page.more} disabled={page.loading} /> : null;
@@ -973,7 +972,7 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
       <Button label="Cancel rename" onPress={() => setRenameTitle(undefined)} />
     </View>
   </View> : null;
-  const editStatus = <ThreadActionFeedback result={editFeedback} busy={editBusy} onRetry={retryEdit} />;
+  const editStatus = <ThreadActionFeedback result={editFeedback} />;
   const threadButtons = thread ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
     {threadActions.has('thread.rename') ? <Button label="Rename" hint={`Renames ${displayed!.title}`} onPress={() => setRenameTitle(displayed!.title)} disabled={!editable} /> : null}
     {!closed && threadActions.has('thread.close') ? <Button label="Close thread" hint={`Closes ${displayed!.title}`} disabled={!editable} onPress={changeState} /> : null}
@@ -993,17 +992,17 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
 }
 
 /** Clear reminder for a return message with no body here: a pending or unavailable anchor.
- * Read-only connections get no control, but a retained clear still offers its retry.
+ * Read-only connections get no new control; unknown changes remain visible without replay.
  */
 function ClearReminder({ thread }: { thread: ThreadSummary }) {
   const { actor, threadActions, unreadClient } = useStore();
-  const { editable, feedback, busy, run, retry } = useThreadEditing(thread);
+  const { editable, feedback, run } = useThreadEditing(thread);
   const api = unreadClient.forThread(thread);
   const clear = api.state === 'ready' && !!actor && threadActions.has('thread.clear-unread') ? reminderClear(api, thread) : undefined;
   if (!clear && !feedback) return null;
   return <View style={{ gap: 6 }}>
     {clear ? <Button label="Clear reminder" hint="Removes the marked unread reminder without reading replies" disabled={!editable} onPress={() => void run(clear)} /> : null}
-    <ThreadActionFeedback result={feedback} busy={busy} onRetry={retry} />
+    <ThreadActionFeedback result={feedback} />
   </View>;
 }
 
@@ -1034,18 +1033,15 @@ function useThreadEditing(thread: ThreadSummary | undefined) {
   const editDelivery = thread ? threadDeliveries?.get(threadEditScope(thread.id)) : undefined;
   const unreadDelivery = thread ? threadDeliveries?.get(`unread/${thread.id}`) : undefined;
   const held = [unreadDelivery, editDelivery].filter(delivery => delivery !== undefined);
-  const recovered = held.find(delivery => delivery.retry)?.retry;
-  const feedback = recovered ? { how: 'unconfirmed' as const, retry: recovered } : result;
+  const feedback = held.find(delivery => delivery.result?.how === 'unconfirmed')?.result ?? result;
   const editable = status === 'online' && !editing && !held.length && feedback?.how !== 'unconfirmed';
-  const run = async (send: () => Promise<ThreadEditResult>, retained = false) => {
+  const run = async (send: () => Promise<ThreadEditResult>) => {
     setEditing(true);
     setResult(undefined);
-    try { const next = await send(); setResult(retained && next.how === 'unconfirmed' ? undefined : next); }
+    try { setResult(await send()); }
     finally { setEditing(false); }
   };
-  const busy = editing || held.some(delivery => !delivery.retry) || status !== 'online';
-  const retry = () => { if (feedback?.how === 'unconfirmed') void run(feedback.retry, !!recovered); };
-  return { editable, feedback, busy, run, retry, setResult };
+  return { editable, feedback, run, setResult };
 }
 
 type Quote = { id: string; from: string; text: string };
@@ -1084,8 +1080,8 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   // shared origin: a first composer has none, so a handed-off attempt never blocks the next Start.
   const deliveryTarget = id ?? sentTarget.current;
   const delivery = threadDeliveries?.get(!thread && start ? deliveryTarget && start.origin ? threadStartAttemptScope(start.origin, deliveryTarget) : '' : deliveryTarget!);
-  const sending = !!delivery && !delivery.retry;
-  const feedback = delivery?.retry ? { how: 'unconfirmed' as const, retry: delivery.retry } : failure;
+  const sending = delivery?.phase === 'sending';
+  const feedback = delivery?.result ?? failure;
   // A fresh Start composes only once its StartContext names the recipient it signs.
   const enabled = canReply && status === 'online' && !sending && !delivery && (!!thread || !start || !!start.origin);
   // A handed-off attempt keeps its signed agent and thread ID. Once its exact retry is refused for a
@@ -1164,9 +1160,7 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
       <T dim>This send's recipient changed, so it cannot be retried. Copy the message into a new Start to send it separately.</T>
       <Button label="Copy message" onPress={() => { void Clipboard.setStringAsync(draft.text); }} />
     </View> : null}
-    <ThreadActionFeedback result={feedback} busy={sending || status !== 'online'} onRetry={() => {
-      if (delivery?.retry) { sentTarget.current = delivery.target; void send(delivery.retry); }
-    }} />
+    <ThreadActionFeedback result={feedback} />
   </View>;
 }
 

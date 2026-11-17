@@ -1,4 +1,4 @@
-import { actionReceiptCheck, appliedAnswer, sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
+import { actionReceiptCheck, appliedAnswer, sendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import type { RequestHistoryPage, ThreadStartContext, ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { ErrorEnvelope } from '@fractal/client/schema'
@@ -456,9 +456,10 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     const grant = registry.get(access)
     const previous = attempts.get(destination)
     if (previous !== undefined && previous.fingerprint !== fingerprint) {
-      return Promise.resolve(reject('Fractal has not confirmed the previous action. Retry that action first.'))
+      return Promise.resolve(reject('Fractal has not confirmed the previous action. Do not send it again.'))
     }
     if (previous?.pending !== undefined) return previous.pending
+    if (previous?.retry !== undefined) return Promise.resolve(reject('Fractal has not confirmed this action. Do not send it again.'))
     if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
     const draft = start === undefined ? undefined : registry.get(drafts(destination))
     const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor, kind,
@@ -482,35 +483,24 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           return { snapshot_id: snapshot.id, subject_revisions: prepared.revisions ?? {} }
         }
         const confirm = actionReceiptCheck(prepared.expected)
-        let signedRequest: Request | undefined
         const ports = {
-          build: async (): Promise<Request> => {
-            signedRequest = { id: `action/${attempt.key}`, idempotency_key: attempt.key, fence: await fence() }
-            return signedRequest
-          },
+          build: async (): Promise<Request> => ({
+            id: `action/${attempt.key}`, idempotency_key: attempt.key, fence: await fence(),
+          }),
           fence,
           send: (request: Request) => confirm(() => prepared.send(request)),
           retry: false as const,
           wait: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
         }
-        const outcome = attempt.retry === undefined
-          ? await sendBoundAction(attempt.actor ?? 'local', ports)
-          : await resendBoundAction(attempt.retry)
-        // A signed Start needs positive nonapplication evidence. A refusal code (even stale-fence)
-        // or retryable:false cannot authorize discarding its packet and choosing a new recipient.
-        if (kind === 'thread.start' && signedRequest !== undefined && outcome.how === 'failed'
-          && outcome.error instanceof ClientError && appliedAnswer(outcome.error) !== 'none') {
-          attempt.retry = { member: attempt.actor ?? 'local', request: signedRequest, ports }
-          return reject('Fractal has not confirmed this action. Retry to check the same action.')
-        }
+        const outcome = await sendBoundAction(attempt.actor ?? 'local', ports)
         if (outcome.how === 'unconfirmed') {
           attempt.retry = outcome.request
-          return reject('Fractal has not confirmed this action. Retry to check the same action.')
+          return reject('Fractal has not confirmed this action. Do not send it again.')
         }
         attempts.delete(destination)
         if (outcome.how === 'sent') return { _tag: 'Sent', threadId: attempt.target }
-        // A failed outcome applied nothing. A gateway or network failure says so in words; a daemon refusal names the
-        // refused action, with Fractal's own reason under it.
+        // Failure means a pre-dispatch build failure or explicit proof of nonapplication.
+        // Keep the daemon's refusal reason where available.
         const error = outcome.error
         if (error instanceof ClientError && error.status < 500) {
           if (kind === 'thread.start' && start !== undefined && appliedAnswer(error) === 'none' && (
@@ -527,7 +517,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           : error instanceof Error ? error.message : 'Fractal could not perform this action.')
       } finally {
         delete attempt.pending
-        invalidate()
+        if (attempt.retry === undefined) invalidate()
+        else deliveryChanged()
       }
     })()
     deliveryChanged()

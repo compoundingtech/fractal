@@ -164,8 +164,9 @@ const refused = (code, details = {}) => new ClientError({ api_version: 'st3.clie
 
 test('a stale fence is not tried again and reads as the window closing; other refusals read plainly', () => {
   assert.equal(overrideRetryable(refused('stale-fence')), false);
-  assert.equal(overrideRetryable(refused('rate-limited')), true);
-  assert.equal(overrideRetryable(refused('internal', { applied: 'unknown' })), true, 'the identical action returns the first answer');
+  assert.equal(overrideRetryable(refused('rate-limited')), false);
+  assert.equal(overrideRetryable(refused('rate-limited', { applied: 'none' })), true);
+  assert.equal(overrideRetryable(refused('internal', { applied: 'unknown' })), false, 'unknown delivery never permits another POST');
   assert.equal(overrideRetryable(refused('forbidden')), false);
   assert.match(overrideRefusal(refused('stale-fence')), /override window closed, or it was already answered/);
   assert.equal(overrideRefusal(refused('forbidden')), 'Only the person who was asked can replace its default.');

@@ -942,6 +942,11 @@ updates. Real retention expiry still returns
 feed retention boundary, authenticated session actor, and capabilities. Unknown required capability
 versions stop the client; unknown optional capabilities may be ignored.
 
+Optional `issuer` and `issuer_key` identify the issuer of the same person-root grant
+returned by pairing. They remain stable across daemon restarts and are absent without
+a held person root, including non-person and unpaired sessions. Reading capabilities
+does not create a root or mint a key.
+
 The following resources have list and detail routes. List routes accept `limit` and `cursor` plus
 documented filters. The server clamps `limit` to `capabilities.limits.max_page_items`. Empty values
 sort after present values, strings compare as Unicode scalar sequences, and the final key is always

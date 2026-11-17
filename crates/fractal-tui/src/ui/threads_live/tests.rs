@@ -589,16 +589,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         host.clone(),
         thread::Tap::Retry(close.key.clone()),
     ));
-    let retry = ui.threads.writes().pop().expect("original Close retry");
-    assert_eq!(retry.key, close.key);
-    assert_eq!(retry.fence, close.fence);
-    assert_eq!(
-        ui.threads.complete(
-            retry.perform(client.clone()).await,
-            &mut ui.conversation_state.drafts
-        ),
-        None
-    );
+    assert!(ui.threads.writes().is_empty(), "unknown Close cannot be replayed");
     let timeline = client
         .thread_timeline(id, None, Some(50))
         .await
@@ -828,7 +819,7 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     // While sending, the recipient preview is frozen to the exact packet recipient.
     pending_layout.splice(
         slot + 1..=panel_end,
-        ["Original delivery to Atlas is pending or unconfirmed. Retrying keeps this exact recipient.".to_owned()],
+        ["Original delivery to Atlas is pending or unconfirmed. It may already have arrived and will not be sent again.".to_owned()],
     );
     assert_eq!(
         queued, pending_layout,
@@ -1010,7 +1001,7 @@ fn forbidden() -> ClientError {
     let envelope = serde_json::from_value(serde_json::json!({
         "api_version":fractal_client::API_VERSION,"error_version":"st3.client.error.v0",
         "request_id":"request/test","code":"forbidden","message":"Grant was revoked",
-        "retryable":false,"details":{}
+        "retryable":false,"details":{"applied":"none"}
     }))
     .unwrap();
     ClientError::Api(
@@ -1021,7 +1012,7 @@ fn forbidden() -> ClientError {
 }
 
 #[test]
-fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
+fn unknown_close_survives_changed_summary_and_reconnect_without_replay() {
     let mut threads = observed_threads(ThreadState::Open);
     let mut texts = HashMap::new();
     let id = "thread/worker";
@@ -1068,21 +1059,18 @@ fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
     assert!(
         doc.lines
             .iter()
-            .any(|line| line.to_string().contains("Retry Close thread"))
+            .any(|line| line.to_string().contains("will not be sent again"))
     );
-    assert!(doc.targets.iter().any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Retry(key)) if key == &original.key)));
+    assert!(!doc.targets.iter().any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Retry(_)))));
     threads.tap(
         &pane.key(),
         thread::Tap::Retry(original.key.clone()),
         &mut texts,
     );
-    let retried = threads.writes().pop().unwrap();
-    assert_eq!(retried.key, original.key);
-    assert_eq!(retried.fence, original.fence);
-    assert!(matches!(retried.mutation, Mutation::Close));
+    assert!(threads.writes().is_empty());
     threads.complete(
         Receipt {
-            write: retried,
+            write: original.clone(),
             confirmation: Confirmation::Failed(forbidden()),
         },
         &mut texts,
@@ -1102,20 +1090,12 @@ fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
         thread::Tap::Retry(original.key.clone()),
         &mut texts,
     );
-    let retried = threads.writes().pop().unwrap();
-    assert_eq!(retried.key, original.key);
-    threads.complete(
-        Receipt {
-            write: retried,
-            confirmation: Confirmation::Applied(None),
-        },
-        &mut texts,
-    );
-    assert!(!threads.pending_actions.contains_key(id));
+    assert!(threads.writes().is_empty(), "reconnection never authorizes replay");
+    assert!(threads.pending_actions[id].unknown);
 }
 
 #[test]
-fn a_pending_reply_without_loaded_history_keeps_fallback_status_and_retry() {
+fn a_pending_reply_without_loaded_history_keeps_status_without_retry() {
     let mut threads = observed_threads(ThreadState::Open);
     let id = "thread/worker";
     let tab = Pane::Thread(id.into());
@@ -1175,7 +1155,7 @@ fn a_pending_reply_without_loaded_history_keeps_fallback_status_and_retry() {
     );
     for pane in [&tab, &agent] {
         let doc = mount(&threads, pane, &texts);
-        assert!(doc.targets.iter().any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Retry(key)) if key == &original.key)));
+        assert!(!doc.targets.iter().any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Retry(_)))));
     }
 }
 
@@ -1514,14 +1494,11 @@ fn a_confirmed_reply_does_not_consume_a_concurrent_unknown_close() {
     );
     assert!(threads.pending_actions[id].unknown);
     threads.retry(&close.key);
-    let retried = threads.writes().pop().unwrap();
-    assert_eq!(retried.key, close.key);
-    assert_eq!(retried.fence, close.fence);
-    assert!(matches!(retried.mutation, Mutation::Close));
+    assert!(threads.writes().is_empty(), "unknown Close cannot dispatch again");
 }
 
 #[test]
-fn read_retry_keeps_the_original_shown_ids_even_after_the_view_moves() {
+fn unknown_read_keeps_original_shown_ids_without_replay_after_the_view_moves() {
     let mut threads = observed_threads(ThreadState::Open);
     threads.set_access(ThreadAccess {
         mark_read: true,
@@ -1554,13 +1531,12 @@ fn read_retry_keeps_the_original_shown_ids_even_after_the_view_moves() {
         .insert(0, event("message/later"));
     assert!(!threads.mark_visible_read("thread:test", id.into(), &["message/later".into()].into()));
     threads.retry(&original.key);
-    let retry = threads.writes().pop().unwrap();
-    let Mutation::MarkRead(request) = retry.mutation else {
+    assert!(threads.writes().is_empty());
+    let Mutation::MarkRead(request) = &original.mutation else {
         panic!("read must remain read")
     };
     assert_eq!(request.seen_message_ids, ["message/first"]);
     assert_eq!(request.through_message_id.as_deref(), Some("message/first"));
-    assert_eq!(retry.fence, original.fence);
 }
 
 #[test]
@@ -1637,9 +1613,8 @@ fn closed_person_composer_keeps_original_quote_and_payload_until_settled() {
     );
     threads.paste(&pane, "changed", &cursor, &mut texts);
     threads.submit(&pane.key(), Input::Reply(id.into()), &texts);
-    let retry = threads.writes().pop().unwrap();
-    assert_eq!(retry.key, original.key);
-    let Mutation::Reply(reply) = retry.mutation else {
+    assert!(threads.writes().is_empty(), "Enter cannot replay an unknown reply");
+    let Mutation::Reply(reply) = &original.mutation else {
         panic!("reply")
     };
     assert_eq!(reply.content, "Closed reply");
@@ -1653,15 +1628,7 @@ fn closed_person_composer_keeps_original_quote_and_payload_until_settled() {
         &mut texts,
     );
     assert!(threads.drafts[&Input::Reply(id.into()).key()].locked());
-    // An authoritative rejection settles the old intent; the draft remains editable.
-    threads.complete(
-        Receipt {
-            write: original,
-            confirmation: Confirmation::Rejected,
-        },
-        &mut texts,
-    );
-    assert!(!threads.drafts[&Input::Reply(id.into()).key()].locked());
+    assert!(threads.writes().is_empty());
 }
 
 #[test]
@@ -1680,17 +1647,13 @@ fn first_definitive_refusal_releases_the_intent_and_dispatch_stays_on_its_origin
         &mut HashMap::new(),
     );
     threads.retry(&original.key);
-    let mut retry = threads.writes().pop().unwrap();
-    threads
-        .bind(&mut retry, Client::unix("/tmp/thread-other.sock"))
-        .unwrap();
-    assert_eq!(
-        format!("{:?}", retry.client.as_ref().unwrap()),
-        format!("{client:?}")
-    );
+    assert!(threads.writes().is_empty());
+    let mut retained = threads.pending_actions[id].write.clone();
+    threads.bind(&mut retained, Client::unix("/tmp/thread-other.sock")).unwrap();
+    assert_eq!(format!("{:?}", retained.client.as_ref().unwrap()), format!("{client:?}"));
     threads.complete(
         Receipt {
-            write: retry,
+            write: retained,
             confirmation: Confirmation::Applied(None),
         },
         &mut HashMap::new(),
@@ -2047,6 +2010,7 @@ fn internal_error_without_not_applied_answer_keeps_the_original_action() {
         unreachable!()
     };
     envelope.code = fractal_client::ErrorCode::Internal;
+    envelope.details.clear();
     let error = ClientError::Api(fractal_client::ErrorCode::Internal, message, envelope);
     threads.complete(
         Receipt {
@@ -2056,6 +2020,34 @@ fn internal_error_without_not_applied_answer_keeps_the_original_action() {
         &mut HashMap::new(),
     );
     assert!(threads.pending_actions["thread/worker"].unknown);
+}
+
+#[test]
+fn unknown_thread_refusals_never_queue_a_second_dispatch() {
+    for code in [fractal_client::ErrorCode::StaleFence, fractal_client::ErrorCode::RateLimited] {
+        for metadata in [
+            serde_json::json!({}),
+            serde_json::json!({"applied":"unknown"}),
+            serde_json::json!({"applied":null}),
+        ] {
+            let mut threads = observed_threads(ThreadState::Open);
+            let id = "thread/worker";
+            let host = Pane::Thread(id.into()).key();
+            threads.lifecycle(&host, id.into(), Mutation::Close);
+            let write = threads.writes().pop().unwrap();
+            let ClientError::Api(_, message, mut envelope) = forbidden() else { unreachable!() };
+            envelope.code = code.clone();
+            envelope.details = serde_json::from_value(metadata).unwrap();
+            threads.complete(Receipt {
+                write: write.clone(),
+                confirmation: Confirmation::Failed(ClientError::Api(code.clone(), message, envelope)),
+            }, &mut HashMap::new());
+            assert!(threads.pending_actions[id].unknown);
+            threads.retry(&write.key);
+            assert!(threads.writes().is_empty(), "unknown {code:?} cannot dispatch again");
+            assert!(threads.take_start_context_reads().is_empty());
+        }
+    }
 }
 
 #[test]
@@ -2619,7 +2611,7 @@ fn inbox_thread_detail_keeps_bare_action_letters() {
 }
 
 #[test]
-fn retry_takes_alt_where_letters_type_and_stays_bare_in_the_inbox() {
+fn unknown_thread_actions_have_no_retry_shortcut_or_button() {
     let id = "thread/worker";
     let agent = Pane::Agent(Some("agent/atlas".into()));
     let tab = Pane::Thread(id.into());
@@ -2639,7 +2631,7 @@ fn retry_takes_alt_where_letters_type_and_stays_bare_in_the_inbox() {
     );
     threads.open.insert(agent.key(), [id.into()].into());
     threads.selected.insert(agent.key(), id.into());
-    let retry = Some(thread::Tap::Retry(original.key.clone()));
+    let retry = None;
     let r = |modifiers| KeyEvent::new(KeyCode::Char('r'), modifiers);
     for pane in [&agent, &tab] {
         assert_eq!(
@@ -2650,7 +2642,7 @@ fn retry_takes_alt_where_letters_type_and_stays_bare_in_the_inbox() {
         assert_eq!(
             threads.shortcut(pane, r(KeyModifiers::ALT)),
             retry,
-            "alt+r retries in {pane:?}"
+            "alt+r cannot replay unknown delivery in {pane:?}"
         );
     }
     assert_eq!(threads.shortcut(&inbox, r(KeyModifiers::NONE)), retry);
@@ -2662,13 +2654,7 @@ fn retry_takes_alt_where_letters_type_and_stays_bare_in_the_inbox() {
         &super::super::demo::test_world(),
         &texts,
     );
-    let button = doc
-        .lines
-        .iter()
-        .map(ToString::to_string)
-        .find(|line| line.contains("Retry Close thread"))
-        .unwrap();
-    assert!(button.contains(" alt+r "), "{button}");
+    assert!(!doc.lines.iter().any(|line| line.to_string().contains("Retry Close thread")));
 }
 
 /// An agent conversation with two tool blocks and, under them, two listed threads.
@@ -3249,17 +3235,14 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
         line.to_string()
             .contains("Fault context · New discussion · Draft")
     }));
-    assert!(doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(key)) if key == &original.key)));
+    assert!(!doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(_)))));
     threads.tap(
         &pane.key(),
         thread::Tap::Retry(original.key.clone()),
         &mut texts,
     );
-    let retry = threads.writes().pop().unwrap();
-    assert_eq!(retry.key, original.key);
-    assert_eq!(retry.id, original.id);
-    assert_eq!(retry.fence, original.fence);
-    let Mutation::Start(parameters) = retry.mutation else {
+    assert!(threads.writes().is_empty(), "unknown Start cannot be replayed");
+    let Mutation::Start(parameters) = original.mutation else {
         panic!("original start")
     };
     assert_eq!(parameters.agent_id, "agent/atlas");
@@ -3269,7 +3252,7 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
 }
 
 #[test]
-fn read_only_thread_history_has_no_composer_or_new_mutations_but_keeps_original_retry() {
+fn read_only_thread_history_keeps_unknown_without_any_mutation() {
     let mut threads = observed_threads(ThreadState::Open);
     threads.lifecycle("thread:test", "thread/worker".into(), Mutation::Close);
     let original = threads.writes().pop().unwrap();
@@ -3314,17 +3297,17 @@ fn read_only_thread_history_has_no_composer_or_new_mutations_but_keeps_original_
                 | thread::Tap::Reopen(_)
         )
     )));
-    assert!(doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(key)) if key == &original.key)));
+    assert!(!doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(_)))));
     threads.tap(
         &pane.key(),
         thread::Tap::Retry(original.key.clone()),
         &mut texts,
     );
-    assert_eq!(threads.writes().pop().unwrap().key, original.key);
+    assert!(threads.writes().is_empty());
 }
 
 #[tokio::test]
-async fn paired_native_transport_replays_the_frozen_signed_packet_byte_for_byte() {
+async fn paired_native_unknown_reply_never_dispatches_its_signed_packet_again() {
     use axum::{
         Json, Router,
         body::Bytes,
@@ -3412,18 +3395,9 @@ async fn paired_native_transport_replays_the_frozen_signed_packet_byte_for_byte(
             .is_some()
     );
     threads.retry(&key);
-    let mut retry = threads.writes().pop().unwrap();
-    threads.bind(&mut retry, client.clone()).unwrap();
-    assert_eq!(
-        threads.complete(retry.perform(client).await, &mut texts),
-        None
-    );
+    assert!(threads.writes().is_empty(), "unknown signed reply cannot dispatch again");
     let packets = requests.lock().unwrap();
-    assert_eq!(packets.len(), 2);
-    assert_eq!(
-        packets[0], packets[1],
-        "including snapshot, subject intent, nonce and signature"
-    );
+    assert_eq!(packets.len(), 1);
     let payload: serde_json::Value = serde_json::from_slice(&packets[0]).unwrap();
     assert!(
         payload["parameters"]["signature"]["signature"]
@@ -3503,18 +3477,18 @@ fn thread_preview_evidence() {
     assert!(matches!(read.mutation, Mutation::MarkRead(_)));
     capture(&mut ui, &pane, &dir, "harness-v-pending");
     // Dispatch-only fixture: settle its retained action before the independent lifecycle
-    // scenarios below. This is a simulated rejection, not an accepted server-side read.
+    // scenarios below. The fixture explicitly proves nonapplication, not an accepted read.
     assert_eq!(
         ui.threads
             .complete(
                 Receipt {
                     write: read,
-                    confirmation: Confirmation::Rejected
+                    confirmation: Confirmation::Failed(forbidden())
                 },
                 &mut ui.conversation_state.drafts,
             )
             .as_deref(),
-        Some("The original thread action was rejected"),
+        Some(forbidden().human().as_str()),
     );
     ui.click(Hit::Thread(
         pane.key(),
@@ -3829,12 +3803,13 @@ fn a_definitely_refused_reply_keeps_its_draft_and_says_the_reply_was_not_sent() 
 }
 
 #[test]
-fn unconfirmed_or_server_side_action_failures_keep_their_retry_and_wording() {
+fn unconfirmed_or_server_side_action_failures_keep_unknown_without_retry() {
     let internal = || {
         let ClientError::Api(_, message, mut envelope) = forbidden() else {
             unreachable!()
         };
         envelope.code = fractal_client::ErrorCode::Internal;
+        envelope.details.clear();
         ClientError::Api(fractal_client::ErrorCode::Internal, message, envelope)
     };
     for error in [ClientError::Transport("lost receipt".into()), internal()] {
@@ -3861,17 +3836,16 @@ fn unconfirmed_or_server_side_action_failures_keep_their_retry_and_wording() {
             lines
                 .iter()
                 .any(|line| line
-                    == "Close thread: outcome not confirmed. Retry the original action.")
+                    == "Close thread: outcome not confirmed. It may already have applied and will not be sent again.")
         );
         assert!(!lines.iter().any(|line| line.starts_with("Couldn't")));
         // A later refusal cannot answer the original request it may have applied.
         threads.retry(&write.key);
-        let retried = threads.writes().pop().unwrap();
-        assert_eq!(retried.key, write.key);
+        assert!(threads.writes().is_empty());
         assert_eq!(
             threads.complete(
                 Receipt {
-                    write: retried,
+                    write: write.clone(),
                     confirmation: Confirmation::Failed(forbidden()),
                 },
                 &mut texts,
@@ -3898,12 +3872,12 @@ fn lifecycle_failure_flashes_warn_and_never_a_success_notice() {
     let write = ui.threads.writes().pop().unwrap();
     ui.complete_thread(Receipt {
         write,
-        confirmation: Confirmation::Rejected,
+        confirmation: Confirmation::Failed(forbidden()),
     });
     assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
     assert_eq!(
         ui.flash.as_ref().unwrap().0,
-        "The original thread action was rejected"
+        "Couldn't close this thread."
     );
     assert!(ui.threads.take_completion_notice().is_none());
 }
@@ -4688,18 +4662,12 @@ fn post_start_unassigned_after_prior_unknown_keeps_the_original_packet() {
     assert!(visible.contains("pending or unconfirmed"), "{visible}");
     assert!(!visible.contains("Checking recipient"), "{visible}");
     threads.retry(&write.key);
-    let retried = threads.writes().pop().unwrap();
-    assert_eq!(retried.key, write.key);
-    let (Mutation::Start(original), Mutation::Start(retry)) = (&write.mutation, &retried.mutation)
-    else {
-        panic!("Start")
-    };
-    assert_eq!(original, retry);
+    assert!(threads.writes().is_empty(), "unknown Start cannot dispatch again");
     let refusal = golden_start_refusal("recipient-unassigned");
     assert_eq!(refusal.applied(), Some("none"));
     threads.complete(
         Receipt {
-            write: retried,
+            write: write.clone(),
             confirmation: Confirmation::Failed(refusal),
         },
         &mut texts,
@@ -4846,7 +4814,7 @@ fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_
         assert_eq!(new.origin, old.origin);
     }
 
-    // A server-side rejection also drops its packet and re-reads the recipient without sending.
+    // Explicit nonapplication drops its packet and re-reads the recipient without sending.
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/resolved";
     threads.saved_origins.insert(
@@ -4874,12 +4842,12 @@ fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_
             .complete(
                 Receipt {
                     write,
-                    confirmation: Confirmation::Rejected
+                    confirmation: Confirmation::Failed(forbidden())
                 },
                 &mut texts
             )
             .as_deref(),
-        Some("The original thread action was rejected")
+        Some(format!("Start was refused: {} Checking the recipient again; review it before sending. Your draft is kept.", forbidden().human()).as_str())
     );
     take_start_context_read(&mut threads, item);
     assert!(threads.start_context(item).is_none());
@@ -4887,7 +4855,7 @@ fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_
 }
 
 #[test]
-fn pending_or_unknown_start_retries_keep_the_exact_packet_recipient() {
+fn pending_or_unknown_start_never_refreshes_or_replays_its_recipient() {
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/notice";
     let pane = Pane::Home(Some(item.into()));
@@ -4931,18 +4899,14 @@ fn pending_or_unknown_start_retries_keep_the_exact_packet_recipient() {
     );
     let rendered = wide_rendering(&threads, &pane, &texts);
     assert!(
-        rendered.contains("Original delivery to agent/chief-of-staff is pending or unconfirmed. Retrying keeps this exact recipient."),
+        rendered.contains("Original delivery to agent/chief-of-staff is pending or unconfirmed. It may already have arrived and will not be sent again."),
         "{rendered}"
     );
     assert!(!rendered.contains("agent/deputy"), "{rendered}");
     assert!(!rendered.contains("Refresh recipient"), "{rendered}");
     threads.tap(&host, thread::Tap::Retry(original.key.clone()), &mut texts);
-    let retry = threads.writes().pop().expect("the original retry");
-    assert_eq!(retry.key, original.key);
-    assert_eq!(retry.id, original.id);
-    assert_eq!(retry.fence, original.fence);
-    assert_eq!(retry.agent, "agent/chief-of-staff");
-    let Mutation::Start(parameters) = retry.mutation else {
+    assert!(threads.writes().is_empty(), "unknown Start cannot dispatch again");
+    let Mutation::Start(parameters) = original.mutation else {
         panic!("original Start")
     };
     assert_eq!(parameters.agent_id, "agent/chief-of-staff");
