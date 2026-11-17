@@ -2595,7 +2595,7 @@ impl Ui {
 
     /// Home while another group has the focus: its list and card, from Home's own selection.
     fn draw_home(&self, buf: &mut Buffer, area: Rect) {
-        let selected = self.list_selection(0);
+        let selected = self.home_selection();
         let side = if area.width >= 70 {
             (area.width * 3 / 10).clamp(30, 46)
         } else {
@@ -4216,6 +4216,7 @@ impl Ui {
         match self.focused_pane() {
             Some(pane) => self.focus_pane(&pane),
             None => {
+                self.threads.select_inbox_detail(None);
                 self.kdl = false;
                 self.note_focus();
             }
@@ -4915,6 +4916,14 @@ impl Ui {
             if let Some(position) = position {
                 self.selected[tab] = position;
             }
+        }
+        match pane {
+            Pane::Home(Some(id)) => self.threads.select_inbox_detail(Some(id.clone())),
+            Pane::List(0) if self.threads.inbox_detail().is_none() => {
+                self.threads.select_inbox_detail(self.list_selection(0));
+            }
+            Pane::List(0) => {}
+            _ => self.threads.select_inbox_detail(None),
         }
         self.note_focus();
     }

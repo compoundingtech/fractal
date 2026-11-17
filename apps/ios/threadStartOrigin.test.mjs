@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 
 test('native start signs the canonical Inbox source and sends the exact generic origin', async () => {
   const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
@@ -10,13 +11,14 @@ test('native start signs the canonical Inbox source and sends the exact generic 
   const { outputText } = ts.transpileModule(`exports.action = { ${source.slice(a, b)} }.startThread;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
-  const signed = [], sent = [], presentations = [];
+  const signed = [], sent = [], presentations = [], scopes = [];
   const exports = {};
   const scope = origin => JSON.stringify([origin.sourceId, origin.episode]);
+  const attemptScope = (origin, thread) => JSON.stringify([origin.sourceId, origin.episode, thread]);
   const ports = {
     signingKeyRef: { current: 'profile/exact' },
-    threadStartScope: scope,
-    trackThreadDelivery: (_scope, _target, send, _onSent, presentation) => { presentations.push(presentation); return send(); },
+    threadStartAttemptScope: attemptScope,
+    trackThreadDelivery: (deliveryScope, _target, send, _onSent, presentation) => { scopes.push(deliveryScope); presentations.push(presentation); return send(); },
     readPhoneSigning: async () => ({ person: 'person/avery' }),
     signThreadMessage: async (_key, _signing, fields) => { signed.push(fields); return { signature: 'exact-signature', messageId: 'message/first' }; },
     submitThreadAction: async (_target, _kind, _revisions, prepare) => {
@@ -28,13 +30,52 @@ test('native start signs the canonical Inbox source and sends the exact generic 
   const origin = { agentId: 'agent/canonical', sourceId: 'notice/canonical-source', episode: 'episode/original' };
   await exports.action('thread/new', origin, 'Notice', 'Follow up');
   assert.deepEqual(presentations, [{ origin, title: 'Notice' }]);
-  assert.deepEqual(signed, [{
+  await exports.action('thread/another', origin, 'Notice', 'Another question');
+  assert.deepEqual(scopes, [attemptScope(origin, 'thread/new'), attemptScope(origin, 'thread/another')],
+    'each Start of one source episode is delivered and retained as its own attempt');
+  assert.deepEqual(signed[0], {
     content: 'Follow up', from: 'person/avery', to: origin.agentId, thread_id: 'thread/new', title: 'Notice',
     thread_origin_source: origin.sourceId, thread_origin_episode: origin.episode,
-  }]);
+  });
+  assert.equal(signed[1].thread_id, 'thread/another');
   assert.deepEqual(sent[0].parameters, {
     target_id: 'thread/new', agent_id: origin.agentId, origin: { source_id: origin.sourceId, episode: origin.episode },
     title: 'Notice', content: 'Follow up', signature: 'exact-signature',
   });
+  assert.equal(sent[1].parameters.target_id, 'thread/another');
   assert.equal(scope(origin), scope({ ...origin, agentId: 'agent/reassigned' }), 'draft identity stays with source and episode');
+});
+
+test('only definitive canonical Start recipient refusals request a visible context refresh; unknown outcomes keep the exact retry', async () => {
+  const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
+  const tree = ts.createSourceFile('store.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let finish;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(tree) === 'finish' && node.initializer?.getText(tree).includes('refreshStartContext')) finish = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  assert.ok(finish, 'test exercises the real store completion mapping');
+  const { outputText } = ts.transpileModule(`exports.make = (kind) => { const ${finish.getText(tree)}; return finish; };`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  const exports = {}, sent = [];
+  new Function('exports', 'ClientError', 'acceptedSnapshot', 'threadActionErrorText', 'setThreadRefresh', 'resendBoundAction', outputText)(
+    exports, ClientError, undefined, String, () => {}, async request => { sent.push(request); return { how: 'sent' }; });
+  const refusal = (status, code) => new ClientError({
+    api_version: 'fractal.client.v0', error_version: 'fractal.client.error.v0', request_id: 'request/unit',
+    code, message: 'Refused', retryable: false, applied: 'none', details: {},
+  }, status);
+  const start = exports.make('start');
+  for (const error of [refusal(404, 'not-found'), refusal(409, 'recipient-retired')]) {
+    assert.equal(start({ how: 'failed', error }).refreshStartContext, true);
+  }
+  assert.equal(start({ how: 'failed', error: refusal(403, 'forbidden') }).refreshStartContext, undefined);
+  assert.equal(exports.make('reply')({ how: 'failed', error: refusal(404, 'not-found') }).refreshStartContext, undefined);
+  const original = Object.freeze({ agent_id: 'agent/A', id: 'action/original', signature: 'signed-original' });
+  const unknown = start({ how: 'unconfirmed', request: original });
+  assert.equal(unknown.how, 'unconfirmed');
+  assert.equal(unknown.refreshStartContext, undefined);
+  assert.equal((await unknown.retry()).how, 'sent');
+  assert.deepEqual(sent, [original], 'an unknown receipt never goes through a new recipient or action key');
 });

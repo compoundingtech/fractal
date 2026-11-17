@@ -32,6 +32,5 @@ appId: com.compoundingtech.fractal.starter
 # PREVIEW_FINAL_ASSERTIONS
 - assertVisible: ".*Fixture/preliminary: discuss this exact Inbox review origin.*"
 - assertNotVisible: "Thread context is unavailable for this Inbox item."
-- assertNotVisible: "No agent is assigned to this Inbox item."
 - assertNotVisible: "^Mark visible replies read$"
 # Leave the real Inbox detail and inline thread visible for an external simctl capture.

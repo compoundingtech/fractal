@@ -12,9 +12,11 @@ use super::{composer, doc::DocExt, text, theme};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tap {
     Start(String),
+    RefreshStart(String),
     CombineSavedDrafts(String),
     MessageHeader(String),
     Earlier(String),
+    RequestHistory { thread: String, first: bool },
     Toggle(String),
     Compose(String),
     Send(String),

@@ -40,10 +40,10 @@ const host = type => function Host({ ref, children, ...props }) {
   const id = React.useRef(Symbol(type)).current;
   hostProps.set(id, { type, props });
   React.useEffect(() => () => { hostProps.delete(id); }, [id]);
-  return React.createElement('div', { ref, 'data-host': type, 'data-collapsable': props.collapsable === false ? 'false' : undefined }, children);
+  return React.createElement('div', { ref, 'data-host': type, 'aria-label': props.accessibilityLabel, 'data-collapsable': props.collapsable === false ? 'false' : undefined }, children);
 };
 const hosts = Object.fromEntries(['View', 'T', 'Text', 'Button', 'Field', 'Pressable', 'ContextMenu', 'Runs',
-  'ThreadComposer', 'ThreadEditFlash', 'ThreadReadIssue'].map(type => [type, host(type)]));
+  'ThreadComposer', 'ThreadEditFlash', 'ThreadReadIssue', 'RequestHistory', 'HistoryStart'].map(type => [type, host(type)]));
 const mounted = () => [...hostProps.values()];
 const button = label => mounted().find(({ type, props }) => type === 'Button' && props.label === label)?.props;
 
@@ -52,7 +52,7 @@ const compilerOptions = { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.
 function compile(file, name, next, dependencies) {
   const text = source(file);
   const a = text.search(new RegExp(`function ${name}(?=[(<])`));
-  const b = text.indexOf(`\n${next}`, a);
+  const b = next === null ? text.length : text.indexOf(`\n${next}`, a);
   assert.ok(a >= 0 && b > a, `${name} in ${file}`);
   const { outputText } = ts.transpileModule(`${text.slice(a, b)}\nexports.value = ${name};`, { compilerOptions });
   const exports = {};
@@ -79,7 +79,24 @@ const flushFrames = () => {
   frames.clear();
   for (const run of due) run();
 };
-const navigation = { isFocused: () => true, addListener: () => () => {} };
+let navigationFocused = true;
+const navigationListeners = { focus: new Set(), blur: new Set(), beforeRemove: new Set() };
+const navigation = {
+  isFocused: () => navigationFocused,
+  addListener: (event, callback) => { navigationListeners[event].add(callback); return () => navigationListeners[event].delete(callback); },
+};
+function navigate(focused) {
+  navigationFocused = focused;
+  for (const callback of [...navigationListeners[focused ? 'focus' : 'blur']]) callback();
+}
+function useNativeFocusEffect(callback) {
+  React.useEffect(() => {
+    let release = navigation.isFocused() ? callback() : undefined;
+    const focus = navigation.addListener('focus', () => { release?.(); release = callback(); });
+    const blur = navigation.addListener('blur', () => { release?.(); release = undefined; });
+    return () => { release?.(); focus(); blur(); };
+  }, [callback]);
+}
 const route = { key: 'route/thread' };
 const scrollHost = { measureInWindow: done => done(0, 0, 400, 600) };
 const viewportRef = { current: { getNativeScrollRef: () => scrollHost } };
@@ -87,7 +104,7 @@ const viewports = [viewportRef];
 const threadViewport = load('./threadViewport.tsx', {
   react: React, 'react-native': { Keyboard: { metrics: () => undefined } }, './threadVisibility': threadVisibility,
 });
-const { useUnreadVisit } = load('./unreadVisitNative.ts', {
+const { useUnreadVisit, useUnreadVisitEntry } = load('./unreadVisitNative.ts', {
   react: React,
   'react-native': {
     AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
@@ -95,7 +112,7 @@ const { useUnreadVisit } = load('./unreadVisitNative.ts', {
   },
   '@react-navigation/native': {
     useNavigation: () => navigation, useRoute: () => route,
-    useFocusEffect: callback => React.useEffect(() => callback(), [callback]),
+    useFocusEffect: useNativeFocusEffect,
   },
   './unreadActions': { applyVisitEffect, UnreadVisitController },
   './unreadVisit': { unreadVisit },
@@ -151,6 +168,7 @@ function deliveryStore(thread) {
   const unreadPorts = { current: undefined };
   const store = {
     actor: 'person/one', data: { agents: [] }, status: 'online', threadRefresh: 0, threadDeliveries: new Map(), reads: [], unreadEnabled: true,
+    draftsOwner: { current: 'person/one' }, draftGeneration: { current: 0 },
     threadActions: new Set(['thread.read', 'thread.clear-unread', 'thread.mark-unread']),
     actions: { markThreadRead: async (_summary, messageIds) => { store.reads.push([...messageIds]); return { how: 'sent' }; } },
   };
@@ -161,7 +179,7 @@ function deliveryStore(thread) {
     selected: { route: { kind: 'tailscale' } }, fabricMember: undefined, url: 'https://gateway.example', carrier: { snapshot: null },
     threadConnection: { current: member }, actionId: () => `action/ios-${++ids}`,
     fence: async revisions => ({ snapshot_id: `snapshot/${++fences}`, subject_revisions: revisions }),
-    actionReceiptCheck, sendBoundAction, resendBoundAction, setThreadRefresh: () => {}, ClientError,
+    actionReceiptCheck, sendBoundAction, resendBoundAction, setThreadRefresh: () => { store.threadRefresh++; changed(); }, ClientError,
     threadActionErrorText: error => error instanceof Error ? error.message : String(error),
     deliveriesByClient, setThreadDeliveryRevision: () => { store.threadDeliveries = new Map(ledger()); changed(); },
     unreadPorts, client: member, capsRef, capsClient: { current: member }, statusRef, unreadSupported, actions: store.actions,
@@ -182,19 +200,22 @@ const settle = async (turns = 12) => { for (let turn = 0; turn < turns; turn++) 
 const step = work => act(async () => { await work?.(); await settle(); });
 
 // The store provider rerenders consumers when its delivery revision changes.
-async function mountBody(harness, thread, page) {
-  const ThreadBody = compile('./screens/Threads.tsx', 'ThreadBody', 'type Quote', {
+function bodyComponent(useStore, useThreadPage, extra = {}) {
+  return compile('./screens/Threads.tsx', 'ThreadBody', 'type Quote', {
     useCallback: React.useCallback, useContext: React.useContext, useEffect: React.useEffect, useMemo: React.useMemo,
     useRef: React.useRef, useState: React.useState, useSyncExternalStore: React.useSyncExternalStore, BottomTabBarHeightContext,
-    useThreadPage: () => page, useWindowDimensions: () => ({ width: 400, height: 800 }),
+    useThreadPage, useWindowDimensions: () => ({ width: 400, height: 800 }),
     useSafeAreaInsets: () => ({ top: 0, left: 0, right: 0, bottom: 0 }), useHeaderHeight: () => 0,
     useNavigation: () => navigation, useThreadViewports: () => viewports,
     measureThreadBounds: threadViewport.measureThreadBounds, measureThreadViewport: threadViewport.measureThreadViewport,
     visibleThreadMessages: threadVisibility.visibleThreadMessages, renderedLineEvidence, THREAD_WINDOW_SIZE,
     threadEditScope, threadClock, threadExactTime, threadRelativeTime, reminderFromSummary, anchorPresentation, pendingUnreadAPI, useUnreadVisit,
     agentName: agent => agent.id, theme: {}, Markdown, ThreadActionFeedback, ...hosts,
-    useStore: () => React.useContext(StoreContext),
+    useStore, ...extra,
   });
+}
+async function mountBody(harness, thread, page) {
+  const ThreadBody = bodyComponent(() => React.useContext(StoreContext), () => page);
   const StoreContext = React.createContext(harness.store);
   function Store() {
     const [, setRevision] = React.useState(0);
@@ -397,3 +418,313 @@ test('initial mark and clear deliveries settle from the real unread server recei
     assert.equal(harness.ledger().size, 0, 'no unknown delivery remains after confirmation');
   }
 });
+
+// Compile the production collection, exact summary, seek, history and composer together.
+// Only native hosts and transport are ports; no substitute collection/body UI owns retention.
+async function mountMarkedList(harness, initial, { inlineTwin, recentlyClosed = false, deniedStatus = 403 } = {}) {
+  let summary = initial, listReads = 0, contextReads = 0, collectionHandlers, listRefused = false, revision = 1;
+  const summaryHandlers = new Map();
+  const others = [
+    { ...initial, id: 'thread/two', title: 'Other one' },
+    { ...initial, id: 'thread/three', title: 'Other two' },
+  ];
+  const members = () => [summary, ...others].filter(thread => recentlyClosed ? thread.state === 'closed' : !!reminderFromSummary(thread));
+  const refresh = () => { harness.store.threadRefresh++; harness.setOnline(true); };
+  const publish = next => {
+    summary = next;
+    const snapshot = { host_id: 'host/one', store_index: ++revision };
+    summaryHandlers.get(next.id)?.onWindow({ items: [next], snapshot });
+    collectionHandlers?.onWindow({ items: members(), snapshot });
+  };
+  const StoreContext = React.createContext(harness.store);
+  const useStore = () => React.useContext(StoreContext);
+  const hooks = { useStore, useCallback: React.useCallback, useEffect: React.useEffect,
+    useMemo: React.useMemo, useRef: React.useRef, useState: React.useState,
+    useFocusEffect: useNativeFocusEffect };
+  const appearance = () => ({ system: true, palette: {}, colors: {}, color: value => value });
+  const deps = { ...hooks, ...hosts, ClientError, THREAD_WINDOW_SIZE, reminderFromSummary, ACCESSIBILITY_FONT_SCALE: 1.3,
+    errorText: error => String(error), theme: {}, useTextAppearance: appearance,
+    useNavigation: () => navigation,
+    useWindowDimensions: () => ({ height: 800, width: 400, fontScale: 1 }),
+    useThreadViewports: () => viewports, threadViewportChanged: threadViewport.threadViewportChanged,
+    ThreadViewport: ({ children }) => children, SystemText: ({ children }) => children,
+    ScrollView: host('ScrollView'), useUnreadVisitEntry,
+    NO_THREADS: [], NO_SNAPSHOTS: new Map(),
+  };
+  const build = (name, next) => compile('./screens/Threads.tsx', name, next, deps);
+  deps.sameHead = build('sameHead', '// The live window');
+  deps.useThreadPage = build('useThreadPage', '/** Typed read failures');
+  deps.unreadReadIssue = build('unreadReadIssue', 'function markedUnreadIssue');
+  deps.markedUnreadIssue = build('markedUnreadIssue', 'const NO_THREADS');
+  deps.useMarkedUnreadPage = build('useMarkedUnreadPage', 'type ThreadClient');
+  deps.useTitleLines = build('useTitleLines', 'export function AgentThreads');
+  deps.useThreadSummary = build('useThreadSummary', '/** Only whole rendered lines');
+  deps.threadSummaryLine = build('threadSummaryLine', '/** One thread row');
+  deps.ThreadRow = build('ThreadRow', 'export function InboxThread');
+  deps.ContextThreadHeader = build('ContextThreadHeader', 'function ExpandedContextThread');
+  const Field = ({ ref, value, onChangeText, ...props }) => React.createElement('input', {
+    ref, value, onInput: event => onChangeText(event.target.value), 'data-composer': true,
+  });
+  const composerDeps = { ...deps, Field, ThreadActionFeedback, AccessibilityInfo: { announceForAccessibility() {} },
+    threadDraftKey: id => `thread/${id}`, threadStartScope: id => `start/${id}`, readThreadDraft: value => value ? JSON.parse(value) : { text: '' },
+    threadTextIssue: () => undefined };
+  composerDeps.ThreadComposeField = compile('./screens/Threads.tsx', 'ThreadComposeField', null, composerDeps);
+  const ThreadComposer = compile('./screens/Threads.tsx', 'ThreadComposer', 'function ThreadComposeField', composerDeps);
+  deps.ThreadBody = bodyComponent(useStore, deps.useThreadPage, { ThreadComposer });
+  deps.ThreadActionFeedback = ThreadActionFeedback;
+  deps.threadEditScope = threadEditScope;
+  deps.anchorPresentation = anchorPresentation;
+  deps.reminderClear = build('reminderClear', '/** One thread');
+  deps.useThreadEditing = build('useThreadEditing', 'type Quote');
+  deps.ClearReminder = build('ClearReminder', '/** An explicit clear');
+  deps.ReminderThreadBody = build('ReminderThreadBody', 'export function ThreadScreen');
+  deps.ExpandedContextThread = build('ExpandedContextThread', '/** A marked thread');
+  deps.ContextThreadList = build('ContextThreadList', 'function ContextThreadHeader');
+  const ThreadGroup = build('ThreadGroup', 'function ContextThreadList');
+  deps.ThreadDetailContent = build('ThreadDetailContent', 'function threadSummaryLine');
+  const InlineThread = build('InlineThread', 'function useThreadSummary');
+  Object.assign(harness.store, {
+    threadClient: harness.member, draftCache: { current: new Map() }, draftsReady: true, saveDrafts() {},
+    feed: { belongsTo: client => client === harness.member,
+      followThreadSummaries: (_context, handlers) => { collectionHandlers = handlers; return { close: () => { collectionHandlers = undefined; } }; },
+      followThreadTimeline: () => undefined,
+      followThreadSummary: (id, handlers) => { summaryHandlers.set(id, handlers); return { close: () => { summaryHandlers.delete(id); } }; } },
+  });
+  harness.store.threadActions.add('thread.reply');
+  const originalUnread = harness.store.unreadClient;
+  harness.store.unreadClient = { ...originalUnread,
+    listMarked: async () => {
+      listReads++;
+      if (listRefused) return { kind: 'error', items: [], error: { kind: 'read-failed', reason: { kind: 'refused', code: 'forbidden' } } };
+      return { kind: 'items', items: members() };
+    },
+  };
+  harness.member.threadList = async () => {
+    contextReads++;
+    if (listRefused) throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+      request_id: 'request/one', code: 'forbidden', message: 'Thread access was revoked.', retryable: false }, deniedStatus);
+    return { value: { items: recentlyClosed ? members() : [summary], next_cursor: null } };
+  };
+  harness.member.threadGet = async id => ({ value: id === inlineTwin?.id ? inlineTwin : id === summary.id ? summary : others.find(thread => thread.id === id) });
+  harness.member.threadTimeline = async id => ({ value: {
+    items: [{ ...message, id: id === initial.id ? message.id : id === inlineTwin?.id ? 'message/two' : `message/${id}`,
+      content: id === initial.id ? message.content : id === inlineTwin?.id ? 'The independently started second message' : `Reply in ${id}`, thread_quote_id: null }],
+    next_cursor: null, anchor: { state: 'current', message_id: message.id },
+  } });
+  const clear = harness.member.threadClearUnread;
+  harness.member.threadClearUnread = async request => {
+    const result = await clear(request);
+    publish({ ...summary, unread_reminder: undefined });
+    return result;
+  };
+  if (recentlyClosed) harness.store.threadActions.add('thread.reopen');
+  harness.store.actions.editThread = async (_thread, edit) => {
+    assert.equal(edit.kind, 'reopen');
+    publish({ ...summary, state: 'open' });
+    refresh();
+    return { how: 'sent' };
+  };
+  function Store() {
+    const [, update] = React.useState(0);
+    React.useEffect(() => { harness.onChange(() => update(value => value + 1)); return () => harness.onChange(() => {}); }, []);
+    return React.createElement(StoreContext.Provider, { value: { ...harness.store } },
+      React.createElement(React.Fragment, null,
+        React.createElement(ThreadGroup, { context: inlineTwin ? { origin_source: 'ask/one', origin_episode: 'episode/one' } : recentlyClosed ? { recently_closed: true } : { marked_unread: true },
+          title: inlineTwin ? 'Threads' : recentlyClosed ? 'Recently closed' : 'Marked unread', openThread: () => navigate(false), excludeId: inlineTwin?.id }),
+        inlineTwin ? React.createElement(InlineThread, { client: harness.member, id: inlineTwin.id, placement: 'inbox:one',
+          refresh: harness.store.threadRefresh, embedded: true, onOpen: () => navigate(false),
+          start: { target: inlineTwin.id, cacheKey: 'start/one', accepted: true, title: inlineTwin.title } }) : null));
+  }
+  const root = createRoot(document.getElementById('root'));
+  await step(() => root.render(React.createElement(Store)));
+  return { listReads: () => listReads, update: () => step(() => harness.setOnline(true)),
+    remoteClear: () => step(() => publish({ ...summary, unread_reminder: undefined })),
+    denySummary: id => step(() => summaryHandlers.get(id).onIssue('Thread access was revoked.', true)),
+    denyList: () => step(() => { listRefused = true; collectionHandlers?.onIssue('Thread access was revoked.', true); refresh(); }),
+    members,
+    contextReads: () => contextReads,
+    liveList: () => step(() => collectionHandlers.onWindow({ items: members(), hasMore: false, snapshot: { host_id: 'host/one', store_index: ++revision } })),
+    unmount: () => step(() => root.unmount()) };
+}
+
+for (const ending of ['collapse', 'owner', 'generation', 'read-grant', 'tab-blur', 'push-blur']) {
+  test(`marked-list removal preserves the open native reading context until ${ending}`, async context => {
+    context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 });
+    frames.clear();
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: reminder };
+    const harness = deliveryStore(thread);
+    harness.member.outcome = 'confirmed';
+    const view = await mountMarkedList(harness, thread);
+    const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel?.startsWith(label))?.props;
+    try {
+      await step(() => row('Marked unread').onPress());
+      await step(() => row('Review').onPress());
+      const scroll = document.querySelector('[data-host="ScrollView"]');
+      const order = () => [...scroll.querySelectorAll('[data-host="Pressable"][aria-label]')].map(node => node.getAttribute('aria-label').split(',')[0])
+        .filter(title => ['Review', 'Other one', 'Other two'].includes(title));
+      assert.deepEqual(order(), ['Review', 'Other one', 'Other two']);
+      scroll.scrollTop = 29;
+      const body = await layOut(100);
+      const composer = document.querySelector('[data-composer]');
+      assert.ok(composer, 'the production composer mounted');
+      composer.focus();
+      assert.ok(scroll.contains(body), 'the conversation belongs to the real list ScrollView');
+      await step(() => {
+        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+        setter.call(composer, 'Keep this draft');
+        composer.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      });
+      const before = view.listReads();
+      await step(() => { threadViewport.threadViewportChanged(viewportRef); flushFrames(); });
+      await step(() => { context.mock.timers.tick(500); flushFrames(); });
+      assert.equal(harness.member.sends.filter(send => send.kind === 'clear').length, 1);
+      assert.ok(view.listReads() > before, 'confirmed clear refreshed marked membership');
+      assert.equal(composer.value, 'Keep this draft');
+      assert.equal(JSON.parse(harness.store.draftCache.current.get(`thread/${thread.id}`)).text, 'Keep this draft');
+      assert.equal(document.querySelector('[data-collapsable="false"]'), body);
+      assert.equal(document.querySelector('[data-composer]'), composer);
+      assert.equal(document.activeElement, composer);
+      assert.equal(document.querySelector('[data-host="ScrollView"]'), scroll);
+      assert.equal(scroll.scrollTop, 29, 'the actual ScrollView retains its offset');
+      assert.deepEqual(order(), ['Review', 'Other one', 'Other two'], 'membership removal never moves the open row below its neighbors');
+      assert.equal(row('Review').accessibilityLabel.includes('marked unread reminder'), false);
+      assert.equal(scroll.querySelector('[aria-label^="Review"]').textContent.includes('Marked unread'), false);
+      if (ending === 'collapse') await step(() => row('Review').onPress());
+      else if (ending === 'tab-blur' || ending === 'push-blur') {
+        await step(() => ending === 'push-blur' ? button('Open thread').onPress() : navigate(false));
+        assert.equal(document.querySelector('[data-collapsable="false"]'), null, 'navigation exit releases the retained body');
+        await step(() => navigate(true));
+        assert.equal(row('Review'), undefined, 'refocus cannot restore a cleared membership from the old visit');
+        assert.deepEqual(order(), ['Other one', 'Other two']);
+      } else {
+        if (ending === 'owner') harness.store.actor = 'person/ada';
+        if (ending === 'generation') harness.store.draftGeneration.current++;
+        if (ending === 'read-grant') harness.store.threadClient = undefined;
+        await view.update();
+      }
+      assert.equal(document.querySelector('[data-collapsable="false"]'), null);
+      assert.equal(document.querySelector('[data-composer]'), null);
+    } finally { await view.unmount(); navigate(true); }
+  });
+}
+
+test('same-title accepted Inbox start is visibly and accessibly distinct; each real row collapses only its own body', async () => {
+  const original = { id: 'thread/one', title: 'Review', message_count: 1, state: 'open', unread: false };
+  const next = { ...original, id: 'thread/two' };
+  const harness = deliveryStore(original);
+  const view = await mountMarkedList(harness, original, { inlineTwin: next });
+  const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel === label)?.props;
+  const bodies = () => [...document.querySelectorAll('[data-collapsable="false"]')];
+  try {
+    await step(() => row('Threads, 1').onPress());
+    await step(() => row('Review, 1 message, open').onPress());
+    assert.equal(bodies().length, 2);
+    const [oldBody, newBody] = bodies();
+    assert.match(oldBody.closest('[data-host="Pressable"]').getAttribute('aria-label'), /A reply long enough/);
+    assert.match(newBody.closest('[data-host="Pressable"]').getAttribute('aria-label'), /independently started second message/);
+    assert.match(document.querySelector('[aria-label="Review, 1 message, open, started here"]').textContent, /Started here/);
+    await step(() => row('Review, 1 message, open, started here').onPress());
+    assert.deepEqual(bodies(), [oldBody], 'collapsing the accepted start never collapses the original');
+    await step(() => row('Review, 1 message, open, started here').onPress());
+    assert.equal(bodies().length, 2);
+    const reopenedNew = bodies()[1];
+    await step(() => row('Review, 1 message, open').onPress());
+    assert.deepEqual(bodies(), [reopenedNew], 'collapsing the original never collapses the accepted start');
+    assert.equal(row('Review, 1 message, open, started here').accessibilityState.expanded, true);
+  } finally { await view.unmount(); }
+});
+
+for (const change of ['explicit-clear', 'remote-clear', 'reopen']) for (const ending of ['owner-reset', 'exact-denial', 'collection-denial']) {
+  test(`${change} removes filter membership, not selected reading contexts; ${ending} still clears protected content`, async () => {
+    const recentlyClosed = change === 'reopen';
+    const thread = { id: 'thread/one', title: 'Review', message_count: 1, unread: true,
+      state: recentlyClosed ? 'closed' : 'open', unread_reminder: recentlyClosed ? undefined : reminder };
+    const harness = deliveryStore(thread);
+    harness.member.outcome = 'confirmed';
+    const view = await mountMarkedList(harness, thread, { recentlyClosed });
+    const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel?.startsWith(label))?.props;
+    const bodies = () => [...document.querySelectorAll('[data-collapsable="false"]')];
+    try {
+      await step(() => row(recentlyClosed ? 'Recently closed, 3' : 'Marked unread').onPress());
+      for (const title of ['Review', 'Other one', 'Other two']) await step(() => row(title).onPress());
+      const originalBodies = bodies();
+      const originalComposers = [...document.querySelectorAll('[data-composer]')];
+      assert.equal(originalBodies.length, 3);
+      assert.equal(originalComposers.length, 3);
+      const scroll = document.querySelector('[data-host="ScrollView"]');
+      const order = () => [...scroll.querySelectorAll('[data-host="Pressable"][aria-label]')]
+        .map(node => node.getAttribute('aria-label').split(',')[0]).filter(title => ['Review', 'Other one', 'Other two'].includes(title));
+      const composer = originalComposers[0];
+      composer.focus();
+      scroll.scrollTop = 61;
+      await step(() => {
+        Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(composer, 'An unfinished reply');
+        composer.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      });
+      if (change === 'remote-clear') {
+        const before = view.listReads();
+        await view.remoteClear();
+        assert.equal(view.listReads(), before, 'the exact summary stream alone updates marked membership, with no synthetic refresh');
+      }
+      else await press(recentlyClosed ? 'Reopen thread' : 'Clear reminder');
+      assert.deepEqual(view.members().map(member => member.id), ['thread/two', 'thread/three'], 'authoritative filtered membership excludes the changed thread');
+      assert.deepEqual(bodies(), originalBodies, 'all selected bodies retain their identity and order');
+      assert.deepEqual([...document.querySelectorAll('[data-composer]')], originalComposers);
+      assert.deepEqual(order(), ['Review', 'Other one', 'Other two']);
+      assert.equal(document.querySelector('[data-host="ScrollView"]'), scroll);
+      assert.equal(scroll.scrollTop, 61);
+      assert.equal(document.activeElement, composer);
+      assert.equal(composer.value, 'An unfinished reply');
+      assert.equal(JSON.parse(harness.store.draftCache.current.get(`thread/${thread.id}`)).text, 'An unfinished reply');
+      assert.equal(row('Review').accessibilityLabel.includes(', unread'), true, 'natural unread is unchanged by reminder clear or reopen');
+      assert.equal(row('Review').accessibilityLabel.includes('marked unread reminder'), false);
+      assert.deepEqual(harness.store.reads, [], 'explicit/remote clear never acknowledges unseen messages');
+      if (recentlyClosed) {
+        assert.ok(row('Recently closed, 2'), 'the count reports filter members, not retained open placements');
+        assert.equal(row('Review').accessibilityLabel.includes('closed'), false);
+      } else {
+        assert.equal(row('Marked unread').accessibilityLabel, 'Marked unread', 'no phantom marked count is added');
+        assert.equal(scroll.querySelector('[aria-label^="Review"]').textContent.includes('Marked unread'), false);
+        assert.equal(harness.member.sends.length, change === 'explicit-clear' ? 1 : 0);
+      }
+      if (ending === 'owner-reset') {
+        harness.store.draftGeneration.current++;
+        await view.update();
+      } else if (ending === 'exact-denial') await view.denySummary(thread.id);
+      else await view.denyList();
+      assert.equal(document.contains(originalBodies[0]), false);
+      assert.equal(document.contains(composer), false);
+      if (ending === 'exact-denial') {
+        assert.ok(document.contains(originalBodies[1]), 'denial of one exact thread does not revoke another');
+      } else assert.equal(bodies().length, 0);
+    } finally { await view.unmount(); }
+  });
+}
+
+for (const status of [401, 403, 404]) {
+  test(`an authorized unchanged live membership supersedes an earlier HTTP ${status} refusal without reloading`, async () => {
+    const thread = { id: 'thread/one', title: 'Review', state: 'closed', unread: false };
+    const harness = deliveryStore(thread);
+    const view = await mountMarkedList(harness, thread, { recentlyClosed: true, deniedStatus: status });
+    const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel?.startsWith(label))?.props;
+    try {
+      await view.liveList();
+      await step(() => row('Recently closed, 3').onPress());
+      await step(() => row('Review').onPress());
+      assert.ok(document.querySelector('[data-collapsable="false"]'));
+      await view.denyList();
+      assert.equal(row('Review'), undefined, 'a current HTTP read denial hides the collection');
+      assert.equal(document.querySelector('[data-collapsable="false"]'), null);
+      assert.ok(mounted().some(({ type }) => type === 'ThreadReadIssue'));
+      const reads = view.contextReads();
+      await view.liveList(); // Same IDs and hasMore, while HTTP still refuses.
+      assert.equal(view.contextReads(), reads, 'unchanged live membership does not need another HTTP request');
+      assert.ok(row('Recently closed, 3'), 'the authorized live collection is visible again');
+      assert.ok(row('Review'));
+      assert.equal(mounted().some(({ type }) => type === 'ThreadReadIssue'), false, 'the superseded refusal is no longer shown');
+      assert.equal(document.querySelector('[data-collapsable="false"]'), null, 'revoked selections do not reopen themselves');
+      await step(() => row('Review').onPress());
+      assert.ok(document.querySelector('[data-collapsable="false"]'), 'the person can deliberately open the authorized thread again');
+    } finally { await view.unmount(); }
+  });
+}

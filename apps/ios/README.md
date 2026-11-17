@@ -60,6 +60,34 @@ Inline thread read and timeline errors offer an in-place Retry button; a success
 Thread action failures, validation issues, changed read errors and quote selection are explicitly announced to VoiceOver; revoked read access moves focus to the error. Expandable thread rows and the Threads header expose expanded/collapsed values and hints. Embedded composers name their thread in the message and Send labels; Retry names the failed thread or thread list. Standalone composers keep their existing Message thread and Send labels. Thread action hints identify the affected title without changing the visible button text.
 Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
 
+First Starts are independent, even for the same Inbox source and episode. Each
+attempt owns its thread UUID, action key and delivery slot; only its own retry
+recovers that result. Unconfirmed starts appear separately in Inbox recovery,
+including when their source remains listed. They never replace the current
+source/episode or disable a fresh Start. Listing existing discussions is navigation,
+not Start deduplication.
+Before a fresh send, the generated Start context selects the exact displayed and
+signed recipient (`original`, `configured`, or `fallback`). A source with neither
+an original agent nor a configured recipient remains visibly unavailable: no
+recipient is guessed, and the composer cannot submit. Definitive stale-recipient
+refusals reread context and require another explicit Send; unknown-delivery retries
+retain their original signed recipient and request.
+Before releasing an unconfirmed first composer, the rendered draft used to build
+its submitted content and quote is serialized into the attempt's own durable key.
+Only a matching origin snapshot is removed: shared-cache edits before invocation
+or while the send is pending remain independent.
+Start completion captures the draft owner and cache generation at dispatch. If
+either changes while pending, it skips draft handoff, persistence and cleanup, even
+when the reset shared map contains identical text for the next owner.
+Minimal target/origin/title discovery metadata is saved beside the draft, never a
+bound action, operation key or signature. Inbox discovers these drafts after restart.
+With the live ledger, recovery retries the original signed request. Without it, the
+saved message explicitly has unknown delivery status and offers Copy message and
+Discard saved draft, never Retry or a send to its old target. The person may paste
+into a current Inbox Start to deliberately send a separate message with a fresh
+UUID/key and current recipient; the warning explains the original may have arrived.
+Recovery acceptance/discard touches only that attempt's draft, not later typing.
+
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.
 The body must have full width, its trailing end visible, and visible height of at
@@ -121,6 +149,21 @@ the shared thread body on that page (older history continues from it; Open threa
 shows the latest); unavailable and pending anchors show their notice and, with the
 current write grant, an explicit Clear reminder. Visible evidence counts whole
 rendered Markdown lines (up to two, including the last), never paragraph spacing.
+Every expanded contextual row owns its open reading context independently of filter
+membership. Automatic, explicit and remote reminder clears remove the real marker
+and marked membership; reopening removes Recently closed membership. None removes
+the open body, composer, draft, focus or scroll. Counts describe current filter
+members, never retained placements. Selected rows keep their ordering while open.
+The shared selection boundary applies to all contextual thread collections. Collapsing the row
+or section, switching tabs or pushing another screen releases it; refocus cannot
+restore a cleared row from the previous visit. Owner, pairing/session, client and
+read-grant changes still remove the protected context. A current exact-thread denial
+removes that body; a collection denial releases every selection in that collection.
+A later authorized live window supersedes an earlier HTTP refusal even with unchanged
+membership. It restores the readable collection, not the selections released on denial.
+An accepted inline Start is labeled “Started here”, visibly and for VoiceOver, to
+distinguish it from an existing contextual thread with the same generated title and
+message count. The two placements keep independent collapse controls.
 Loading wrappers (detail, Inbox start, expanded rows) start the
 visit entry with the same placement key before the body mounts, so a reminder that
 loads after entry is never captured. Focused node coverage lives beside the visit
