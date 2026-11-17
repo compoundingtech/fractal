@@ -399,9 +399,75 @@ no untrimmed seeds requiring old-build excusal and next-cut continuation in this
 on top of v29 notice-owner registry entry. Versions 1 through 29 stay frozen; v29 is main`s
 notice-owner corpus. Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v30.json`;
-do not hand-edit it. The simulation and audit reports select v30.
+do not hand-edit it. It remains the historical v30 corpus.
 
-The local fixed sweep observed only seeds 13 and 294 without a checkpoint trim; each still
-trims on every modern node after its old build is excused and the next cut falls due. The
-exact v30 `NEVER_TRIMS` set is `[13, 294]`, carried from the invocation-receipt corpus
-schedule measured before main took v29.
+`claims-v31.json` adds explicit deadline-answer replacements (`work.person-override`).
+Versions 1 through 30 remain byte-identical. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v31.json`;
+the simulation and audit reports now select v32.
+
+The v31 fixed sweep observed only seed 179 without a checkpoint trim; it still trims on
+every modern node after its old build is excused and the next cut falls due. The exact
+v31 `NEVER_TRIMS` set is `[179]`.
+
+`claims-v32.json` adds the durable, system-only append receipts `effect.intended`,
+`effect.in-flight`, `effect.confirmed`, and `effect.unresolved` on dedicated
+`effect/OPERATION_ID` subjects. Versions 1 through 31 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v32.json`;
+do not hand-edit it. Effect draws bind operation identity, payload digest, step attempt,
+and admitting lease; confirmed draws include a provider reference and evidence.
+
+The v32 fixed sweep retains the exact `NEVER_TRIMS` set `[179]`. That seed still
+trims on every modern node after its old build is excused and the next cut falls due;
+all other fixed seeds trim. The per-seed and majority trim-coverage assertions remain enforced.
+
+`claims-v33.json` registers the optional `resolution: "human"` and
+`outcome: "abandoned"` fields on existing native effect receipt kinds. No kind is
+added. Versions 1 through 32 remain byte-identical. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v33.json`;
+do not hand-edit it. Ordinary effect
+draws retain their explicit immutable binding and confirmation-evidence mapping;
+human resolution is exercised by focused effect API and reconciliation tests.
+
+`claims-v34.json` adds `mission-run.gate-carried` and the native continuity bindings
+on human requests and carried steps. Versions 1 through 33 remain byte-identical.
+Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v34.json`;
+do not hand-edit it. The simulation and audit reports select v34. The targeted
+`the_corpus_generates_valid_native_continuity_inputs` assertion checks current
+continuity specs and validates generated inputs, in addition to the complete
+registry-kind inventory guard.
+
+The v34 fixed-seed characterization in
+[hosted run 43977692983](https://github.com/compoundingtech/fractal/actions/runs/43977692983)
+observed seed 2 converge without an initial checkpoint trim, then trim on every
+modern node after the old build's excusal and the next cut. Its only failure was
+the obsolete v33 initial-trim expectation; the three reported attempts agreed.
+Seed 179 retained its existing initial non-trim behavior and passed its required
+continuation; the other fixed seeds passed their initial-trim assertions.
+The exact v34 `NEVER_TRIMS` set is therefore `[2, 179]`, not a waiver of checkpoint
+coverage: each named seed must still converge, match the exact initial-trim
+expectation, and trim on every modern node in the continuation. The maximum of
+three non-trimming fixed seeds, majority trim coverage, replay comparisons,
+tombstone verification, and deliberate-corruption checks remain unchanged.
+
+The input snapshot adds kinds and fields, and coherent native review generation
+now fills the complete request tuple instead of independently drawing invalid
+empty heads and partial tuples. Both affect consumption of the schedule's shared
+seeded random stream, so an older corpus's exact trim set is not transferable.
+The v34 filename is used in diagnostics as well as the audit summary.
+For a wider characterization, use a fresh `CONVERGENCE_REPORT_DIR` and the existing
+`fixed_sweep` workflow above; retain the source and binary hashes with its outcomes.
+
+`claims-v35.json` adds the durable `resource.exec-receipt` schema. Versions 1 through 34
+remain byte-identical. It is the official `claims_json` generator output produced under
+admitted capacity (receipt `1475150:88192935`), with SHA-256
+`ba9a0a13be02824369b77e5c0f7ff76f0107fe382e3f73de0777d6053221d86a`.
+Regenerate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v35.json`;
+do not hand-edit the snapshot.
+
+In [hosted run 44158892426](https://github.com/compoundingtech/fractal/actions/runs/44158892426),
+seed 2 converged and trimmed an initial checkpoint with this corpus, so v34's non-trimming
+expectation for seed 2 no longer applies. The v35 never-trim set is `[179]`; exact per-seed
+equality, continuation after excusing the old build, and majority trim coverage remain enforced.

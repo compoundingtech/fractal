@@ -108,6 +108,15 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_cut_epoch",
         // Like message cut epochs, desired write generations invalidate local cursors.
         "local_desired_write_witness",
+        // Rebuildable daily-digest arrival indexes, dependency work and staging:
+        // replicated notice/document claims, not these cursors, are the authority.
+        "local_ask_digest_pending",
+        "local_ask_digest_emitted",
+        "local_ask_digest_sources",
+        "local_ask_digest_source_history",
+        "local_ask_digest_draft",
+        "local_ask_digest_deferred",
+        "local_ask_digest_retry",
         "local_idle_messages",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",
@@ -160,6 +169,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_usage_credit_pending",
         "local_usage_credit_progress",
         "local_latest_slots",
+        // Member-local timestamp seeks and capture queue, rebuilt from authoritative claim bodies.
+        "local_objective_times_v1",
+        "local_objective_times_pending_v1",
         "local_resource_projection_pending",
         // Member-local mission-head work, rebuilt from selected published revisions.
         "local_mission_supersession_heads_v3",
@@ -199,6 +211,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_authorities_v1",
         "resource_lane_policies_v1",
         "resource_memberships_v1",
+        "shell_resources_v1",
         // Person attention controls: order-free earliest-seen and newest-snooze registers
         // refolded from replicated claims on open, repair and replay; the claims carry the
         // shared digest coverage.

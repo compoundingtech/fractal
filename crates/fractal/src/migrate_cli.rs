@@ -291,7 +291,9 @@ pub(super) fn print_launchd_domain() -> Result<()> {
         ensure!(fractal_daemon::instance::current().is_none(), "launchd migration domain is for the default host only");
         let layout = Layout::discover()?;
         let domain = queried_launchd_domain(&layout, unsafe { libc::getuid() },
-            |domain| launchd::probe(domain, std::process::Command::new("/bin/launchctl").args(["print", domain]).output()?))?;
+            |domain| launchd::probe(domain, fractal_daemon::service::launchctl::output(
+                std::process::Command::new("/bin/launchctl").args(["print", domain]),
+            )?))?;
         fractal_daemon::cli_println!("{domain}");
         Ok(())
     }

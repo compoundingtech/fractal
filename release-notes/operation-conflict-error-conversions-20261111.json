@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fix typed error conversions in the operation-conflict replay fence.",
+  "replay": {"status": "none", "detail": "No replay behavior change; fallible SQLite, JSON, discovery-validity and frontier reads now convert to the projection closure's structured error type."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "No compatibility changes."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."},
+  "downtime": {"status": "none", "detail": "Compile-time correction only."}
+}

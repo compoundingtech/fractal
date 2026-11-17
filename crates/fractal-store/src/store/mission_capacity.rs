@@ -174,34 +174,54 @@ pub const FEATURE: &str = "mission_capacity";
 pub const AUTHORITY_FEATURE: &str = "mission_authority";
 /// The `daemon.started` feature of a build that reads a step's `program`.
 pub const PROGRAM_FEATURE: &str = "mission_program";
+/// The `daemon.started` feature of a build that reads finite execution resource lanes.
+pub const RESOURCE_LANE_FEATURE: &str = "mission_resource_lane";
 
 /// One mission field behind a fleet barrier: the feature that says a member reads it, the
 /// refusal code, and what to do once every member is upgraded.
 struct Barrier {
     feature: &'static str,
+    minimum_version: u64,
     code: &'static str,
     declares: fn(&MissionSpec) -> bool,
     later: &'static str,
 }
 
-const BARRIERS: [Barrier; 3] = [
+const BARRIERS: [Barrier; 5] = [
     Barrier {
         feature: FEATURE,
+        minimum_version: 1,
         code: "mission-capacity-unavailable",
         declares: declares_capacity,
         later: "declare capacity on a mission or step",
     },
     Barrier {
         feature: AUTHORITY_FEATURE,
+        minimum_version: 1,
         code: "mission-authority-unavailable",
         declares: |mission| !mission.authority.is_empty(),
         later: "declare authority on a mission",
     },
     Barrier {
         feature: PROGRAM_FEATURE,
+        minimum_version: 1,
         code: "mission-program-unavailable",
         declares: |mission| !mission.programs().is_empty(),
         later: "declare a program step",
+    },
+    Barrier {
+        feature: RESOURCE_LANE_FEATURE,
+        minimum_version: 1,
+        code: "mission-resource-lane-unavailable",
+        declares: declares_resource_lane,
+        later: "declare a finite execution resource lane",
+    },
+    Barrier {
+        feature: RESOURCE_LANE_FEATURE,
+        minimum_version: 2,
+        code: "mission-resource-lane-unavailable",
+        declares: declares_extended_resource_lane,
+        later: "declare resource lane classes, disk reservations or IO-heavy admission",
     },
 ];
 
@@ -217,6 +237,29 @@ fn declares_capacity(mission: &MissionSpec) -> bool {
         || mission.steps.values().any(|step| {
             step.capacity.is_some() || step.nested_mission.as_deref().is_some_and(declares_capacity)
         })
+}
+
+fn declares_resource_lane(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.resource_lane.is_some()
+            || step.nested_mission.as_deref().is_some_and(declares_resource_lane)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_resource_lane(branch))
+            })
+    })
+}
+
+fn declares_extended_resource_lane(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.resource_lane.as_ref().is_some_and(|lane| {
+            lane.class != fractal_runtime::RequestClass::Agent || lane.disk.is_some() || lane.io.is_some()
+        }) || step.nested_mission.as_deref().is_some_and(declares_extended_resource_lane)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_extended_resource_lane(branch))
+            })
+    })
 }
 
 /// Refuses each new mission revision in `intent` that declares a field behind a barrier while a
@@ -257,7 +300,7 @@ pub(super) fn validate_mission(
 }
 
 fn validate_barrier(connection: &Connection, origin: &str, barrier: &Barrier) -> Result<(), FractalError> {
-    let Barrier { feature, code, later, .. } = barrier;
+    let Barrier { feature, minimum_version, code, later, .. } = barrier;
     let refused = |reason: String| FractalError::new(code, reason);
     let membership = fleet_membership_tx(connection).map_err(internal)?;
     for member in membership.incarnations().filter(|member| member.end.is_none()) {
@@ -286,10 +329,11 @@ fn validate_barrier(connection: &Connection, origin: &str, barrier: &Barrier) ->
             .map_err(internal)?;
         let advertised = features.flatten()
             .and_then(|features| serde_json::from_str::<Value>(&features).ok())
-            .is_some_and(|features| features.get(*feature) == Some(&json!(1)));
+            .and_then(|features| features.get(*feature).and_then(Value::as_u64))
+            .is_some_and(|version| version >= *minimum_version);
         if !advertised {
             return Err(refused(format!(
-                "host/{} runs an older build that would refuse this revision (it has not advertised {feature}=1); {later} once every member is upgraded",
+                "host/{} runs an older build that would refuse this revision (it has not advertised {feature}>={minimum_version}); {later} once every member is upgraded",
                 member.name
             )));
         }
@@ -557,7 +601,7 @@ mission "authorized" state="ready" {
         sync(&peer, &store);
         let refusal = publish(&store, AUTHORIZED, "older").unwrap_err();
         assert_eq!(refusal.code, "mission-authority-unavailable");
-        assert!(refusal.message.contains("has not advertised mission_authority=1); declare authority on a mission once every member is upgraded"),
+        assert!(refusal.message.contains("has not advertised mission_authority>=1); declare authority on a mission once every member is upgraded"),
             "{}", refusal.message);
         assert!(store.mission_spec("authorized", None).unwrap().is_none());
         claim(&peer, "daemon/birch", "daemon.started", None,
@@ -585,7 +629,7 @@ mission "authorized" state="ready" {
         sync(&peer, &store);
         let refusal = publish(&store, &source, "older").unwrap_err();
         assert_eq!(refusal.code, "mission-program-unavailable");
-        assert!(refusal.message.contains("has not advertised mission_program=1); declare a program step once every member is upgraded"),
+        assert!(refusal.message.contains("has not advertised mission_program>=1); declare a program step once every member is upgraded"),
             "{}", refusal.message);
         assert!(store.mission_spec("programmed", None).unwrap().is_none());
         claim(&peer, "daemon/birch", "daemon.started", None,
@@ -593,5 +637,53 @@ mission "authorized" state="ready" {
         sync(&peer, &store);
         assert!(publish(&store, &source, "upgraded").unwrap().is_empty());
         assert_eq!(store.mission_spec("programmed", None).unwrap().unwrap().programs().len(), 1);
+    }
+
+    #[test]
+    fn resource_lane_publication_waits_for_reader_capability() {
+        const SOURCE: &str = r#"version 2
+mission "resource-laned" state="ready" {
+  goal "Verify."
+  step "verify" {
+    agentless
+    lane "verification" host="alder"
+    exec "verify" { command "true"; }
+  }
+}
+"#;
+        let (store, peer) = two_members();
+        let error = publish(&store, SOURCE, "old-reader").unwrap_err();
+        assert_eq!(error.code, "mission-resource-lane-unavailable");
+        assert!(store.mission_spec("resource-laned", None).unwrap().is_none());
+        publish(&store, PLAIN, "unaffected-history").unwrap();
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {RESOURCE_LANE_FEATURE: 1}}));
+        sync(&peer, &store);
+        assert!(publish(&store, SOURCE, "lane-reader").unwrap().is_empty());
+        assert!(store.mission_spec("resource-laned", None).unwrap().unwrap().steps["verify"].resource_lane.is_some());
+    }
+
+    #[test]
+    fn extended_resource_lane_needs_version_two_reader() {
+        const SOURCE: &str = r#"version 2
+mission "resource-classed" state="ready" {
+  goal "Verify."
+  step "verify" {
+    agentless
+    lane "checks" host="alder" class="check" disk="1G" disk-path="/workspace" io="heavy"
+    exec "verify" { command "true"; }
+  }
+}"#;
+        let (store, peer) = two_members();
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {RESOURCE_LANE_FEATURE: 1}}));
+        sync(&peer, &store);
+        let refusal = publish(&store, SOURCE, "class-old-reader").unwrap_err();
+        assert_eq!(refusal.code, "mission-resource-lane-unavailable");
+        assert!(refusal.message.contains("mission_resource_lane>=2"));
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {RESOURCE_LANE_FEATURE: 2}}));
+        sync(&peer, &store);
+        assert!(publish(&store, SOURCE, "class-reader").unwrap().is_empty());
     }
 }

@@ -28,6 +28,34 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AutoResolvedAsk {
+    pub resolution_id: String,
+    pub title: String,
+    pub requester_id: String,
+    pub resolved_at: String,
+    pub target_id: String,
+    pub episode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<AskDefaultAnswer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<StructuredRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_parameters: Option<BTreeMap<String, PersonOverrideTarget>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonOverrideTarget {
+    pub target_id: String,
+    pub episode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AutoResolvedAsks {
+    pub items: Vec<AutoResolvedAsk>,
+    pub complete: bool,
+}
+
 /// Set or clear the session person's own note; `text: None` clears it and is sent as `null`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DirectiveNoteSet {
@@ -161,6 +189,72 @@ pub struct PresenceReportResult {
     pub report_again_at: Option<String>,
 }
 
+/// Milliseconds spent in each status during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityStatusDurations {
+    pub available: u64,
+    pub away: u64,
+}
+
+/// Milliseconds the status came from each source during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityStatusSourceDurations {
+    pub r#override: u64,
+    pub presence: u64,
+    pub unreported: u64,
+}
+
+/// Milliseconds of each derived presence during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityPresenceDurations {
+    pub present: u64,
+    pub idle: u64,
+    pub locked: u64,
+    pub unreported: u64,
+}
+
+/// Milliseconds of each interruptions setting during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityInterruptionsDurations {
+    pub all: u64,
+    pub urgent: u64,
+    pub none: u64,
+}
+
+/// Milliseconds of each deadline-clock mode during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityDeadlineClockDurations {
+    pub run: u64,
+    #[serde(rename = "hold-routine")]
+    pub hold_routine: u64,
+    #[serde(rename = "hold-all")]
+    pub hold_all: u64,
+}
+
+/// One history bucket; each axis's durations sum to `covered_ms`. `presence` is `None` for
+/// anyone but the person.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityHistoryBucket {
+    pub start: String,
+    pub covered_ms: u64,
+    pub status: AvailabilityStatusDurations,
+    pub status_source: AvailabilityStatusSourceDurations,
+    pub presence: Option<AvailabilityPresenceDurations>,
+    pub interruptions: AvailabilityInterruptionsDurations,
+    pub deadline_clock: AvailabilityDeadlineClockDurations,
+}
+
+/// A person's availability over `[from, to)` in buckets of `bucket_seconds` from `from`; `to`
+/// is the requested end clamped to when the daemon answered.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityHistory {
+    pub person: String,
+    pub from: String,
+    pub to: String,
+    pub bucket_seconds: u64,
+    pub buckets: Vec<AvailabilityHistoryBucket>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope<T> {
     pub api_version: String,
@@ -205,8 +299,15 @@ pub struct AgentsPublication {
     pub has_more: bool,
 }
 
+pub(crate) fn deserialize_error_applied<'de,D:serde::Deserializer<'de>>(deserializer:D)->std::result::Result<Option<Value>,D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ErrorEnvelope {
+    /// Raw application metadata: missing and explicit null remain distinct for safe classification.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_error_applied")]
+    pub applied: Option<Value>,
     pub api_version: String,
     pub error_version: String,
     pub request_id: String,
@@ -268,6 +369,9 @@ pub enum ErrorCode {
     UnsupportedCapability,
     PeerTooOld,
     ValidationFailed,
+    UnknownObjective,
+    InvalidSeries,
+    UnsupportedObjectiveSeries,
     IdempotencyConflict,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
@@ -1089,6 +1193,40 @@ pub struct SloHistory {
     pub samples: u64,
     pub steps: Vec<Option<f64>>,
 }
+/// A half-open count histogram, not percentiles.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Series {
+    pub from: u64,
+    pub to: u64,
+    pub bucket_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
+    pub buckets: Vec<SeriesBucket>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SeriesBucket {
+    pub start: u64,
+    pub end: u64,
+    pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<SeriesGroup>>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SeriesGroup {
+    pub value: serde_json::Value,
+    pub count: u64,
+}
+/// Select a declared objective or explicit kinds; grouping and prefixes require explicit kinds.
+#[derive(Clone, Debug)]
+pub struct SeriesQuery {
+    pub objective: Option<String>,
+    pub kinds: Vec<String>,
+    pub subject_prefix: Option<String>,
+    pub group_by: Option<String>,
+    pub from: u64,
+    pub to: u64,
+    pub bucket_seconds: u64,
+}
 /// Token spend over a period, one row per agent, mission run, step, model, account and host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct UsagePeriod {
@@ -1204,6 +1342,14 @@ pub struct UsageRow {
     pub mission_run: Option<String>,
     #[serde(default)]
     pub step: Option<String>,
+    /// Immutable work-claim accounting key, not a native process identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    /// Exact durable launch/turn receipt identity; absent means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -1970,6 +2116,8 @@ pub struct StepExecution {
     pub id: String,
     pub step_subject: String,
     pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     pub agent: String,
     pub incarnation_id: Option<String>,
     pub declared_model: Option<String>,
@@ -3770,6 +3918,12 @@ pub enum TimelineUsageSemantics {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TimelineAttribution {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     pub mission_run_id: Option<String>,
     pub generation_id: Option<String>,
     pub step_id: Option<String>,
@@ -3959,6 +4113,8 @@ pub enum ActionType {
     WorkAsk,
     #[serde(rename = "work.done")]
     WorkDone,
+    #[serde(rename = "work.override")]
+    WorkOverride,
     #[serde(rename = "work.cancel-ask")]
     WorkCancelAsk,
     #[serde(rename = "work.claim")]
@@ -4078,6 +4234,20 @@ pub struct PersonStepParameters {
     pub target_id: String, pub summary: String, pub episode: String,
     #[serde(default)] pub evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub answer: Option<PersonAnswerInput>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PersonOverrideParameters {
+    pub target_id: String,
+    pub episode: String,
+    pub answer: PersonOverrideAnswer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PersonOverrideAnswer {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 /// A typed question with named answers: a `decision`, a `choice` or `feedback`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

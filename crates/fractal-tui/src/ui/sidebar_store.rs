@@ -224,7 +224,7 @@ mod tests {
             assert_eq!(wire, client::write_request(&exact).unwrap());
             async {
                 Err(ClientError::Api(fractal_client::ErrorCode::Forbidden, "refused replay".into(),
-                    Box::new(fractal_client::ErrorEnvelope {
+                    Box::new(fractal_client::ErrorEnvelope { applied: None,
                         api_version: "0".into(), error_version: "1".into(), request_id: "request/test".into(),
                         code: fractal_client::ErrorCode::Forbidden, message: "refused replay".into(),
                         retryable: false, retry_after_ms: None,

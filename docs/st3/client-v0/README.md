@@ -36,6 +36,39 @@ reviewed manifest digest; it does not authenticate external git commits named in
 authenticated sender evidence. Notice finalization is SQL-free when no notice
 work is pending; touched authority or custom state still triggers revalidation.
 This is a finalization contract, not a checked performance result.
+Daily ask digests are daemon-owned notices under
+`custom/attention/{source,snapshot}/digest/person/{person}/{local-date}`.
+Small payloads inline at most 128 rows in `input.source.digest`; larger days
+use one `digest_document` exact native document reference and a decimal-string
+`digest_count`. Immutable content-addressed documents contain at most 16KiB of
+UTF-8 JSONL `data` and an optional `previous` exact reference, never an unbounded
+reference array. Concatenating fragments from oldest to newest recovers every
+row losslessly, including titles longer than a fragment or the 64KiB source
+budget. Native document reads retrieve each binding and blob; no UI is added.
+Rows preserve each ask's title, requester, applied default answer, resolution
+timestamp, subject, episode and required `resolution_id` claim hash. Optional
+`covered_through` is an RFC3339 coverage boundary; `owner_claim` pins emission
+authority. Absent optional fields are omitted, not null. A row's optional
+`action_parameters["work.override"]` binds that subject and episode; it is
+omitted when no default applied or the seven-day override window has closed.
+Asks already overridden when the digest is created are excluded. Digest source
+and snapshot writes require the bound notice-owner member; ordinary notices
+remain producer-owned. The existing reviewed storage manifests are unchanged:
+the native digest validator admits only the exact `daemon/runtime` producer
+for digest snapshots while validating the remaining snapshot fields normally.
+Immutable source identity, keyed by person and date, prevents duplicate emission on retries.
+Historical authentication requires the pin belong to the selected declaration's predecessor
+lineage, with conflicting declaration heads failing closed until resolved. It folds that
+lineage and the emission writer's declarations through its batch sequence. A former owner cannot mint
+new sources pinned to a declaration superseded in its own writer chain; real emissions
+before that handover remain authenticated. The replicated envelope has no cross-writer
+knowledge frontier, so it cannot establish whether a writer had imported another
+writer's handover when emitting. Digests are informational derived graph records, not
+an exactly-once execution authority. Concurrent authenticated sources converge to one
+source per person and date, preferring the reader's current bound owner and then the lowest
+claim ID, never receiver arrival order. This bounds partitioned former-owner emissions
+to one selected notice rather than a duplicate or source conflict. Snapshots still
+require current-owner authority. These records do not register a notice client surface.
 Generic seat-summary visibility and reduction use one pinned read snapshot and
 effective claim cut. Exact incarnation summaries neither use nor advance the shared
 subject cache; unrelated claim backlogs do not trigger its maintenance. The reduction
@@ -288,6 +321,28 @@ routes. See the [read fixture](fixtures/person-availability.json), the
 harness agent or the configured person. The CLI refuses an agent's write before any request.
 See the [attention guide](../../site/concepts/attention.md#availability).
 
+`GET /v1/client/availability/history` (`availability.history`, scope `read.projections`) answers
+an `AvailabilityHistory`: one person's availability over `[from, to)` in buckets of
+`bucket_seconds`, the first starting at `from`. `from` and `to` are UTC RFC 3339; the range is
+at most 31 days and at most 2016 buckets. The answer's `to` is the earlier of the requested `to`
+and when the daemon answered, so no bucket covers the future and the last bucket may be short;
+a range that starts in the future has no buckets. Each bucket names its `covered_ms` and, as
+integer milliseconds that sum to it, how long each `status`, `status_source`, `presence`,
+`interruptions` and `deadline_clock` value held. The daemon folds the same claims by the same
+rules as `availability.list` at every instant, sweeping from one change to the next (a write,
+an `until`, an active device turning idle, a report ceasing to count after 24 hours), so the
+history is what the current read said then. Before a person's first claim they read as
+unreported, which is available. Readers are as for `availability.list`: a person reads
+themselves by default, an agent names `person`, and only the person's own read carries
+`presence` (`null` for anyone else). The claims are the record, so history reaches back to the
+person's first availability claim: the three axes are durable, and `person.presence-observed`
+has no checkpoint rule yet, so every recorded presence transition is kept. A checkpoint rule
+that keeps only each device's newest report would end presence history at the checkpoint. An
+older daemon answers the route with an empty `404`; the generated Rust
+`availability_history`, Swift `availabilityHistory(person:from:to:bucketSeconds:)` and
+TypeScript `availabilityHistory({from, to, bucket_seconds, person})` report it as
+`unsupported-capability`. See the [history fixture](fixtures/availability-history.json).
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with
@@ -337,24 +392,24 @@ without retries may omit `retried_by`. Older servers omit both fields. Readers
 must preserve the distinction between a new-run retry and a step's next attempt.
 
 A retry creates a new run, defaulting to the latest published mission revision;
-explicit same-revision retry uses the source's current revision. It retains exact
-resolved inputs and workspace, refuses incompatible latest inputs with both
-revisions and a reason, and restarts all steps and the program from the top.
-The source's status, generation, and execution history do not change. These links
-are navigation and attribution, not a signal to hide the source or reuse its work.
+explicit same-revision retry uses the source's current revision. Resolved inputs
+remain pinned; incompatible inputs refuse with both revisions and the reason.
+Compatible completed work and bound answers carry by reference; unfinished work
+restarts without adopting program journals. Launch provenance resolves the current
+workspace, while explicit workspaces and source execution history remain unchanged.
 See [the runtime contract](../mission-graph-runtime.md#retrying-a-failed-run).
 
-For a policy-less mission, new-revision publication automatically supersedes already-active
-stale runs after replacement admission succeeds. Existing human-only review and when-idle
-policies take precedence; approved cutover also creates a fresh linked run, and
-the existing `revision-draining` phase denotes the source's idle-boundary wait. List, detail, and history `run_details[]` include
+New-revision publication supersedes older active runs only without completed work or
+person responses and when pinned revision policy allows it. Existing explicit review
+admits a fresh linked run; when-idle timing alone does not authorize evidence loss.
+The `revision-draining` phase denotes the source's idle wait. List, detail, and history `run_details[]` include
 optional `supersedes` and `superseded_by` mission-run IDs and optional string
 `supersession_fault`. Absent strings are omitted, never null; older servers omit
 them. A refusal names both revisions and the incompatibility while leaving the
-source active. A replacement waits for predecessor cleanup to reach terminal,
-then restarts all steps and programs without adopting journals. Republish alone
-does nothing; an explicit same-revision retry after publication is not caught by
-a continuous stale-revision scan. See [automatic publication supersession](../mission-graph-runtime.md#automatic-publication-supersession).
+source active. A replacement waits for confirmed predecessor cleanup, carries compatible
+completed evidence by reference, and restarts unfinished programs without adopting journals.
+Republishing the same revision does nothing; an explicit same-revision retry is not caught
+by a continuous stale-revision scan. See [automatic publication supersession](../mission-graph-runtime.md#automatic-publication-supersession).
 
 ### Mission run timing
 
@@ -1229,6 +1284,37 @@ The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms,
 Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
 `sloHistory(id, { since_ms, until_ms, steps })`.
 
+`GET /v1/client/series?objective=…&from=…&to=…&bucket_seconds=…` returns
+`Series { from, to, bucket_seconds, group_by?, buckets: [{ start, end, count, groups? }] }`.
+Select either one exact declared count/interval `objective` name or explicit
+repeatable `kind` parameters. Explicit kinds may additionally filter by
+`subject_prefix` and group by a payload field with `group_by`. An objective
+cannot be combined with kinds, a prefix or grouping.
+
+`from`, `to` and `bucket_seconds` are required. The unsigned Unix millisecond
+range is half-open `[from,to)`, with `from < to` and a span of at most 31 days.
+`bucket_seconds` is a positive integer; the ceiling of the span divided by that
+duration must be at most 1000. Buckets include zero counts and the final bucket
+ends at `to` even when shorter than the requested duration.
+
+When grouped, the response echoes `group_by` and every bucket has
+`groups: [{ value, count }]`; empty buckets have `groups: []`. Group values
+preserve JSON types, including arrays and objects; a missing field groups under
+`null`. Ungrouped responses omit `group_by` and `groups`.
+
+Objective counts use evaluator selection, deduplication and exclusions.
+Intervals count closed samples by completion time. This is a count histogram,
+**not percentiles** or remaining-budget readings from `slo.history`.
+Unknown names return `unknown-objective` (HTTP 404); unsupported objectives return
+`unsupported-objective-series` (HTTP 422); invalid queries return `invalid-series`
+(HTTP 422). The read requires `read.projections`.
+
+Typed clients expose Rust `Client::series(&SeriesQuery)`,
+Swift `series(objective:kinds:subjectPrefix:groupBy:from:to:bucketSeconds:)`
+returning `Envelope<Series>`, and TypeScript `series(options, requestOptions?)`
+returning `Promise<EnvelopeOf<Series>>`. `fixtures/series.json` demonstrates
+ungrouped buckets; `fixtures/series-grouped.json` demonstrates typed group values.
+
 ### Documents
 
 Clients read documents through three reads under `read.projections`; the `documents`
@@ -1340,11 +1426,43 @@ or presses read. Agents post updates with `fractal work update`. An update's opt
 (1 to 300 characters) is set only when the person asked to be told that outcome: a client that
 speaks reads `update.speech` aloud, and speaks no update without it.
 
+The draft [rich content block contract](../content-blocks.md) specifies shared text-change and
+image blocks, daemon checks, content-bound approval, compatibility and per-client rendering.
+Its capabilities are a design contract, not available merely because a request uses version 1.
+
 A card for an ask a mission step made carries that mission (`mission_id`), its run
 (`mission_run_id`) and `blocked`: the step run that asked and waits for the answer, its name
 (`step`), what it is for (`goal`) and its `attempt`. A standalone ask (`--new-run`) and an update
 have no `blocked`. Show the step and its goal with the question, so the person can see what
 their answer lets go on, and link the mission.
+
+### Auto-resolved asks
+
+`GET /v1/client/auto-resolved` (`auto-resolved.list`) requires `read.projections`
+and a person session. It accepts no query parameters and returns only that person's
+deadline-resolved asks from the last seven days, excluding person answers,
+cancellations and overrides. Agents receive 403. `AutoResolvedAsks` contains
+`items` (at most 128, newest resolution first) and `complete`. `complete` is false
+when the read returns 128 rows or its bounded scan of 512 recent asks fills, so
+an empty read can still be incomplete.
+
+Each row names `resolution_id`, `title`, `requester_id`, `resolved_at`, `target_id`
+and `episode`. Optional `default_answer`, client-view `request` and
+`action_parameters` are omitted, never null. Only rows with
+`action_parameters["work.override"]` offer override. Pick a named answer other
+than the default from `request.answers`. `work.override` takes `target_id`,
+`episode`, `answer: { id, text? }` and optional nonempty `summary`; the server
+derives the summary when omitted. It requires `control.attention` and only a
+snapshot fence: the asking episode is its work fence. Use the stable key
+`person-override:{episode}:{answer.id}` and action id
+`action/person-override:{episode}:{answer.id}` for exact retries.
+
+Only the ask's person may override. A closed seven-day window or stale episode
+returns non-retryable `stale-fence`; invalid answers are validation refusals.
+Show: "Your answer replaces the default. Work already done on the default is not undone; <asker> is told."
+Re-read on surface open, attention changes and accepted overrides, not on a timer.
+Digest notices stay internal; they will link to these rows once the notices read
+path lands. Override is never offered on open attention rows.
 
 `work.done` takes `target_id`, `episode`, nonempty `summary`, optional string `evidence`, and
 an optional `answer` (`id` and/or `text`). A structured decision or choice needs `answer.id`,

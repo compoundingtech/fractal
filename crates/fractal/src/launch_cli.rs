@@ -455,6 +455,82 @@ fn quiet_query(quiet: Option<&str>) -> Result<String> {
     })
 }
 
+pub(super) fn mission_runs_path(mission_prefix: &str, active: bool, limit: u16) -> String {
+    format!(
+        "/v1/client/mission-runs?mission_prefix={}&active={active}&limit={limit}",
+        urlencoding::encode(mission_prefix)
+    )
+}
+
+pub(super) fn render_mission_runs_query(response: &Value) -> String {
+    use std::fmt::Write as _;
+
+    // The native client has already removed the HTTP response envelope.
+    let value = response;
+    let mut output = String::from("MISSION RUNS\n");
+    let runs = value["runs"].as_array();
+    if runs.is_none_or(Vec::is_empty) {
+        output.push_str("  none\n");
+    }
+    for run in runs.into_iter().flatten() {
+        let _ = writeln!(
+            output,
+            "  {}  {}  {}",
+            run["run_id"].as_str().unwrap_or("unknown"),
+            run["phase"].as_str().unwrap_or("unknown"),
+            run["mission_id"].as_str().unwrap_or("unknown"),
+        );
+        for (field, label) in [
+            ("status", "status"),
+            ("revision", "revision"),
+            ("host_id", "host"),
+            ("started_at", "started"),
+            ("updated_at", "updated"),
+        ] {
+            if let Some(value) = run.get(field).filter(|value| !value.is_null()) {
+                if let Some(text) = value.as_str() {
+                    let _ = writeln!(output, "    {label}: {text}");
+                } else {
+                    let _ = writeln!(output, "    {label}: {value}");
+                }
+            }
+        }
+        for step in run["steps"].as_array().into_iter().flatten() {
+            let _ = writeln!(
+                output,
+                "    {}  {}",
+                step["step_id"].as_str().unwrap_or("unknown"),
+                step["state"].as_str().unwrap_or("unknown"),
+            );
+        }
+        if run["steps_truncated"] == true {
+            output.push_str("    More steps exist; inspect this run with fractal missions show.\n");
+        }
+    }
+    if value["truncated"] == true {
+        output.push_str("  More runs match; narrow --mission-prefix or increase --limit (maximum 500).\n");
+    }
+    output
+}
+
+pub(super) async fn run_mission_runs_to(
+    client: &Client,
+    mission_prefix: &str,
+    active: bool,
+    limit: u16,
+    json_output: bool,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let response = client.get_envelope(&mission_runs_path(mission_prefix, active, limit)).await?;
+    if json_output {
+        serde_json::to_writer_pretty(&mut *output, &response)?;
+        writeln!(output)?;
+    } else {
+        write!(output, "{}", render_mission_runs_query(&response["value"]))?;
+    }
+    Ok(())
+}
+
 pub(super) async fn run_mission_view(
     client: &Client,
     endpoint: &Endpoint,
@@ -473,6 +549,11 @@ pub(super) async fn run_mission_view(
                 print!("{}", render_missions_tree(&view));
                 Ok(())
             }
+        }
+        MissionViewCommand::Runs { mission_prefix, active, limit } => {
+            run_mission_runs_to(
+                client, &mission_prefix, active, limit, json_output, &mut cli_output::stdout(),
+            ).await
         }
         MissionViewCommand::Ls {
             watch,
@@ -640,6 +721,7 @@ pub(super) async fn run_mission_view(
         }
         MissionViewCommand::Start(args) => start_mission_run(client, args, json_output).await,
         MissionViewCommand::Retry(args) => retry_mission_run(client, args, json_output).await,
+        MissionViewCommand::Run { command } => continuity_cli::run(endpoint, command, json_output).await,
         MissionViewCommand::Cancel(args) => {
             cancel_mission_run(client, endpoint, args, json_output).await
         }

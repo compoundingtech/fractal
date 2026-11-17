@@ -508,6 +508,15 @@ impl Heard {
 /// may select one exact agent. An older daemon ignores the selector and answers with the fleet.
 pub const EXACT_AGENT_SELECTOR_CAPABILITY: &str = "collection.agents.exact-selector";
 
+impl ActionResult {
+    /// Raw Rust model fields are strings: completion requires the tag, status and original ID.
+    pub fn completed_for(&self, original_id: &str) -> bool {
+        self.kind == "action-result"
+            && self.status == ActionStatus::Completed
+            && self.action_id == original_id
+    }
+}
+
 impl Capabilities {
     /// Whether this daemon granted capability `id` at `version` or newer.
     pub fn grants(&self, id: &str, version: u32) -> bool {
@@ -1099,22 +1108,44 @@ impl ClientError {
         matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
     }
 
-    /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
-    /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
-    /// with the same key, again). Any other answer, or none, says nothing.
+    /// Merge raw outer and legacy details application metadata without mutating either.
+    /// Missing metadata says nothing; only literal "none" in every present location yields
+    /// "none". Any other present value, including null or a conflict, yields "unknown".
     pub fn applied(&self) -> Option<&str> {
         match self {
-            ClientError::Api(_, _, envelope) => envelope
-                .details
-                .get("applied")
-                .and_then(|value| value.as_str()),
+            ClientError::Api(_, _, envelope) => {
+                let outer = envelope.applied.as_ref();
+                let legacy = envelope.details.get("applied");
+                if outer
+                    .into_iter()
+                    .chain(legacy)
+                    .any(|value| value.as_str() != Some("none"))
+                {
+                    Some("unknown")
+                } else if outer.is_some() || legacy.is_some() {
+                    Some("none")
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 
-    /// Whether the request may have been taken without the person hearing so: its answer was lost
-    /// (a transport failure, a deadline) or st said `applied: "unknown"`. A request in this state is
-    /// repeated unchanged, never rebuilt with a new key.
+    /// A first attempt was refused before application. Callers with earlier ambiguous delivery
+    /// must keep that history and replay the original request, regardless of this attempt's refusal.
+    pub fn not_applied(&self) -> bool {
+        self.applied() != Some("unknown")
+            && (self.applied() == Some("none")
+                || matches!(
+                    self,
+                    ClientError::Api(ErrorCode::StaleFence | ErrorCode::RateLimited, ..)
+                ))
+    }
+
+    /// A transport failure or explicit/malformed application metadata may leave delivery unknown.
+    /// False is not a nonapplication guarantee. Earlier ambiguity remains caller state even if a
+    /// later attempt is refused; repeat only the original request and key to recover its receipt.
     pub fn outcome_unknown(&self) -> bool {
         matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
     }
@@ -1284,6 +1315,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::UnknownObjective
+        | ErrorCode::InvalidSeries
+        | ErrorCode::UnsupportedObjectiveSeries
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
         | ErrorCode::AttentionDismissUnsupported
@@ -1856,6 +1890,7 @@ impl Client {
                 code.clone(),
                 message.clone(),
                 Box::new(ErrorEnvelope {
+                    applied: None,
                     api_version: response.api_version,
                     error_version: "st3.client.error.v0".into(),
                     request_id: response.request_id,
@@ -2130,6 +2165,35 @@ impl Client {
         };
         self.get(&format!("/v1/client/events{suffix}")).await
     }
+    /// Submit an already typed action unchanged for explicit receipt recovery on this client.
+    pub async fn submit_action(
+        &self,
+        request: &ActionRequest,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        self.action_internal(request).await
+    }
+    /// Prepare the signed message body once; explicit checks keep its identity, signature and fence.
+    pub fn prepare_message_send(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        mut parameters: MessageSendParameters,
+    ) -> Result<ActionRequest, ClientError> {
+        let idempotency_key = idempotency_key.into();
+        if parameters.signature.is_none()
+            && let Some(device) = &self.signing_device
+        {
+            parameters.signature = Some(
+                device
+                    .sign_message(&idempotency_key, &parameters)
+                    .map_err(|error| ClientError::Protocol(error.to_string()))?,
+            );
+        }
+        ActionRequest::message_send(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))
+    }
+
     async fn action_internal(
         &self,
         request: &ActionRequest,
@@ -2234,6 +2298,9 @@ impl Client {
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
+    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {
+        self.get("/v1/client/auto-resolved").await
+    }
     pub async fn availability_list(
         &self,
         person: Option<&str>,
@@ -2248,6 +2315,23 @@ impl Client {
             }
             None => self.get("/v1/client/availability").await,
         }
+    }
+    pub async fn availability_history(
+        &self,
+        person: Option<&str>,
+        from: &str,
+        to: &str,
+        bucket_seconds: u64,
+    ) -> Result<Envelope<AvailabilityHistory>, ClientError> {
+        let person = person
+            .map(|person| format!("&person={}", percent_encode(person)))
+            .unwrap_or_default();
+        self.get(&format!(
+            "/v1/client/availability/history?from={}&to={}&bucket_seconds={bucket_seconds}{person}",
+            percent_encode(from),
+            percent_encode(to)
+        ))
+        .await
     }
     pub async fn custom_subjects_list(
         &self,
@@ -2437,6 +2521,27 @@ impl Client {
             path.push_str(&format!("&steps={steps}"));
         }
         self.get(&path).await
+    }
+    pub async fn series(&self, options: &SeriesQuery) -> Result<Envelope<Series>, ClientError> {
+        let mut query = vec![
+            format!("from={}", options.from),
+            format!("to={}", options.to),
+            format!("bucket_seconds={}", options.bucket_seconds),
+        ];
+        for (name, value) in [
+            ("objective", options.objective.as_deref()),
+            ("subject_prefix", options.subject_prefix.as_deref()),
+            ("group_by", options.group_by.as_deref()),
+        ] {
+            if let Some(value) = value {
+                query.push(format!("{name}={}", percent_encode(value)));
+            }
+        }
+        for kind in &options.kinds {
+            query.push(format!("kind={}", percent_encode(kind)));
+        }
+        self.get(&format!("/v1/client/series?{}", query.join("&")))
+            .await
     }
     pub async fn usage_period(
         &self,
@@ -3474,20 +3579,9 @@ impl Client {
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
         fence: Fence,
-        mut parameters: MessageSendParameters,
+        parameters: MessageSendParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
-        let idempotency_key = idempotency_key.into();
-        if parameters.signature.is_none()
-            && let Some(device) = &self.signing_device
-        {
-            parameters.signature = Some(
-                device
-                    .sign_message(&idempotency_key, &parameters)
-                    .map_err(|error| ClientError::Protocol(error.to_string()))?,
-            );
-        }
-        let request = ActionRequest::message_send(id, idempotency_key, fence, parameters)
-            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        let request = self.prepare_message_send(id, idempotency_key, fence, parameters)?;
         self.action_internal(&request).await
     }
     pub async fn mission_approve_revision(
@@ -3819,6 +3913,17 @@ impl Client {
         parameters: TargetParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::work_fail(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn work_override(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PersonOverrideParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::work_override(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -4919,22 +5024,24 @@ impl Client {
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
             // These projections have no missing-item 404; an older router may return no envelope.
-            let related_runs = path.starts_with("/v1/client/agent-related-runs/");
-            if status == 404
-                && (related_runs || path.split('?').next() == Some("/v1/client/schedules"))
-            {
+            let unsupported = if path.starts_with("/v1/client/agent-related-runs/") {
+                Some("agent-related-runs.get")
+            } else {
+                match path.split('?').next() {
+                    Some("/v1/client/schedules") => Some("schedules.list"),
+                    Some("/v1/client/availability/history") => Some("availability.history"),
+                    _ => None,
+                }
+            };
+            if let (404, Some(operation)) = (status, unsupported) {
                 let error = ErrorEnvelope {
+                    applied: None,
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: String::new(),
                     code: ErrorCode::UnsupportedCapability,
                     message: format!(
-                        "this server does not support {}; upgrade the server",
-                        if related_runs {
-                            "agent-related-runs.get"
-                        } else {
-                            "schedules.list"
-                        }
+                        "this server does not support {operation}; upgrade the server"
                     ),
                     retryable: false,
                     retry_after_ms: None,
@@ -4948,6 +5055,7 @@ impl Client {
             }
             if status == 404 && bytes.is_empty() && path.starts_with("/v1/client/launches/") {
                 let error = ErrorEnvelope {
+                    applied: None,
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: String::new(),
@@ -4986,6 +5094,11 @@ impl Client {
 fn core_api_error(bytes: &[u8]) -> Option<ErrorEnvelope> {
     #[derive(Deserialize)]
     struct Core {
+        #[serde(
+            default,
+            deserialize_with = "crate::generated::deserialize_error_applied"
+        )]
+        applied: Option<serde_json::Value>,
         code: ErrorCode,
         message: String,
         #[serde(default)]
@@ -4995,6 +5108,7 @@ fn core_api_error(bytes: &[u8]) -> Option<ErrorEnvelope> {
     }
     let core: Core = serde_json::from_slice(bytes).ok()?;
     Some(ErrorEnvelope {
+        applied: core.applied,
         api_version: "st3.v1".into(),
         error_version: String::new(),
         request_id: core.request_id,
@@ -5712,6 +5826,7 @@ mod tests {
             code.clone(),
             message.into(),
             Box::new(ErrorEnvelope {
+                applied: None,
                 api_version: "st3.client.v0".into(),
                 error_version: "st3.client.error.v0".into(),
                 request_id: "request/test".into(),
@@ -6591,6 +6706,33 @@ mod tests {
     }
 
     #[test]
+    fn auto_resolved_models_decode_and_override_omits_absent_summary() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/auto-resolved.json"
+        ))
+        .unwrap();
+        let rows: Envelope<AutoResolvedAsks> = serde_json::from_value(wire.clone()).unwrap();
+        assert!(rows.value.complete);
+        assert_eq!(
+            rows.value.items[0].default_answer.as_ref().unwrap().id,
+            "hold"
+        );
+        assert_eq!(serde_json::to_value(rows).unwrap(), wire);
+        let parameters = PersonOverrideParameters {
+            target_id: "step-run/example".into(),
+            episode: "claim/example".into(),
+            answer: PersonOverrideAnswer {
+                id: "ship".into(),
+                text: None,
+            },
+            summary: None,
+        };
+        let wire = serde_json::to_value(parameters).unwrap();
+        assert!(wire.get("summary").is_none());
+        assert!(wire["answer"].get("text").is_none());
+    }
+
+    #[test]
     fn schedule_models_preserve_unknown_fields_and_state_strings() {
         let wire: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/fixtures/schedules-page.json"
@@ -6618,6 +6760,65 @@ mod tests {
             assert_eq!(lines.len(),3);
             assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
             assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
+    }
+
+    #[test]
+    fn availability_history_reads_its_fixture_and_keeps_an_old_server_unsupported() {
+        runtime().block_on(async {
+            let fixture =
+                include_str!("../../../docs/st3/client-v0/fixtures/availability-history.json");
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("history.sock");
+            let server = scripted_server(
+                &socket,
+                vec![(0, 200, fixture.into()), (0, 404, String::new())],
+            );
+            let client = Client::unix_as(&socket, "person/ada");
+            let history = client
+                .availability_history(
+                    Some("person/ada"),
+                    "2026-11-12T09:00:00Z",
+                    "2026-11-12T11:00:00Z",
+                    3600,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (history.value.bucket_seconds, history.value.buckets.len()),
+                (3600, 2)
+            );
+            assert_eq!(
+                history.value.buckets[1].deadline_clock.hold_routine,
+                1_200_000
+            );
+            assert!(matches!(
+                client
+                    .availability_history(
+                        None,
+                        "2026-11-12T09:00:00Z",
+                        "2026-11-12T11:00:00Z",
+                        3600
+                    )
+                    .await,
+                Err(ClientError::Api(ErrorCode::UnsupportedCapability, _, _))
+            ));
+            let lines = server.await.unwrap();
+            assert!(
+                lines[0].starts_with("GET /v1/client/availability/history?from=2026-11-12T09"),
+                "{}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains("&bucket_seconds=3600&person=person/ada HTTP/1.1"),
+                "{}",
+                lines[0]
+            );
+            assert!(
+                lines[1].contains("&bucket_seconds=3600 HTTP/1.1"),
+                "{}",
+                lines[1]
+            );
         });
     }
 
@@ -7176,5 +7377,84 @@ mod observer_tests {
     fn without_an_observer_a_request_keeps_no_timing_state() {
         assert!(OBSERVER.get().is_none());
         assert!(RequestGuard::begin(&Method::GET, "/v1/client/usage?since_ms=1").is_none());
+    }
+    #[test]
+    fn error_application_certainty_preserves_presence_and_fails_closed_on_conflicts_or_malformed_values()
+     {
+        let samples = [
+            None,
+            Some(serde_json::json!("none")),
+            Some(serde_json::json!("unknown")),
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(true)),
+            Some(serde_json::json!(12)),
+            Some(serde_json::json!([])),
+            Some(serde_json::json!({"future":"value"})),
+        ];
+        for outer in &samples {
+            for inner in &samples {
+                let mut raw = serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/test","code":"stale-fence","message":"fixture","retryable":false,"details":{}});
+                if let Some(value) = outer {
+                    raw["applied"] = value.clone();
+                }
+                if let Some(value) = inner {
+                    raw["details"]["applied"] = value.clone();
+                }
+                let envelope: ErrorEnvelope = serde_json::from_value(raw).unwrap();
+                assert_eq!(&envelope.applied, outer);
+                assert_eq!(envelope.details.get("applied"), inner.as_ref());
+                let encoded = serde_json::to_value(&envelope).unwrap();
+                assert_eq!(encoded.get("applied"), outer.as_ref());
+                let present = outer.iter().chain(inner.iter()).collect::<Vec<_>>();
+                let expected = if present.is_empty() {
+                    None
+                } else if present.iter().any(|value| value.as_str() != Some("none")) {
+                    Some("unknown")
+                } else {
+                    Some("none")
+                };
+                let error =
+                    ClientError::Api(ErrorCode::StaleFence, "fixture".into(), Box::new(envelope));
+                assert_eq!(error.applied(), expected);
+                assert_eq!(error.not_applied(), expected != Some("unknown"));
+                assert_eq!(error.outcome_unknown(), expected == Some("unknown"));
+                let ClientError::Api(_, _, preserved) = error else {
+                    unreachable!()
+                };
+                assert_eq!(&preserved.applied, outer);
+                assert_eq!(preserved.details.get("applied"), inner.as_ref());
+            }
+        }
+    }
+    #[test]
+    fn core_route_error_fallback_preserves_outer_uncertainty_too() {
+        for applied in [
+            serde_json::json!("unknown"),
+            serde_json::Value::Null,
+            serde_json::json!(false),
+        ] {
+            let bytes=serde_json::to_vec(&serde_json::json!({"code":"stale-fence","message":"fixture","applied":applied,"details":{"applied":"none"}})).unwrap();
+            let envelope = core_api_error(&bytes).unwrap();
+            assert_eq!(envelope.applied, Some(applied));
+            let error =
+                ClientError::Api(ErrorCode::StaleFence, "fixture".into(), Box::new(envelope));
+            assert_eq!(error.applied(), Some("unknown"));
+            assert!(!error.not_applied());
+        }
+    }
+
+    #[test]
+    fn completed_receipt_requires_original_id_status_and_kind() {
+        for (kind, status, id, expected) in [
+            ("action-result", "completed", "action/original", true),
+            ("other", "completed", "action/original", false),
+            ("action-result", "accepted", "action/original", false),
+            ("action-result", "rejected", "action/original", false),
+            ("action-result", "unknown", "action/original", false),
+            ("action-result", "completed", "action/other", false),
+        ] {
+            let receipt:ActionResult=serde_json::from_value(serde_json::json!({"kind":kind,"status":status,"action_id":id,"operation_id":"operation/test","affected_ids":[],"snapshot_id":"snapshot/test"})).unwrap();
+            assert_eq!(receipt.completed_for("action/original"), expected);
+        }
     }
 }

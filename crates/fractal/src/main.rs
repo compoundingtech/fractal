@@ -83,6 +83,7 @@ mod availability;
 mod directive_note;
 mod completion;
 mod doctor_cli;
+mod effects_cli;
 mod fractal;
 mod release_version;
 #[cfg(test)]
@@ -90,6 +91,7 @@ mod follow_tests;
 mod presentation;
 mod actor_contract;
 mod inspection_actor;
+mod continuity_cli;
 mod pairing_qr;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
@@ -97,6 +99,7 @@ mod agents_cli;
 mod attention_cli;
 mod claims_cli;
 mod hosts_cli;
+mod resources_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -339,6 +342,8 @@ enum Command {
     /// List every objective and budget with its target, current value and what is left, and
     /// explain one in plain words.
     Slo(SloArgs),
+    /// Count a claim selection per time bucket, optionally split by a field.
+    Series(SeriesArgs),
     /// Inspect and control missions.
     ///
     /// A mission records an authorized goal, its plan, owners, verification and result.
@@ -347,6 +352,11 @@ enum Command {
     Missions {
         #[command(subcommand)]
         command: MissionViewCommand,
+    },
+    /// Inspect durable native effects or explicitly resolve an uncertain outcome.
+    Effects {
+        #[command(subcommand)]
+        command: effects_cli::EffectsCommand,
     },
     /// List locally replicated schedule declarations and their knowledge limits.
     Schedules {
@@ -365,7 +375,7 @@ enum Command {
     #[command(
         name = "alerts",
         alias = "attention",
-        after_help = "Messages never appear here; read them with `fractal conversations`.\nFaults never appear here; fractal sends each one to the agent that owns it, which asks a person with `fractal work ask` only if it needs to."
+        after_help = "Messages never appear here; read them with `fractal conversations`.\nOperational faults go to their owning agent, which asks a person with `fractal work ask` when needed. Unresolved native effects also appear here because only explicit person resolution can clear their fence."
     )]
     Attention {
         #[command(subcommand)]
@@ -452,6 +462,17 @@ enum Command {
     Hosts {
         #[command(subcommand)]
         command: hosts_cli::HostsCommand,
+    },
+    /// Run and inspect host-accounted finite shell executions.
+    Resources {
+        #[command(subcommand)]
+        command: resources_cli::ResourcesCommand,
+    },
+    #[command(hide = true)]
+    ResourcePayload {
+        result: PathBuf,
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
     },
     /// Save or restore the signed claim log.
     Backup {
@@ -1302,6 +1323,18 @@ enum MissionViewCommand {
         #[arg(long, add = ArgValueCompleter::new(Complete(Entity::Mission)))]
         mission: Option<String>,
     },
+    /// List bounded run and step summaries for a mission ID prefix.
+    Runs {
+        /// Literal mission ID prefix to select.
+        #[arg(long)]
+        mission_prefix: String,
+        /// Only include active runs.
+        #[arg(long)]
+        active: bool,
+        /// Maximum runs to return (1 through 500).
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+    },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
     /// What one run waits on: each open step, whom it waits on and since when, open asks, the
@@ -1360,6 +1393,11 @@ enum MissionViewCommand {
     /// Uses the latest published revision unless --same-revision is set. The source run
     /// and its history remain unchanged; incompatible latest inputs are refused.
     Retry(MissionRunRetryArgs),
+    /// Preview or recover continuity evidence for mission runs.
+    Run {
+        #[command(subcommand)]
+        command: continuity_cli::RunCommand,
+    },
     /// Cancel one exact running mission and stop its owned work and runtimes.
     Cancel(MissionCancelArgs),
     /// Change who a running run tells when it fails, is cancelled or stalls, or clear it.
@@ -2080,16 +2118,20 @@ enum UsageBy {
     Agent,
     Mission,
     Step,
+    Attempt,
+    Invocation,
     Model,
     Account,
     Host,
 }
 
 impl UsageBy {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Agent,
         Self::Mission,
         Self::Step,
+        Self::Attempt,
+        Self::Invocation,
         Self::Model,
         Self::Account,
         Self::Host,
@@ -2101,6 +2143,8 @@ impl UsageBy {
             Self::Agent => "agent",
             Self::Mission => "mission_run",
             Self::Step => "step",
+            Self::Attempt => "attempt",
+            Self::Invocation => "invocation_id",
             Self::Model => "model",
             Self::Account => "account",
             Self::Host => "host",
@@ -2110,6 +2154,7 @@ impl UsageBy {
     fn label(self) -> &'static str {
         match self {
             Self::Mission => "mission",
+            Self::Invocation => "invocation",
             other => other.field(),
         }
     }
@@ -2155,6 +2200,31 @@ enum SloCommand {
         #[arg(long)]
         width: Option<usize>,
     },
+}
+
+#[derive(Args)]
+struct SeriesArgs {
+    /// Exact declared objective id; mutually exclusive with explicit claim selection.
+    #[arg(long, required_unless_present = "kind", conflicts_with_all = ["kind", "subject_prefix", "group_by"])]
+    objective: Option<String>,
+    /// Claim kind to count; repeat to include more than one kind.
+    #[arg(long, required_unless_present = "objective")]
+    kind: Vec<String>,
+    /// Restrict explicit claims to subjects beginning with this prefix.
+    #[arg(long, requires = "kind")]
+    subject_prefix: Option<String>,
+    /// Split explicit claim counts by this top-level claim field.
+    #[arg(long, requires = "kind")]
+    group_by: Option<String>,
+    /// Inclusive range start, in Unix milliseconds.
+    #[arg(long)]
+    from: u64,
+    /// Exclusive range end, in Unix milliseconds (at most 31 days after --from).
+    #[arg(long)]
+    to: u64,
+    /// Bucket width in seconds; at most 1000 buckets are returned.
+    #[arg(long, default_value_t = 86_400)]
+    bucket_seconds: u64,
 }
 
 #[derive(Args)]
@@ -2613,12 +2683,8 @@ enum ServiceCommand {
     },
     /// Show whether the daemon and replication services are installed and running.
     Status,
-    /// Explain the one-time macOS permissions for service-owned work.
-    Permissions {
-        /// Open the matching System Settings pages on macOS.
-        #[arg(long)]
-        open: bool,
-    },
+    /// Explain the macOS protected-folder boundary for agent work.
+    Permissions,
     /// Restart fractal after configuration or binary changes.
     Restart {
         #[arg(long)]
@@ -4422,6 +4488,8 @@ enum WorkCommand {
     Update(WorkUpdateArgs),
     /// Complete a person-assigned step with a response.
     Done(WorkDoneArgs),
+    /// Replace a deadline-applied default within seven days. Already taken effects are not undone.
+    Override(WorkOverrideArgs),
     /// Cancel your own ask and resume its live origin.
     CancelAsk(WorkDoneArgs),
     /// List current actionable work; use --as to filter one agent or --all for history.
@@ -4651,6 +4719,26 @@ struct WorkDoneArgs {
     episode: Option<String>,
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+struct WorkOverrideArgs {
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
+    subject: String,
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_name = "PERSON", value_parser = parse_person_subject)]
+    actor: String,
+    /// The ID of one of the ask's named answers.
+    #[arg(long, value_name = "ID")]
+    answer: String,
+    /// Text accompanying the selected answer.
+    #[arg(long)]
+    text: Option<String>,
+    #[arg(long)]
+    summary: Option<String>,
+    /// Fence the original ask; recovered from its latest ask claim when omitted.
+    #[arg(long)]
+    episode: Option<String>,
 }
 
 #[derive(Args)]
@@ -6112,6 +6200,9 @@ fn daemon_is_unreachable(error: &anyhow::Error) -> bool {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Command::ResourcePayload { result, argv } = cli.command {
+        return resources_cli::payload(&result, argv).await;
+    }
     let own = fractal_drivers::contracts::env("ST_AGENT");
     anyhow::ensure!(
         own.is_some() || !agent_environment_present(),
@@ -6297,6 +6388,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Slo(args) => run_slo(&immediate, args, cli.json).await,
+        Command::Series(args) => run_series(&immediate, args, cli.json).await,
         Command::Launch { command } => {
             run_launch(&client, &endpoint, command, &config.planner, cli.json).await
         }
@@ -6351,6 +6443,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Clients => run_clients(&endpoint, cli.json).await,
         Command::Work { command } => run_work(&client, &endpoint, command, cli.json).await,
+        Command::Effects { command } => effects_cli::run(&endpoint, command, cli.json).await,
         Command::Changes(arguments) => {
             let client = if matches!(
                 &arguments.command,
@@ -6476,6 +6569,9 @@ async fn run(cli: Cli) -> Result<()> {
             run_replication(&client, &config, command, cli.json).await
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
+        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
+        Command::Resources { command } => resources_cli::run(&client, config.person.as_deref(), command, cli.json).await,
+        Command::ResourcePayload { .. } => unreachable!("resource payload is dispatched before daemon connection"),
         Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
@@ -6489,7 +6585,6 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Claims { command } => run_claims(&client, command, cli.json).await,
-        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -6595,10 +6690,12 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
-        Command::Apply(args) => args.actor.as_deref(),
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
+        Command::Resources { command: resources_cli::ResourcesCommand::Hold { actor, .. }
+            | resources_cli::ResourcesCommand::Release { actor, .. } } => actor.as_deref(),
+        Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
@@ -6619,6 +6716,7 @@ fn guard_mutating_cli_actor(
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retry(args) => Some(args.actor.as_str()),
+            MissionViewCommand::Run { command } => command.actor(),
             MissionViewCommand::Check(args) => args.actor.as_deref(),
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
@@ -6676,9 +6774,14 @@ fn guard_mutating_cli_actor(
                 anyhow::anyhow!("a harness person rename needs explicit --as {own}")
             })?),
         },
+        Command::Effects { command } => match command {
+            effects_cli::EffectsCommand::Resolve(args) => Some(args.actor.as_str()),
+            effects_cli::EffectsCommand::Status { .. } => None,
+        },
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
             WorkCommand::Done(args) | WorkCommand::CancelAsk(args) => Some(args.actor.as_str()),
+            WorkCommand::Override(args) => Some(args.actor.as_str()),
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
@@ -7765,6 +7868,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             (
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
+                    "mission_resource_lane": 2,
+                    "shell_resource_exec": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7883,13 +7988,14 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
-    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_finite_resources(config.finite_resources.clone()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
+    reconciler.set_ask_digest_policy(&config.asks)?;
     fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -9448,7 +9554,7 @@ async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()>
     if args.exec {
         let st = match args.st {
             Some(st) => std::path::absolute(st)?,
-            None => std::env::current_exe().context("find this st executable")?,
+            None => std::env::current_exe().context("find this Fractal executable")?,
         };
         let pty_root = std::path::absolute(
             config
@@ -11378,6 +11484,43 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
     Ok(())
 }
 
+async fn run_series(client: &Client, args: SeriesArgs, json_output: bool) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut path = format!("/v1/series?from={}&to={}&bucket_seconds={}", args.from, args.to, args.bucket_seconds);
+    for (key, value) in [
+        ("objective", args.objective.as_deref()),
+        ("subject_prefix", args.subject_prefix.as_deref()),
+        ("group_by", args.group_by.as_deref()),
+    ] {
+        if let Some(value) = value {
+            write!(path, "&{key}={}", urlencoding::encode(value))?;
+        }
+    }
+    for kind in &args.kind {
+        write!(path, "&kind={}", urlencoding::encode(kind))?;
+    }
+    let series: Value = client.get(&path).await?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&series)?);
+    } else {
+        let grouped = args.group_by.is_some();
+        println!("START\tEND\tCOUNT{}", if grouped { "\tGROUP" } else { "" });
+        for bucket in series["buckets"].as_array().into_iter().flatten() {
+            if grouped {
+                for group in bucket["groups"].as_array().into_iter().flatten() {
+                    println!("{}\t{}\t{}\t{}", bucket["start"], bucket["end"], group["count"], group["value"]);
+                }
+                if bucket["count"] == 0 {
+                    println!("{}\t{}\t0\t-", bucket["start"], bucket["end"]);
+                }
+            } else {
+                println!("{}\t{}\t{}", bucket["start"], bucket["end"], bucket["count"]);
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()> {
     let report: Value = client.get("/v1/slo").await?;
     let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
@@ -11860,10 +12003,13 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
     for by in groups {
         let mut totals = BTreeMap::<String, Vec<&Value>>::new();
         for row in rows {
-            let label = row[by.field()]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .unwrap_or("unknown");
+            let attempt_label = match (by, row["step"].as_str(), row["attempt"].as_u64()) {
+                (UsageBy::Attempt, Some(step), Some(attempt)) if !step.is_empty() =>
+                    Some(format!("{step} attempt {attempt}")),
+                _ => None,
+            };
+            let label = attempt_label.as_deref().or_else(|| row[by.field()].as_str())
+                .filter(|value| !value.is_empty()).unwrap_or("unknown");
             let label = match (by, declared.get(label)) {
                 (UsageBy::Account, Some(name)) => format!("{name} ({label})"),
                 _ => label.to_owned(),
@@ -13687,22 +13833,18 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
                 Ok(())
             }
         }
-        ServiceCommand::Permissions { open } => {
+        ServiceCommand::Permissions => {
             if json_output {
                 let guidance = fractal_daemon::service::permissions_guidance()?;
-                if open {
-                    fractal_daemon::service::open_permissions_settings()?;
-                }
                 print_value(
                     &serde_json::json!({
                         "platform": std::env::consts::OS,
                         "guidance": guidance,
-                        "settings_opened": open && cfg!(target_os = "macos"),
                     }),
                     true,
                 )
             } else {
-                fractal_daemon::service::permissions(open)
+                fractal_daemon::service::permissions()
             }
         }
         ServiceCommand::Restart { config } => {
@@ -16263,6 +16405,10 @@ async fn send_message(
     args: MessageSendArgs,
     attachments: Vec<fractal_daemon::model::AttachmentInput>,
 ) -> Result<Option<MessageSendReceipt>> {
+    if fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").is_some() {
+        anyhow::ensure!(args.idempotency_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
+            "a program message requires an explicit stable --idempotency-key");
+    }
     let id = uuid::Uuid::now_v7().simple().to_string();
     let mission_id = format!("message/{id}");
     // Before anything else: an agent that sends to a person needs this answer, not another.
@@ -16312,14 +16458,15 @@ async fn send_message(
         return Ok(None);
     }
     let mut request = MessageSendRequest {
-        idempotency_key: String::new(),
-        from,
-        to,
-        content: body,
-        title: args.subject,
-        in_reply_to: args.in_reply_to,
-        tags: args.tags,
-        attachments,
+    owner: None,
+    idempotency_key: String::new(),
+    from,
+    to,
+    content: body,
+    title: args.subject,
+    in_reply_to: args.in_reply_to,
+    tags: args.tags,
+    attachments,
     };
     request.idempotency_key = match args.idempotency_key {
         Some(key) => key,
@@ -18419,10 +18566,10 @@ fn accept_managed_channel_frame(
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
-            "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
+            "state" | "session" | "ready" | "delivery_ready" | "delivered" | "read" | "failed" | "todo" => true,
             "timeline" | "context" | "turn" | "subagent" | "question.open" | "question.closed" => observer.is_some(),
             // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-            "delivery_ready" | "retry_pending_ask" | "diagnostic" => true,
+            "retry_pending_ask" | "diagnostic" => true,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             _ => false,
         };
@@ -18550,6 +18697,7 @@ struct PiChannelResume {
     #[serde(default)]
     retry_after_ms: BTreeMap<String, u64>,
     failed_diagnostics: BTreeSet<String>,
+    // Historical resume-wire name: either idle or an explicit handoff-ready proof opens delivery.
     first_idle_seen: bool,
     frame_sequence: u64,
     // Reports the daemon has not accepted yet. A restart must not end the channel or lose the
@@ -18625,13 +18773,11 @@ impl PiChannelResume {
                 }
                 true
             }
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
             Some("delivery_ready") => {
-                // Delivery readiness is independent of the reopened picker's human-blocked state.
+                // The extension proved its handoff path is installed, independently of activity.
                 self.first_idle_seen = true;
                 false
             }
-            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             Some("state") => {
                 let Some(state) = frame.get("state").and_then(Value::as_str) else {
                     return false;
@@ -21181,6 +21327,9 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
                 store.set_ask_deadlines(asks.deadlines);
+                if let Err(error) = reconciler.set_ask_digest_policy(&asks) {
+                    tracing::warn!("the ask digest policy keeps its last config: {error:#}");
+                }
                 limits = reloaded;
                 last_error = None;
             }

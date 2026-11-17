@@ -2,6 +2,9 @@
 // Source: docs/st3/client-v0/schemas/client-v0.schema.json
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.
 
+import type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';
+export type { MarkdownBlock, MarkdownInline } from './markdown-text.ts';
+
 export const API_VERSION = 'st3.client.v0' as const;
 
 /** Each person's ordered Pins use version-2 memberships at arrangement/person/NAME/<this UUID>. */
@@ -49,6 +52,7 @@ export type ActionCommon = {
   | "session.import"
   | "work.ask"
   | "work.done"
+  | "work.override"
   | "work.cancel-ask"
   | "work.claim"
   | "work.renew"
@@ -287,7 +291,7 @@ export type AgentPresentation = {
 };
 
 export type AgentPresentationNow = AgentPresentationWork & {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   since: Timestamp;
 };
@@ -1032,7 +1036,7 @@ export type Attention = ResourceHeader & {
   | "harness-prompt"
   | "model-drift"
  | string);
-  because?: string;
+  because?: MarkdownInline;
   blocked?: AttentionBlocked;
   conversation_id?: Id;
   conversation_ids?: Array<Id>;
@@ -1041,7 +1045,7 @@ export type Attention = ResourceHeader & {
 };
   deadline_at?: Timestamp;
   default_answer?: AskDefaultAnswer;
-  detail: string;
+  detail: MarkdownBlock;
   episode?: string;
   fix?: {
 
@@ -1082,7 +1086,7 @@ export type AttentionActor = {
 
 export type AttentionBlocked = {
   attempt: number;
-  goal: string;
+  goal: MarkdownInline;
   step: string;
   step_run_id: Id;
 };
@@ -1144,7 +1148,7 @@ export type AttentionLaunchAssignee = {
 export type AttentionLaunchPreview = {
   agents: Array<AttentionLaunchAgent>;
   asks_you: number;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   steps: Array<AttentionLaunchStep>;
   variant: string;
 };
@@ -1205,7 +1209,7 @@ export type AttentionPromptCall = {
 export type AttentionRevision = {
   from_revision: string;
   lines: Array<AttentionRevisionLine>;
-  reason: string;
+  reason: MarkdownInline;
   to_revision: string;
   truncated: boolean;
 };
@@ -1235,11 +1239,52 @@ export type AttentionWaiting = {
   step: StepRunId;
 };
 
+export type AutoResolvedAsk = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  request?: StructuredRequest;
+  requester_id: Id;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: Id;
+  title: string;
+};
+
+export type AutoResolvedAsks = {
+  complete: boolean;
+  items: Array<AutoResolvedAsk>;
+};
+
 export type AvailabilityDeadlineClock = ("run" | "hold-routine" | "hold-all" | string);
 
 export type AvailabilityDeadlineClockChange = {
   until?: (Timestamp | null);
   value: "run" | "hold-routine" | "hold-all";
+};
+
+export type AvailabilityDeadlineClockDurations = {
+  "hold-all": number;
+  "hold-routine": number;
+  run: number;
+};
+
+export type AvailabilityHistory = {
+  bucket_seconds: number;
+  buckets: Array<AvailabilityHistoryBucket>;
+  from: Timestamp;
+  person: string;
+  to: Timestamp;
+};
+
+export type AvailabilityHistoryBucket = {
+  covered_ms: number;
+  deadline_clock: AvailabilityDeadlineClockDurations;
+  interruptions: AvailabilityInterruptionsDurations;
+  presence: (AvailabilityPresenceDurations | null);
+  start: Timestamp;
+  status: AvailabilityStatusDurations;
+  status_source: AvailabilityStatusSourceDurations;
 };
 
 export type AvailabilityInterruptions = ("all" | "urgent" | "none" | string);
@@ -1249,7 +1294,20 @@ export type AvailabilityInterruptionsChange = {
   value: "all" | "urgent" | "none";
 };
 
+export type AvailabilityInterruptionsDurations = {
+  all: number;
+  none: number;
+  urgent: number;
+};
+
 export type AvailabilityPresence = ("present" | "idle" | "locked" | "unreported" | string);
+
+export type AvailabilityPresenceDurations = {
+  idle: number;
+  locked: number;
+  present: number;
+  unreported: number;
+};
 
 export type AvailabilitySet = {
   deadline_clock?: AvailabilityDeadlineClockChange;
@@ -1264,7 +1322,18 @@ export type AvailabilityStatusChange = {
   value: ("available" | "away" | null);
 };
 
+export type AvailabilityStatusDurations = {
+  available: number;
+  away: number;
+};
+
 export type AvailabilityStatusSource = ("override" | "presence" | "unreported" | string);
+
+export type AvailabilityStatusSourceDurations = {
+  override: number;
+  presence: number;
+  unreported: number;
+};
 
 export type BlobChunk = {
   data: string;
@@ -1924,7 +1993,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | AvailabilityHistory | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | Series | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -1972,6 +2041,9 @@ export type ErrorCode = (
   | "unsupported-capability"
   | "peer-too-old"
   | "validation-failed"
+  | "unknown-objective"
+  | "invalid-series"
+  | "unsupported-objective-series"
   | "idempotency-conflict"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
@@ -2679,11 +2751,11 @@ export type LaunchApproval = ResourceHeader & {
 
 export type LaunchDecision = ResourceHeader & {
   decision_type: "boolean" | "single-choice" | "multiple-choice" | "rank";
-  explanation?: string | null;
+  explanation?: MarkdownBlock | null;
   kind: "launch-decision";
   launch_id: Id;
   options: Array<DecisionOption>;
-  question: string;
+  question: MarkdownBlock;
   requested_at: Timestamp;
   response?: (DecisionResponse | null);
   state: "open" | "answered" | "withdrawn";
@@ -2701,8 +2773,8 @@ export type LaunchPreview = {
   automated: number;
   human: number;
 };
-  goal: string;
-  request_excerpt: string;
+  goal: MarkdownInline;
+  request_excerpt: MarkdownBlock;
   steps: Array<{
   assignee?: string | null;
   depends: Array<string>;
@@ -2766,7 +2838,7 @@ export type Message = ResourceHeader & {
   attachments?: Array<Attachment>;
   body_bytes?: number;
   body_ref?: string;
-  content: string;
+  content: MarkdownBlock;
   from: Id;
   in_reply_to?: (Id | null);
   kind: "message";
@@ -2783,7 +2855,7 @@ export type MessageBody = {
   bytes: number;
   complete?: boolean;
   message: string;
-  text: string;
+  text: MarkdownBlock;
 };
 
 export type MessageProvenance = {
@@ -2866,7 +2938,7 @@ export type MissionId = string;
 export type MissionPresentation = {
   actions: Array<MissionActionOffer>;
   card: ("what-you-can-do" | "nothing-to-do" | null);
-  last_progress: string | null;
+  last_progress: MarkdownInline | null;
   progress: {
   done: number;
   total: number;
@@ -2942,7 +3014,7 @@ export type MissionRunSummary = {
 });
   generation_id?: RunGenerationId;
   id: MissionRunId;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   must_act: MustAct;
   outcome?: (MissionRunOutcome | null);
   phase: string;
@@ -2984,14 +3056,14 @@ export type MissionStep = {
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
   completed_at?: number | null;
-  constraints?: Array<string>;
+  constraints?: Array<MarkdownInline>;
   eta?: MissionStepEta;
   executions?: Array<StepExecution>;
-  goals?: Array<string>;
+  goals?: Array<MarkdownInline>;
   history_complete?: boolean;
   id: Id;
   keep_open?: boolean;
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   loop_max_rounds?: number | null;
   loop_reason?: string | null;
   loop_round?: number | null;
@@ -3181,6 +3253,31 @@ export type NoticeDelivery = ({
   surface: "tray" | "speech" | "push" | "log";
 });
 
+export type NoticeDigestActions = {
+  "work.override": NoticeDigestOverride;
+};
+
+export type NoticeDigestDefaultAnswer = {
+  id: string;
+  label: string;
+};
+
+export type NoticeDigestOverride = {
+  episode: string;
+  target_id: string;
+};
+
+export type NoticeDigestRow = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  requester_id: string;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: string;
+  title: string;
+};
+
 export type NoticeDismissParameters = {
   notice_id: NoticeId;
 };
@@ -3254,8 +3351,13 @@ export type NoticeSnoozeParameters = {
 
 export type NoticeSource = {
   agent?: NoticeAgent;
+  covered_through?: NoticeTimestamp;
   cwd?: string;
+  digest?: Array<NoticeDigestRow>;
+  digest_count?: string;
+  digest_document?: string;
   host: string;
+  owner_claim?: string;
   pty?: string;
   repo?: string;
 };
@@ -3546,6 +3648,16 @@ export type PersonOptionNote = {
   text: string;
 };
 
+export type PersonOverrideParameters = {
+  answer: {
+  id: string;
+  text?: string;
+};
+  episode: string;
+  summary?: string;
+  target_id: Id;
+};
+
 export type PersonPairedSession = {
   credential: string;
   device_id: Id;
@@ -3596,7 +3708,7 @@ export type PersonUpdate = {
   about: Id;
   speech?: string;
   subjects?: Array<RequestSubject>;
-  summary?: string;
+  summary?: MarkdownBlock;
   type: "update";
   version: 1;
 };
@@ -3671,7 +3783,7 @@ export type PrivateNotesAction = {
 
 export type PrivateNotesData = {
   fence: PrivateNotesFence;
-  markdown: string;
+  markdown: MarkdownBlock;
   uri: PrivateNotesUri;
 };
 
@@ -3939,7 +4051,9 @@ export type Runtime = ResourceHeader & {
   | "unreachable"
 ;
   terminal_access?: {
-
+  input: "granted" | "ungranted" | "unavailable";
+  read: "granted" | "ungranted" | "unavailable";
+  resize: "granted" | "ungranted" | "unavailable";
 } | null;
   terminal_id?: (Id | null);
   terminal_sequence?: number | null;
@@ -4040,6 +4154,26 @@ export type SchedulesPage = {
 };
 
 export type SenderRef = string;
+
+export type Series = {
+  bucket_seconds: number;
+  buckets: Array<SeriesBucket>;
+  from: number;
+  group_by?: string;
+  to: number;
+};
+
+export type SeriesBucket = {
+  count: number;
+  end: number;
+  groups?: Array<SeriesGroup>;
+  start: number;
+};
+
+export type SeriesGroup = {
+  count: number;
+  value: unknown;
+};
 
 export type Session = ResourceHeader & {
   ended_at?: (Timestamp | null);
@@ -4184,6 +4318,7 @@ export type StepExecution = {
   fallback: boolean | null;
   id: string;
   incarnation_id: string | null;
+  invocation_id?: string;
   observed_models: Array<string>;
   started_at_unix_ms: number;
   status: string | null;
@@ -4225,17 +4360,17 @@ export type StructuredRequest = {
   answers?: Array<RequestAnswerOption>;
   attachments?: Array<Attachment>;
   custom?: boolean;
-  question: string;
-  reasons?: Array<string>;
+  question: MarkdownBlock;
+  reasons?: Array<MarkdownInline>;
   recommendation?: {
   answer: string;
   reason: string;
 };
   subjects?: Array<RequestSubject>;
-  summary?: string;
+  summary?: MarkdownBlock;
   type: "decision" | "choice" | "feedback";
   version: 1;
-  why_person: string;
+  why_person: MarkdownInline;
 };
 
 export type SubagentSummary = {
@@ -4249,7 +4384,7 @@ export type SubagentSummary = {
   name?: string;
   requests?: number;
   status: string;
-  task?: string;
+  task?: MarkdownBlock;
   tokens?: number;
   tool_count?: number;
 };
@@ -4470,7 +4605,7 @@ export type TimelineAskQuestion = {
   description?: string;
   label: string;
 }>;
-  question: string;
+  question: MarkdownBlock;
   recommended?: number;
 };
 
@@ -4492,7 +4627,7 @@ export type TimelineContentBody = {
   blocks?: Array<TimelineBlock>;
   media_type: string;
   message_id?: string;
-  text?: string;
+  text?: MarkdownBlock;
 } & (unknown | unknown);
 
 export type TimelineDelta = {
@@ -4628,7 +4763,10 @@ export type TimelineUsageBody = {
   api?: string;
   attribution: {
   agent_id: Id;
+  attempt?: number;
+  execution_id?: string;
   generation_id?: string | null;
+  invocation_id?: string;
   mission_run_id?: string | null;
   step_id?: string | null;
 };
@@ -4726,8 +4864,8 @@ export type TimelineViewBash = {
 
 export type TimelineViewCompaction = {
   method?: string;
-  short_summary?: string;
-  summary?: string;
+  short_summary?: MarkdownInline;
+  summary?: MarkdownBlock;
   tokens_after?: number;
   tokens_before?: number;
   type: "compaction";
@@ -4778,7 +4916,7 @@ export type TimelineViewHub = {
   intent?: string;
   is_error?: boolean;
   jobs?: Array<JobSummary>;
-  message?: string;
+  message?: MarkdownBlock;
   name?: string;
   op: string;
   state?: string;
@@ -4791,7 +4929,7 @@ export type TimelineViewHub = {
 
 export type TimelineViewIrc = {
   from: string;
-  message: string;
+  message: MarkdownBlock;
   message_id: string;
   reply_to?: string;
   type: "irc";
@@ -4869,13 +5007,13 @@ export type TimelineViewTask = {
   agents?: Array<SubagentSummary>;
   async?: boolean;
   call_id?: string;
-  context?: string;
+  context?: MarkdownBlock;
   intent?: string;
   is_error?: boolean;
   tasks?: Array<{
   agent?: string;
   name?: string;
-  task: string;
+  task: MarkdownBlock;
 }>;
   tool: string;
   total_ms?: number;
@@ -5038,12 +5176,15 @@ export type UsageRow = {
   account?: string;
   account_ref?: string;
   agent: Id;
+  attempt?: number;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;
   cached_tokens: number;
   cost_microusd: number;
+  execution_id?: string;
   host?: string;
   input_tokens: number;
+  invocation_id?: string;
   mission_run?: Id;
   model?: string;
   native_session_id?: string;
@@ -5073,14 +5214,14 @@ export type UsageSummary = {
 export type Value = unknown;
 
 export type Visualization = {
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   decisions: Array<LaunchDecision>;
   diffs: Array<StructuredDiff>;
   edges: Array<VisualizationEdge>;
   gates: Array<{
 
 }>;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   groups: Array<VisualizationGroup>;
   live_progress: {
 
@@ -5126,9 +5267,9 @@ export type VisualizationGroup = {
 
 export type VisualizationNode = {
   assignment?: unknown;
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   gates?: Array<unknown>;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   id: string;
   kind: string;
   label: string;
@@ -5154,7 +5295,7 @@ export type Work = ResourceHeader & {
   claim_expires_at_unix_ms?: number | null;
   claim_incarnation?: string | null;
   claimant?: (Id | null);
-  constraints: Array<string>;
+  constraints: Array<MarkdownInline>;
   definition_id: Revision;
   execution_elapsed_ms?: number;
   execution_started_at_unix_ms?: number | null;
@@ -5171,9 +5312,9 @@ export type Work = ResourceHeader & {
   | null
 ;
   generation_id: Id;
-  goals: Array<string>;
+  goals: Array<MarkdownInline>;
   kind: "work";
-  last_progress?: string | null;
+  last_progress?: MarkdownInline | null;
   mission_id?: (Id | null);
   mission_run_id: Id;
   nudged_at_unix_ms?: number | null;
@@ -5190,7 +5331,7 @@ export type Work = ResourceHeader & {
 };
 
 export type WorkLabel = {
-  goal?: string | null;
+  goal?: MarkdownInline | null;
   holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;
@@ -5394,6 +5535,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.complete'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.done'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.fail'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.override'; parameters: PersonOverrideParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.progress'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.publish-mission'; parameters: {
   mission: {

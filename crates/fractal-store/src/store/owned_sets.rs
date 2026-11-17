@@ -276,7 +276,7 @@ pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, Fract
     Ok(views)
 }
 
-fn known_members(
+pub(super) fn known_members(
     connection: &Connection,
     set: &str,
     at: Option<u64>,
@@ -2161,8 +2161,16 @@ pub fn commit_tx(
 
 /// Rebuild the existing desired and mission projections through exact set member references.
 pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
+    project_excluding_tx(transaction, &BTreeSet::new())
+}
+
+/// Leave only explicitly degraded set subjects untouched while projecting unrelated sets.
+pub fn project_excluding_tx(
+    transaction: &Transaction<'_>,
+    excluded_subjects: &BTreeSet<String>,
+) -> Result<(), FractalError> {
     for view in selected(transaction, None)? {
-        if !view.blockers.is_empty() {
+        if excluded_subjects.contains(&view.id) || !view.blockers.is_empty() {
             continue;
         } // Existing runtimes hold; callers fence actions below.
         for (s, (m, retired, implicit)) in effective_members(transaction, &view, None)? {

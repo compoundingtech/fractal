@@ -1777,7 +1777,7 @@ mod tests {
         ClientError::Api(
             code.clone(),
             message.into(),
-            Box::new(fractal_client::ErrorEnvelope {
+            Box::new(fractal_client::ErrorEnvelope { applied: None,
                 api_version: "v0".into(),
                 error_version: "1".into(),
                 request_id: "request".into(),

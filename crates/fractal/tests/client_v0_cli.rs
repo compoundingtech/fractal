@@ -2150,6 +2150,88 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_person_override_replaces_a_deadline_default_once() {
+    use fractal_daemon::PersonWorkStore;
+
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    store.set_ask_deadlines(true);
+    let intent = fractal_daemon::graph::parse_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&intent, "cli-override-asker").unwrap();
+    let actor = format!("agent/{}.asker", store.origin());
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(socket.exists());
+    let request = root.path().join("request.json");
+    std::fs::write(&request, serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "type": "choice",
+        "question": "Which day should the garden open?",
+        "why_person": "The opening date needs your choice.",
+        "recommendation": {"answer": "friday", "reason": "The garden will be ready."},
+        "answers": [
+            {"id": "friday", "label": "Friday", "consequence": "Open on Friday."},
+            {"id": "monday", "label": "Monday", "consequence": "Open on Monday."}
+        ]
+    })).unwrap()).unwrap();
+    let ask = value(&run_cli(&socket, &[
+        "work", "ask", "--for", "person/avery", "--title", "Garden opening",
+        "--request", request.to_str().unwrap(), "--deadline", "1h", "--default", "friday",
+        "--as", &actor, "--idempotency-key", "cli-override-ask",
+    ]).await);
+    let subject = ask["subject"].as_str().unwrap();
+    let episode = store.claims_for(subject, Some("work.person-asked")).unwrap()[0].clone();
+    let deadline = episode.body["fields"]["deadline_unix_ms"].as_u64().unwrap();
+    store.reconcile_person_asks_at(u128::from(deadline) + 1).unwrap();
+    assert_eq!(store.step_run(subject).unwrap().unwrap().status, "completed");
+    assert_eq!(store.latest_claim(subject, Some("work.person-done")).unwrap().unwrap()
+        .body["fields"]["resolved_by"], "deadline");
+
+    let missing_answer = run_cli(&socket, &[
+        "work", "override", subject, "--as", "person/avery",
+    ]).await;
+    assert!(!missing_answer.status.success());
+    let foreign = run_cli(&socket, &[
+        "work", "override", subject, "--as", "person/robin", "--answer", "monday",
+    ]).await;
+    assert!(!foreign.status.success());
+    let stale = run_cli(&socket, &[
+        "work", "override", subject, "--as", "person/avery", "--answer", "monday",
+        "--episode", "claim/stale-ask",
+    ]).await;
+    assert!(!stale.status.success());
+    let override_args = [
+        "work", "override", subject, "--as", "person/avery", "--answer", "monday",
+    ];
+    assert_eq!(value(&run_cli(&socket, &override_args).await)["status"], "completed");
+    assert_eq!(value(&run_cli(&socket, &override_args).await)["status"], "completed");
+    let claims = store.claims_for(subject, Some("work.person-override")).unwrap();
+    assert_eq!(claims.len(), 1, "replaying the CLI override must not append another claim");
+    assert_eq!(claims[0].actor.as_deref(), Some("person/avery"));
+    assert_eq!(claims[0].body["fields"]["episode"], episode.id);
+    assert_eq!(claims[0].body["fields"]["answer"]["id"], "monday");
+    let shown = value(&run_cli(&socket, &["work", "show", subject]).await);
+    let answers = shown["value"]["person_answers"].as_array().unwrap();
+    assert_eq!(answers.len(), 1, "{shown}");
+    assert_eq!(answers[0]["respondent"], "person/avery");
+    assert_eq!(answers[0]["answer"]["id"], "monday");
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");

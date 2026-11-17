@@ -17,6 +17,7 @@ pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod invocation;
+pub mod effects;
 pub mod provenance;
 pub mod read_positions;
 pub mod source_map;
@@ -802,6 +803,7 @@ impl Registry {
         if kind == invocation::KIND {
             invocation::validate(subject, fields)?;
         }
+        effects::validate(kind, subject, fields)?;
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -1307,6 +1309,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "effect",
+            "effect/OPERATION_ID",
+            "A durable native effect bound to one operation.",
+            false,
+        ),
+        (
             "step-run",
             "step-run/GENERATION/PATH",
             "One step attempt lineage.",
@@ -1580,6 +1588,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
 
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
+        (
+            "resource.exec-receipt",
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
         (
             "person.delegation-set",
             &["person"],
@@ -1889,6 +1906,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "mission-run.gate-carried",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
             "mission-run.state",
             &["mission-run"],
             WritePolicy::SystemOnly,
@@ -2041,6 +2067,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "work.person-done",
+            &["step-run"],
+            WritePolicy::AuthorizedParticipant,
+            Cardinality::Append,
+            Some("work"),
+            true,
+            &[],
+        ),
+        (
+            "work.person-override",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
             Cardinality::Append,
@@ -2672,6 +2707,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ("client.native-crash", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.hang", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (invocation::KIND, &["agent"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_INTENDED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_IN_FLIGHT, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_CONFIRMED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (effects::KIND_UNRESOLVED, &["effect"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (
             "harness.timeline",
             &["agent"],
@@ -3317,6 +3356,26 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "resource.exec-receipt" => &[
+            ("exec_id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["landing", "check", "agent"])),
+            ("owner", required_object()),
+            ("coverage", required_enum(&["logical", "enforced"])),
+            ("state", required_enum(&["completed", "refused", "cancelled"])),
+            ("memory_bytes", integer()),
+            ("disk_reserved_bytes", required_integer()),
+            ("io", enumeration(&["heavy"])),
+            ("head_start", string()),
+            ("head_end", string()),
+            ("clean_start", boolean()),
+            ("clean_end", boolean()),
+            ("exit_code", integer()),
+            ("exit_signal", integer()),
+            ("wall_duration_ms", required_integer()),
+            ("queue_wait_ms", required_integer()),
+            ("memory_peak_bytes", integer()),
+        ],
         "deploy.go" => &[
             ("version", required_integer()),
             ("host", required_string()),
@@ -3551,6 +3610,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("root_revision", string()),
             ("root_mission_run", reference()),
             ("workspace", string()),
+            ("workspace_declaration", object()),
             ("requester", reference()),
             ("mode", string()),
             ("inputs", object()),
@@ -3579,6 +3639,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source", required_reference_to(&["mission-run"])),
             ("replacement", required_reference_to(&["mission-run"])),
             ("publication", required_string()),
+        ],
+        "mission-run.gate-carried" => &[
+            ("source_run", required_reference_to(&["mission-run"])),
+            ("source_request", required_string()),
+            ("source_answer", required_string()),
+            ("target_generation", required_reference_to(&["run-generation"])),
+            ("continuity", required_object()),
+            ("legacy_confirmed", boolean()),
+            ("source_confirmation", string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -3661,6 +3730,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source", reference()),
             ("source_step_run", reference()),
             ("source_generation", reference()),
+            ("source_attempt", integer()),
+            ("source_gate_request", string()),
+            ("person_continuity", object()),
             ("definition_hash", string()),
             ("status", string()),
             ("attempt", integer()),
@@ -3699,12 +3771,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("legacy_request", string()),
             ("requester_declaration", string()),
             ("request", object()),
+            ("continuity", object()),
             ("deadline_unix_ms", integer()),
             ("deadline_ms", integer()),
             ("default_answer", string()),
             ("priority", enumeration(availability::PRIORITIES)),
         ],
         "work.person-done" | "work.person-cancelled" => &[
+            ("continuity", object()),
             ("attempt", integer()),
             ("status", string()),
             ("summary", string()),
@@ -3712,6 +3786,13 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("episode", string()),
             ("answer", object()),
             ("resolved_by", string()),
+        ],
+        "work.person-override" => &[
+            ("answer", object()),
+            ("summary", string()),
+            ("episode", string()),
+            ("overrides", string()),
+            ("key", string()),
         ],
         "work.person-reassigned" => &[
             ("previous_person", reference()),
@@ -3760,6 +3841,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("waits", array()),
         ],
         "gate.requested" => &[
+            ("continuity", object()),
             ("status", string()),
             ("owner", reference()),
             ("reviewer", reference()),
@@ -4506,6 +4588,25 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("launch_input_digest", any()), ("provider_binary_digest", any()),
             ("prompt_digest", any()), ("transcript_ref", any()), ("trace_context", any()),
             ("freshness", object()), ("fallback", any()), ("error", any()), ("evidence", any()),
+        ],
+        effects::KIND_INTENDED | effects::KIND_IN_FLIGHT | effects::KIND_CONFIRMED | effects::KIND_UNRESOLVED => &[
+            ("effect_id", required_reference_to(&["effect"])),
+            ("operation_id", required_string()),
+            ("provider", required_string()),
+            ("target", required_string()),
+            ("payload_digest", required_string()),
+            ("class", required_enum(&["native-coordinated", "provider-idempotent", "fail-closed"])),
+            ("bound_step_run", required_reference_to(&["step-run"])),
+            ("bound_attempt", required_integer()),
+            ("lease_owner", required_string()),
+            ("lease_incarnation", required_string()),
+            ("recovering_actor", string()),
+            ("resolution", enumeration(&["human"])),
+            ("outcome", enumeration(&["abandoned"])),
+            ("provider_ref", string()),
+            ("result_digest", string()),
+            ("error", string()),
+            ("evidence", array()),
         ],
         "harness.timeline" => &[
             (
@@ -5296,6 +5397,8 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("resource.exec-receipt").unwrap();
+        current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
         current.subjects.remove(read_positions::FAMILY).unwrap();
@@ -5312,13 +5415,24 @@ mod tests {
         current.claims.remove("program.attempt.trace").unwrap();
         current.claims.remove(invocation::KIND).unwrap();
         current.claims.remove("harness.invocation-artifact").unwrap();
+        for kind in [effects::KIND_INTENDED, effects::KIND_IN_FLIGHT, effects::KIND_CONFIRMED, effects::KIND_UNRESOLVED] {
+            current.claims.remove(kind).unwrap();
+        }
+        current.subjects.remove("effect").unwrap();
         for field in ["producer_version", "invocation_id"] {
             current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
         }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
-        for field in ["phase", "admission_publication"] {
+        current.claims.remove("mission-run.gate-carried").unwrap();
+        for field in ["phase", "admission_publication", "workspace_declaration"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
+        }
+        for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
+            current.claims.get_mut(kind).unwrap().fields.remove("continuity").unwrap();
+        }
+        for field in ["source_attempt", "source_gate_request", "person_continuity"] {
+            current.claims.get_mut("step-run.carried").unwrap().fields.remove(field).unwrap();
         }
         current.claims.get_mut("reconcile.fault").unwrap().fields.remove("publication").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
@@ -5546,6 +5660,7 @@ mod tests {
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",
+                "work.person-override",
                 "work.progress",
                 "work.released",
                 "work.renewed",

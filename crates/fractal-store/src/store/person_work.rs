@@ -1,7 +1,7 @@
 //! Person asks are runtime steps. The immutable asking claim supplies their ownership fence;
 //! step_runs supplies their state. No separate attention record is created.
 use super::*;
-use crate::model::PersonRenameRequest;
+use crate::model::{PersonAskRequest, PersonRenameRequest};
 
 use crate::person_request::StructuredRequest;
 
@@ -9,6 +9,8 @@ use crate::person_request::StructuredRequest;
 mod reconcile_candidates_tests;
 #[cfg(test)]
 mod revision_provenance_tests;
+pub mod continuity;
+pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
 /// The structured request an ask claim carries. An ask from a newer build whose request this
 /// build cannot read is refused rather than answered as free text.
@@ -87,14 +89,22 @@ pub fn stop_counting_ask_deadlines(connection: &Connection) -> Result<bool> {
 /// ask's deadline with the person's deadline clock applied, [`answer_cutoff`], or when the
 /// default was applied for an ask made without one) wins, and one accepted at or after it does
 /// not. Every member holds the same claims with the same accept times, so every member keeps
-/// the same responses. Without a deadline response all stand.
+/// the same responses. A validated explicit override wins even after the cutoff; the last
+/// one in canonical order stands. Without a deadline response ordinary responses all stand.
 pub fn standing_responses<T>(
     responses: Vec<T>,
     by_deadline: impl Fn(&T) -> bool,
     is_person_answer: impl Fn(&T) -> bool,
+    is_override: impl Fn(&T) -> bool,
     accepted_at: impl Fn(&T) -> u128,
     deadline: Option<u128>,
 ) -> (Vec<T>, bool) {
+    if let Some(latest) = responses.iter().rposition(&is_override) {
+        return (responses.into_iter().enumerate().filter_map(|(index, response)| {
+            (index == latest || (!by_deadline(&response) && !is_person_answer(&response) && !is_override(&response)))
+                .then_some(response)
+        }).collect(), true);
+    }
     let Some(applied) = responses.iter().find(|response| by_deadline(response)) else {
         return (responses, false);
     };
@@ -591,6 +601,21 @@ fn run_liveness_uncached(
     }
 }
 
+pub fn episode_owner(connection: &Connection, ask: &ClaimRecord) -> Result<Option<(String, Option<String>)>> {
+    let fields = &ask.body["fields"];
+    if fields.get("owner_run").is_some() {
+        return Ok(fields["owner_run"].as_str().map(|run| (
+            run.to_owned(), fields["owner_generation"].as_str().map(str::to_owned),
+        )));
+    }
+    let requester = ask.actor.as_deref().unwrap_or_default();
+    if !requester.starts_with("agent/") {
+        return Ok(None);
+    }
+    Ok(canonical_desired_row_at_claim(connection, requester, &ask.id)?.and_then(|desired|
+        desired.owner_run.map(|run| (run, desired.owner_generation))))
+}
+
 pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Result<bool> {
     if ask.accepted_at_unix_ms > as_of {
         return Ok(false);
@@ -615,11 +640,27 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         return Ok(false);
     }
     let requester = ask.actor.as_deref().unwrap_or_default();
-    // Independent asks belong to the agent, not its current work or runtime turn.
-    // This also preserves asks written before owner-run fencing was removed.
+    // Unowned asks survive runtime turns; an episode-owned ask keeps its original fence.
+    if let Some((owner, generation)) = episode_owner(connection, ask)?
+        && !run_live(connection, &owner, generation.as_deref(), false)?
+    {
+        return Ok(false);
+    }
+    if is_update(ask) {
+        let about = fields["request"]["about"].as_str().unwrap_or_default();
+        if about.starts_with("mission-run/") && !run_live(connection, about, None, false)? {
+            return Ok(false);
+        }
+        if about.starts_with("step-run/")
+            && let Some(origin) = step(connection, about)?
+            && (matches!(origin.status.as_str(), "completed" | "cancelled" | "failed")
+                || !run_live(connection, &origin.run, Some(&origin.generation), false)?)
+        {
+            return Ok(false);
+        }
+    }
     let independent = view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null();
-    // A daemon asks for its own policy, not for a seat, so no declaration fences it. An update
-    // waits for nobody, so it stays until the person reads it, even after its poster stops.
+    // Updates need no live poster, but their owning episode still fences them.
     let unfenced = requester.starts_with("daemon/") || is_update(ask);
     if !matches!(view.status.as_str(), "pending" | "ready")
         || (!independent && !run_live(connection, &view.run, Some(&view.generation), false)?)
@@ -702,20 +743,36 @@ pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h65cae3d401d5 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
-          json_extract(request.body,'$.fields.origin_step')=?1, resolution.kind,
-          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution JOIN claims request
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h58b7fa26fa6e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "WITH RECURSIVE sources(subject,attempt) AS (
+          SELECT ?1,?2 UNION
+          SELECT json_extract(carried.body,'$.fields.source_step_run'),
+            coalesce(json_extract(carried.body,'$.fields.source_attempt'),sources.attempt)
+          FROM sources JOIN claims carried ON carried.subject=sources.subject
+            AND carried.kind='step-run.carried'
+            AND json_extract(carried.body,'$.fields.attempt')=sources.attempt
+        )
+        SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
+          EXISTS(SELECT 1 FROM sources WHERE sources.subject=json_extract(request.body,'$.fields.origin_step')), resolution.kind,
+          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution LEFT JOIN claims request
         ON request.subject=resolution.subject AND request.kind='work.person-asked'
-        WHERE resolution.kind IN ('work.person-done','work.person-cancelled')
-          -- Only asks this step made, or the step's own ask: an index walk, not every answer.
-          AND resolution.subject IN (
-            SELECT subject FROM claims WHERE kind='work.person-asked'
-              AND json_extract(body,'$.fields.origin_step')=?1
-            UNION SELECT ?1)
-          AND ((json_extract(request.body,'$.fields.origin_step')=?1
-                AND json_extract(request.body,'$.fields.origin_attempt')=?2)
-            OR (resolution.subject=?1 AND json_extract(resolution.body,'$.fields.attempt')=?2))
+        WHERE resolution.kind IN ('work.person-done','work.person-cancelled','work.person-override')
+          AND (resolution.kind!='work.person-override' OR (
+            json_extract(resolution.body,'$.fields.episode')=request.id
+            AND resolution.actor=json_extract(request.body,'$.fields.person')
+            AND json_type(resolution.body,'$.fields.answer')='object'
+            AND EXISTS (SELECT 1 FROM claims deadline
+              WHERE deadline.id=json_extract(resolution.body,'$.fields.overrides')
+                AND deadline.subject=request.subject AND deadline.kind='work.person-done'
+                AND json_extract(deadline.body,'$.fields.resolved_by')='deadline'
+                AND json_extract(deadline.body,'$.fields.episode')=request.id)))
+          AND EXISTS(SELECT 1 FROM sources WHERE
+            (json_extract(request.body,'$.fields.origin_step')=sources.subject
+              AND json_extract(request.body,'$.fields.origin_attempt')=sources.attempt)
+            OR (resolution.subject=sources.subject AND
+              (json_extract(resolution.body,'$.fields.attempt')=sources.attempt
+               OR (resolution.kind='work.person-override'
+                 AND json_extract(request.body,'$.fields.attempt')=sources.attempt))))
         ORDER BY CANONICAL_ASC(resolution)",
     ))?;
     let responses = query
@@ -739,7 +796,17 @@ pub fn enrich_responses(
         };
         let response = (actor, body, accepted, from_origin, kind);
         match asks.iter_mut().find(|(subject, _, _)| *subject == ask) {
-            Some((_, _, responses)) => responses.push(response),
+            Some((_, _, responses)) => {
+                // Offline members can admit the same logical key independently. Its first
+                // canonical receipt fixes that operation; a retry must not reselect an old answer.
+                if response.4 == "work.person-override"
+                    && response.1["fields"]["key"].as_str().is_some_and(|key| responses.iter().any(
+                        |(_, previous, _, _, kind): &(Option<String>, Value, String, bool, String)|
+                            kind == "work.person-override" && previous["fields"]["key"] == key)) {
+                    continue;
+                }
+                responses.push(response);
+            }
             None => asks.push((ask, deadline.and_then(|deadline| u128::try_from(deadline).ok()), vec![response])),
         }
     }
@@ -760,13 +827,17 @@ pub fn enrich_responses(
             responses,
             by_deadline,
             |(_, body, _, _, kind)| kind == "work.person-done" && body["fields"]["resolved_by"] != "deadline",
+            |(_, _, _, _, kind)| kind == "work.person-override",
             |(_, _, accepted, _, _)| accepted.parse().unwrap_or(0),
             cutoff,
         );
         if overridden && standing.iter().any(|(_, _, _, from_origin, _)| *from_origin) {
-            view.constraints.push(format!(
-                "Person response to {ask}: the person answered before its deadline, so their answer replaces the default the deadline applied"
-            ));
+            let explanation = if standing.iter().any(|(_, _, _, _, kind)| kind == "work.person-override") {
+                "the person explicitly overrode the default the deadline applied; already-taken effects are not rolled back"
+            } else {
+                "the person answered before its deadline, so their answer replaces the default the deadline applied"
+            };
+            view.constraints.push(format!("Person response to {ask}: {explanation}"));
         }
         for (actor, body, accepted, from_origin, _) in standing {
             enrich_response(view, ask.clone(), actor, &body, accepted, from_origin);
@@ -1135,6 +1206,7 @@ mod standing_responses_tests {
             responses,
             |response| response.1,
             |response| response.2,
+            |_| false,
             |response| response.3,
             deadline,
         );
@@ -1158,5 +1230,87 @@ mod standing_responses_tests {
         // A cancellation is not a person's answer and always stands; without a default all do.
         assert_eq!(standing(vec![default, cancelled], Some(1_000)), (vec!["default", "cancelled"], false));
         assert_eq!(standing(vec![late, cancelled], Some(1_000)), (vec!["late", "cancelled"], false));
+    }
+
+    #[test]
+    fn explicit_overrides_bypass_the_cutoff_and_only_the_latest_stands() {
+        let (kept, overridden) = standing_responses(
+            vec![("default", true, false, 1_000), ("early", false, true, 999),
+                ("override-first", false, true, 2_000), ("override-latest", false, true, 3_000)],
+            |response| response.1,
+            |response| response.2,
+            |response| response.0.starts_with("override-"),
+            |response| response.3,
+            Some(1_000),
+        );
+        assert!(overridden);
+        assert_eq!(kept.iter().map(|response| response.0).collect::<Vec<_>>(), ["override-latest"]);
+    }
+
+    #[test]
+    fn override_projection_converges_for_reordered_history_and_fences_invalid_links() {
+        use super::*;
+        let history = [
+            ("ask", "work.person-asked", "agent/requester", 1, json!({
+                "person":"person/avery","attempt":1,"origin_step":"origin","origin_attempt":1
+            })),
+            ("deadline", "work.person-done", "daemon/runtime", 1_000, json!({
+                "episode":"ask","attempt":1,"resolved_by":"deadline","summary":"Default"
+            })),
+            ("first", "work.person-override", "person/avery", 2_000, json!({
+                "episode":"ask","overrides":"deadline","summary":"First","key":"person-override:ask:first",
+                "answer":{"id":"first","type":"decision","outcome":"accept","label":"First"}
+            })),
+            ("latest", "work.person-override", "person/avery", 3_000, json!({
+                "episode":"ask","overrides":"deadline","summary":"Latest","key":"person-override:ask:latest",
+                "answer":{"id":"latest","type":"decision","outcome":"decline","label":"Latest"}
+            })),
+            ("retry-first", "work.person-override", "person/avery", 3_500, json!({
+                "episode":"ask","overrides":"deadline","summary":"First","key":"person-override:ask:first",
+                "answer":{"id":"first","type":"decision","outcome":"accept","label":"First"}
+            })),
+            ("wrong-episode", "work.person-override", "person/avery", 4_000, json!({
+                "episode":"another-ask","overrides":"deadline","summary":"Wrong episode","answer":{}
+            })),
+            ("wrong-link", "work.person-override", "person/avery", 5_000, json!({
+                "episode":"ask","overrides":"first","summary":"Not a deadline","answer":{}
+            })),
+            ("wrong-person", "work.person-override", "person/other", 6_000, json!({
+                "episode":"ask","overrides":"deadline","summary":"Not the person","answer":{}
+            })),
+        ];
+        for reverse in [false, true] {
+            // Independent retained-history readers model opposite replication arrival orders.
+            let connection = Connection::open_in_memory().unwrap();
+            connection.execute_batch("
+                CREATE TABLE batches(id TEXT PRIMARY KEY,origin TEXT,replica_sequence INTEGER);
+                CREATE TABLE claims(id TEXT UNIQUE,store_index INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT,subject TEXT,kind TEXT,actor TEXT,body TEXT,accepted_at_unix_ms TEXT);
+                CREATE TABLE claim_positions(claim_id TEXT,position INTEGER);
+                CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
+            ").unwrap();
+            for index in 0..history.len() {
+                let index = if reverse { history.len() - 1 - index } else { index };
+                let (id, kind, actor, at, fields) = &history[index];
+                connection.execute("INSERT INTO batches VALUES(?1,'member-alder',?2)", params![id, index as i64]).unwrap();
+                connection.execute(
+                    "INSERT INTO claims(id,batch_id,subject,kind,actor,body,accepted_at_unix_ms)
+                     VALUES(?1,?1,'ask-step',?2,?3,?4,?5)",
+                    params![id, kind, actor, json!({"fields":fields}).to_string(), at.to_string()],
+                ).unwrap();
+            }
+            for subject in ["ask-step", "origin"] {
+                let mut view: StepRunView = serde_json::from_value(json!({
+                    "subject":subject,"run":"mission-run/example","generation":"generation/example",
+                    "step":"ask","definition_hash":"definition","status":"completed","attempt":1,
+                    "agentless":false,"worker_reported":true,"readiness_epoch":1,
+                    "created_at_unix_ms":1,"updated_at_unix_ms":1_000
+                })).unwrap();
+                enrich_responses(&connection, &mut view).unwrap();
+                assert_eq!(view.person_answers.len(), 1);
+                assert_eq!(view.person_answers[0].summary, "Latest");
+                assert_eq!(view.status, "completed", "an override must not reopen the origin");
+            }
+        }
     }
 }

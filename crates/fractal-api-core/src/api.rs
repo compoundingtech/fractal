@@ -88,6 +88,7 @@ use crate::model::{
     SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
+pub mod effects;
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
@@ -97,6 +98,7 @@ use crate::store::local_commits;
 pub mod wire_names;
 pub mod seat_freshness;
 mod host_holds;
+mod resources;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -157,6 +159,7 @@ pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
 }
 mod availability;
 mod directive_notes;
+mod auto_resolved;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
@@ -196,6 +199,8 @@ mod native_delivery;
 pub mod replication;
 mod replication_replay;
 mod runs;
+mod continuity;
+mod agent_invocations;
 pub mod sessions;
 pub mod work;
 // Other api code calls these handlers directly.
@@ -509,7 +514,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -652,6 +657,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/internal/resources", get(resources::list))
+        .route("/v1/internal/resources/exec", post(resources::submit))
+        .route("/v1/internal/resources/{id}", get(resources::show))
+        .route("/v1/internal/resources/{id}/wait", post(resources::wait))
+        .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -664,7 +674,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
                 .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
         )
         .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
+        .route("/v1/client/auto-resolved", get(auto_resolved::read))
         .route("/v1/client/availability", get(availability::list).put(availability::set))
+        .route("/v1/client/availability/history", get(availability::history))
         .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
@@ -736,6 +748,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/blobs/{id}", get(client_blobs::get))
         .route("/v1/client/blobs/{id}/chunk", get(client_blobs::chunk))
+        .route("/v1/client/invocation-artifacts/{id}", get(agent_invocations::artifact).delete(agent_invocations::delete_artifact))
         .route("/v1/client/adapter/import", post(client_adapters::import_message))
         .route("/v1/client/adapter/deliveries", get(client_adapters::deliveries))
         .route("/v1/schema", get(schema))
@@ -834,6 +847,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/usage", get(operations::get_usage))
         .route("/v1/slo", get(operations::get_slo))
         .route("/v1/slo/history", get(operations::get_slo_history))
+        .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(records::get_claim))
         .route("/v1/reviews", get(records::list_reviews))
@@ -862,6 +876,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(messages::message_delivery))
         .route("/v1/messages/by-key", get(messages::message_by_key))
+        .route("/v1/effects/by-key", get(effects::by_key))
+        .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
@@ -987,6 +1003,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/evals/{*run}", get(runs::get_eval))
         .route("/v1/mission-runs", get(runs::list_mission_runs))
         .route("/v1/mission-runs/tree", get(runs::list_mission_run_tree))
+        .route("/v1/mission-runs/continuity/preview", post(continuity::preview))
+        .route("/v1/mission-runs/continuity/recover", post(continuity::recover))
+        .route("/v1/mission-runs/continuity/startup-preview", get(continuity::startup_preview))
         .route("/v1/mission-overview", get(runs::mission_overview))
         .route("/v1/outcome-history", get(runs::outcome_history))
         .route("/v1/performance", get(runs::performance_report))
@@ -1014,6 +1033,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
+        .route("/v1/agent-invocations/{*invocation}", get(agent_invocations::get))
+        .route("/v1/invocation-input", post(agent_invocations::input))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
             "/v1/revision-proposals/{proposal}",
@@ -1041,6 +1062,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
         .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
         .route("/v1/work/done", post(work::done_person_step))
+        .route("/v1/work/override", post(work::override_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
         .route("/v1/work", get(work::list_work))
         .route("/v1/work-items/{*subject}", get(work::get_work))
@@ -1181,6 +1203,11 @@ async fn response_envelope_unbounded(
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
+    let effect_resolution = request.method() == axum::http::Method::POST
+        && request.uri().path().starts_with("/v1/effects/")
+        && request.uri().path().ends_with("/resolve");
+    let continuity_recovery = request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/mission-runs/continuity/recover";
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -1282,6 +1309,8 @@ async fn response_envelope_unbounded(
     // must leave the async acceptor free to admit independent requests when SQLite is busy.
     // Bearers on native Unix routes must not evade the assistant route boundary.
     let (client_authentication, client_snapshot) = if client_request
+        || effect_resolution
+        || continuity_recovery
         || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
@@ -2079,6 +2108,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
+        | "unknown-objective"
+        | "invalid-series"
+        | "unsupported-objective-series"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
@@ -7650,9 +7682,9 @@ async fn serve_reserved_unix_with_lookup_ready(
                     if let HarnessAncestry::Run(credential) = &ancestry {
                         request.extensions_mut().insert(credential.clone());
                     }
-                    if matches!(ancestry, HarnessAncestry::Unavailable) {
-                        request.extensions_mut().insert(HarnessAncestry::Unavailable);
-                    }
+                    // Preserve positive person evidence as well as failures. Private reads
+                    // must distinguish a verified operator from a missing ancestry binding.
+                    request.extensions_mut().insert(ancestry);
                     app.oneshot(request).await
                 }
             });
@@ -8335,6 +8367,11 @@ pub async fn guard_bound_request(
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        // Resource handlers bind submission to native ownership and scope inspection/control
+        // to that same owner. No other internal route (or method) admits bound callers.
+        if resources::allows_bound_request(request.method(), request.uri().path()) {
+            return Ok(request);
+        }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
@@ -8394,6 +8431,7 @@ pub async fn guard_bound_request(
         "/v1/agents/lane/burst",
         "/v1/hosts/holds",
         "/v1/delivery/hold",
+        "/v1/hosts/holds",
         "/v1/lane-changes",
         "/v1/work/",
         "/v1/github/",
@@ -8501,7 +8539,15 @@ pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bo
     }
 }
 
-async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// Read-only supervisor diagnostics supplied by the daemon's process boundary.
+/// Reading health must never start a service-manager command.
+#[derive(Clone)]
+pub struct SupervisorHealth(pub Arc<dyn Fn() -> Option<Value> + Send + Sync>);
+
+async fn health(
+    State(state): State<AppState>,
+    supervisor: Option<Extension<SupervisorHealth>>,
+) -> Result<Json<Value>, ApiError> {
     let mut health = json!({
         "status": "ready",
         "node": state.node,
@@ -8511,7 +8557,11 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
     });
+    if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
+        health["service_manager"] = supervisor;
+    }
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
     if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)
@@ -8519,7 +8569,21 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
     {
         health["messages_store_index"] = json!(index);
     }
+    apply_systemd_health(&mut health, fractal_runtime::systemd::health());
     Ok(Json(health))
+}
+
+fn apply_systemd_health(health: &mut Value, supervisor: fractal_runtime::systemd::Health) {
+    if let Some(reason) = supervisor.unresponsive {
+        health["status"] = json!("degraded");
+        health["supervisor"] = json!({
+            "status": "unresponsive",
+            "reason": "systemd-unresponsive",
+            "since_unix_ms": reason.since.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis(),
+            "message": reason.message,
+        });
+    }
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
@@ -11820,6 +11884,33 @@ pub fn accept_message_receipt_with_upload_owner(
     upload_owner: Option<&str>,
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<MessageSendReceipt, ApiError> {
+    accept_message_receipt_authorized(state, request, session_id, device_signature,
+        upload_owner, assistant_authorization, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accept_message_receipt_authorized(
+    state: &AppState,
+    mut request: MessageSendRequest,
+    session_id: Option<String>,
+    device_signature: Option<smallclaims::principal::ClaimSignature>,
+    upload_owner: Option<&str>,
+    assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
+    effect_caller: Option<&str>,
+) -> Result<MessageSendReceipt, ApiError> {
+    let effect_digest = if let Some(owner) = request.owner.as_ref() {
+        if effect_caller.is_none() || device_signature.is_some() || assistant_authorization.is_some() {
+            return Err(ApiError::bad(FractalError::new("effect-caller-refused",
+                "effect-bound sends require an attested worker at the native message endpoint")));
+        }
+        let payload = serde_json::to_vec(&(
+            &request.from, &request.to, &request.content, &request.title,
+            &request.in_reply_to, &request.tags, &request.attachments,
+        )).map_err(ApiError::internal)?;
+        request.idempotency_key = crate::store::effects::native_message_key(owner)
+            .map_err(ApiError::bad)?;
+        Some(hex::encode(Sha256::digest(&payload)))
+    } else { None };
     let requested_recipient = normalize_message_party(&request.to);
     let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
@@ -11908,12 +11999,45 @@ pub fn accept_message_receipt_with_upload_owner(
         upload_owner.unwrap_or(&from),
         &request.attachments,
     )?;
+    let effect = match (request.owner.as_ref(), effect_digest.as_deref()) {
+        (Some(owner), Some(digest)) => {
+            use crate::store::effects::EffectAdmission;
+            let caller = effect_caller.expect("effect callers were attested before admission");
+            let (_, caller) = receipt_recipient(&state.store, caller)?;
+            match state.store.admit_message_effect(owner, &caller, &from, digest, &to)
+                .map_err(ApiError::bad)? {
+                EffectAdmission::Originate(record) => Some((record, true, caller)),
+                EffectAdmission::Recover(record) => Some((record, false, caller)),
+                EffectAdmission::Blocked(error) => return Err(ApiError::bad(error)),
+            }
+        }
+        _ => None,
+    };
+    #[cfg(feature = "test-support")]
+    if let Some((record, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &record.operation_id, "after-intent").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after durable intent")));
+    }
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
     let subject = format!("message/{id}");
     let previous = state
         .store
         .operation_claim(&request.idempotency_key)
         .map_err(ApiError::internal)?;
+    let recovered = if let Some((effect, false, caller)) = effect.as_ref() {
+        match previous.as_ref().filter(|claim| claim.kind == "message.sent" && claim.subject == subject) {
+            Some(record) => Some(record.clone()),
+            None => {
+                state.store.unresolved_message_effect(effect,
+                    "the originating store's committed message is unavailable; absence here is not proof of non-delivery", caller)
+                    .map_err(ApiError::bad)?;
+                return Err(ApiError::bad(FractalError::new("effect-unresolved",
+                    "the effect cannot be recovered by key; nothing was sent")));
+            }
+        }
+    } else { None };
     let parent = request
         .in_reply_to
         .as_deref()
@@ -12021,13 +12145,27 @@ pub fn accept_message_receipt_with_upload_owner(
         message_body::bodies(&state.state_dir)
             .ensure_room(&from, &subject, request.content.len())
             .map_err(ApiError::bad)?;
-        let entry = crate::model::MessageAttachment {
+        let mut entry = crate::model::MessageAttachment {
             sha256: hex::encode(Sha256::digest(request.content.as_bytes())),
             media_type: message_body::MEDIA_TYPE.into(),
             name: None,
             size: request.content.len() as u64,
             origin: client_host_id(&state.node),
         };
+        if let Some(stored) = previous.as_ref()
+            .filter(|claim| claim.kind == "message.sent" && claim.subject == subject)
+            .and_then(|claim| claim.body["fields"]["attachments"].as_array())
+            .and_then(|entries| entries.iter().find(|entry| entry["media_type"] == message_body::MEDIA_TYPE))
+        {
+            let stored: crate::model::MessageAttachment =
+                serde_json::from_value(stored.clone()).map_err(ApiError::internal)?;
+            // The body belongs to the accepting host, not the host recovering the key.
+            // Reuse its metadata only for identical full text; otherwise keep the supplied
+            // hash and size so the immutable operation comparison below refuses the retry.
+            if stored.sha256 == entry.sha256 && stored.size == entry.size {
+                entry = stored;
+            }
+        }
         claim_attachments.push(entry.clone());
         body = Some(entry);
     }
@@ -12078,19 +12216,47 @@ pub fn accept_message_receipt_with_upload_owner(
         idempotency_key: Some(request.idempotency_key.clone()),
     };
     // A repeated key returns the first claim and says it appended nothing.
-    let (record, appended) = match &device_signature {
-        Some(signature) => state.store.append_signed_message(&input, signature),
-        None => match assistant_authorization {
-            Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
-            // A reply settles its parent citing the reply's claim, so it stays on the graph until
-            // 4c-3; any other send goes where its recipient's host reads it (message_routing).
-            None if request.in_reply_to.is_some() => state.store.append_claim_outcome(&input),
-            None => crate::store::message_routing::send_message(&state.store, &input),
-        },
-    }
+    let sent = if let Some(record) = recovered {
+        let operation = smallclaims::store::claim_operation(&input).map_err(ApiError::bad)?;
+        if operation.as_ref().is_none_or(|(operation, digest)|
+            smallclaims::store::operation_parts(&record.body) != Some((operation.as_str(), digest.as_str())))
+        {
+            Err(FractalError::new("idempotency-mismatch",
+                "the recovered message key identifies a different immutable payload"))
+        } else {
+            Ok((record, false))
+        }
+    } else {
+        if let Some((effect, true, caller)) = effect.as_ref() {
+            state.store.effect_in_flight(effect).map_err(|error| {
+                if let Some(staged) = staged.as_ref() {
+                    staged.discard();
+                }
+                if let Err(parking) = state.store.unresolved_message_effect(effect, &error.message, caller) {
+                    return ApiError::bad(parking);
+                }
+                ApiError::bad(error)
+            })?;
+        }
+        match &device_signature {
+            Some(signature) => state.store.append_signed_message(&input, signature),
+            None => match assistant_authorization {
+                Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
+                // Replies retain the graph lifecycle evidence of their parent.
+                None if request.in_reply_to.is_some() => state.store.append_claim_outcome(&input),
+                None => crate::store::message_routing::send_message(&state.store, &input),
+            },
+        }
+    };
+    let (record, appended) = sent
     .map_err(|error| {
         if let Some(staged) = staged.as_ref() {
             staged.discard();
+        }
+        if let Some((effect, _, caller)) = effect.as_ref()
+            && let Err(parking) = state.store.unresolved_message_effect(effect, &error.message, caller)
+        {
+            return ApiError::bad(parking);
         }
         ApiError::bad(error)
     })?;
@@ -12102,6 +12268,16 @@ pub fn accept_message_receipt_with_upload_owner(
                 "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
             ))
         })?;
+    }
+    #[cfg(feature = "test-support")]
+    if let Some((effect, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &effect.operation_id, "after-accept").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after provider acceptance")));
+    }
+    if let Some((effect, _, caller)) = effect.as_ref() {
+        state.store.confirm_message_effect(effect, &record, caller).map_err(ApiError::bad)?;
     }
     // A concurrent sender may have accepted this key first with the same canonical input.
     // Return its accepted classification, rather than this attempt's speculative tags.
@@ -13357,6 +13533,8 @@ pub fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod effects_tests;
 #[cfg(test)]
 mod ready_work_tests;
 #[cfg(any(test, feature = "test-support"))]

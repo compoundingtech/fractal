@@ -581,8 +581,8 @@ fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
     fixture.until("uncaught cancellation ends the run", || fixture.run_status(&parent.run) == "failed");
     let cancelled = json!({"_tag": "AskCancelled", "ask": withdrawn});
     assert_eq!(fixture.result(&parent.step, "withdrawn", 1), Some(("failed".into(), cancelled.clone())));
-    // Failed program exits retain the typed error as the step's reason; only successful
-    // program exits write RESULT_KEY.
+    // The typed program exit is durable as well as retained in the step's reason.
+    assert_eq!(fixture.result(&parent.step, RESULT_KEY, 1), Some(("failed".into(), cancelled.clone())));
     let failed = fixture.store.step_run(&parent.step).unwrap().unwrap();
     assert_eq!(failed.status, "failed");
     assert_eq!(serde_json::from_str::<Value>(failed.blocked_reason.as_deref().unwrap()).unwrap(), cancelled);

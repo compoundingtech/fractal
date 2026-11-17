@@ -3084,7 +3084,7 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
         controller.replay_replication_graph().unwrap();
         assert_eq!(incremental, graph_digest_of(&controller), "{operation}");
 
-        // A conflicting identity still requires canonical replay and names its work claim.
+        // A conflicting identity refolds only its affected tree and names its work claim.
         body["_operation"]["request_digest"] = json!("different-digest");
         let incoming = {
             let mut connection = controller.connection.lock().unwrap();
@@ -3110,7 +3110,7 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
                 .project_replication_backlog_with_log("test", |line| lines.push(line.to_owned()))
                 .unwrap()
         );
-        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 1);
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
         let detail: Value = serde_json::from_str(
             lines
                 .iter()
@@ -9927,6 +9927,12 @@ version 2
 
 #[test]
 fn a_revision_keeps_the_old_generation_and_fences_its_work() {
+    for action in ["complete", "fail", "release"] {
+        revision_keeps_old_generation_and_fences_its_work(action);
+    }
+}
+
+fn revision_keeps_old_generation_and_fences_its_work(terminal_action: &str) {
     let store = Store::open_memory("node").unwrap();
     let publish = |source: &str, key: &str| {
         let intent = crate::graph::parse_test_intent(source, "node").unwrap();
@@ -10012,6 +10018,9 @@ version 2
     store
         .work_action(&active, "claim", &request("generation-claim"))
         .unwrap();
+    let invocation = store.agent_invocation_receipts(&worker).unwrap().into_iter()
+        .find(|receipt| receipt.owner_step.as_deref() == Some(active.as_str())).unwrap().invocation_id;
+    let trace = store.start_invocation_trace(&invocation, &worker, &[]);
     store
         .work_action(&active, "progress", &request("generation-progress"))
         .unwrap();
@@ -10105,10 +10114,19 @@ version 2
         "cancelled"
     );
     let submitted = store
-        .work_action(&active, "complete", &request("carried-complete"))
+        .work_action(&active, terminal_action, &request("carried-terminal"))
         .unwrap();
     assert_eq!(submitted.subject, carried.subject);
-    assert_eq!(submitted.status, "verifying");
+    assert_eq!(submitted.status, match terminal_action {
+        "complete" => "verifying", "fail" => "failed", "release" => "ready", _ => unreachable!(),
+    });
+    let ended = store.invocation_receipts(&invocation).unwrap().into_iter()
+        .find(|receipt| receipt.phase == fractal_schema::invocation::InvocationPhase::Ended)
+        .expect("the routed terminal ends the original invocation");
+    assert_eq!(ended.owner_step.as_deref(), Some(active.as_str()));
+    assert_ne!(store.start_invocation_trace(&invocation, &worker, &[]).trace_id(),
+        trace.trace_id(), "{terminal_action} via predecessor leaked the original trace");
+    store.finish_invocation_trace(&invocation, false);
     let retried = store
         .adopt_mission_revision(
             &run.id,
@@ -12886,3 +12904,5 @@ mission "wake-history" state="ready" {
         assert_eq!(created.wake, read.wake);
     }
 }
+
+mod continuity_recovery;
