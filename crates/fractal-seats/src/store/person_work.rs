@@ -325,10 +325,16 @@ pub mod tests {
             summary: "Friday".into(), evidence: vec![], episode: None,
             idempotency_key: "answer-after-thread".into(), answer: None,
         }, false).unwrap();
-        assert_eq!(
-            start_from_inbox(&store, start("thread/after-answer", "start-after-answer", person)).unwrap_err().code,
-            "thread-unavailable",
-        );
+        let mut retained_message = message.clone();
+        retained_message.subject = "message/after-answer-first".into();
+        retained_message.fields.insert("content".into(), json!("A separate retained discussion."));
+        let (retained, appended) = start_from_inbox(&store, StartFromInbox {
+            first_message: &retained_message,
+            ..start("thread/after-answer", "start-after-answer", person)
+        }).unwrap();
+        assert!(appended);
+        assert_ne!(retained.id, created.id);
+        assert_eq!(store.claims_for(&retained_message.subject, Some("message.sent")).unwrap().len(), 1);
         assert!(!start_from_inbox(&store, start("thread/worker", "start-thread", person)).unwrap().1);
     }
 

@@ -733,7 +733,8 @@ mod authored_tests {
         let store = Store::open_memory("authored-qualifier").unwrap();
         let source = format!("version 2\nmission \"proof\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to {recipient:?}; goal \"Retained question\"; }} }}");
         let intent = crate::graph::parse_internal_intent(&source, store.origin()).unwrap();
-        store.apply(&intent, &BTreeMap::new(), "proof-definition").unwrap();
+        store.apply(&intent, &BTreeMap::from([("mission/proof".into(), Vec::new())]),
+            "proof-definition").unwrap();
         let run = store.create_mission_run_inner(&MissionRunRequest {
             mission: "proof".into(), revision: None, workspace: "/tmp".into(),
             requester: Some("person/reader".into()), mode: Some("run".into()),

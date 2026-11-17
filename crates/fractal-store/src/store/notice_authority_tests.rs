@@ -671,12 +671,12 @@ fn label_about_and_arbitrary_attention_claims_never_establish_notice_discussion_
     discussion_agent(&fleet);
     for (source, kind, fields) in [
         ("message/notice-label", "message.sent", json!({
-            "label":"attention","person":"person/example","from":"agent/example/producer",
+            "tags":["attention"],"from":"agent/example/producer",
             "to":"person/example","content":"Attention label only","status":"sent",
         })),
         ("message/notice-about", "message.sent", json!({
             "from":"agent/example/producer","to":"person/example","content":"About this notice","status":"sent",
-            "about":[SOURCE],
+            "tags":[format!("about:{SOURCE}")],
         })),
     ] {
         let claim = fleet.alder.connection.batched(|tx| append_claim_tx(tx, "alder",

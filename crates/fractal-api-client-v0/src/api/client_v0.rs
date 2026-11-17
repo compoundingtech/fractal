@@ -256,6 +256,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/threads", get(assistant::read_projection))
         .route("/v1/client/assistant/thread-detail", get(assistant::read_projection))
         .route("/v1/client/assistant/thread-timeline", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-start-context", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/slo", get(assistant::read_projection))
         .route("/v1/client/assistant/slo-history", get(assistant::read_projection))
