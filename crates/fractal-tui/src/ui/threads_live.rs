@@ -7,8 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fractal_client::{
     Client, ClientError, Envelope, Fence, Snapshot, ThreadClearUnreadParameters,
     ThreadCollectionRows, ThreadMarkUnreadParameters, ThreadReadParameters, ThreadRenameParameters,
-    ThreadReplyParameters, ThreadStartParameters, ThreadState,
-    ThreadSummary, ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
+    ThreadReplyParameters, ThreadStartParameters, ThreadState, ThreadSummary,
+    ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
 };
 use fractal_feed::{THREAD_UPDATES_PAUSED, ThreadAccess, ThreadInterest, model::Model};
 use ratatui::text::{Line, Span};
@@ -35,7 +35,11 @@ fn access_refused(reason: &str) -> String {
     if reason.is_empty() {
         return NO_ACCESS.into();
     }
-    let stop = if reason.ends_with(['.', '!', '?']) { "" } else { "." };
+    let stop = if reason.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
     format!("{NO_ACCESS} {reason}{stop}")
 }
 
@@ -50,7 +54,9 @@ fn thread_read_failure(code: Option<&fractal_client::ErrorCode>, message: &str) 
 
 fn thread_read_error(error: ClientError) -> String {
     match &error {
-        ClientError::Api(fractal_client::ErrorCode::Forbidden, message, _) => access_refused(message),
+        ClientError::Api(fractal_client::ErrorCode::Forbidden, message, _) => {
+            access_refused(message)
+        }
         error => error.human(),
     }
 }
@@ -280,10 +286,14 @@ impl Write {
                 client.thread_read(&action, key, fence, value.clone()).await
             }
             Mutation::MarkUnread(value) => {
-                client.thread_mark_unread(&action, key, fence, value.clone()).await
+                client
+                    .thread_mark_unread(&action, key, fence, value.clone())
+                    .await
             }
             Mutation::ClearUnread(value) => {
-                client.thread_clear_unread(&action, key, fence, value.clone()).await
+                client
+                    .thread_clear_unread(&action, key, fence, value.clone())
+                    .await
             }
             Mutation::Close => client.thread_close(&action, key, fence, target()).await,
             Mutation::Reopen => client.thread_reopen(&action, key, fence, target()).await,
@@ -445,8 +455,9 @@ impl Earlier {
 
 fn start_context_error(error: ClientError) -> String {
     match error {
-        ClientError::Api(fractal_client::ErrorCode::RecipientRetired, ..) =>
-            "The recipient is retired. No discussion was started; your draft is kept.".into(),
+        ClientError::Api(fractal_client::ErrorCode::RecipientRetired, ..) => {
+            "The recipient is retired. No discussion was started; your draft is kept.".into()
+        }
         error => thread_read_error(error),
     }
 }
@@ -458,9 +469,14 @@ pub(super) struct StartContextRead {
 }
 
 impl StartContextRead {
-    pub(super) async fn read(&self, client: &Client) -> Result<Envelope<fractal_client::ThreadStartContext>, String> {
-        client.thread_start_context(&self.origin.source_id, &self.origin.episode)
-            .await.map_err(start_context_error)
+    pub(super) async fn read(
+        &self,
+        client: &Client,
+    ) -> Result<Envelope<fractal_client::ThreadStartContext>, String> {
+        client
+            .thread_start_context(&self.origin.source_id, &self.origin.episode)
+            .await
+            .map_err(start_context_error)
     }
 }
 
@@ -472,9 +488,15 @@ pub(super) struct RequestHistoryRead {
 }
 
 impl RequestHistoryRead {
-    pub(super) async fn read(&self, client: &Client) -> Result<fractal_client::RequestHistoryPage, String> {
-        client.thread_request_history(&self.id, self.cursor.as_deref(), Some(20))
-            .await.map(|reply| reply.value).map_err(thread_read_error)
+    pub(super) async fn read(
+        &self,
+        client: &Client,
+    ) -> Result<fractal_client::RequestHistoryPage, String> {
+        client
+            .thread_request_history(&self.id, self.cursor.as_deref(), Some(20))
+            .await
+            .map(|reply| reply.value)
+            .map_err(thread_read_error)
     }
 }
 
@@ -497,10 +519,18 @@ pub(super) enum SeekFailure {
 }
 
 impl Seek {
-    pub(super) async fn read(&self, client: &Client) -> Result<fractal_client::ThreadTimelinePage, SeekFailure> {
-        client.thread_timeline_around(&self.id, &self.anchor, Some(50))
-            .await.map(|reply| reply.value).map_err(|error| match error {
-                ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => SeekFailure::Unavailable,
+    pub(super) async fn read(
+        &self,
+        client: &Client,
+    ) -> Result<fractal_client::ThreadTimelinePage, SeekFailure> {
+        client
+            .thread_timeline_around(&self.id, &self.anchor, Some(50))
+            .await
+            .map(|reply| reply.value)
+            .map_err(|error| match error {
+                ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => {
+                    SeekFailure::Unavailable
+                }
                 error => SeekFailure::Failed(thread_read_error(error)),
             })
     }
@@ -555,6 +585,15 @@ pub(super) struct Threads {
     marked_in_home: bool,
 }
 
+fn actor_name(world: &view::World, actor: &str) -> Option<String> {
+    world
+        .agents
+        .items()
+        .iter()
+        .find(|agent| agent.id == actor)
+        .map(|agent| agent.name.clone())
+}
+
 impl Threads {
     /// Hydrate the ordinary native windows from the shared demo world, without a transport.
     /// Access stays read-only: demo mode has no thread mutation receipt driver.
@@ -573,7 +612,11 @@ impl Threads {
         let mut contexts: BTreeMap<ThreadInterest, Vec<ThreadSummary>> = BTreeMap::new();
         for row in rows {
             let origin = self.origins.get(&row.origin_attention_id).ok_or_else(|| {
-                anyhow::anyhow!("Demo thread {} has no readable Inbox origin {}", row.summary.id, row.origin_attention_id)
+                anyhow::anyhow!(
+                    "Demo thread {} has no readable Inbox origin {}",
+                    row.summary.id,
+                    row.origin_attention_id
+                )
             })?;
             anyhow::ensure!(
                 origin.agent.as_deref() == Some(row.summary.agent_id.as_str()),
@@ -584,7 +627,10 @@ impl Threads {
                 origin.context.clone(),
                 ThreadInterest::Agent(row.summary.agent_id.clone()),
             ] {
-                contexts.entry(context).or_default().push(row.summary.clone());
+                contexts
+                    .entry(context)
+                    .or_default()
+                    .push(row.summary.clone());
             }
             let order = row.events.iter().map(|event| event.id.clone()).collect();
             self.window(
@@ -754,7 +800,8 @@ impl Threads {
                     .into(),
             );
         }
-        let origin = self.start_origin(item)
+        let origin = self
+            .start_origin(item)
             .ok_or("This Inbox item's exact source is unavailable")?;
         let ThreadInterest::Inbox { source, episode } = &origin.context else {
             return Err("The Inbox origin is unavailable".into());
@@ -783,7 +830,9 @@ impl Threads {
         let write = match self.prepare_write(host, &input, text, draft) {
             Ok(write) => write,
             Err(reason) => {
-                if self.start_context(item).is_none() { self.request_start_context(item); }
+                if self.start_context(item).is_none() {
+                    self.request_start_context(item);
+                }
                 return Err(reason);
             }
         };
@@ -1001,7 +1050,9 @@ impl Threads {
         // Saved exact keys are only lookup inputs. Every first send still needs a
         // successful canonical start-context read and the writer's atomic recheck.
         for item in model.now.items.iter().filter_map(|row| match row {
-            fractal_client::Resource::Attention(item) if item.person_id == model.actor => Some(item),
+            fractal_client::Resource::Attention(item) if item.person_id == model.actor => {
+                Some(item)
+            }
             _ => None,
         }) {
             if item.thread_unread == Some(true) {
@@ -1010,7 +1061,11 @@ impl Threads {
             if item.episode.is_empty() || item.source_id.is_empty() {
                 continue;
             }
-            let agent = item.conversation_id.as_ref().filter(|id| id.starts_with("agent/")).cloned();
+            let agent = item
+                .conversation_id
+                .as_ref()
+                .filter(|id| id.starts_with("agent/"))
+                .cloned();
             self.origins.insert(
                 item.header.id.clone(),
                 Origin {
@@ -1025,57 +1080,96 @@ impl Threads {
         }
     }
 
-
     /// Saved exact keys are lookup inputs, not authority to start a discussion.
     pub(super) fn keep_inbox_sources(&mut self, ids: &[String]) {
         self.saved_origins.retain(|id, _| ids.contains(id));
-        self.start_contexts.retain(|id, _| ids.contains(id) || self.retained_origins.contains_key(id));
-        self.start_context_pending.retain(|id, _| ids.contains(id) || self.retained_origins.contains_key(id));
+        self.start_contexts
+            .retain(|id, _| ids.contains(id) || self.retained_origins.contains_key(id));
+        self.start_context_pending
+            .retain(|id, _| ids.contains(id) || self.retained_origins.contains_key(id));
         self.start_context_failures.retain(|id, _| ids.contains(id));
-        self.start_context_reads.retain(|read| self.start_context_pending.get(&read.item) == Some(&read.key));
+        self.start_context_reads
+            .retain(|read| self.start_context_pending.get(&read.item) == Some(&read.key));
     }
 
     pub(super) fn auto_resolved_sources(&mut self, asks: &fractal_client::AutoResolvedAsks) {
         for ask in &asks.items {
-            if ask.target_id.is_empty() || ask.episode.is_empty() { continue; }
-            self.saved_origins.insert(format!("auto-resolved/{}", ask.resolution_id), Origin {
-                context: ThreadInterest::Inbox { source: ask.target_id.clone(), episode: ask.episode.clone() },
-                agent: None,
-                title: ask.title.clone(),
-            });
+            if ask.target_id.is_empty() || ask.episode.is_empty() {
+                continue;
+            }
+            self.saved_origins.insert(
+                format!("auto-resolved/{}", ask.resolution_id),
+                Origin {
+                    context: ThreadInterest::Inbox {
+                        source: ask.target_id.clone(),
+                        episode: ask.episode.clone(),
+                    },
+                    agent: None,
+                    title: ask.title.clone(),
+                },
+            );
         }
     }
 
     pub(super) fn start_source(&self, item: &str) -> Option<fractal_client::ThreadStartOrigin> {
-        let ThreadInterest::Inbox { source, episode } = &self.start_origin(item)?.context else { return None };
-        Some(fractal_client::ThreadStartOrigin { source_id: source.clone(), episode: episode.clone() })
+        let ThreadInterest::Inbox { source, episode } = &self.start_origin(item)?.context else {
+            return None;
+        };
+        Some(fractal_client::ThreadStartOrigin {
+            source_id: source.clone(),
+            episode: episode.clone(),
+        })
     }
 
-    pub(super) fn start_context(&self, item: &str) -> Option<&Envelope<fractal_client::ThreadStartContext>> {
-        let ThreadInterest::Inbox { source, episode } = &self.start_origin(item)?.context else { return None };
-        self.start_contexts.get(item).filter(|context|
-            context.value.source_id == *source && context.value.episode == *episode)
+    pub(super) fn start_context(
+        &self,
+        item: &str,
+    ) -> Option<&Envelope<fractal_client::ThreadStartContext>> {
+        let ThreadInterest::Inbox { source, episode } = &self.start_origin(item)?.context else {
+            return None;
+        };
+        self.start_contexts.get(item).filter(|context| {
+            context.value.source_id == *source && context.value.episode == *episode
+        })
     }
 
     pub(super) fn request_start_context(&mut self, item: &str) {
-        if !self.available || self.start_context_pending.contains_key(item) { return; }
-        let Some(input) = self.start_input(item) else { return };
-        if self.drafts.get(&input.key()).is_some_and(Draft::locked) { return; }
-        let Some(origin) = self.start_source(item) else { return };
+        if !self.available || self.start_context_pending.contains_key(item) {
+            return;
+        }
+        let Some(input) = self.start_input(item) else {
+            return;
+        };
+        if self.drafts.get(&input.key()).is_some_and(Draft::locked) {
+            return;
+        }
+        let Some(origin) = self.start_source(item) else {
+            return;
+        };
         let key = uuid::Uuid::now_v7().to_string();
         self.start_contexts.remove(item);
         self.start_context_failures.remove(item);
         self.start_context_pending.insert(item.into(), key.clone());
-        self.start_context_reads.push(StartContextRead { item: item.into(), key, origin });
+        self.start_context_reads.push(StartContextRead {
+            item: item.into(),
+            key,
+            origin,
+        });
     }
 
     pub(super) fn take_start_context_reads(&mut self) -> Vec<StartContextRead> {
         std::mem::take(&mut self.start_context_reads)
     }
 
-    pub(super) fn start_context_loaded(&mut self, item: &str, key: &str,
-        result: Result<Envelope<fractal_client::ThreadStartContext>, String>) {
-        if self.start_context_pending.get(item).map(String::as_str) != Some(key) { return; }
+    pub(super) fn start_context_loaded(
+        &mut self,
+        item: &str,
+        key: &str,
+        result: Result<Envelope<fractal_client::ThreadStartContext>, String>,
+    ) {
+        if self.start_context_pending.get(item).map(String::as_str) != Some(key) {
+            return;
+        }
         self.start_context_pending.remove(item);
         match result {
             Ok(context) => {
@@ -1084,36 +1178,86 @@ impl Threads {
                 if valid {
                     self.start_contexts.insert(item.into(), context);
                 } else {
-                    self.start_context_failures.insert(item.into(), "The Inbox source changed. Check its recipient again.".into());
+                    self.start_context_failures.insert(
+                        item.into(),
+                        "The Inbox source changed. Check its recipient again.".into(),
+                    );
                 }
             }
-            Err(reason) => { self.start_contexts.remove(item); self.start_context_failures.insert(item.into(), reason); }
+            Err(reason) => {
+                self.start_contexts.remove(item);
+                self.start_context_failures.insert(item.into(), reason);
+            }
         }
     }
 
-    fn start_recipient_panel(&self, doc: &mut Doc, host: &str, item: &str, width: usize) {
-        let frozen = self.start_input(item).and_then(|input| self.drafts.get(&input.key()))
-            .and_then(|draft| draft.delivery.as_ref()).filter(|delivery| delivery.pending || delivery.unknown);
-        if let Some(Delivery { write: Write { mutation: Mutation::Start(start), .. }, .. }) = frozen {
-            doc.wrap(&[text::run(format!("Original delivery to {} is pending or unconfirmed. Retrying keeps this exact recipient.", start.agent_id), theme::dim())], width);
+    fn start_recipient_panel(
+        &self,
+        doc: &mut Doc,
+        host: &str,
+        item: &str,
+        width: usize,
+        world: &view::World,
+    ) {
+        let label = |id: &str| {
+            actor_name(world, id)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| id.to_owned())
+        };
+        let frozen = self
+            .start_input(item)
+            .and_then(|input| self.drafts.get(&input.key()))
+            .and_then(|draft| draft.delivery.as_ref())
+            .filter(|delivery| delivery.pending || delivery.unknown);
+        if let Some(Delivery {
+            write:
+                Write {
+                    mutation: Mutation::Start(start),
+                    ..
+                },
+            ..
+        }) = frozen
+        {
+            doc.wrap(&[text::run(format!("Original delivery to {} is pending or unconfirmed. Retrying keeps this exact recipient.", label(&start.agent_id)), theme::dim())], width);
             return;
         }
         if let Some(context) = self.start_context(item) {
             let recipient = &context.value.start_recipient;
-            doc.wrap(&[text::run(format!("New discussion to {}", recipient.agent_id), theme::soft())], width);
+            doc.wrap(
+                &[text::run(
+                    format!("New discussion to {}", label(&recipient.agent_id)),
+                    theme::soft(),
+                )],
+                width,
+            );
             let basis = match &recipient.basis {
-                fractal_client::ThreadStartRecipientBasis::Original => "Original source recipient".to_owned(),
-                fractal_client::ThreadStartRecipientBasis::Configured => "Configured source recipient".to_owned(),
-                fractal_client::ThreadStartRecipientBasis::Fallback { original_agent_id, .. } =>
-                    format!("Fallback recipient · original source agent {original_agent_id} is retired. Existing discussions and participants are unchanged."),
+                fractal_client::ThreadStartRecipientBasis::Original => {
+                    "Original source recipient".to_owned()
+                }
+                fractal_client::ThreadStartRecipientBasis::Configured => {
+                    "Configured source recipient".to_owned()
+                }
+                fractal_client::ThreadStartRecipientBasis::Fallback {
+                    original_agent_id, ..
+                } => format!(
+                    "Fallback recipient · original source agent {original_agent_id} is retired. Existing discussions and participants are unchanged."
+                ),
             };
             doc.wrap(&[text::run(basis, theme::dim())], width);
         } else {
-            let notice = self.start_context_failures.get(item).map_or("Checking recipient before first send…", String::as_str);
+            let notice = self
+                .start_context_failures
+                .get(item)
+                .map_or("Checking recipient before first send…", String::as_str);
             doc.wrap(&[text::run(notice, theme::dim())], width);
         }
         if !self.start_context_pending.contains_key(item) {
-            doc.buttons(&[("", "Refresh recipient", Hit::Thread(host.into(), thread::Tap::RefreshStart(item.into())), theme::SAPPHIRE)]);
+            doc.buttons(&[(
+                "",
+                "Refresh recipient",
+                Hit::Thread(host.into(), thread::Tap::RefreshStart(item.into())),
+                theme::SAPPHIRE,
+            )]);
         }
     }
 
@@ -1153,11 +1297,24 @@ impl Threads {
                 out.push(ThreadInterest::Timeline(id.clone()));
             }
         } else if let Some(expanded) = self.open.get(&pane.key()) {
-            let active = self.focused.as_ref().and_then(|(host, input)| {
-                if host != &pane.key() { return None; }
-                match input { Input::Reply(id) | Input::Rename(id) => Some(id), Input::Start { .. } => None }
-            }).or_else(|| self.selected.get(&pane.key())).filter(|id| expanded.contains(*id));
-            for id in active.into_iter().chain(expanded.iter().filter(|id| Some(*id) != active)) {
+            let active = self
+                .focused
+                .as_ref()
+                .and_then(|(host, input)| {
+                    if host != &pane.key() {
+                        return None;
+                    }
+                    match input {
+                        Input::Reply(id) | Input::Rename(id) => Some(id),
+                        Input::Start { .. } => None,
+                    }
+                })
+                .or_else(|| self.selected.get(&pane.key()))
+                .filter(|id| expanded.contains(*id));
+            for id in active
+                .into_iter()
+                .chain(expanded.iter().filter(|id| Some(*id) != active))
+            {
                 out.push(ThreadInterest::Summary(id.clone()));
                 out.push(ThreadInterest::Timeline(id.clone()));
             }
@@ -1205,7 +1362,8 @@ impl Threads {
                 && old.snapshot.store_index > summary.snapshot.store_index
         }) {
             if self.summaries.get(id).map(|old| &old.value.unread_reminder)
-                != Some(&summary.value.unread_reminder) {
+                != Some(&summary.value.unread_reminder)
+            {
                 self.invalidate_marked();
             }
             self.summaries.insert(id.clone(), summary);
@@ -1388,7 +1546,11 @@ impl Threads {
             self.marked_in_home = visible;
             self.invalidate_marked();
         }
-        if !visible || self.marked_loading || self.marked_ids.is_some() || self.marked_failure.is_some() {
+        if !visible
+            || self.marked_loading
+            || self.marked_ids.is_some()
+            || self.marked_failure.is_some()
+        {
             return None;
         }
         self.marked_loading = true;
@@ -1402,13 +1564,21 @@ impl Threads {
         self.marked_failure = None;
     }
 
-    pub(super) fn marked_loaded(&mut self, generation: u64, rows: Result<Vec<Envelope<ThreadSummary>>, super::marked_unread::Failure>) {
-        if generation != self.marked_generation { return; }
+    pub(super) fn marked_loaded(
+        &mut self,
+        generation: u64,
+        rows: Result<Vec<Envelope<ThreadSummary>>, super::marked_unread::Failure>,
+    ) {
+        if generation != self.marked_generation {
+            return;
+        }
         self.marked_loading = false;
         match rows {
             Ok(rows) => {
                 let ids = rows.iter().map(|row| row.value.id.clone()).collect();
-                for row in rows { self.put_summary(row); }
+                for row in rows {
+                    self.put_summary(row);
+                }
                 self.marked_ids = Some(ids);
             }
             Err(error) => self.marked_failure = Some(error.human()),
@@ -1416,7 +1586,9 @@ impl Threads {
     }
 
     pub(super) fn marked_unread(&self, list: &mut super::screens::Listing) {
-        if !self.available || !self.marked_in_home { return; }
+        if !self.available || !self.marked_in_home {
+            return;
+        }
         use super::screens::{Item, ListState};
         list.items.push(Item::Header {
             title: "Marked unread".into(),
@@ -1425,23 +1597,41 @@ impl Threads {
         });
         if let Some(ids) = &self.marked_ids {
             if ids.is_empty() {
-                list.items.push(Item::Note(Line::from(Span::styled("No marked threads", theme::dim()))));
+                list.items.push(Item::Note(Line::from(Span::styled(
+                    "No marked threads",
+                    theme::dim(),
+                ))));
             }
             for id in ids {
-                let Some(summary) = self.summary(id) else { continue; };
+                let Some(summary) = self.summary(id) else {
+                    continue;
+                };
                 let index = list.ids.len();
                 list.ids.push(id.clone());
                 list.items.push(Item::Row {
-                    index, first: vec![Span::styled(text::sanitize(&summary.title).replace('\n', " "), theme::soft())],
+                    index,
+                    first: vec![Span::styled(
+                        text::sanitize(&summary.title).replace('\n', " "),
+                        theme::soft(),
+                    )],
                     right: vec![Span::styled(" · reminder", theme::dim())],
-                    second: Vec::new(), children: Vec::new(),
+                    second: Vec::new(),
+                    children: Vec::new(),
                 });
             }
         } else {
-            let notice = self.marked_failure.as_deref().unwrap_or("Loading marked threads…");
-            list.items.push(Item::Note(Line::from(Span::styled(notice.to_owned(), theme::dim()))));
+            let notice = self
+                .marked_failure
+                .as_deref()
+                .unwrap_or("Loading marked threads…");
+            list.items.push(Item::Note(Line::from(Span::styled(
+                notice.to_owned(),
+                theme::dim(),
+            ))));
         }
-        if matches!(list.state, ListState::Empty(_)) { list.state = ListState::Ready; }
+        if matches!(list.state, ListState::Empty(_)) {
+            list.state = ListState::Ready;
+        }
     }
 
     pub(super) fn mount(
@@ -1499,7 +1689,7 @@ impl Threads {
                         false,
                         width,
                     ));
-                    self.start_recipient_panel(&mut doc, &host, item, width);
+                    self.start_recipient_panel(&mut doc, &host, item, width, world);
                 }
                 self.editor(
                     &mut doc,
@@ -1540,7 +1730,7 @@ impl Threads {
             if let Some(Input::Start { item, .. }) = start.as_ref()
                 && drafting.is_none()
             {
-                self.start_recipient_panel(&mut doc, &host, item, width);
+                self.start_recipient_panel(&mut doc, &host, item, width, world);
                 doc.buttons(&[(
                     "t",
                     "Start thread",
@@ -1562,8 +1752,10 @@ impl Threads {
                 self.drafts
                     .get(&input.key())
                     .and_then(|draft| draft.delivery.as_ref())
-                    .filter(|delivery| (delivery.unknown || delivery.pending)
-                        && *context == ThreadInterest::Agent(delivery.write.agent.clone()))
+                    .filter(|delivery| {
+                        (delivery.unknown || delivery.pending)
+                            && *context == ThreadInterest::Agent(delivery.write.agent.clone())
+                    })
                     .map(|_| input)
             }),
         }
@@ -1618,7 +1810,11 @@ impl Threads {
 
     /// The listed heading that has the keyboard in `pane`: it draws the `▌` gutter and the
     /// thread keys act on it, expanded or not.
-    pub(super) fn focused_row(&self, pane: &Pane, texts: &HashMap<String, String>) -> Option<String> {
+    pub(super) fn focused_row(
+        &self,
+        pane: &Pane,
+        texts: &HashMap<String, String>,
+    ) -> Option<String> {
         let id = self.selected.get(&pane.key())?;
         self.rows(pane, texts).contains(id).then(|| id.clone())
     }
@@ -1687,11 +1883,13 @@ impl Threads {
         // are current or remain an unexplained loading placeholder. The status sits under
         // this thread's own heading; the view explains a pause once, below its threads.
         let notice = open
-            .then(|| match self.failures.get(&ThreadInterest::Timeline(id.into())) {
-                Some(_) if self.paused(id) => Some(PAUSED_NOTICE),
-                Some(reason) => Some(reason.as_str()),
-                None => (!loaded || summary.is_none()).then_some("Loading thread…"),
-            })
+            .then(
+                || match self.failures.get(&ThreadInterest::Timeline(id.into())) {
+                    Some(_) if self.paused(id) => Some(PAUSED_NOTICE),
+                    Some(reason) => Some(reason.as_str()),
+                    None => (!loaded || summary.is_none()).then_some("Loading thread…"),
+                },
+            )
             .flatten();
         let Some(summary) = summary else {
             if let Some(notice) = notice {
@@ -1706,7 +1904,11 @@ impl Threads {
         } else if let Some(page) = self.seek_pages.get(id) {
             page.items.clone()
         } else {
-            source.into_iter().flat_map(History::rows).cloned().collect()
+            source
+                .into_iter()
+                .flat_map(History::rows)
+                .cloned()
+                .collect()
         };
         let input = Input::Reply(id.into());
         let key = input.key();
@@ -1738,17 +1940,26 @@ impl Threads {
                 // Keep the selected destination visible while its composer owns the keys, and
                 // on a collapsed heading Ctrl+↑/↓ focused.
                 selected: !standalone
-                    && self.selected.get(host).is_some_and(|selected| selected == id),
+                    && self
+                        .selected
+                        .get(host)
+                        .is_some_and(|selected| selected == id),
                 standalone,
                 draft: draft_text,
                 cursor: focus.then(|| cursor.at(&key, draft_text)),
                 reply_to,
                 hovered_message: self.hover.as_deref(),
-                has_earlier: self.seek_pages.get(id).map_or_else(|| source.is_some_and(History::more), |page| page.next_cursor.is_some()),
+                has_earlier: self.seek_pages.get(id).map_or_else(
+                    || source.is_some_and(History::more),
+                    |page| page.next_cursor.is_some(),
+                ),
                 loading_earlier: source.is_some_and(|history| history.loading),
                 can_mark_read: self.can_mark_read(id),
                 can_mark_unread: self.can_mark_unread(id),
-                anchor: self.seek_pages.get(id).and_then(|page| page.anchor.as_ref()),
+                anchor: self
+                    .seek_pages
+                    .get(id)
+                    .and_then(|page| page.anchor.as_ref()),
                 seek_refused: self.seek_refused.contains(id),
                 has_reminder: false,
                 can_reply: self.access.reply,
@@ -1762,14 +1973,7 @@ impl Threads {
                 can_reopen: self.access.reopen,
             },
             &world.person,
-            |actor| {
-                world
-                    .agents
-                    .items()
-                    .iter()
-                    .find(|agent| agent.id == actor)
-                    .map(|agent| agent.name.clone())
-            },
+            |actor| actor_name(world, actor),
             &chrono::Utc::now().to_rfc3339(),
             width,
         );
@@ -2044,16 +2248,24 @@ impl Threads {
             thread::Tap::Close(id) => self.lifecycle(host, id, Mutation::Close),
             thread::Tap::Reopen(id) => self.lifecycle(host, id, Mutation::Reopen),
             thread::Tap::OpenTab(id) => return Some(id),
-            thread::Tap::RequestHistory { thread, first } => self.read_request_history(thread, first),
+            thread::Tap::RequestHistory { thread, first } => {
+                self.read_request_history(thread, first)
+            }
             thread::Tap::Earlier(id) => {
                 if let Some(page) = self.seek_pages.get(&id) {
                     let history = self.histories.entry(id.clone()).or_default();
                     if let Some(cursor) = &page.next_cursor
-                        && !history.loading {
+                        && !history.loading
+                    {
                         history.loading = true;
                         self.earlier.push(Earlier {
-                            id, cursor: Some(cursor.clone()),
-                            tail: page.items.last().map(|event| event.id.clone()).unwrap_or_default(),
+                            id,
+                            cursor: Some(cursor.clone()),
+                            tail: page
+                                .items
+                                .last()
+                                .map(|event| event.id.clone())
+                                .unwrap_or_default(),
                         });
                     }
                     return None;
@@ -2146,7 +2358,10 @@ impl Threads {
                 width,
             );
             doc.buttons(&[(
-                match (self.hotkeys_for(host, &delivery.write.id), Self::alt_chords(host)) {
+                match (
+                    self.hotkeys_for(host, &delivery.write.id),
+                    Self::alt_chords(host),
+                ) {
                     (false, _) => "",
                     (true, false) => "r",
                     (true, true) => "alt+r",
@@ -2362,9 +2577,9 @@ impl Threads {
                     if episode != observed_episode {
                         return Err("The thread context is not ready".into());
                     }
-                    let preview = self.start_context(item).ok_or(
-                        "Check the recipient before sending. Your draft is kept."
-                    )?;
+                    let preview = self
+                        .start_context(item)
+                        .ok_or("Check the recipient before sending. Your draft is kept.")?;
                     let target_id = format!("thread/{}", uuid::Uuid::now_v7());
                     (
                         target_id.clone(),
@@ -2500,52 +2715,97 @@ impl Threads {
     pub(super) fn can_mark_read(&self, id: &str) -> bool {
         self.access.mark_read
             && !self.has_edit(id)
-            && self
-                .summary(id)
-                .is_some_and(|summary| summary.unread == Some(true)
-                    || summary.unread_reminder.as_ref().is_some_and(|reminder| !reminder.marks.is_empty()))
+            && self.summary(id).is_some_and(|summary| {
+                summary.unread == Some(true)
+                    || summary
+                        .unread_reminder
+                        .as_ref()
+                        .is_some_and(|reminder| !reminder.marks.is_empty())
+            })
     }
 
     pub(super) fn can_mark_unread(&self, id: &str) -> bool {
-        self.access.mark_read && !self.has_edit(id) && self.summary(id).is_some()
+        self.access.mark_read
+            && !self.has_edit(id)
+            && self.summary(id).is_some()
             && !self.seek_pending.contains_key(id)
             && !self.seek_refused.contains(id)
-            && self.seek_pages.get(id).and_then(|page| page.anchor.as_ref())
-                .is_none_or(|anchor| anchor.state != fractal_client::ThreadTimelineAnchorState::Pending)
+            && self
+                .seek_pages
+                .get(id)
+                .and_then(|page| page.anchor.as_ref())
+                .is_none_or(|anchor| {
+                    anchor.state != fractal_client::ThreadTimelineAnchorState::Pending
+                })
     }
 
     fn message_rows(&self, id: &str) -> impl Iterator<Item = &ThreadTimelineEvent> {
         let page = self.seek_pages.get(id);
-        page.into_iter().flat_map(|page| &page.items)
-            .chain(self.histories.get(id).filter(|_| page.is_none()).into_iter().flat_map(History::rows))
+        page.into_iter().flat_map(|page| &page.items).chain(
+            self.histories
+                .get(id)
+                .filter(|_| page.is_none())
+                .into_iter()
+                .flat_map(History::rows),
+        )
     }
 
     fn queue_reading(&mut self, host: &str, id: &str, mutation: Mutation) -> bool {
-        if !self.access.mark_read || self.has_edit(id) { return false; }
-        let Some(observed) = self.summaries.get(id) else { return false; };
+        if !self.access.mark_read || self.has_edit(id) {
+            return false;
+        }
+        let Some(observed) = self.summaries.get(id) else {
+            return false;
+        };
         let write = Write {
             key: uuid::Uuid::now_v7().to_string(),
-            id: id.into(), host: host.into(), input: None,
-            fence: Fence { snapshot_id: observed.snapshot.id.clone(), ..Fence::default() },
-            client: None, agent: observed.value.agent_id.clone(), mutation,
+            id: id.into(),
+            host: host.into(),
+            input: None,
+            fence: Fence {
+                snapshot_id: observed.snapshot.id.clone(),
+                ..Fence::default()
+            },
+            client: None,
+            agent: observed.value.agent_id.clone(),
+            mutation,
         };
-        self.pending_actions.insert(id.into(), Delivery::new(write.clone()));
+        self.pending_actions
+            .insert(id.into(), Delivery::new(write.clone()));
         self.writes.push(write);
         true
     }
 
     pub(super) fn mark_unread(&mut self, host: &str, id: &str, visible: &HashSet<String>) -> bool {
-        if !self.can_mark_unread(id) { return false; }
+        if !self.can_mark_unread(id) {
+            return false;
+        }
         let Some(anchor) = self.message_rows(id).find(|event| {
             visible.contains(&event.id)
                 && matches!(&event.change, ThreadTimelineChange::Message { content, .. } if !content.trim().is_empty())
         }).map(|event| event.id.clone()) else { return false; };
-        let observed_marks = self.summary(id).and_then(|summary| summary.unread_reminder.as_ref())
-            .map(|reminder| reminder.marks.iter().map(|mark| mark.mark_id.clone()).collect())
+        let observed_marks = self
+            .summary(id)
+            .and_then(|summary| summary.unread_reminder.as_ref())
+            .map(|reminder| {
+                reminder
+                    .marks
+                    .iter()
+                    .map(|mark| mark.mark_id.clone())
+                    .collect()
+            })
             .unwrap_or_default();
-        if !self.queue_reading(host, id, Mutation::MarkUnread(ThreadMarkUnreadParameters {
-            target_id: id.into(), anchor_message_id: anchor, observed_marks,
-        })) { return false; }
+        if !self.queue_reading(
+            host,
+            id,
+            Mutation::MarkUnread(ThreadMarkUnreadParameters {
+                target_id: id.into(),
+                anchor_message_id: anchor,
+                observed_marks,
+            }),
+        ) {
+            return false;
+        }
         self.reading_host = Some(host.into());
         self.visits.entry(id.into()).or_default().marked_here(id);
         true
@@ -2563,12 +2823,23 @@ impl Threads {
         match pane {
             Pane::Thread(id) => vec![id.clone()],
             Pane::Home(Some(id)) if id.starts_with("thread/") => vec![id.clone()],
-            _ => self.open.get(&pane.key()).into_iter().flatten().cloned().collect(),
+            _ => self
+                .open
+                .get(&pane.key())
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect(),
         }
     }
 
     /// Only the successfully presented, active foreground mount supplies this evidence.
-    pub(super) fn presented(&mut self, host: &str, shown: &BTreeMap<String, BTreeMap<String, super::BodyGeometry>>, now: std::time::Instant) {
+    pub(super) fn presented(
+        &mut self,
+        host: &str,
+        shown: &BTreeMap<String, BTreeMap<String, super::BodyGeometry>>,
+        now: std::time::Instant,
+    ) {
         if self.reading_host.as_deref() != Some(host) {
             self.stop_reading();
             self.reading_host = Some(host.into());
@@ -2583,39 +2854,65 @@ impl Threads {
             if !self.visits.contains_key(id) {
                 let mut visit = super::unread_visit::Visit::default();
                 // Unknown at entry is sticky: a later summary cannot retroactively capture marks.
-                let reminder = self.summary(id).and_then(|summary| summary.unread_reminder.as_ref());
+                let reminder = self
+                    .summary(id)
+                    .and_then(|summary| summary.unread_reminder.as_ref());
                 visit.begin(id, reminder);
                 let anchor = reminder.map(|reminder| reminder.anchor_message_id.clone());
                 self.visits.insert(id.clone(), visit);
-                if let Some(anchor) = anchor && !visible.contains_key(&anchor) {
+                if let Some(anchor) = anchor
+                    && !visible.contains_key(&anchor)
+                {
                     let key = uuid::Uuid::now_v7().to_string();
                     self.seek_pending.insert(id.clone(), key.clone());
-                    self.seeks.push(Seek { id: id.clone(), anchor, key });
+                    self.seeks.push(Seek {
+                        id: id.clone(),
+                        anchor,
+                        key,
+                    });
                 }
             }
             let dwell = self.read_dwell.entry(id.clone()).or_default();
             dwell.retain(|message, _| visible.contains_key(message));
-            let stable: HashSet<_> = visible.iter().filter_map(|(message, geometry)| {
-                if let Some((previous, since)) = dwell.get_mut(message) {
-                    if previous != geometry {
-                        *previous = *geometry;
-                        *since = now;
-                    }
-                    (now.saturating_duration_since(*since) >= std::time::Duration::from_millis(500))
+            let stable: HashSet<_> = visible
+                .iter()
+                .filter_map(|(message, geometry)| {
+                    if let Some((previous, since)) = dwell.get_mut(message) {
+                        if previous != geometry {
+                            *previous = *geometry;
+                            *since = now;
+                        }
+                        (now.saturating_duration_since(*since)
+                            >= std::time::Duration::from_millis(500))
                         .then(|| message.clone())
-                } else {
-                    dwell.insert(message.clone(), (*geometry, now));
-                    None
-                }
-            }).collect();
-            if self.seek_pending.contains_key(id) || self.seek_refused.contains(id) || self.has_edit(id) { continue; }
-            if self.read_natural(host, id.clone(), &stable) { continue; }
-            if !self.access.mark_read { continue; }
+                    } else {
+                        dwell.insert(message.clone(), (*geometry, now));
+                        None
+                    }
+                })
+                .collect();
+            if self.seek_pending.contains_key(id)
+                || self.seek_refused.contains(id)
+                || self.has_edit(id)
+            {
+                continue;
+            }
+            if self.read_natural(host, id.clone(), &stable) {
+                continue;
+            }
+            if !self.access.mark_read {
+                continue;
+            }
             let captured = self.visits.get_mut(id).unwrap().viewed(id, &stable);
             if !captured.is_empty() {
-                self.queue_reading(host, id, Mutation::ClearUnread(ThreadClearUnreadParameters {
-                    target_id: id.clone(), observed_marks: captured,
-                }));
+                self.queue_reading(
+                    host,
+                    id,
+                    Mutation::ClearUnread(ThreadClearUnreadParameters {
+                        target_id: id.clone(),
+                        observed_marks: captured,
+                    }),
+                );
             }
         }
     }
@@ -2634,55 +2931,91 @@ impl Threads {
         self.anchor_scroll.borrow_mut().clear();
     }
 
-    pub(super) fn take_seeks(&mut self) -> Vec<Seek> { std::mem::take(&mut self.seeks) }
+    pub(super) fn take_seeks(&mut self) -> Vec<Seek> {
+        std::mem::take(&mut self.seeks)
+    }
 
-    pub(super) fn seek_loaded(&mut self, id: &str, key: &str, page: Result<fractal_client::ThreadTimelinePage, SeekFailure>) -> Option<String> {
-        if self.seek_pending.get(id).is_none_or(|pending| pending != key) { return None; }
+    pub(super) fn seek_loaded(
+        &mut self,
+        id: &str,
+        key: &str,
+        page: Result<fractal_client::ThreadTimelinePage, SeekFailure>,
+    ) -> Option<String> {
+        if self
+            .seek_pending
+            .get(id)
+            .is_none_or(|pending| pending != key)
+        {
+            return None;
+        }
         self.seek_pending.remove(id);
         match page {
             Ok(page) => {
                 if let Some(anchor) = &page.anchor
-                    && anchor.state == fractal_client::ThreadTimelineAnchorState::Current {
-                    self.anchor_scroll.borrow_mut().insert(id.into(), anchor.message_id.clone());
+                    && anchor.state == fractal_client::ThreadTimelineAnchorState::Current
+                {
+                    self.anchor_scroll
+                        .borrow_mut()
+                        .insert(id.into(), anchor.message_id.clone());
                 }
                 self.seek_pages.insert(id.into(), page);
                 None
             }
-            Err(SeekFailure::Unavailable) => { self.seek_refused.insert(id.into()); None }
+            Err(SeekFailure::Unavailable) => {
+                self.seek_refused.insert(id.into());
+                None
+            }
             Err(SeekFailure::Failed(why)) => Some(why),
         }
     }
 
     pub(super) fn take_anchor_scroll(&self, host: &str) -> Option<String> {
-        let id = host.strip_prefix("thread:")
-            .or_else(|| host.strip_prefix("home:").filter(|id| id.starts_with("thread/")))
+        let id = host
+            .strip_prefix("thread:")
+            .or_else(|| {
+                host.strip_prefix("home:")
+                    .filter(|id| id.starts_with("thread/"))
+            })
             .or_else(|| self.selected.get(host).map(String::as_str))?;
         self.anchor_scroll.borrow_mut().remove(id)
     }
 
     pub(super) fn mark_visible_read(
-        &mut self, host: &str, id: String, visible: &HashSet<String>,
-    ) -> bool {
-        if !self.can_mark_read(&id) { return false; }
-        let captured: Vec<_> = self.summary(&id).and_then(|summary| summary.unread_reminder.as_ref())
-            .into_iter().flat_map(|reminder| &reminder.marks)
-            .map(|mark| mark.mark_id.clone()).collect();
-        if !captured.is_empty() {
-            return self.queue_reading(host, &id, Mutation::ClearUnread(ThreadClearUnreadParameters {
-                target_id: id.clone(), observed_marks: captured,
-            }));
-        }
-        self.read_natural(host, id, visible)
-    }
-
-    fn read_natural(
         &mut self,
         host: &str,
         id: String,
         visible: &HashSet<String>,
     ) -> bool {
-        if !self.access.mark_read || self.has_edit(&id)
-            || self.summary(&id).is_none_or(|summary| summary.unread != Some(true)) {
+        if !self.can_mark_read(&id) {
+            return false;
+        }
+        let captured: Vec<_> = self
+            .summary(&id)
+            .and_then(|summary| summary.unread_reminder.as_ref())
+            .into_iter()
+            .flat_map(|reminder| &reminder.marks)
+            .map(|mark| mark.mark_id.clone())
+            .collect();
+        if !captured.is_empty() {
+            return self.queue_reading(
+                host,
+                &id,
+                Mutation::ClearUnread(ThreadClearUnreadParameters {
+                    target_id: id.clone(),
+                    observed_marks: captured,
+                }),
+            );
+        }
+        self.read_natural(host, id, visible)
+    }
+
+    fn read_natural(&mut self, host: &str, id: String, visible: &HashSet<String>) -> bool {
+        if !self.access.mark_read
+            || self.has_edit(&id)
+            || self
+                .summary(&id)
+                .is_none_or(|summary| summary.unread != Some(true))
+        {
             return false;
         }
         let Some(observed) = self.summaries.get(&id) else {
@@ -2763,22 +3096,48 @@ impl Threads {
             doc.section("Related requests", None, width);
         }
         if history.is_some_and(|history| history.pending.is_some()) {
-            doc.line(Line::from(Span::styled("Loading related requests…", theme::dim())));
+            doc.line(Line::from(Span::styled(
+                "Loading related requests…",
+                theme::dim(),
+            )));
             return;
         }
         if let Some(failure) = history.and_then(|history| history.failure.as_ref()) {
             doc.wrap(&[text::run(failure, theme::dim())], width);
         }
-        let more = history.and_then(|history| history.page.as_ref())
+        let more = history
+            .and_then(|history| history.page.as_ref())
             .is_some_and(|page| page.next_cursor.is_some());
         if more {
-            doc.buttons(&[("", "Next related requests", Hit::Thread(host.into(),
-                thread::Tap::RequestHistory { thread: id.into(), first: false }), theme::SAPPHIRE)]);
+            doc.buttons(&[(
+                "",
+                "Next related requests",
+                Hit::Thread(
+                    host.into(),
+                    thread::Tap::RequestHistory {
+                        thread: id.into(),
+                        first: false,
+                    },
+                ),
+                theme::SAPPHIRE,
+            )]);
         }
-        doc.buttons(&[("", if history.and_then(|history| history.page.as_ref()).is_some() {
-            "Refresh related requests"
-        } else { "Load related requests" }, Hit::Thread(host.into(),
-            thread::Tap::RequestHistory { thread: id.into(), first: true }), theme::SAPPHIRE)]);
+        doc.buttons(&[(
+            "",
+            if history.and_then(|history| history.page.as_ref()).is_some() {
+                "Refresh related requests"
+            } else {
+                "Load related requests"
+            },
+            Hit::Thread(
+                host.into(),
+                thread::Tap::RequestHistory {
+                    thread: id.into(),
+                    first: true,
+                },
+            ),
+            theme::SAPPHIRE,
+        )]);
     }
 
     fn read_request_history(&mut self, id: String, first: bool) {
@@ -2789,8 +3148,14 @@ impl Threads {
         if history.pending.is_some() {
             return;
         }
-        let cursor = if first { None } else {
-            let Some(cursor) = history.page.as_ref().and_then(|page| page.next_cursor.clone()) else {
+        let cursor = if first {
+            None
+        } else {
+            let Some(cursor) = history
+                .page
+                .as_ref()
+                .and_then(|page| page.next_cursor.clone())
+            else {
                 return;
             };
             Some(cursor)
@@ -2800,21 +3165,33 @@ impl Threads {
         history.page = None;
         history.failure = None;
         history.pending = Some(key.clone());
-        self.request_history_reads.push(RequestHistoryRead { id, key, cursor });
+        self.request_history_reads
+            .push(RequestHistoryRead { id, key, cursor });
     }
 
     pub(super) fn take_request_history_reads(&mut self) -> Vec<RequestHistoryRead> {
         std::mem::take(&mut self.request_history_reads)
     }
 
-    pub(super) fn request_history_loaded(&mut self, id: &str, key: &str,
-        result: Result<fractal_client::RequestHistoryPage, String>) {
-        let Some(history) = self.request_history.get_mut(id) else { return };
-        if history.pending.as_deref() != Some(key) { return; }
+    pub(super) fn request_history_loaded(
+        &mut self,
+        id: &str,
+        key: &str,
+        result: Result<fractal_client::RequestHistoryPage, String>,
+    ) {
+        let Some(history) = self.request_history.get_mut(id) else {
+            return;
+        };
+        if history.pending.as_deref() != Some(key) {
+            return;
+        }
         history.pending = None;
         match result {
             Ok(page) => history.page = Some(page),
-            Err(reason) => { history.page = None; history.failure = Some(reason); }
+            Err(reason) => {
+                history.page = None;
+                history.failure = Some(reason);
+            }
         }
     }
 
@@ -2921,10 +3298,16 @@ impl Threads {
                     self.pending_actions.remove(&write.id);
                 }
             }
-            if !keep && !not_sent && matches!(write.mutation, Mutation::Start(_))
-                && let Some(item) = write.host.strip_prefix("home:") {
+            if !keep
+                && !not_sent
+                && matches!(write.mutation, Mutation::Start(_))
+                && let Some(item) = write.host.strip_prefix("home:")
+            {
                 self.request_start_context(item);
-                return Some(format!("Start was refused: {} Checking the recipient again; review it before sending. Your draft is kept.", error.human()));
+                return Some(format!(
+                    "Start was refused: {} Checking the recipient again; review it before sending. Your draft is kept.",
+                    error.human()
+                ));
             }
             if !keep
                 && !not_sent
@@ -2951,7 +3334,8 @@ impl Threads {
                 draft.rename_observed = None;
             }
             if matches!(write.mutation, Mutation::Start(_))
-                && let Some(item) = write.host.strip_prefix("home:") {
+                && let Some(item) = write.host.strip_prefix("home:")
+            {
                 self.request_start_context(item);
             }
             return Some("The original thread action was rejected".into());
@@ -2962,14 +3346,26 @@ impl Threads {
         if let Some(summary) = summary {
             self.put_summary(summary);
         }
-        if matches!(&write.mutation, Mutation::MarkUnread(_) | Mutation::ClearUnread(_)) {
+        if matches!(
+            &write.mutation,
+            Mutation::MarkUnread(_) | Mutation::ClearUnread(_)
+        ) {
             self.invalidate_marked();
         }
         self.completion_notice = match &write.mutation {
-            Mutation::Close => self.summary(&write.id).map(|thread| format!(
-                "Closed “{}” · {} reopens", thread.title,
-                if Self::alt_chords(&write.host) { "alt+z" } else { "z" })),
-            Mutation::Reopen => self.summary(&write.id)
+            Mutation::Close => self.summary(&write.id).map(|thread| {
+                format!(
+                    "Closed “{}” · {} reopens",
+                    thread.title,
+                    if Self::alt_chords(&write.host) {
+                        "alt+z"
+                    } else {
+                        "z"
+                    }
+                )
+            }),
+            Mutation::Reopen => self
+                .summary(&write.id)
                 .map(|thread| format!("Reopened “{}”", thread.title)),
             Mutation::Rename(parameters) => Some(format!("Renamed to “{}”", parameters.title)),
             _ => None,
@@ -3048,7 +3444,10 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str, base: usize) -> Doc {
         }
         let digest: [u8; 32] = hash.finalize().into();
         let nonblank = body.clone().filter(|line| {
-            doc.lines[*line].spans.iter().any(|span| !span.content.trim().is_empty())
+            doc.lines[*line]
+                .spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty())
         });
         let body_rows = nonblank.clone().count();
         for (body_row, line) in nonblank.enumerate() {
@@ -3078,8 +3477,8 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str, base: usize) -> Doc {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod render_tests;
+#[cfg(test)]
+mod tests;
 #[cfg(test)]
 mod unread_actions_tests;

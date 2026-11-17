@@ -32,11 +32,18 @@ fn snapshot() -> Snapshot {
 /// An exact Inbox source association. `agent` is the historical source agent, never the
 /// first-Start recipient: that comes only from the canonical start context.
 fn origin(context: ThreadInterest, agent: Option<&str>, title: &str) -> Origin {
-    Origin { context, agent: agent.map(Into::into), title: title.into() }
+    Origin {
+        context,
+        agent: agent.map(Into::into),
+        title: title.into(),
+    }
 }
 
 fn preview_snapshot(id: &str) -> Snapshot {
-    Snapshot { id: id.into(), ..snapshot() }
+    Snapshot {
+        id: id.into(),
+        ..snapshot()
+    }
 }
 
 fn retired(original: &str) -> fractal_client::ThreadStartRecipientBasis {
@@ -93,17 +100,26 @@ fn install_start_context(
 ) {
     threads.request_start_context(item);
     let read = take_start_context_read(threads, item);
-    let ThreadInterest::Inbox { source, episode } = threads.start_origin(item).unwrap().context.clone()
+    let ThreadInterest::Inbox { source, episode } =
+        threads.start_origin(item).unwrap().context.clone()
     else {
         panic!("an Inbox origin")
     };
     threads.start_context_loaded(
         &read.item,
         &read.key,
-        Ok(start_context_envelope(&source, &episode, recipient, basis, "snapshot/start-context")),
+        Ok(start_context_envelope(
+            &source,
+            &episode,
+            recipient,
+            basis,
+            "snapshot/start-context",
+        )),
     );
     assert_eq!(
-        threads.start_context(item).map(|context| context.value.start_recipient.agent_id.as_str()),
+        threads
+            .start_context(item)
+            .map(|context| context.value.start_recipient.agent_id.as_str()),
         Some(recipient)
     );
 }
@@ -308,14 +324,29 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         },
     )
     .unwrap();
-    let ask = store.ask_person(&fractal_daemon::model::PersonAskRequest {
-        legacy_request: None, person: person.into(), title: "Review the worker".into(),
-        reason: "Discuss the review without answering the ask.".into(), actor: agent.into(),
-        step: None, new_run: None, incarnation: None, request: None,
-        deadline_ms: None, default_answer: None, priority: None, idempotency_key: "native-thread-origin".into(),
-    }).unwrap();
-    let ask_item = store.attention_items(Some(person)).unwrap().into_iter()
-        .find(|item| item.subject == ask.subject).unwrap();
+    let ask = store
+        .ask_person(&fractal_daemon::model::PersonAskRequest {
+            legacy_request: None,
+            person: person.into(),
+            title: "Review the worker".into(),
+            reason: "Discuss the review without answering the ask.".into(),
+            actor: agent.into(),
+            step: None,
+            new_run: None,
+            incarnation: None,
+            request: None,
+            deadline_ms: None,
+            default_answer: None,
+            priority: None,
+            idempotency_key: "native-thread-origin".into(),
+        })
+        .unwrap();
+    let ask_item = store
+        .attention_items(Some(person))
+        .unwrap()
+        .into_iter()
+        .find(|item| item.subject == ask.subject)
+        .unwrap();
     let state = fractal_daemon::api::AppState {
         browser_pairing_login: None,
         seat_admission: Default::default(),
@@ -396,11 +427,15 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     apply_window(&mut ui, &mut stream, id).await;
 
     fn capture(ui: &mut super::super::Ui, pane: &Pane, name: &str) {
-        let Ok(dir) = std::env::var("THREAD_PREVIEW_CAPTURE_DIR") else { return };
+        let Ok(dir) = std::env::var("THREAD_PREVIEW_CAPTURE_DIR") else {
+            return;
+        };
         let area = Rect::new(0, 0, 120, 40);
         let mut screen = Buffer::empty(area);
         ui.draw_pane(&mut screen, area, pane);
-        let mut text = String::from("HARNESS — production Ui::draw_pane + disposable real daemon socket, not the installed TUI binary\n");
+        let mut text = String::from(
+            "HARNESS — production Ui::draw_pane + disposable real daemon socket, not the installed TUI binary\n",
+        );
         for row in screen.content.chunks(120) {
             text.push_str(&row.iter().map(|cell| cell.symbol()).collect::<String>());
             text.push('\n');
@@ -408,43 +443,100 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         std::fs::write(std::path::Path::new(&dir).join(format!("{name}.txt")), text).unwrap();
     }
     let inbox = Pane::Home(Some(ask.subject.clone()));
-    let context = ThreadInterest::Inbox { source: ask.subject.clone(), episode: ask_item.episode.clone() };
-    ui.threads.origins.insert(ask.subject.clone(), origin(context.clone(), Some(agent), &ask_item.title));
+    let context = ThreadInterest::Inbox {
+        source: ask.subject.clone(),
+        episode: ask_item.episode.clone(),
+    };
+    ui.threads.origins.insert(
+        ask.subject.clone(),
+        origin(context.clone(), Some(agent), &ask_item.title),
+    );
     // The recipient comes from the real daemon's canonical start-context read, never the card.
     ui.threads.request_start_context(&ask.subject);
     let read = take_start_context_read(&mut ui.threads, &ask.subject);
-    let preview = read.read(&client).await.expect("real canonical start context");
+    let preview = read
+        .read(&client)
+        .await
+        .expect("real canonical start context");
     assert_eq!(preview.value.start_recipient.agent_id, agent);
-    assert_eq!(preview.value.start_recipient.basis, fractal_client::ThreadStartRecipientBasis::Original);
+    assert_eq!(
+        preview.value.start_recipient.basis,
+        fractal_client::ThreadStartRecipientBasis::Original
+    );
     let preview_fence = preview.snapshot.id.clone();
-    ui.threads.start_context_loaded(&read.item, &read.key, Ok(preview));
+    ui.threads
+        .start_context_loaded(&read.item, &read.key, Ok(preview));
     ui.threads.lists.insert(context, Vec::new());
     ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
     capture(&mut ui, &inbox, "harness-socket-start-before");
-    ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(ask.subject.clone())));
+    ui.click(Hit::Thread(
+        inbox.key(),
+        thread::Tap::Start(ask.subject.clone()),
+    ));
     ui.paste("Start the review discussion.".into());
     capture(&mut ui, &inbox, "harness-socket-start-draft");
     ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(ask.subject.clone())));
+    ui.click(Hit::Thread(
+        inbox.key(),
+        thread::Tap::Start(ask.subject.clone()),
+    ));
     ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    let start = ui.threads.writes().pop().expect("native first-message start action");
-    let Mutation::Start(parameters) = &start.mutation else { panic!("native Start") };
-    assert_eq!(parameters.agent_id, agent, "the submitted recipient is the displayed canonical one");
-    assert_eq!(start.fence.snapshot_id, preview_fence, "the Start fence is the canonical preview snapshot");
+    let start = ui
+        .threads
+        .writes()
+        .pop()
+        .expect("native first-message start action");
+    let Mutation::Start(parameters) = &start.mutation else {
+        panic!("native Start")
+    };
+    assert_eq!(
+        parameters.agent_id, agent,
+        "the submitted recipient is the displayed canonical one"
+    );
+    assert_eq!(
+        start.fence.snapshot_id, preview_fence,
+        "the Start fence is the canonical preview snapshot"
+    );
     let started_id = start.id.clone();
     let receipt = start.perform(client.clone()).await;
-    assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real first message committed");
-    ui.threads.complete(receipt, &mut ui.conversation_state.drafts);
-    let timeline = client.thread_timeline(&started_id, None, Some(50)).await.unwrap();
-    assert_eq!(timeline.value.items.len(), 1, "start commits exactly one first message");
+    assert!(
+        matches!(receipt.confirmation, Confirmation::Applied(_)),
+        "real first message committed"
+    );
+    ui.threads
+        .complete(receipt, &mut ui.conversation_state.drafts);
+    let timeline = client
+        .thread_timeline(&started_id, None, Some(50))
+        .await
+        .unwrap();
+    assert_eq!(
+        timeline.value.items.len(),
+        1,
+        "start commits exactly one first message"
+    );
     ui.threads.window(
-        ThreadInterest::Timeline(started_id), timeline.snapshot, true,
-        ThreadCollectionRows::Timeline(timeline.value.items.clone()), vec![],
-        timeline.value.items.iter().map(|event| event.id.clone()).collect(), false,
+        ThreadInterest::Timeline(started_id),
+        timeline.snapshot,
+        true,
+        ThreadCollectionRows::Timeline(timeline.value.items.clone()),
+        vec![],
+        timeline
+            .value
+            .items
+            .iter()
+            .map(|event| event.id.clone())
+            .collect(),
+        false,
     );
     capture(&mut ui, &inbox, "harness-socket-start-after");
-    assert!(store.attention_items(Some(person)).unwrap().iter().any(|item| item.subject == ask.subject),
-        "starting a discussion never answers the ask");
+    assert!(
+        store
+            .attention_items(Some(person))
+            .unwrap()
+            .iter()
+            .any(|item| item.subject == ask.subject),
+        "starting a discussion never answers the ask"
+    );
     let pane = Pane::Thread(id.into());
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
     let host = pane.key();
@@ -603,24 +695,42 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     let rename = ui.threads.writes().pop().expect("native rename action");
     assert!(matches!(rename.mutation, Mutation::Rename(_)));
     let receipt = rename.perform(client.clone()).await;
-    assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real Rename committed");
-    ui.threads.complete(receipt, &mut ui.conversation_state.drafts);
+    assert!(
+        matches!(receipt.confirmation, Confirmation::Applied(_)),
+        "real Rename committed"
+    );
+    ui.threads
+        .complete(receipt, &mut ui.conversation_state.drafts);
     apply_window(&mut ui, &mut stream, id).await;
     ui.threads.put_summary(client.thread_get(id).await.unwrap());
     capture(&mut ui, &pane, "harness-socket-rename-after");
-    assert_eq!(client.thread_get(id).await.unwrap().value.title, "Worker review complete");
+    assert_eq!(
+        client.thread_get(id).await.unwrap().value.title,
+        "Worker review complete"
+    );
     ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     capture(&mut ui, &pane, "harness-socket-reopen-before");
     ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
-    let reopen = ui.threads.writes().pop().expect("native alt+z reopens the tab's closed thread");
+    let reopen = ui
+        .threads
+        .writes()
+        .pop()
+        .expect("native alt+z reopens the tab's closed thread");
     assert!(matches!(reopen.mutation, Mutation::Reopen));
     let receipt = reopen.perform(client.clone()).await;
-    assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real Reopen committed");
-    ui.threads.complete(receipt, &mut ui.conversation_state.drafts);
+    assert!(
+        matches!(receipt.confirmation, Confirmation::Applied(_)),
+        "real Reopen committed"
+    );
+    ui.threads
+        .complete(receipt, &mut ui.conversation_state.drafts);
     apply_window(&mut ui, &mut stream, id).await;
     ui.threads.put_summary(client.thread_get(id).await.unwrap());
     capture(&mut ui, &pane, "harness-socket-reopen-after");
-    assert_eq!(client.thread_get(id).await.unwrap().value.state, ThreadState::Open);
+    assert_eq!(
+        client.thread_get(id).await.unwrap().value.state,
+        ThreadState::Open
+    );
     server.abort();
 }
 
@@ -629,7 +739,9 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     let mut threads = Threads::default();
     enable_editing(&mut threads);
     let mut world = super::super::demo::test_world();
-    let super::super::view::Load::Ready(agents) = &mut world.agents else { panic!() };
+    let super::super::view::Load::Ready(agents) = &mut world.agents else {
+        panic!()
+    };
     agents[0].id = "agent/atlas".into();
     agents[0].name = "Atlas".into();
     let cursor = edit::Cursor::default();
@@ -697,7 +809,9 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     ));
     let write = threads.writes().pop().unwrap();
     assert_ne!(write.id, older.id);
-    let Mutation::Start(parameters) = &write.mutation else { panic!("first-message Start") };
+    let Mutation::Start(parameters) = &write.mutation else {
+        panic!("first-message Start")
+    };
     assert_eq!(parameters.agent_id, "agent/atlas");
     assert_eq!(write.fence.snapshot_id, "snapshot/start-context");
     let queued = lines(&threads, &texts);
@@ -765,7 +879,10 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     );
     threads.histories.insert(new.id.clone(), History::default());
     let accepted = lines(&threads, &texts);
-    assert_eq!(accepted[slot].trim_end(), "▌▾ Worker test · 1 message · unread");
+    assert_eq!(
+        accepted[slot].trim_end(),
+        "▌▾ Worker test · 1 message · unread"
+    );
     assert!(
         accepted[slot + 1..]
             .iter()
@@ -794,7 +911,10 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
         "Ask access expired".into(),
         true,
     );
-    assert_eq!(threads.failures[&context], "not allowed: Ask access expired");
+    assert_eq!(
+        threads.failures[&context],
+        "not allowed: Ask access expired"
+    );
     assert!(
         !lines(&threads, &texts)
             .iter()
@@ -1225,7 +1345,11 @@ fn enter_that_queues_nothing_says_why_and_keeps_the_draft() {
     let cursor = edit::Cursor::default();
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     let mut texts = HashMap::new();
-    threads.tap(&pane.key(), thread::Tap::Compose("thread/worker".into()), &mut texts);
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Compose("thread/worker".into()),
+        &mut texts,
+    );
     assert!(threads.key(&pane, enter, &cursor, &mut texts));
     assert!(threads.writes().is_empty());
     assert_eq!(threads.take_refusal().as_deref(), Some(NOTHING_TO_SEND));
@@ -1234,7 +1358,11 @@ fn enter_that_queues_nothing_says_why_and_keeps_the_draft() {
     threads.paste(&pane, "First reply", &cursor, &mut texts);
     assert!(threads.key(&pane, enter, &cursor, &mut texts));
     assert_eq!(threads.writes().len(), 1);
-    assert_eq!(threads.take_refusal(), None, "a queued reply is not refused");
+    assert_eq!(
+        threads.take_refusal(),
+        None,
+        "a queued reply is not refused"
+    );
     assert!(threads.key(&pane, enter, &cursor, &mut texts));
     assert!(threads.writes().is_empty());
     assert_eq!(
@@ -1265,7 +1393,10 @@ fn the_shell_flashes_a_refused_thread_send_as_a_warning() {
     let pane = Pane::Thread("thread/worker".into());
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Compose("thread/worker".into()),
+    ));
     ui.key(enter);
     let said = |ui: &super::super::Ui| ui.flash.as_ref().map(|(text, _)| text.clone());
     assert_eq!(said(&ui).as_deref(), Some(NOTHING_TO_SEND));
@@ -1287,7 +1418,10 @@ fn the_shell_flashes_a_refused_thread_send_as_a_warning() {
 
     // The Send button reaches the same refusal as Enter.
     ui.flash = None;
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Send("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Send("thread/worker".into()),
+    ));
     assert_eq!(
         said(&ui).as_deref(),
         Some("The original action is still being sent")
@@ -1593,7 +1727,10 @@ fn starting_adopts_compatible_legacy_drafts_and_reports_conflicts_without_losing
         (Some("Canonical draft"), "", "Canonical draft"),
     ] {
         let mut threads = observed_threads(ThreadState::Open);
-        threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Review"));
+        threads.origins.insert(
+            item.into(),
+            origin(context.clone(), Some("agent/atlas"), "Review"),
+        );
         let mut texts = HashMap::from([(format!("chat:{item}"), legacy.into())]);
         if let Some(canonical) = canonical {
             texts.insert(input.key(), canonical.into());
@@ -1607,7 +1744,10 @@ fn starting_adopts_compatible_legacy_drafts_and_reports_conflicts_without_losing
         );
     }
     let mut threads = observed_threads(ThreadState::Open);
-    threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Review"));
+    threads.origins.insert(
+        item.into(),
+        origin(context.clone(), Some("agent/atlas"), "Review"),
+    );
     install_start_context(
         &mut threads,
         item,
@@ -1691,7 +1831,10 @@ fn locked_start_requests_never_offer_or_apply_saved_draft_combination() {
     };
     for unknown in [false, true] {
         let mut threads = observed_threads(ThreadState::Open);
-        threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Review"));
+        threads.origins.insert(
+            item.into(),
+            origin(context.clone(), Some("agent/atlas"), "Review"),
+        );
         install_start_context(
             &mut threads,
             item,
@@ -2051,12 +2194,7 @@ fn paused_live_updates_keep_cached_thread_content_and_draft_until_a_fresh_frame_
         &mut texts,
     );
     let timeline = ThreadInterest::Timeline("thread/worker".into());
-    threads.failure(
-        timeline.clone(),
-        None,
-        THREAD_UPDATES_PAUSED.into(),
-        false,
-    );
+    threads.failure(timeline.clone(), None, THREAD_UPDATES_PAUSED.into(), false);
     let render = |threads: &Threads| {
         threads
             .mount(
@@ -2175,9 +2313,16 @@ fn ordinary_agent_composer_keeps_thread_shortcut_letters_as_text() {
     let pane = Pane::Agent(Some(agent.into()));
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
     ui.threads = observed_threads(ThreadState::Open);
-    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
-    ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
-    ui.threads.selected.insert(pane.key(), "thread/worker".into());
+    ui.threads.set_access(ThreadAccess {
+        mark_read: true,
+        ..ui.threads.access
+    });
+    ui.threads
+        .open
+        .insert(pane.key(), ["thread/worker".into()].into());
+    ui.threads
+        .selected
+        .insert(pane.key(), "thread/worker".into());
     ui.click(Hit::Composer);
     ui.paste("Please ".into());
     for letter in "zinc never help".chars() {
@@ -2191,7 +2336,10 @@ fn ordinary_agent_composer_keeps_thread_shortcut_letters_as_text() {
         ui.threads.focused.is_none(),
         "typing n must not open the selected thread's rename editor"
     );
-    assert_eq!(ui.conversation_state.drafts[agent], "Please zinc never help");
+    assert_eq!(
+        ui.conversation_state.drafts[agent],
+        "Please zinc never help"
+    );
 }
 
 #[test]
@@ -2203,14 +2351,26 @@ fn expanding_a_writable_thread_transfers_composer_ownership_without_losing_eithe
     ui.threads = observed_threads(ThreadState::Open);
     ui.click(Hit::Composer);
     ui.paste("Keep the ordinary draft.".into());
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Toggle("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Toggle("thread/worker".into()),
+    ));
     assert!(!ui.editing, "the visible thread composer now owns the keys");
     for letter in "zinc never help".chars() {
         ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
     }
-    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft.");
-    assert_eq!(ui.conversation_state.drafts[&Input::Reply("thread/worker".into()).key()], "zinc never help");
-    assert!(ui.threads.writes().is_empty(), "typing queues no thread actions");
+    assert_eq!(
+        ui.conversation_state.drafts[agent],
+        "Keep the ordinary draft."
+    );
+    assert_eq!(
+        ui.conversation_state.drafts[&Input::Reply("thread/worker".into()).key()],
+        "zinc never help"
+    );
+    assert!(
+        ui.threads.writes().is_empty(),
+        "typing queues no thread actions"
+    );
 }
 
 #[test]
@@ -2220,37 +2380,68 @@ fn conversation_find_keeps_selected_thread_shortcut_letters_as_search_text() {
     let pane = Pane::Agent(Some(agent.into()));
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
     ui.threads = observed_threads(ThreadState::Open);
-    ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
-    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
-    ui.threads.selected.insert(pane.key(), "thread/worker".into());
+    ui.threads
+        .open
+        .insert(pane.key(), ["thread/worker".into()].into());
+    ui.threads.set_access(ThreadAccess {
+        mark_read: true,
+        ..ui.threads.access
+    });
+    ui.threads
+        .selected
+        .insert(pane.key(), "thread/worker".into());
     ui.find_in(agent, "");
     for letter in "zinc never help".chars() {
         ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
     }
-    assert!(ui.threads.writes().is_empty(), "search never mutates threads");
-    assert!(ui.threads.focused.is_none(), "search never opens a rename editor");
+    assert!(
+        ui.threads.writes().is_empty(),
+        "search never mutates threads"
+    );
+    assert!(
+        ui.threads.focused.is_none(),
+        "search never opens a rename editor"
+    );
     assert_eq!(ui.find.as_ref().unwrap().query, "zinc never help");
-    assert_eq!(ui.main_pane(), pane, "p in a search must not open another tab");
+    assert_eq!(
+        ui.main_pane(),
+        pane,
+        "p in a search must not open another tab"
+    );
 }
 
 #[test]
 fn selected_thread_alt_chords_still_dispatch_from_agent_list_focus() {
-    for (letter, state) in [('n', ThreadState::Open), ('z', ThreadState::Open), ('z', ThreadState::Closed)] {
+    for (letter, state) in [
+        ('n', ThreadState::Open),
+        ('z', ThreadState::Open),
+        ('z', ThreadState::Closed),
+    ] {
         let mut ui = super::super::Ui::new(super::super::demo::test_world());
         let pane = Pane::Agent(Some("agent/example/atlas/builder".into()));
         ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
         let was_open = matches!(state, ThreadState::Open);
         ui.threads = observed_threads(state);
-        ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
-        ui.threads.selected.insert(pane.key(), "thread/worker".into());
+        ui.threads
+            .open
+            .insert(pane.key(), ["thread/worker".into()].into());
+        ui.threads
+            .selected
+            .insert(pane.key(), "thread/worker".into());
         assert!(!ui.editing);
         ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT));
         if letter == 'n' {
             assert!(matches!(ui.threads.focused, Some((_, Input::Rename(_)))));
         } else {
-            let write = ui.threads.writes().pop().expect("alt+z lifecycle dispatch from list focus");
-            assert!(matches!((was_open, write.mutation),
-                (true, Mutation::Close) | (false, Mutation::Reopen)));
+            let write = ui
+                .threads
+                .writes()
+                .pop()
+                .expect("alt+z lifecycle dispatch from list focus");
+            assert!(matches!(
+                (was_open, write.mutation),
+                (true, Mutation::Close) | (false, Mutation::Reopen)
+            ));
         }
     }
 }
@@ -2261,10 +2452,17 @@ fn writable_thread_in(pane: &Pane) -> super::super::Ui {
     let mut ui = super::super::Ui::new(super::super::demo::test_world());
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
     ui.threads = observed_threads(ThreadState::Open);
-    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
+    ui.threads.set_access(ThreadAccess {
+        mark_read: true,
+        ..ui.threads.access
+    });
     if matches!(pane, Pane::Agent(_)) {
-        ui.threads.open.insert(pane.key(), ["thread/worker".into()].into());
-        ui.threads.selected.insert(pane.key(), "thread/worker".into());
+        ui.threads
+            .open
+            .insert(pane.key(), ["thread/worker".into()].into());
+        ui.threads
+            .selected
+            .insert(pane.key(), "thread/worker".into());
     }
     assert!(!ui.editing && ui.threads.focused.is_none());
     ui
@@ -2279,23 +2477,38 @@ fn agent_and_thread_tab_bare_action_letters_type_instead_of_acting() {
     for letter in "znvpr".chars() {
         ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
     }
-    assert!(ui.threads.writes().is_empty(), "bare letters queue no thread action");
-    assert!(ui.threads.focused.is_none(), "a bare n opens no rename editor");
+    assert!(
+        ui.threads.writes().is_empty(),
+        "bare letters queue no thread action"
+    );
+    assert!(
+        ui.threads.focused.is_none(),
+        "a bare n opens no rename editor"
+    );
     assert_eq!(ui.main_pane(), conversation, "a bare p opens no tab");
-    assert_eq!(ui.conversation_state.drafts[agent], "znvpr", "every letter starts the agent message");
+    assert_eq!(
+        ui.conversation_state.drafts[agent], "znvpr",
+        "every letter starts the agent message"
+    );
 
     let tab = Pane::Thread(id.into());
     let mut ui = writable_thread_in(&tab);
     for letter in "znvpr".chars() {
         ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
     }
-    assert!(ui.threads.writes().is_empty(), "bare letters queue no thread action");
+    assert!(
+        ui.threads.writes().is_empty(),
+        "bare letters queue no thread action"
+    );
     assert!(
         matches!(&ui.threads.focused, Some((host, Input::Reply(thread))) if host == &tab.key() && thread == id),
         "the first letter opens the tab's reply box, never its rename editor"
     );
     assert_eq!(ui.main_pane(), tab);
-    assert_eq!(ui.conversation_state.drafts[&Input::Reply(id.into()).key()], "znvpr");
+    assert_eq!(
+        ui.conversation_state.drafts[&Input::Reply(id.into()).key()],
+        "znvpr"
+    );
 }
 
 #[test]
@@ -2340,7 +2553,10 @@ fn an_active_message_box_keeps_alt_chords_from_thread_actions() {
     let mut ui = writable_thread_in(&conversation);
     ui.click(Hit::Composer);
     ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
-    assert!(ui.threads.writes().is_empty(), "the agent's message box keeps the keys");
+    assert!(
+        ui.threads.writes().is_empty(),
+        "the agent's message box keeps the keys"
+    );
 
     let tab = Pane::Thread(id.into());
     let mut ui = writable_thread_in(&tab);
@@ -2348,7 +2564,10 @@ fn an_active_message_box_keeps_alt_chords_from_thread_actions() {
     for letter in ['z', 'n', 'v', 'r'] {
         ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT));
     }
-    assert!(ui.threads.writes().is_empty(), "the reply box keeps the keys");
+    assert!(
+        ui.threads.writes().is_empty(),
+        "the reply box keeps the keys"
+    );
     assert!(matches!(&ui.threads.focused, Some((_, Input::Reply(_)))));
 }
 
@@ -2357,7 +2576,10 @@ fn inbox_thread_detail_keeps_bare_action_letters() {
     let id = "thread/worker";
     let inbox = Pane::Home(Some(id.into()));
     let mut threads = observed_threads(ThreadState::Open);
-    threads.set_access(ThreadAccess { mark_read: true, ..threads.access });
+    threads.set_access(ThreadAccess {
+        mark_read: true,
+        ..threads.access
+    });
     let cases = [
         ('z', thread::Tap::Close as fn(String) -> thread::Tap),
         ('n', thread::Tap::Rename),
@@ -2366,21 +2588,33 @@ fn inbox_thread_detail_keeps_bare_action_letters() {
     ];
     for (letter, tap) in cases {
         assert_eq!(
-            threads.shortcut(&inbox, KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE)),
+            threads.shortcut(
+                &inbox,
+                KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE)
+            ),
             Some(tap(id.into())),
             "a bare {letter} acts in an Inbox item"
         );
         assert_eq!(
-            threads.shortcut(&inbox, KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT)),
+            threads.shortcut(
+                &inbox,
+                KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT)
+            ),
             None,
             "alt+{letter} is not an Inbox thread key"
         );
     }
     let close = threads
-        .shortcut(&inbox, KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+        .shortcut(
+            &inbox,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+        )
         .unwrap();
     threads.tap(&inbox.key(), close, &mut HashMap::new());
-    let write = threads.writes().pop().expect("a bare z closes from the Inbox");
+    let write = threads
+        .writes()
+        .pop()
+        .expect("a bare z closes from the Inbox");
     assert!(matches!(write.mutation, Mutation::Close));
 }
 
@@ -2408,8 +2642,16 @@ fn retry_takes_alt_where_letters_type_and_stays_bare_in_the_inbox() {
     let retry = Some(thread::Tap::Retry(original.key.clone()));
     let r = |modifiers| KeyEvent::new(KeyCode::Char('r'), modifiers);
     for pane in [&agent, &tab] {
-        assert_eq!(threads.shortcut(pane, r(KeyModifiers::NONE)), None, "a bare r types in {pane:?}");
-        assert_eq!(threads.shortcut(pane, r(KeyModifiers::ALT)), retry, "alt+r retries in {pane:?}");
+        assert_eq!(
+            threads.shortcut(pane, r(KeyModifiers::NONE)),
+            None,
+            "a bare r types in {pane:?}"
+        );
+        assert_eq!(
+            threads.shortcut(pane, r(KeyModifiers::ALT)),
+            retry,
+            "alt+r retries in {pane:?}"
+        );
     }
     assert_eq!(threads.shortcut(&inbox, r(KeyModifiers::NONE)), retry);
     assert_eq!(threads.shortcut(&inbox, r(KeyModifiers::ALT)), None);
@@ -2439,9 +2681,15 @@ fn agent_with_tools_and_threads() -> (super::super::Ui, Pane, &'static str) {
     let tool = |id: &str| Entry {
         id: id.into(),
         at: "10:00".into(),
-        body: Body::Tool { title: id.into(), state: ToolState::Ok, output: vec![] },
+        body: Body::Tool {
+            title: id.into(),
+            state: ToolState::Ok,
+            output: vec![],
+        },
     };
-    ui.world.conversations.insert(agent.into(), Load::Ready(vec![tool("one"), tool("two")]));
+    ui.world
+        .conversations
+        .insert(agent.into(), Load::Ready(vec![tool("one"), tool("two")]));
     ui.threads = observed_threads(ThreadState::Open);
     ui.threads.window(
         ThreadInterest::Agent(agent.into()),
@@ -2449,7 +2697,11 @@ fn agent_with_tools_and_threads() -> (super::super::Ui, Pane, &'static str) {
         true,
         ThreadCollectionRows::Summaries(vec![
             summary(),
-            ThreadSummary { id: "thread/sibling".into(), title: "Sibling".into(), ..summary() },
+            ThreadSummary {
+                id: "thread/sibling".into(),
+                title: "Sibling".into(),
+                ..summary()
+            },
         ]),
         vec![],
         vec!["thread/worker".into(), "thread/sibling".into()],
@@ -2481,7 +2733,13 @@ fn ctrl_arrows_walk_tools_then_thread_headings_in_screen_order() {
     }
     assert_eq!(
         seen,
-        [tool("one"), tool("two"), row("thread/worker"), row("thread/sibling"), row("thread/sibling")],
+        [
+            tool("one"),
+            tool("two"),
+            row("thread/worker"),
+            row("thread/sibling"),
+            row("thread/sibling")
+        ],
         "tools first, then thread headings, stopping at the last"
     );
     assert_eq!(
@@ -2489,15 +2747,27 @@ fn ctrl_arrows_walk_tools_then_thread_headings_in_screen_order() {
         Some("thread/sibling"),
         "a focused heading is scrolled into view like a focused tool"
     );
-    let collapsed = ui.threads.mount(&pane, 100, &edit::Cursor::default(), &ui.world, &ui.conversation_state.drafts);
+    let collapsed = ui.threads.mount(
+        &pane,
+        100,
+        &edit::Cursor::default(),
+        &ui.world,
+        &ui.conversation_state.drafts,
+    );
     let lines: Vec<String> = collapsed.lines.iter().map(ToString::to_string).collect();
-    assert!(lines.iter().any(|line| line.starts_with("▌▸ Sibling")), "{lines:#?}");
+    assert!(
+        lines.iter().any(|line| line.starts_with("▌▸ Sibling")),
+        "{lines:#?}"
+    );
     assert_eq!(lines.iter().filter(|line| line.starts_with('▌')).count(), 1);
     for expected in [row("thread/worker"), tool("two"), tool("one"), tool("one")] {
         ui.key(ctrl(KeyCode::Up));
         assert_eq!(focus(&ui), expected);
     }
-    assert!(ui.threads.writes().is_empty(), "moving focus changes no thread");
+    assert!(
+        ui.threads.writes().is_empty(),
+        "moving focus changes no thread"
+    );
 }
 
 #[test]
@@ -2505,16 +2775,34 @@ fn ctrl_enter_toggles_the_focused_thread_and_keeps_the_heading_focused() {
     let (mut ui, pane, _) = agent_with_tools_and_threads();
     ui.key(ctrl(KeyCode::Down));
     ui.key(ctrl(KeyCode::Down));
-    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/worker"));
+    assert_eq!(
+        ui.threads
+            .focused_row(&pane, &ui.conversation_state.drafts)
+            .as_deref(),
+        Some("thread/worker")
+    );
     ui.key(ctrl(KeyCode::Enter));
     assert!(ui.threads.open[&pane.key()].contains("thread/worker"));
-    assert!(ui.threads.focused.is_none(), "expanding by keyboard keeps the keys off the reply box");
+    assert!(
+        ui.threads.focused.is_none(),
+        "expanding by keyboard keeps the keys off the reply box"
+    );
     assert!(!ui.editing);
-    assert!(!ui.conversation_state.expanded.contains("two"), "the tool above stays as it was");
+    assert!(
+        !ui.conversation_state.expanded.contains("two"),
+        "the tool above stays as it was"
+    );
     ui.key(ctrl(KeyCode::Enter));
-    assert!(!ui.threads.open.get(&pane.key()).is_some_and(|open| open.contains("thread/worker")));
+    assert!(
+        !ui.threads
+            .open
+            .get(&pane.key())
+            .is_some_and(|open| open.contains("thread/worker"))
+    );
     assert_eq!(
-        ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(),
+        ui.threads
+            .focused_row(&pane, &ui.conversation_state.drafts)
+            .as_deref(),
         Some("thread/worker"),
         "collapsing leaves the heading focused, so Ctrl+Enter expands it again"
     );
@@ -2527,10 +2815,22 @@ fn thread_chords_act_on_the_keyboard_focused_heading_even_collapsed() {
     for _ in 0..3 {
         ui.key(ctrl(KeyCode::Down));
     }
-    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/sibling"));
-    assert!(!ui.threads.open.contains_key(&pane.key()), "the focused heading is collapsed");
+    assert_eq!(
+        ui.threads
+            .focused_row(&pane, &ui.conversation_state.drafts)
+            .as_deref(),
+        Some("thread/sibling")
+    );
+    assert!(
+        !ui.threads.open.contains_key(&pane.key()),
+        "the focused heading is collapsed"
+    );
     ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
-    let write = ui.threads.writes().pop().expect("alt+z closes the focused thread");
+    let write = ui
+        .threads
+        .writes()
+        .pop()
+        .expect("alt+z closes the focused thread");
     assert_eq!(write.id, "thread/sibling");
     assert!(matches!(write.mutation, Mutation::Close));
     ui.key(ctrl(KeyCode::Up));
@@ -2549,22 +2849,50 @@ fn ctrl_arrows_leave_message_boxes_without_losing_their_drafts() {
     assert!(ui.editing);
     ui.key(ctrl(KeyCode::Down));
     assert!(!ui.editing, "the composer lets go of the keys");
-    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft");
+    assert_eq!(
+        ui.conversation_state.drafts[agent],
+        "Keep the ordinary draft"
+    );
     ui.key(ctrl(KeyCode::Down));
-    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/worker"));
+    assert_eq!(
+        ui.threads
+            .focused_row(&pane, &ui.conversation_state.drafts)
+            .as_deref(),
+        Some("thread/worker")
+    );
     ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
-    assert_eq!(ui.threads.writes().pop().map(|write| write.id).as_deref(), Some("thread/worker"));
-    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft", "the chord typed nothing");
+    assert_eq!(
+        ui.threads.writes().pop().map(|write| write.id).as_deref(),
+        Some("thread/worker")
+    );
+    assert_eq!(
+        ui.conversation_state.drafts[agent], "Keep the ordinary draft",
+        "the chord typed nothing"
+    );
 
     // A thread reply box lets go the same way and keeps its own draft.
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Compose("thread/worker".into()),
+    ));
     ui.paste("Keep the reply".into());
     assert!(ui.threads.editing_in(&pane));
     ui.key(ctrl(KeyCode::Down));
     assert!(!ui.threads.editing_in(&pane));
-    assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/sibling"));
-    assert_eq!(ui.conversation_state.drafts[&Input::Reply("thread/worker".into()).key()], "Keep the reply");
-    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft");
+    assert_eq!(
+        ui.threads
+            .focused_row(&pane, &ui.conversation_state.drafts)
+            .as_deref(),
+        Some("thread/sibling")
+    );
+    assert_eq!(
+        ui.conversation_state.drafts[&Input::Reply("thread/worker".into()).key()],
+        "Keep the reply"
+    );
+    assert_eq!(
+        ui.conversation_state.drafts[agent],
+        "Keep the ordinary draft"
+    );
 
     // A letter goes back to the ordinary composer, as before.
     ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
@@ -2584,7 +2912,10 @@ fn accepting_a_new_inbox_thread_keeps_the_existing_expanded_thread_and_its_draft
         source: "agent/example".into(),
         episode: "claim/notice".into(),
     };
-    threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Notice"));
+    threads.origins.insert(
+        item.into(),
+        origin(context.clone(), Some("agent/atlas"), "Notice"),
+    );
     install_start_context(
         &mut threads,
         item,
@@ -2914,11 +3245,10 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
         &super::super::demo::test_world(),
         &texts,
     );
-    assert!(
-        doc.lines
-            .iter()
-            .any(|line| line.to_string().contains("Fault context · New discussion · Draft"))
-    );
+    assert!(doc.lines.iter().any(|line| {
+        line.to_string()
+            .contains("Fault context · New discussion · Draft")
+    }));
     assert!(doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(key)) if key == &original.key)));
     threads.tap(
         &pane.key(),
@@ -3117,11 +3447,17 @@ fn thread_preview_evidence() {
     ui.threads = observed_threads(ThreadState::Open);
     let pane = Pane::Thread("thread/worker".into());
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
-    fn capture(ui: &mut super::super::Ui, pane: &Pane, dir: &std::path::Path, name: &str) -> String {
+    fn capture(
+        ui: &mut super::super::Ui,
+        pane: &Pane,
+        dir: &std::path::Path,
+        name: &str,
+    ) -> String {
         let area = Rect::new(0, 0, 120, 40);
         let mut screen = Buffer::empty(area);
         ui.draw_pane(&mut screen, area, pane);
-        let mut text = String::from("HARNESS, NOT PRODUCTION BINARY PATH — production Ui::draw_pane\n");
+        let mut text =
+            String::from("HARNESS, NOT PRODUCTION BINARY PATH — production Ui::draw_pane\n");
         for row in screen.content.chunks(120) {
             text.push_str(&row.iter().map(|cell| cell.symbol()).collect::<String>());
             text.push('\n');
@@ -3135,48 +3471,83 @@ fn thread_preview_evidence() {
     let message: ThreadTimelineEvent = serde_json::from_value(serde_json::json!({
         "id":"message/preview", "actor_id":"agent/atlas", "accepted_at_unix_ms":accepted_at,
         "kind":"message", "content":"Please review the sensor calibration.", "thread_quote_id":null
-    })).unwrap();
+    }))
+    .unwrap();
     ui.threads.window(
-        ThreadInterest::Timeline("thread/worker".into()), snapshot(), true,
-        ThreadCollectionRows::Timeline(vec![message]), vec![],
-        vec!["message/preview".into()], false,
+        ThreadInterest::Timeline("thread/worker".into()),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Timeline(vec![message]),
+        vec![],
+        vec!["message/preview".into()],
+        false,
     );
     ui.threads.hover(Some("message/preview"));
     let hovered = capture(&mut ui, &pane, &dir, "harness-hover-reply");
     assert!(hovered.contains("↩ Reply"));
-    assert!(hovered.contains("2m ago"), "preview message uses the rendering clock: {hovered}");
-    ui.threads.set_access(ThreadAccess { mark_read: true, ..ui.threads.access });
+    assert!(
+        hovered.contains("2m ago"),
+        "preview message uses the rendering clock: {hovered}"
+    );
+    ui.threads.set_access(ThreadAccess {
+        mark_read: true,
+        ..ui.threads.access
+    });
     capture(&mut ui, &pane, &dir, "harness-v-before");
     ui.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
-    let read = ui.threads.writes().pop().expect("alt+v dispatches visible-message read");
+    let read = ui
+        .threads
+        .writes()
+        .pop()
+        .expect("alt+v dispatches visible-message read");
     assert!(matches!(read.mutation, Mutation::MarkRead(_)));
     capture(&mut ui, &pane, &dir, "harness-v-pending");
     // Dispatch-only fixture: settle its retained action before the independent lifecycle
     // scenarios below. This is a simulated rejection, not an accepted server-side read.
     assert_eq!(
-        ui.threads.complete(
-            Receipt { write: read, confirmation: Confirmation::Rejected },
-            &mut ui.conversation_state.drafts,
-        ).as_deref(),
+        ui.threads
+            .complete(
+                Receipt {
+                    write: read,
+                    confirmation: Confirmation::Rejected
+                },
+                &mut ui.conversation_state.drafts,
+            )
+            .as_deref(),
         Some("The original thread action was rejected"),
     );
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Compose("thread/worker".into()),
+    ));
     ui.paste("Keep this unsent draft.".into());
     let focused = capture(&mut ui, &pane, &dir, "harness-focused-composer");
     assert!(focused.contains("Keep this unsent draft.") && focused.contains("Send"));
     ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Rename("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Rename("thread/worker".into()),
+    ));
     assert!(capture(&mut ui, &pane, &dir, "harness-rename").contains("Worker test"));
     ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Close("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Close("thread/worker".into()),
+    ));
     let close = ui.threads.writes().pop().expect("production close action");
     assert!(matches!(close.mutation, Mutation::Close));
     capture(&mut ui, &pane, &dir, "harness-close-pending");
 
     let item = "attention/preview";
     let inbox = Pane::Home(Some(item.into()));
-    let context = ThreadInterest::Inbox { source: "agent/atlas".into(), episode: "claim/preview".into() };
-    ui.threads.origins.insert(item.into(), origin(context.clone(), Some("agent/atlas"), "Calibration review"));
+    let context = ThreadInterest::Inbox {
+        source: "agent/atlas".into(),
+        episode: "claim/preview".into(),
+    };
+    ui.threads.origins.insert(
+        item.into(),
+        origin(context.clone(), Some("agent/atlas"), "Calibration review"),
+    );
     install_start_context(
         &mut ui.threads,
         item,
@@ -3188,22 +3559,42 @@ fn thread_preview_evidence() {
     capture(&mut ui, &inbox, &dir, "harness-start-before");
     ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(item.into())));
     ui.paste("First message stays inline before sending.".into());
-    assert!(capture(&mut ui, &inbox, &dir, "harness-inline-first-message").contains("First message stays inline"));
+    assert!(
+        capture(&mut ui, &inbox, &dir, "harness-inline-first-message")
+            .contains("First message stays inline")
+    );
     ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    let canonical = Input::Start { item: item.into(), episode: "claim/preview".into() }.key();
-    ui.conversation_state.drafts.insert(format!("chat:{item}"), "Different recovered draft".into());
+    let canonical = Input::Start {
+        item: item.into(),
+        episode: "claim/preview".into(),
+    }
+    .key();
+    ui.conversation_state
+        .drafts
+        .insert(format!("chat:{item}"), "Different recovered draft".into());
     let before = ui.conversation_state.drafts.clone();
     ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(item.into())));
     assert_eq!(ui.conversation_state.drafts, before);
-    assert!(capture(&mut ui, &inbox, &dir, "harness-draft-collision").contains("Both drafts are kept"));
-    ui.click(Hit::Thread(inbox.key(), thread::Tap::CombineSavedDrafts(item.into())));
+    assert!(
+        capture(&mut ui, &inbox, &dir, "harness-draft-collision").contains("Both drafts are kept")
+    );
+    ui.click(Hit::Thread(
+        inbox.key(),
+        thread::Tap::CombineSavedDrafts(item.into()),
+    ));
     assert!(ui.conversation_state.drafts[&canonical].contains("Different recovered draft"));
     assert!(ui.conversation_state.drafts[&canonical].contains("First message stays inline"));
     capture(&mut ui, &inbox, &dir, "harness-draft-recovered");
     assert!(ui.threads.writes().is_empty(), "draft recovery never sends");
     ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    let start = ui.threads.writes().pop().expect("first-message start dispatch");
-    let Mutation::Start(parameters) = start.mutation else { panic!("start mutation") };
+    let start = ui
+        .threads
+        .writes()
+        .pop()
+        .expect("first-message start dispatch");
+    let Mutation::Start(parameters) = start.mutation else {
+        panic!("start mutation")
+    };
     assert_eq!(parameters.agent_id, "agent/atlas");
     assert!(parameters.content.contains("Different recovered draft"));
     assert!(parameters.content.contains("First message stays inline"));
@@ -3213,8 +3604,11 @@ fn thread_preview_evidence() {
 
 #[test]
 fn lifecycle_success_flashes_only_after_server_confirmation_with_host_keys() {
-    for pane in [Pane::Agent(Some("agent/example/atlas/builder".into())),
-        Pane::Thread("thread/worker".into()), Pane::Home(Some("thread/worker".into()))] {
+    for pane in [
+        Pane::Agent(Some("agent/example/atlas/builder".into())),
+        Pane::Thread("thread/worker".into()),
+        Pane::Home(Some("thread/worker".into())),
+    ] {
         for action in ["close", "reopen", "rename"] {
             let mut ui = writable_thread_in(&pane);
             if action == "reopen" {
@@ -3235,18 +3629,36 @@ fn lifecycle_success_flashes_only_after_server_confirmation_with_host_keys() {
             let write = ui.threads.writes().pop().expect("lifecycle action queued");
             assert!(ui.flash.is_none(), "no optimistic success");
             let repeated = write.clone();
-            ui.complete_thread(Receipt { write, confirmation: Confirmation::Applied(None) });
+            ui.complete_thread(Receipt {
+                write,
+                confirmation: Confirmation::Applied(None),
+            });
             let expected = match action {
-                "close" => format!("Closed “{title}” · {} reopens",
-                    if matches!(pane, Pane::Home(_)) { "z" } else { "alt+z" }),
+                "close" => format!(
+                    "Closed “{title}” · {} reopens",
+                    if matches!(pane, Pane::Home(_)) {
+                        "z"
+                    } else {
+                        "alt+z"
+                    }
+                ),
                 "reopen" => format!("Reopened “{title}”"),
                 _ => "Renamed to “A clearer title”".into(),
             };
-            assert_eq!(ui.flash.as_ref().map(|(message, _)| message), Some(&expected));
+            assert_eq!(
+                ui.flash.as_ref().map(|(message, _)| message),
+                Some(&expected)
+            );
             assert_eq!(ui.flash_severity, Some(super::super::Severity::Info));
             ui.flash = None;
-            ui.complete_thread(Receipt { write: repeated, confirmation: Confirmation::Applied(None) });
-            assert!(ui.flash.is_none(), "duplicate receipt is not another success");
+            ui.complete_thread(Receipt {
+                write: repeated,
+                confirmation: Confirmation::Applied(None),
+            });
+            assert!(
+                ui.flash.is_none(),
+                "duplicate receipt is not another success"
+            );
         }
     }
 }
@@ -3285,8 +3697,16 @@ fn assert_refusal_lines(lines: &[String], headline: &str) {
 #[test]
 fn definite_lifecycle_refusals_name_the_action_and_put_the_reason_on_its_own_line() {
     for (state, mutation, headline) in [
-        (ThreadState::Open, Mutation::Close, "Couldn't close this thread."),
-        (ThreadState::Closed, Mutation::Reopen, "Couldn't reopen this thread."),
+        (
+            ThreadState::Open,
+            Mutation::Close,
+            "Couldn't close this thread.",
+        ),
+        (
+            ThreadState::Closed,
+            Mutation::Reopen,
+            "Couldn't reopen this thread.",
+        ),
     ] {
         let mut threads = observed_threads(state);
         let id = "thread/worker";
@@ -3437,7 +3857,12 @@ fn unconfirmed_or_server_side_action_failures_keep_their_retry_and_wording() {
         );
         assert!(threads.pending_actions[id].unknown);
         let lines = rendered_lines(&threads, &pane, &texts);
-        assert!(lines.iter().any(|line| line == "Close thread: outcome not confirmed. Retry the original action."));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line
+                    == "Close thread: outcome not confirmed. Retry the original action.")
+        );
         assert!(!lines.iter().any(|line| line.starts_with("Couldn't")));
         // A later refusal cannot answer the original request it may have applied.
         threads.retry(&write.key);
@@ -3466,11 +3891,20 @@ fn unconfirmed_or_server_side_action_failures_keep_their_retry_and_wording() {
 fn lifecycle_failure_flashes_warn_and_never_a_success_notice() {
     let pane = Pane::Thread("thread/worker".into());
     let mut ui = writable_thread_in(&pane);
-    ui.click(Hit::Thread(pane.key(), thread::Tap::Close("thread/worker".into())));
+    ui.click(Hit::Thread(
+        pane.key(),
+        thread::Tap::Close("thread/worker".into()),
+    ));
     let write = ui.threads.writes().pop().unwrap();
-    ui.complete_thread(Receipt { write, confirmation: Confirmation::Rejected });
+    ui.complete_thread(Receipt {
+        write,
+        confirmation: Confirmation::Rejected,
+    });
     assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
-    assert_eq!(ui.flash.as_ref().unwrap().0, "The original thread action was rejected");
+    assert_eq!(
+        ui.flash.as_ref().unwrap().0,
+        "The original thread action was rejected"
+    );
     assert!(ui.threads.take_completion_notice().is_none());
 }
 
@@ -3478,14 +3912,25 @@ fn lifecycle_failure_flashes_warn_and_never_a_success_notice() {
 fn definite_action_refusal_headlines_flash_as_warnings() {
     let pane = Pane::Thread("thread/worker".into());
     for (state, tap, headline) in [
-        (ThreadState::Open, thread::Tap::Close("thread/worker".into()), "Couldn't close this thread."),
-        (ThreadState::Closed, thread::Tap::Reopen("thread/worker".into()), "Couldn't reopen this thread."),
+        (
+            ThreadState::Open,
+            thread::Tap::Close("thread/worker".into()),
+            "Couldn't close this thread.",
+        ),
+        (
+            ThreadState::Closed,
+            thread::Tap::Reopen("thread/worker".into()),
+            "Couldn't reopen this thread.",
+        ),
     ] {
         let mut ui = writable_thread_in(&pane);
         ui.threads = observed_threads(state);
         ui.click(Hit::Thread(pane.key(), tap));
         let write = ui.threads.writes().pop().unwrap();
-        ui.complete_thread(Receipt { write, confirmation: Confirmation::Failed(forbidden()) });
+        ui.complete_thread(Receipt {
+            write,
+            confirmation: Confirmation::Failed(forbidden()),
+        });
         assert_eq!(ui.flash.as_ref().unwrap().0, headline);
         assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
         assert!(ui.threads.take_completion_notice().is_none());
@@ -3499,7 +3944,10 @@ fn a_refused_thread_read_says_access_ended_with_the_reason() {
         "You no longer have access to this thread. Grant was revoked."
     );
     let lost = ClientError::Transport("lost".into());
-    assert_eq!(thread_read_error(ClientError::Transport("lost".into())), lost.human());
+    assert_eq!(
+        thread_read_error(ClientError::Transport("lost".into())),
+        lost.human()
+    );
     let mut threads = observed_threads(ThreadState::Open);
     let id = "thread/worker";
     let pane = Pane::Thread(id.into());
@@ -3542,9 +3990,13 @@ fn a_refused_thread_read_says_access_ended_with_the_reason() {
 
 fn request_history_page(cursor: Option<&str>) -> fractal_client::RequestHistoryPage {
     fractal_client::RequestHistoryPage {
-        items: vec![], relations: vec![], source_episodes: vec![], boundary_items: vec![],
+        items: vec![],
+        relations: vec![],
+        source_episodes: vec![],
+        boundary_items: vec![],
         source_support: Some(fractal_client::HistorySourceSupport::PersonStep),
-        next_cursor: cursor.map(str::to_owned), complete: true,
+        next_cursor: cursor.map(str::to_owned),
+        complete: true,
     }
 }
 
@@ -3554,20 +4006,41 @@ fn request_history_pagination_is_explicit_bounded_and_keeps_the_server_cursor() 
     threads.read_request_history("thread/worker".into(), true);
     threads.read_request_history("thread/worker".into(), true);
     let mut reads = threads.take_request_history_reads();
-    assert_eq!(reads.len(), 1, "one request in flight, never an automatic page walk");
+    assert_eq!(
+        reads.len(),
+        1,
+        "one request in flight, never an automatic page walk"
+    );
     let first = reads.pop().unwrap();
     assert!(first.cursor.is_none());
-    threads.request_history_loaded(&first.id, &first.key, Ok(request_history_page(Some("opaque/server-cursor"))));
+    threads.request_history_loaded(
+        &first.id,
+        &first.key,
+        Ok(request_history_page(Some("opaque/server-cursor"))),
+    );
     assert!(threads.take_request_history_reads().is_empty());
     threads.read_request_history(first.id.clone(), false);
-    assert!(threads.request_history[&first.id].page.is_none(), "old authorization is not shown during a fresh read");
+    assert!(
+        threads.request_history[&first.id].page.is_none(),
+        "old authorization is not shown during a fresh read"
+    );
     let next = threads.take_request_history_reads().pop().unwrap();
     assert_eq!(next.cursor.as_deref(), Some("opaque/server-cursor"));
     threads.request_history_loaded(&next.id, &next.key, Ok(request_history_page(None)));
     threads.read_request_history(next.id.clone(), false);
-    assert!(threads.take_request_history_reads().is_empty(), "a terminal page cannot fetch again");
+    assert!(
+        threads.take_request_history_reads().is_empty(),
+        "a terminal page cannot fetch again"
+    );
     threads.read_request_history(next.id.clone(), true);
-    assert!(threads.take_request_history_reads().pop().unwrap().cursor.is_none());
+    assert!(
+        threads
+            .take_request_history_reads()
+            .pop()
+            .unwrap()
+            .cursor
+            .is_none()
+    );
 }
 
 #[test]
@@ -3576,8 +4049,12 @@ fn request_history_revocation_and_departure_discard_pages_and_late_results() {
     let id = "thread/worker";
     threads.read_request_history(id.into(), true);
     let read = threads.take_request_history_reads().pop().unwrap();
-    threads.failure(ThreadInterest::Summary(id.into()), Some(fractal_client::ErrorCode::Forbidden),
-        "access revoked".into(), true);
+    threads.failure(
+        ThreadInterest::Summary(id.into()),
+        Some(fractal_client::ErrorCode::Forbidden),
+        "access revoked".into(),
+        true,
+    );
     threads.request_history_loaded(id, &read.key, Ok(request_history_page(None)));
     assert!(!threads.request_history.contains_key(id));
     let mut threads = observed_threads(ThreadState::Open);
@@ -3590,7 +4067,13 @@ fn request_history_revocation_and_departure_discard_pages_and_late_results() {
 
 fn wide_rendering(threads: &Threads, pane: &Pane, texts: &HashMap<String, String>) -> String {
     threads
-        .mount(pane, 240, &edit::Cursor::default(), &super::super::demo::test_world(), texts)
+        .mount(
+            pane,
+            240,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            texts,
+        )
         .lines
         .iter()
         .map(ToString::to_string)
@@ -3609,7 +4092,10 @@ fn refused(code: fractal_client::ErrorCode, wire: &str, message: &str) -> Client
 }
 
 fn resolved_source() -> ThreadInterest {
-    ThreadInterest::Inbox { source: "step-run/resolved".into(), episode: "original:1:1".into() }
+    ThreadInterest::Inbox {
+        source: "step-run/resolved".into(),
+        episode: "original:1:1".into(),
+    }
 }
 
 const FALLBACK_LINE: &str = "Fallback recipient · original source agent agent/atlas is retired. Existing discussions and participants are unchanged.";
@@ -3630,35 +4116,66 @@ fn canonical_previews_show_and_submit_the_exact_recipient_for_every_basis() {
     for case in [
         Case {
             label: "original recipient of a current ask",
-            item: "attention/ask", source: "step-run/ask", episode: "claim/ask",
-            historical_agent: Some("agent/atlas"), current: true, recipient: "agent/atlas",
+            item: "attention/ask",
+            source: "step-run/ask",
+            episode: "claim/ask",
+            historical_agent: Some("agent/atlas"),
+            current: true,
+            recipient: "agent/atlas",
             basis: fractal_client::ThreadStartRecipientBasis::Original,
             basis_line: "Original source recipient",
         },
         Case {
             label: "configured recipient of a saved system notice",
-            item: "attention/system", source: "system/fleet-health", episode: "claim/system",
-            historical_agent: None, current: false, recipient: "agent/chief-of-staff",
+            item: "attention/system",
+            source: "system/fleet-health",
+            episode: "claim/system",
+            historical_agent: None,
+            current: false,
+            recipient: "agent/chief-of-staff",
             basis: fractal_client::ThreadStartRecipientBasis::Configured,
             basis_line: "Configured source recipient",
         },
         Case {
             label: "fallback for a saved typed notice with no listed agent",
-            item: "attention/notice", source: "notice/retired-source", episode: "claim/notice",
-            historical_agent: None, current: false, recipient: "agent/chief-of-staff",
-            basis: retired("agent/atlas"), basis_line: FALLBACK_LINE,
+            item: "attention/notice",
+            source: "notice/retired-source",
+            episode: "claim/notice",
+            historical_agent: None,
+            current: false,
+            recipient: "agent/chief-of-staff",
+            basis: retired("agent/atlas"),
+            basis_line: FALLBACK_LINE,
         },
         Case {
             label: "fallback for a resolved ask whose source agent retired",
-            item: "attention/resolved", source: "step-run/resolved", episode: "original:1:1",
-            historical_agent: Some("agent/atlas"), current: false, recipient: "agent/chief-of-staff",
-            basis: retired("agent/atlas"), basis_line: FALLBACK_LINE,
+            item: "attention/resolved",
+            source: "step-run/resolved",
+            episode: "original:1:1",
+            historical_agent: Some("agent/atlas"),
+            current: false,
+            recipient: "agent/chief-of-staff",
+            basis: retired("agent/atlas"),
+            basis_line: FALLBACK_LINE,
         },
     ] {
-        let Case { label, item, source, episode, historical_agent, current, recipient, basis, basis_line } = case;
+        let Case {
+            label,
+            item,
+            source,
+            episode,
+            historical_agent,
+            current,
+            recipient,
+            basis,
+            basis_line,
+        } = case;
         let mut threads = observed_threads(ThreadState::Open);
         let source_origin = origin(
-            ThreadInterest::Inbox { source: source.into(), episode: episode.into() },
+            ThreadInterest::Inbox {
+                source: source.into(),
+                episode: episode.into(),
+            },
             historical_agent,
             "Original request",
         );
@@ -3671,37 +4188,77 @@ fn canonical_previews_show_and_submit_the_exact_recipient_for_every_basis() {
         let host = pane.key();
         let mut texts = HashMap::new();
         assert!(threads.can_start(item), "{label}");
-        assert!(threads.begin(&host, item, &mut texts), "{label}: the draft opens while the preview loads");
+        assert!(
+            threads.begin(&host, item, &mut texts),
+            "{label}: the draft opens while the preview loads"
+        );
         let input = threads.start_input(item).unwrap();
         let read = take_start_context_read(&mut threads, item);
         let loading = wide_rendering(&threads, &pane, &texts);
-        assert!(loading.contains("Checking recipient before first send…"), "{label}: {loading}");
-        assert!(!loading.contains("New discussion to "), "{label}: {loading}");
+        assert!(
+            loading.contains("Checking recipient before first send…"),
+            "{label}: {loading}"
+        );
+        assert!(
+            !loading.contains("New discussion to "),
+            "{label}: {loading}"
+        );
         texts.insert(input.key(), "First discussion".into());
         threads.submit(&host, input.clone(), &texts);
-        assert!(threads.writes().is_empty(), "{label}: nothing is sent before the canonical preview");
+        assert!(
+            threads.writes().is_empty(),
+            "{label}: nothing is sent before the canonical preview"
+        );
 
         threads.start_context_loaded(
             &read.item,
             &read.key,
-            Ok(start_context_envelope(source, episode, recipient, basis.clone(), "snapshot/preview")),
+            Ok(start_context_envelope(
+                source,
+                episode,
+                recipient,
+                basis.clone(),
+                "snapshot/preview",
+            )),
         );
-        assert!(threads.writes().is_empty(), "{label}: a loaded preview never sends by itself");
+        assert!(
+            threads.writes().is_empty(),
+            "{label}: a loaded preview never sends by itself"
+        );
         let shown = wide_rendering(&threads, &pane, &texts);
-        assert!(shown.contains(&format!("New discussion to {recipient}")), "{label}: {shown}");
+        assert!(
+            shown.contains(&format!("New discussion to {recipient}")),
+            "{label}: {shown}"
+        );
         assert!(shown.contains(basis_line), "{label}: {shown}");
 
-        let first = threads.prepare_write(&host, &input, "First discussion", &Draft::default()).unwrap();
-        let second = threads.prepare_write(&host, &input, "Second discussion", &Draft::default()).unwrap();
+        let first = threads
+            .prepare_write(&host, &input, "First discussion", &Draft::default())
+            .unwrap();
+        let second = threads
+            .prepare_write(&host, &input, "Second discussion", &Draft::default())
+            .unwrap();
         let (Mutation::Start(a), Mutation::Start(b)) = (&first.mutation, &second.mutation) else {
             panic!("{label}: independent Starts")
         };
-        assert_ne!(a.target_id, b.target_id, "{label}: every new Start has its own target");
-        assert_ne!(first.key, second.key, "{label}: every new Start has its own idempotency key");
+        assert_ne!(
+            a.target_id, b.target_id,
+            "{label}: every new Start has its own target"
+        );
+        assert_ne!(
+            first.key, second.key,
+            "{label}: every new Start has its own idempotency key"
+        );
         for (write, start) in [(&first, a), (&second, b)] {
-            assert_eq!(start.agent_id, recipient, "{label}: the submitted recipient is the displayed one");
+            assert_eq!(
+                start.agent_id, recipient,
+                "{label}: the submitted recipient is the displayed one"
+            );
             assert_eq!(write.agent, recipient, "{label}");
-            assert_eq!(write.fence.snapshot_id, "snapshot/preview", "{label}: fenced by the canonical preview");
+            assert_eq!(
+                write.fence.snapshot_id, "snapshot/preview",
+                "{label}: fenced by the canonical preview"
+            );
             assert_eq!(start.origin.source_id, source, "{label}");
             assert_eq!(start.origin.episode, episode, "{label}");
         }
@@ -3710,15 +4267,97 @@ fn canonical_previews_show_and_submit_the_exact_recipient_for_every_basis() {
             historical_agent,
             "{label}: the historical source agent stays separate from the recipient"
         );
-        if let fractal_client::ThreadStartRecipientBasis::Fallback { original_agent_id, .. } = &basis {
-            assert_ne!(&a.agent_id, original_agent_id, "{label}: a fallback never sends to the retired agent");
+        if let fractal_client::ThreadStartRecipientBasis::Fallback {
+            original_agent_id, ..
+        } = &basis
+        {
+            assert_ne!(
+                &a.agent_id, original_agent_id,
+                "{label}: a fallback never sends to the retired agent"
+            );
         }
         threads.submit(&host, input, &texts);
-        let sent = threads.writes().pop().expect("the person's Send dispatches once");
-        let Mutation::Start(sent) = sent.mutation else { panic!("{label}: Start") };
+        let sent = threads
+            .writes()
+            .pop()
+            .expect("the person's Send dispatches once");
+        let Mutation::Start(sent) = sent.mutation else {
+            panic!("{label}: Start")
+        };
         assert_eq!(sent.agent_id, recipient, "{label}");
         assert_eq!(sent.content, "First discussion", "{label}");
-        assert_eq!(threads.summary("thread/worker").unwrap(), &summary(), "{label}: existing discussion untouched");
+        assert_eq!(
+            threads.summary("thread/worker").unwrap(),
+            &summary(),
+            "{label}: existing discussion untouched"
+        );
+    }
+}
+
+#[test]
+fn start_recipient_uses_agent_display_metadata_without_changing_the_canonical_recipient() {
+    const RECIPIENT: &str = "agent/dotfiles/manager";
+    for metadata in [Some("Chief of Staff"), Some("   "), None] {
+        let mut world = super::super::demo::test_world();
+        let mut agent = world.agents.items().first().unwrap().clone();
+        agent.id = RECIPIENT.into();
+        agent.name = metadata.unwrap_or_default().into();
+        world.agents = view::Load::Ready(if metadata.is_some() {
+            vec![agent]
+        } else {
+            Vec::new()
+        });
+        let mut threads = observed_threads(ThreadState::Open);
+        let item = "attention/resolved";
+        threads.saved_origins.insert(
+            item.into(),
+            origin(resolved_source(), Some("agent/atlas"), "Original request"),
+        );
+        install_start_context(&mut threads, item, RECIPIENT, retired("agent/atlas"));
+        let pane = Pane::Home(Some(item.into()));
+        let host = pane.key();
+        let mut texts = HashMap::new();
+        assert!(threads.begin(&host, item, &mut texts));
+        let input = threads.start_input(item).unwrap();
+        texts.insert(input.key(), "New discussion".into());
+        let render = |threads: &Threads, texts: &HashMap<String, String>| {
+            threads
+                .mount(&pane, 240, &edit::Cursor::default(), &world, texts)
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let expected = metadata
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(RECIPIENT);
+        let shown = render(&threads, &texts);
+        assert!(
+            shown.contains(&format!("New discussion to {expected}")),
+            "{shown}"
+        );
+        assert!(shown.contains(FALLBACK_LINE), "{shown}");
+        threads.submit(&host, input, &texts);
+        let write = threads
+            .writes()
+            .pop()
+            .expect("explicit Send dispatches once");
+        let Mutation::Start(start) = &write.mutation else {
+            panic!("Start")
+        };
+        assert_eq!(start.agent_id, RECIPIENT);
+        assert_eq!(write.agent, RECIPIENT);
+        assert_eq!(start.origin.source_id, "step-run/resolved");
+        assert_eq!(start.origin.episode, "original:1:1");
+        assert_eq!(write.fence.snapshot_id, "snapshot/start-context");
+        let pending = render(&threads, &texts);
+        assert!(
+            pending.contains(&format!(
+                "Original delivery to {expected} is pending or unconfirmed."
+            )),
+            "{pending}"
+        );
     }
 }
 
@@ -3728,17 +4367,32 @@ fn resolved_asks_authored_steps_and_notices_start_independent_discussions() {
         let mut threads = observed_threads(ThreadState::Open);
         let id = "attention/resolved";
         let host = format!("home:{id}");
-        threads.saved_origins.insert(id.into(), origin(resolved_source(), Some("agent/atlas"), kind));
-        install_start_context(&mut threads, id, "agent/atlas", fractal_client::ThreadStartRecipientBasis::Original);
+        threads.saved_origins.insert(
+            id.into(),
+            origin(resolved_source(), Some("agent/atlas"), kind),
+        );
+        install_start_context(
+            &mut threads,
+            id,
+            "agent/atlas",
+            fractal_client::ThreadStartRecipientBasis::Original,
+        );
         let mut texts = HashMap::new();
-        threads.start_with_text(&host, id, "First discussion", &mut texts).unwrap();
+        threads
+            .start_with_text(&host, id, "First discussion", &mut texts)
+            .unwrap();
         let first = threads.writes().pop().unwrap();
-        let Mutation::Start(a) = &first.mutation else { panic!("{kind}: Start") };
+        let Mutation::Start(a) = &first.mutation else {
+            panic!("{kind}: Start")
+        };
         threads.complete(
             Receipt {
                 write: first.clone(),
                 confirmation: Confirmation::Applied(Some(Envelope {
-                    value: ThreadSummary { id: a.target_id.clone(), ..summary() },
+                    value: ThreadSummary {
+                        id: a.target_id.clone(),
+                        ..summary()
+                    },
                     snapshot: snapshot(),
                     request_id: "request/first".into(),
                     api_version: fractal_client::API_VERSION.into(),
@@ -3747,17 +4401,33 @@ fn resolved_asks_authored_steps_and_notices_start_independent_discussions() {
             &mut texts,
         );
         if threads.start_context(id).is_none() {
-            install_start_context(&mut threads, id, "agent/atlas", fractal_client::ThreadStartRecipientBasis::Original);
+            install_start_context(
+                &mut threads,
+                id,
+                "agent/atlas",
+                fractal_client::ThreadStartRecipientBasis::Original,
+            );
         }
-        threads.start_with_text(&host, id, "Second discussion", &mut texts).unwrap();
+        threads
+            .start_with_text(&host, id, "Second discussion", &mut texts)
+            .unwrap();
         let second = threads.writes().pop().unwrap();
-        let Mutation::Start(b) = &second.mutation else { panic!("{kind}: Start") };
+        let Mutation::Start(b) = &second.mutation else {
+            panic!("{kind}: Start")
+        };
         assert_ne!(a.target_id, b.target_id, "{kind}");
         assert_ne!(first.key, second.key, "{kind}");
         assert_eq!(a.origin, b.origin, "{kind}");
-        assert_eq!(a.agent_id, "agent/atlas", "{kind}: an offline original is not retired or redirected");
+        assert_eq!(
+            a.agent_id, "agent/atlas",
+            "{kind}: an offline original is not retired or redirected"
+        );
         assert_eq!(b.agent_id, "agent/atlas", "{kind}");
-        assert_eq!(threads.summary("thread/worker").unwrap(), &summary(), "{kind}: existing discussion is untouched");
+        assert_eq!(
+            threads.summary("thread/worker").unwrap(),
+            &summary(),
+            "{kind}: existing discussion is untouched"
+        );
     }
 }
 
@@ -3779,11 +4449,29 @@ fn auto_resolved_sources_start_through_their_typed_key_and_canonical_recipient()
         complete: true,
     });
     let item = "auto-resolved/resolution/1";
-    assert_eq!(threads.start_origin(item).unwrap().agent, None, "a requester is not a recipient");
-    install_start_context(&mut threads, item, "agent/chief-of-staff", retired("agent/atlas"));
+    assert_eq!(
+        threads.start_origin(item).unwrap().agent,
+        None,
+        "a requester is not a recipient"
+    );
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/chief-of-staff",
+        retired("agent/atlas"),
+    );
     let mut texts = HashMap::new();
-    threads.start_with_text(&format!("home:{item}"), item, "Why was this auto-resolved?", &mut texts).unwrap();
-    let Mutation::Start(start) = threads.writes().pop().unwrap().mutation else { panic!("Start") };
+    threads
+        .start_with_text(
+            &format!("home:{item}"),
+            item,
+            "Why was this auto-resolved?",
+            &mut texts,
+        )
+        .unwrap();
+    let Mutation::Start(start) = threads.writes().pop().unwrap().mutation else {
+        panic!("Start")
+    };
     assert_eq!(start.agent_id, "agent/chief-of-staff");
     assert_eq!(start.origin.source_id, "step-run/auto");
     assert_eq!(start.origin.episode, "claim/auto");
@@ -3792,18 +4480,33 @@ fn auto_resolved_sources_start_through_their_typed_key_and_canonical_recipient()
 #[test]
 fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_send() {
     for (stale, stale_basis, fresh, fresh_basis) in [
-        ("agent/atlas", fractal_client::ThreadStartRecipientBasis::Original, "agent/chief-of-staff", retired("agent/atlas")),
-        ("agent/chief-of-staff", retired("agent/atlas"), "agent/deputy", retired("agent/atlas")),
+        (
+            "agent/atlas",
+            fractal_client::ThreadStartRecipientBasis::Original,
+            "agent/chief-of-staff",
+            retired("agent/atlas"),
+        ),
+        (
+            "agent/chief-of-staff",
+            retired("agent/atlas"),
+            "agent/deputy",
+            retired("agent/atlas"),
+        ),
     ] {
         let mut threads = observed_threads(ThreadState::Open);
         let item = "attention/resolved";
         let pane = Pane::Home(Some(item.into()));
         let host = pane.key();
-        threads.saved_origins.insert(item.into(), origin(resolved_source(), Some("agent/atlas"), "Original request"));
+        threads.saved_origins.insert(
+            item.into(),
+            origin(resolved_source(), Some("agent/atlas"), "Original request"),
+        );
         install_start_context(&mut threads, item, stale, stale_basis);
         let input = threads.start_input(item).unwrap();
         let mut texts = HashMap::new();
-        threads.start_with_text(&host, item, "Please follow up", &mut texts).unwrap();
+        threads
+            .start_with_text(&host, item, "Please follow up", &mut texts)
+            .unwrap();
         let refused_write = threads.writes().pop().unwrap();
         assert_eq!(refused_write.agent, stale);
         let notice = threads
@@ -3820,54 +4523,128 @@ fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_
             )
             .unwrap();
         assert!(notice.starts_with("Start was refused:"), "{notice}");
-        assert!(notice.contains("review it before sending. Your draft is kept."), "{notice}");
-        assert!(threads.writes().is_empty(), "{stale}: a refusal never re-sends or retargets");
+        assert!(
+            notice.contains("review it before sending. Your draft is kept."),
+            "{notice}"
+        );
+        assert!(
+            threads.writes().is_empty(),
+            "{stale}: a refusal never re-sends or retargets"
+        );
         assert_eq!(texts[&input.key()], "Please follow up", "the draft is kept");
         assert!(
-            threads.drafts.get(&input.key()).and_then(|draft| draft.delivery.as_ref()).is_none(),
+            threads
+                .drafts
+                .get(&input.key())
+                .and_then(|draft| draft.delivery.as_ref())
+                .is_none(),
             "the refused packet is dropped"
         );
-        assert!(threads.start_context(item).is_none(), "the stale recipient is no longer offered");
+        assert!(
+            threads.start_context(item).is_none(),
+            "the stale recipient is no longer offered"
+        );
         let refresh = take_start_context_read(&mut threads, item);
         let refreshing = wide_rendering(&threads, &pane, &texts);
-        assert!(!refreshing.contains(&format!("New discussion to {stale}")), "{refreshing}");
-        assert!(refreshing.contains("Checking recipient before first send…"), "{refreshing}");
-        assert!(threads.start_with_text(&host, item, "Please follow up", &mut texts).is_err());
-        assert!(threads.writes().is_empty(), "no send until the refreshed recipient is shown");
+        assert!(
+            !refreshing.contains(&format!("New discussion to {stale}")),
+            "{refreshing}"
+        );
+        assert!(
+            refreshing.contains("Checking recipient before first send…"),
+            "{refreshing}"
+        );
+        assert!(
+            threads
+                .start_with_text(&host, item, "Please follow up", &mut texts)
+                .is_err()
+        );
+        assert!(
+            threads.writes().is_empty(),
+            "no send until the refreshed recipient is shown"
+        );
 
         threads.start_context_loaded(
             &refresh.item,
             &refresh.key,
-            Ok(start_context_envelope("step-run/resolved", "original:1:1", fresh, fresh_basis, "snapshot/refreshed")),
+            Ok(start_context_envelope(
+                "step-run/resolved",
+                "original:1:1",
+                fresh,
+                fresh_basis,
+                "snapshot/refreshed",
+            )),
         );
-        assert!(threads.writes().is_empty(), "the refreshed recipient is shown, never sent automatically");
+        assert!(
+            threads.writes().is_empty(),
+            "the refreshed recipient is shown, never sent automatically"
+        );
         let refreshed = wide_rendering(&threads, &pane, &texts);
-        assert!(refreshed.contains(&format!("New discussion to {fresh}")), "{refreshed}");
-        assert!(!refreshed.contains(&format!("New discussion to {stale}")), "{refreshed}");
+        assert!(
+            refreshed.contains(&format!("New discussion to {fresh}")),
+            "{refreshed}"
+        );
+        assert!(
+            !refreshed.contains(&format!("New discussion to {stale}")),
+            "{refreshed}"
+        );
         assert!(refreshed.contains(FALLBACK_LINE), "{refreshed}");
 
-        threads.start_with_text(&host, item, "Please follow up", &mut texts).unwrap();
+        threads
+            .start_with_text(&host, item, "Please follow up", &mut texts)
+            .unwrap();
         let fresh_write = threads.writes().pop().unwrap();
-        let (Mutation::Start(old), Mutation::Start(new)) = (&refused_write.mutation, &fresh_write.mutation) else {
+        let (Mutation::Start(old), Mutation::Start(new)) =
+            (&refused_write.mutation, &fresh_write.mutation)
+        else {
             panic!("Starts")
         };
         assert_eq!(new.agent_id, fresh);
         assert_eq!(fresh_write.fence.snapshot_id, "snapshot/refreshed");
-        assert_ne!(new.target_id, old.target_id, "a fresh Start is a new target");
-        assert_ne!(fresh_write.key, refused_write.key, "a fresh Start is a new key");
+        assert_ne!(
+            new.target_id, old.target_id,
+            "a fresh Start is a new target"
+        );
+        assert_ne!(
+            fresh_write.key, refused_write.key,
+            "a fresh Start is a new key"
+        );
         assert_eq!(new.origin, old.origin);
     }
 
     // A server-side rejection also drops its packet and re-reads the recipient without sending.
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/resolved";
-    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Original request"));
-    install_start_context(&mut threads, item, "agent/chief-of-staff", retired("agent/atlas"));
+    threads.saved_origins.insert(
+        item.into(),
+        origin(resolved_source(), None, "Original request"),
+    );
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/chief-of-staff",
+        retired("agent/atlas"),
+    );
     let mut texts = HashMap::new();
-    threads.start_with_text(&format!("home:{item}"), item, "Please follow up", &mut texts).unwrap();
+    threads
+        .start_with_text(
+            &format!("home:{item}"),
+            item,
+            "Please follow up",
+            &mut texts,
+        )
+        .unwrap();
     let write = threads.writes().pop().unwrap();
     assert_eq!(
-        threads.complete(Receipt { write, confirmation: Confirmation::Rejected }, &mut texts).as_deref(),
+        threads
+            .complete(
+                Receipt {
+                    write,
+                    confirmation: Confirmation::Rejected
+                },
+                &mut texts
+            )
+            .as_deref(),
         Some("The original thread action was rejected")
     );
     take_start_context_read(&mut threads, item);
@@ -3881,10 +4658,19 @@ fn pending_or_unknown_start_retries_keep_the_exact_packet_recipient() {
     let item = "attention/notice";
     let pane = Pane::Home(Some(item.into()));
     let host = pane.key();
-    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Notice"));
-    install_start_context(&mut threads, item, "agent/chief-of-staff", retired("agent/atlas"));
+    threads
+        .saved_origins
+        .insert(item.into(), origin(resolved_source(), None, "Notice"));
+    install_start_context(
+        &mut threads,
+        item,
+        "agent/chief-of-staff",
+        retired("agent/atlas"),
+    );
     let mut texts = HashMap::new();
-    threads.start_with_text(&host, item, "What happened?", &mut texts).unwrap();
+    threads
+        .start_with_text(&host, item, "What happened?", &mut texts)
+        .unwrap();
     let original = threads.writes().pop().unwrap();
     threads.complete(
         Receipt {
@@ -3894,11 +4680,20 @@ fn pending_or_unknown_start_retries_keep_the_exact_packet_recipient() {
         &mut texts,
     );
     threads.request_start_context(item);
-    assert!(threads.take_start_context_reads().is_empty(), "an unknown packet is never re-previewed");
+    assert!(
+        threads.take_start_context_reads().is_empty(),
+        "an unknown packet is never re-previewed"
+    );
     threads.start_context_loaded(
         item,
         "late/unrequested",
-        Ok(start_context_envelope("step-run/resolved", "original:1:1", "agent/deputy", retired("agent/atlas"), "snapshot/late")),
+        Ok(start_context_envelope(
+            "step-run/resolved",
+            "original:1:1",
+            "agent/deputy",
+            retired("agent/atlas"),
+            "snapshot/late",
+        )),
     );
     let rendered = wide_rendering(&threads, &pane, &texts);
     assert!(
@@ -3913,7 +4708,9 @@ fn pending_or_unknown_start_retries_keep_the_exact_packet_recipient() {
     assert_eq!(retry.id, original.id);
     assert_eq!(retry.fence, original.fence);
     assert_eq!(retry.agent, "agent/chief-of-staff");
-    let Mutation::Start(parameters) = retry.mutation else { panic!("original Start") };
+    let Mutation::Start(parameters) = retry.mutation else {
+        panic!("original Start")
+    };
     assert_eq!(parameters.agent_id, "agent/chief-of-staff");
     assert_eq!(parameters.content, "What happened?");
 }
@@ -3924,16 +4721,36 @@ fn late_or_mismatched_start_contexts_are_rejected() {
     let item = "attention/resolved";
     let other = "attention/other";
     let other_pane = Pane::Home(Some(other.into()));
-    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Original request"));
+    threads.saved_origins.insert(
+        item.into(),
+        origin(resolved_source(), None, "Original request"),
+    );
     threads.saved_origins.insert(
         other.into(),
-        origin(ThreadInterest::Inbox { source: "step-run/other".into(), episode: "claim/other".into() }, None, "Other"),
+        origin(
+            ThreadInterest::Inbox {
+                source: "step-run/other".into(),
+                episode: "claim/other".into(),
+            },
+            None,
+            "Other",
+        ),
     );
     let exact = |recipient: &str| {
-        start_context_envelope("step-run/resolved", "original:1:1", recipient, retired("agent/atlas"), "snapshot/preview")
+        start_context_envelope(
+            "step-run/resolved",
+            "original:1:1",
+            recipient,
+            retired("agent/atlas"),
+            "snapshot/preview",
+        )
     };
     let other_exact = start_context_envelope(
-        "step-run/other", "claim/other", "agent/chief-of-staff", fractal_client::ThreadStartRecipientBasis::Configured, "snapshot/preview",
+        "step-run/other",
+        "claim/other",
+        "agent/chief-of-staff",
+        fractal_client::ThreadStartRecipientBasis::Configured,
+        "snapshot/preview",
     );
     threads.request_start_context(item);
     threads.request_start_context(other);
@@ -3943,8 +4760,14 @@ fn late_or_mismatched_start_contexts_are_rejected() {
     let a = reads.iter().find(|read| read.item == item).unwrap();
     let b = reads.iter().find(|read| read.item == other).unwrap();
     let mut texts = HashMap::new();
-    assert!(threads.begin(&other_pane.key(), other, &mut texts), "the draft opens while its read is pending");
-    assert!(threads.take_start_context_reads().is_empty(), "begin does not duplicate a pending read");
+    assert!(
+        threads.begin(&other_pane.key(), other, &mut texts),
+        "the draft opens while its read is pending"
+    );
+    assert!(
+        threads.take_start_context_reads().is_empty(),
+        "begin does not duplicate a pending read"
+    );
 
     // Another member's read cannot answer this item, in either direction.
     threads.start_context_loaded(item, &b.key, Ok(exact("agent/chief-of-staff")));
@@ -3956,10 +4779,19 @@ fn late_or_mismatched_start_contexts_are_rejected() {
     threads.start_context_loaded(
         item,
         &a.key,
-        Ok(start_context_envelope("step-run/other", "original:1:1", "agent/chief-of-staff", retired("agent/atlas"), "snapshot/preview")),
+        Ok(start_context_envelope(
+            "step-run/other",
+            "original:1:1",
+            "agent/chief-of-staff",
+            retired("agent/atlas"),
+            "snapshot/preview",
+        )),
     );
     assert!(threads.start_context(item).is_none());
-    assert_eq!(threads.start_context_failures[item], "The Inbox source changed. Check its recipient again.");
+    assert_eq!(
+        threads.start_context_failures[item],
+        "The Inbox source changed. Check its recipient again."
+    );
 
     // A result for a different episode of the same source is refused.
     threads.request_start_context(item);
@@ -3967,7 +4799,13 @@ fn late_or_mismatched_start_contexts_are_rejected() {
     threads.start_context_loaded(
         item,
         &wrong_episode.key,
-        Ok(start_context_envelope("step-run/resolved", "original:1:2", "agent/chief-of-staff", retired("agent/atlas"), "snapshot/preview")),
+        Ok(start_context_envelope(
+            "step-run/resolved",
+            "original:1:2",
+            "agent/chief-of-staff",
+            retired("agent/atlas"),
+            "snapshot/preview",
+        )),
     );
     assert!(threads.start_context(item).is_none());
 
@@ -3975,14 +4813,28 @@ fn late_or_mismatched_start_contexts_are_rejected() {
     threads.request_start_context(item);
     let superseded = take_start_context_read(&mut threads, item);
     threads.keep_inbox_sources(&[]);
-    assert!(threads.saved_origins.is_empty(), "live bounds saved sources to its current keys");
-    threads.saved_origins.insert(item.into(), origin(resolved_source(), None, "Original request"));
+    assert!(
+        threads.saved_origins.is_empty(),
+        "live bounds saved sources to its current keys"
+    );
+    threads.saved_origins.insert(
+        item.into(),
+        origin(resolved_source(), None, "Original request"),
+    );
     threads.request_start_context(item);
     let current = take_start_context_read(&mut threads, item);
     threads.start_context_loaded(item, &superseded.key, Ok(exact("agent/deputy")));
     assert!(threads.start_context(item).is_none());
     threads.start_context_loaded(item, &current.key, Ok(exact("agent/chief-of-staff")));
-    assert_eq!(threads.start_context(item).unwrap().value.start_recipient.agent_id, "agent/chief-of-staff");
+    assert_eq!(
+        threads
+            .start_context(item)
+            .unwrap()
+            .value
+            .start_recipient
+            .agent_id,
+        "agent/chief-of-staff"
+    );
 
     // A pruned source's late result never brings it back.
     assert!(!threads.can_start(other));
@@ -3992,24 +4844,49 @@ fn late_or_mismatched_start_contexts_are_rejected() {
     // A refused read says why and offers nothing to send.
     threads.saved_origins.insert(
         other.into(),
-        origin(ThreadInterest::Inbox { source: "step-run/other".into(), episode: "claim/other".into() }, None, "Other"),
+        origin(
+            ThreadInterest::Inbox {
+                source: "step-run/other".into(),
+                episode: "claim/other".into(),
+            },
+            None,
+            "Other",
+        ),
     );
     threads.request_start_context(other);
     let failed = take_start_context_read(&mut threads, other);
-    threads.start_context_loaded(other, &failed.key, Err("You no longer have access to this source.".into()));
+    threads.start_context_loaded(
+        other,
+        &failed.key,
+        Err("You no longer have access to this source.".into()),
+    );
     assert!(threads.start_context(other).is_none());
     let rendered = wide_rendering(&threads, &other_pane, &texts);
-    assert!(rendered.contains("You no longer have access to this source."), "{rendered}");
+    assert!(
+        rendered.contains("You no longer have access to this source."),
+        "{rendered}"
+    );
     assert!(rendered.contains("Refresh recipient"), "{rendered}");
 
     // A preview of an older episode is not offered once the source moves on.
     threads.saved_origins.insert(
         item.into(),
-        origin(ThreadInterest::Inbox { source: "step-run/resolved".into(), episode: "original:2:1".into() }, None, "Original request"),
+        origin(
+            ThreadInterest::Inbox {
+                source: "step-run/resolved".into(),
+                episode: "original:2:1".into(),
+            },
+            None,
+            "Original request",
+        ),
     );
     assert!(threads.start_context(item).is_none());
     let input = threads.start_input(item).unwrap();
-    assert!(threads.prepare_write(&format!("home:{item}"), &input, "Hello", &Draft::default()).is_err());
+    assert!(
+        threads
+            .prepare_write(&format!("home:{item}"), &input, "Hello", &Draft::default())
+            .is_err()
+    );
     assert!(threads.writes().is_empty(), "no context result ever sends");
 }
 
@@ -4017,11 +4894,22 @@ fn late_or_mismatched_start_contexts_are_rejected() {
 fn a_saved_source_alone_never_authorizes_a_start() {
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/resolved";
-    threads.saved_origins.insert(item.into(), origin(resolved_source(), Some("agent/atlas"), "Original request"));
+    threads.saved_origins.insert(
+        item.into(),
+        origin(resolved_source(), Some("agent/atlas"), "Original request"),
+    );
     let input = threads.start_input(item).unwrap();
-    assert!(threads.prepare_write(&format!("home:{item}"), &input, "Hello", &Draft::default()).is_err());
+    assert!(
+        threads
+            .prepare_write(&format!("home:{item}"), &input, "Hello", &Draft::default())
+            .is_err()
+    );
     let mut texts = HashMap::new();
-    assert!(threads.start_with_text(&format!("home:{item}"), item, "Hello", &mut texts).is_err());
+    assert!(
+        threads
+            .start_with_text(&format!("home:{item}"), item, "Hello", &mut texts)
+            .is_err()
+    );
     assert!(texts.is_empty());
     assert!(threads.writes().is_empty());
 }
@@ -4038,7 +4926,12 @@ fn start_recipient_layout_evidence() {
         std::env::var("THREAD_PREVIEW_CAPTURE_DIR").expect("THREAD_PREVIEW_CAPTURE_DIR"),
     );
     std::fs::create_dir_all(&dir).unwrap();
-    fn capture(ui: &mut super::super::Ui, pane: &Pane, dir: &std::path::Path, name: &str) -> String {
+    fn capture(
+        ui: &mut super::super::Ui,
+        pane: &Pane,
+        dir: &std::path::Path,
+        name: &str,
+    ) -> String {
         let area = Rect::new(0, 0, 120, 40);
         let mut screen = Buffer::empty(area);
         ui.draw_pane(&mut screen, area, pane);
@@ -4062,49 +4955,91 @@ fn start_recipient_layout_evidence() {
     let message: ThreadTimelineEvent = serde_json::from_value(serde_json::json!({
         "id":"message/history", "actor_id":"agent/atlas", "accepted_at_unix_ms":accepted_at,
         "kind":"message", "content":"I will look at the calibration drift.", "thread_quote_id":null
-    })).unwrap();
+    }))
+    .unwrap();
     ui.threads.window(
-        ThreadInterest::Timeline("thread/worker".into()), snapshot(), true,
-        ThreadCollectionRows::Timeline(vec![message]), vec![], vec!["message/history".into()], false,
+        ThreadInterest::Timeline("thread/worker".into()),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Timeline(vec![message]),
+        vec![],
+        vec!["message/history".into()],
+        false,
     );
-    ui.threads.read_request_history("thread/worker".into(), true);
+    ui.threads
+        .read_request_history("thread/worker".into(), true);
     let read = ui.threads.take_request_history_reads().pop().unwrap();
-    ui.threads.request_history_loaded(&read.id, &read.key, Ok(fractal_client::RequestHistoryPage {
-        items: vec![fractal_client::RequestHistoryItem {
-            key: fractal_client::SourceEpisode { source_id: "step-run/resolved".into(), episode: "original:1:1".into() },
-            payload: fractal_client::HistoricalPayload::Available {
-                title: Some("Calibration review".into()),
-                text: "Please review the sensor calibration.".into(),
-                request: None,
-                references: Vec::new(),
-                provenance: fractal_client::RequestProvenance::RuntimeAsk { asking_claim_id: "claim/asking".into() },
-            },
-            state: fractal_client::EpisodeState::Available { status: "resolved".into(), answers: Vec::new() },
-            complete: true,
-        }],
-        ..request_history_page(None)
-    }));
+    ui.threads.request_history_loaded(
+        &read.id,
+        &read.key,
+        Ok(fractal_client::RequestHistoryPage {
+            items: vec![fractal_client::RequestHistoryItem {
+                key: fractal_client::SourceEpisode {
+                    source_id: "step-run/resolved".into(),
+                    episode: "original:1:1".into(),
+                },
+                payload: fractal_client::HistoricalPayload::Available {
+                    title: Some("Calibration review".into()),
+                    text: "Please review the sensor calibration.".into(),
+                    request: None,
+                    references: Vec::new(),
+                    provenance: fractal_client::RequestProvenance::RuntimeAsk {
+                        asking_claim_id: "claim/asking".into(),
+                    },
+                },
+                state: fractal_client::EpisodeState::Available {
+                    status: "resolved".into(),
+                    answers: Vec::new(),
+                },
+                complete: true,
+            }],
+            ..request_history_page(None)
+        }),
+    );
     let history = capture(&mut ui, &tab, &dir, "recipient-history-related-requests");
-    assert!(history.contains("Related requests") && history.contains("original:1:1"), "{history}");
+    assert!(
+        history.contains("Related requests") && history.contains("original:1:1"),
+        "{history}"
+    );
 
     // Fallback composer for the resolved item whose source agent retired.
     let item = "attention/resolved";
     let inbox = Pane::Home(Some(item.into()));
-    ui.threads.saved_origins.insert(item.into(), origin(resolved_source(), Some("agent/atlas"), "Calibration review"));
+    ui.threads.saved_origins.insert(
+        item.into(),
+        origin(resolved_source(), Some("agent/atlas"), "Calibration review"),
+    );
     ui.threads.lists.insert(resolved_source(), Vec::new());
     ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
     ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(item.into())));
     let read = take_start_context_read(&mut ui.threads, item);
     ui.paste("Who owns the calibration follow-up now?".into());
     let checking = capture(&mut ui, &inbox, &dir, "recipient-fallback-checking");
-    assert!(checking.contains("Checking recipient before first send…"), "{checking}");
-    ui.threads.start_context_loaded(&read.item, &read.key, Ok(start_context_envelope(
-        "step-run/resolved", "original:1:1", "agent/chief-of-staff", retired("agent/atlas"), "snapshot/preview",
-    )));
+    assert!(
+        checking.contains("Checking recipient before first send…"),
+        "{checking}"
+    );
+    ui.threads.start_context_loaded(
+        &read.item,
+        &read.key,
+        Ok(start_context_envelope(
+            "step-run/resolved",
+            "original:1:1",
+            "agent/chief-of-staff",
+            retired("agent/atlas"),
+            "snapshot/preview",
+        )),
+    );
     let composer = capture(&mut ui, &inbox, &dir, "recipient-fallback-composer");
-    assert!(composer.contains("New discussion to agent/chief-of-staff"), "{composer}");
+    assert!(
+        composer.contains("New discussion to agent/chief-of-staff"),
+        "{composer}"
+    );
     assert!(composer.contains("Fallback recipient"), "{composer}");
-    assert!(ui.threads.writes().is_empty(), "showing the recipient never sends");
+    assert!(
+        ui.threads.writes().is_empty(),
+        "showing the recipient never sends"
+    );
     ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let start = ui.threads.writes().pop().expect("the person's Send");
     assert_eq!(start.agent, "agent/chief-of-staff");
@@ -4123,14 +5058,39 @@ fn start_recipient_layout_evidence() {
     assert!(notice.is_some_and(|notice| notice.starts_with("Start was refused:")));
     let read = take_start_context_read(&mut ui.threads, item);
     let refreshing = capture(&mut ui, &inbox, &dir, "recipient-stale-refused-refreshing");
-    assert!(refreshing.contains("Checking recipient before first send…"), "{refreshing}");
-    ui.threads.start_context_loaded(&read.item, &read.key, Ok(start_context_envelope(
-        "step-run/resolved", "original:1:1", "agent/deputy", retired("agent/atlas"), "snapshot/refreshed",
-    )));
-    let refreshed = capture(&mut ui, &inbox, &dir, "recipient-stale-refreshed-before-send");
-    assert!(refreshed.contains("New discussion to agent/deputy"), "{refreshed}");
-    assert!(refreshed.contains("Who owns the calibration follow-up now?"), "{refreshed}");
-    assert!(ui.threads.writes().is_empty(), "the refreshed recipient waits for the person's Send");
+    assert!(
+        refreshing.contains("Checking recipient before first send…"),
+        "{refreshing}"
+    );
+    ui.threads.start_context_loaded(
+        &read.item,
+        &read.key,
+        Ok(start_context_envelope(
+            "step-run/resolved",
+            "original:1:1",
+            "agent/deputy",
+            retired("agent/atlas"),
+            "snapshot/refreshed",
+        )),
+    );
+    let refreshed = capture(
+        &mut ui,
+        &inbox,
+        &dir,
+        "recipient-stale-refreshed-before-send",
+    );
+    assert!(
+        refreshed.contains("New discussion to agent/deputy"),
+        "{refreshed}"
+    );
+    assert!(
+        refreshed.contains("Who owns the calibration follow-up now?"),
+        "{refreshed}"
+    );
+    assert!(
+        ui.threads.writes().is_empty(),
+        "the refreshed recipient waits for the person's Send"
+    );
     println!("HARNESS recipient evidence: {}", dir.display());
 }
 
@@ -4138,15 +5098,30 @@ fn start_recipient_layout_evidence() {
 fn unassigned_and_retired_start_refusals_are_visible_distinct_and_never_send_or_loop() {
     let mut notices = Vec::new();
     for (code, message, expected) in [
-        ("thread-responsibility-unassigned", "no configured responsible agent", "configured"),
-        ("recipient-retired", "recipient retired", "recipient is retired"),
+        (
+            "thread-responsibility-unassigned",
+            "no configured responsible agent",
+            "configured",
+        ),
+        (
+            "recipient-retired",
+            "recipient retired",
+            "recipient is retired",
+        ),
     ] {
         let mut threads = observed_threads(ThreadState::Open);
         let item = "attention/system-notice";
-        threads.saved_origins.insert(item.into(), origin(
-            ThreadInterest::Inbox { source: "notice/system".into(), episode: "claim/opening".into() },
-            None, "System notice",
-        ));
+        threads.saved_origins.insert(
+            item.into(),
+            origin(
+                ThreadInterest::Inbox {
+                    source: "notice/system".into(),
+                    episode: "claim/opening".into(),
+                },
+                None,
+                "System notice",
+            ),
+        );
         let pane = Pane::Home(Some(item.into()));
         let mut texts = HashMap::new();
         assert!(threads.begin(&pane.key(), item, &mut texts));
@@ -4155,25 +5130,51 @@ fn unassigned_and_retired_start_refusals_are_visible_distinct_and_never_send_or_
             "api_version":fractal_client::API_VERSION, "error_version":"st3.client.error.v0",
             "request_id":"request/no-recipient", "code":code, "message":message,
             "retryable":false, "applied":"none", "details":{}
-        })).unwrap();
+        }))
+        .unwrap();
         let notice = start_context_error(ClientError::Api(
-            envelope.code.clone(), envelope.message.clone(), Box::new(envelope),
+            envelope.code.clone(),
+            envelope.message.clone(),
+            Box::new(envelope),
         ));
         assert!(notice.contains(expected), "{notice}");
         threads.start_context_loaded(&read.item, &read.key, Err(notice.clone()));
         let input = threads.start_input(item).unwrap();
-        texts.insert(input.key(), "Keep this message until there is a recipient.".into());
+        texts.insert(
+            input.key(),
+            "Keep this message until there is a recipient.".into(),
+        );
         for _ in 0..3 {
             threads.submit(&pane.key(), input.clone(), &mut texts);
             assert!(threads.writes().is_empty());
-            assert!(threads.take_start_context_reads().is_empty(), "no retry loop after a refusal");
-            assert!(threads.start_context(item).is_none(), "no invented recipient");
+            assert!(
+                threads.take_start_context_reads().is_empty(),
+                "no retry loop after a refusal"
+            );
+            assert!(
+                threads.start_context(item).is_none(),
+                "no invented recipient"
+            );
         }
-        let doc = threads.mount(&pane, 120, &edit::Cursor::default(), &super::super::demo::test_world(), &texts);
-        let visible = doc.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        let doc = threads.mount(
+            &pane,
+            120,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            &texts,
+        );
+        let visible = doc
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(visible.contains(&notice), "{visible}");
         assert!(!visible.contains("New discussion to "), "{visible}");
-        assert_eq!(texts[&input.key()], "Keep this message until there is a recipient.");
+        assert_eq!(
+            texts[&input.key()],
+            "Keep this message until there is a recipient."
+        );
         notices.push(notice);
     }
     assert_ne!(notices[0], notices[1]);
