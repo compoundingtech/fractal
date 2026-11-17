@@ -1,4 +1,5 @@
 #!/bin/sh
+# Manual callers must not package concurrently into the same output directory.
 set -eu
 cd "$(dirname "$0")"
 repo_root=$(cd ../../../.. && pwd)
@@ -44,8 +45,8 @@ for target in aarch64-apple-ios aarch64-apple-ios-sim; do
   # blake3 tracks CFLAGS but not Apple's deployment environment when reusing C objects.
   CFLAGS="${CFLAGS:-} $fabric_minimum_flag" "$toolchain/bin/cargo" build --manifest-path rust/Cargo.toml --release --locked --target "$target"
 done
-# Other native projects share this host. Never overlap their xcodebuild process.
-while pgrep -x xcodebuild >/dev/null; do sleep 10; done
+# Packaging only reads our libraries and headers and writes our XCFramework.
+# Admission control belongs to the caller, not unrelated host xcodebuild jobs.
 rm -rf ios/build/FractalFabricRust.xcframework
 xcodebuild -create-xcframework \
   -library rust/target/aarch64-apple-ios/release/libfractal_fabric_bridge.a -headers build/headers \
