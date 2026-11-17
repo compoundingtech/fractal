@@ -291,6 +291,9 @@ and [normalized conversation contract](conversation-normalization-design.md) pro
 
 ## Initial rollout
 
+Release note: client capability `threads-v1` version 3 advertises the unread-reminder
+contract (mark/clear actions, around-anchor timeline reads, and marked-unread discovery).
+
 Install the privacy reader release on all serving fleet members before enabling typed writes.
 The writer verifies the configured and active readers' privacy capability inside its transaction.
 Reader readiness version 3 includes causal metadata projection and its frontier revision fence;

@@ -5,6 +5,20 @@ import { intersectThreadBounds, type ThreadBounds } from './threadVisibility';
 type Measurable = Pick<View, 'measureInWindow'>;
 type ViewportRef = { readonly current: ScrollView | null };
 
+// Expanded bodies measure on real viewport changes, never from a summary/list row.
+const listeners = new WeakMap<ViewportRef, Set<() => void>>();
+export function threadViewportChanged(viewport: ViewportRef): void {
+  listeners.get(viewport)?.forEach(listener => listener());
+}
+export function watchThreadViewports(viewports: readonly ViewportRef[], changed: () => void): () => void {
+  for (const viewport of viewports) {
+    let watching = listeners.get(viewport);
+    if (!watching) { watching = new Set(); listeners.set(viewport, watching); }
+    watching.add(changed);
+  }
+  return () => { for (const viewport of viewports) listeners.get(viewport)?.delete(changed); };
+}
+
 const Viewports = createContext<readonly ViewportRef[]>([]);
 
 export function ThreadViewport({ viewport, children }: { viewport: ViewportRef; children: ReactNode }) {
