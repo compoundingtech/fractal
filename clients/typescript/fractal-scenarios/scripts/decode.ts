@@ -126,6 +126,14 @@ export const everyVariant = (world: World): AnySlice[] =>
  */
 export const FIRST_INSTANT_VARIANTS: ReadonlySet<string> = new Set(['huge'])
 
+/**
+ * Sample a decode clock from the anchor through 400 years later. Relative thread instants use
+ * nonnegative Unix milliseconds on the wire, so pre-epoch clocks are not valid decode probes.
+ * Rebasing itself stays affine: neither authored nor shifted invalid wire values are clamped.
+ */
+export const decodeNow = (random: number): number =>
+  ANCHOR_MS + Math.round(random * 400 * 365 * 86_400_000)
+
 export const decodeCatalog = (nows: readonly number[]): DecodeFailure[] => {
   const failures: DecodeFailure[] = []
   for (const [index, now] of nows.entries()) for (const { id } of catalog) {
@@ -196,7 +204,7 @@ export const decodeRecordings = (dir = RECORDINGS_DIR, nows: readonly number[] =
 }
 
 if (import.meta.main) {
-  const random = ANCHOR_MS + Math.round((Math.random() - 0.5) * 2 * 400 * 365 * 86_400_000)
+  const random = decodeNow(Math.random())
   const failures = [...decodeCatalog([ANCHOR_MS, random]), ...decodeFixtures(FIXTURES_DIR), ...decodeRecordings(RECORDINGS_DIR, [ANCHOR_MS, random])]
   for (const failure of failures) {
     console.error(`${failure.world}/${failure.slice}:${failure.variant} ${failure.pointer}\n  ${failure.message.split('\n').join('\n  ')}`)
