@@ -1362,6 +1362,8 @@ enum MissionViewCommand {
     },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
+    /// Inspect local selected rename evidence without exporting a portable bundle.
+    RenameProof(IdentityRenameProofArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
     /// Legacy: use `fractal apply FILE`; publish authored KDL after checking exec gates.
     ///
@@ -3081,6 +3083,8 @@ enum AgentsCommand {
     Rename(AgentRenameArgs),
     /// Change an agent's canonical ID, preserving its immutable identity and harness.
     RenameId(IdentityRenameArgs),
+    /// Inspect local selected rename evidence without exporting a portable bundle.
+    RenameProof(IdentityRenameProofArgs),
     /// Show one agent's current claim and its queued mission runs in order, or move a run.
     /// The show form is also available as `fractal missions queued AGENT`.
     Queue(AgentQueueArgs),
@@ -3109,6 +3113,18 @@ struct IdentityRenameArgs {
     expected_declaration: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: Option<String>,
+    /// Evaluate this exact rename request without writing claims or changing names.
+    #[arg(long)]
+    plan: bool,
+}
+
+#[derive(Args)]
+struct IdentityRenameProofArgs {
+    from: String,
+    to: String,
+    /// Require evidence for this exact planned request digest.
+    #[arg(long)]
+    request_digest: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3247,6 +3263,11 @@ async fn run_identity_rename(
         idempotency_key: args.idempotency_key.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
     };
     let client = generated_client(endpoint, None)?;
+    if args.plan {
+        let kind = if agent { fractal_client::IdentityKind::Agent } else { fractal_client::IdentityKind::Mission };
+        let plan = client.identity_rename_plan(kind, &request).await?;
+        return print_value(&plan, json_output);
+    }
     let receipt = if agent {
         client.agent_rename_id(&request).await?
     } else {
@@ -3258,6 +3279,18 @@ async fn run_identity_rename(
     println!("{} -> {} ({})", receipt.from, receipt.canonical_id, receipt.applied);
     println!("{} at frontier {}", receipt.replication.state, receipt.replication.frontier);
     Ok(())
+}
+
+async fn run_identity_rename_proof(
+    endpoint: &Endpoint,
+    args: IdentityRenameProofArgs,
+    agent: bool,
+    json_output: bool,
+) -> Result<()> {
+    let kind = if agent { fractal_client::IdentityKind::Agent } else { fractal_client::IdentityKind::Mission };
+    let client = generated_client(endpoint, None)?;
+    let proof = client.identity_rename_proof(kind, &args.from, &args.to, args.request_digest.as_deref()).await?;
+    print_value(&proof, json_output)
 }
 
 #[derive(Args)]
