@@ -119,7 +119,7 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
     expect(host.querySelector('textarea')).toBe(input)
     expect(input?.value).toBe(content)
     expect(input?.readOnly).toBe(true)
-    expect(host.querySelector<HTMLButtonElement>('button[aria-label="Send"]')?.disabled).toBe(true)
+    expect(host.querySelector('button[aria-label="Send"]')?.getAttribute('aria-disabled')).toBe('true')
     expect(button('Retry thread start')).toBeUndefined()
     await act(async () => loseFirst())
     await vi.waitFor(() => expect(button('Retry thread start')?.disabled, host.textContent ?? '').toBe(false))
