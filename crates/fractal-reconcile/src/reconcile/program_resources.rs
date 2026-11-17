@@ -327,6 +327,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let runtime_id = command_execution_id(&base, &command)?;
         let root = command_root(&record.roots, &base, &runtime_id)?;
         if root.is_none() {
+            // Keep the durable resource request pending, just like a queued seat start.
+            let Some(_launch_permit) = self.admit_incarnation_launch()? else {
+                return Ok(false);
+            };
             let environment = command_environment(
                 command.options.env,
                 engine.attempt_environment(&request.step, request.attempt)?,

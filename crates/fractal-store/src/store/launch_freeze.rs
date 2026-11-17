@@ -80,8 +80,25 @@ fn now() -> Result<u64, FractalError> {
         .map_err(internal)?.as_millis().try_into().map_err(internal)
 }
 
+fn dependency(origin: &str) -> String { format!("launch-freeze/{origin}") }
+
+fn changed_tx(transaction: &Transaction<'_>, origin: &str, freeze: &LaunchFreeze, decision: &str) -> Result<(), FractalError> {
+    insert_local_observation_tx(transaction, origin, &ClaimInput {
+        subject: dependency(origin), kind: "runtime.reconcile-decision".into(),
+        actor: Some(freeze.owner.clone()),
+        fields: BTreeMap::from([
+            ("key".into(), json!(freeze.id)),
+            ("decision".into(), json!(decision)),
+            ("reason".into(), json!(freeze.reason)),
+        ]),
+        evidence: Vec::new(), idempotency_key: None, expected_subject: None,
+    }, now_ms())?;
+    Ok(())
+}
+
 impl Store {
     pub fn launch_freeze(&self) -> Result<Option<LaunchFreeze>, FractalError> {
+        smallclaims::touched::note_read(|| dependency(self.origin()));
         self.readers.get().query_row(
             "SELECT id,owner,reason,expires_at_unix_ms FROM local_launch_freeze WHERE singleton=1 AND expires_at_unix_ms>?1",
             [now()?], |row| Ok(LaunchFreeze { id: row.get(0)?, owner: row.get(1)?, reason: row.get(2)?, expires_at_unix_ms: row.get(3)? }))
@@ -125,9 +142,13 @@ impl Store {
             return Err(FractalError::new("launch-freeze-producer-uncertain", "a detached launch producer remains unverified; no lease was armed"));
         }
         let freeze = LaunchFreeze { id: id.into(), owner: owner.into(), reason: reason.into(), expires_at_unix_ms: now()?.saturating_add(duration_ms) };
-        self.connection.write().execute(
+        let mut writer = self.connection.write();
+        let transaction = writer.transaction().map_err(internal)?;
+        transaction.execute(
             "INSERT OR REPLACE INTO local_launch_freeze(singleton,id,owner,reason,expires_at_unix_ms) VALUES(1,?1,?2,?3,?4)",
             rusqlite::params![freeze.id, freeze.owner, freeze.reason, freeze.expires_at_unix_ms]).map_err(internal)?;
+        changed_tx(&transaction, self.origin(), &freeze, "launch-freeze-set")?;
+        transaction.commit().map_err(internal)?;
         Ok(freeze)
     }
 
@@ -137,7 +158,11 @@ impl Store {
             if current.owner != owner || current.id != id {
                 return Err(FractalError::new("launch-freeze-owner", "launch freeze owner or id does not match"));
             }
-            self.connection.write().execute("DELETE FROM local_launch_freeze WHERE singleton=1 AND id=?1 AND owner=?2", rusqlite::params![id, owner]).map_err(internal)?;
+            let mut writer = self.connection.write();
+            let transaction = writer.transaction().map_err(internal)?;
+            transaction.execute("DELETE FROM local_launch_freeze WHERE singleton=1 AND id=?1 AND owner=?2", rusqlite::params![id, owner]).map_err(internal)?;
+            changed_tx(&transaction, self.origin(), &current, "launch-freeze-cleared")?;
+            transaction.commit().map_err(internal)?;
         }
         Ok(())
     }
