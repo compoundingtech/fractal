@@ -38,6 +38,8 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
   /// The asking agent (`agent/…`) whose conversation the card belongs to; the member resolves
   /// it to that agent's current session.
   public let conversationID: String?
+  /// Full request already carried by attention.list; no network is needed to open a detail.
+  public let snapshotContext: AttentionContext?
 
   public init(
     id: String, revision: String, kind: String, state: String, sourceID: String,
@@ -45,7 +47,7 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
     deadlineAt: Date?, defaultAnswerLabel: String?, actions: [String], promptAnswers: [String],
     request: RequestForm?, update: UpdateNote?, workDoneDefaults: WorkDoneAnswer?, url: URL,
     isUrgent: Bool = false, seenAt: Date? = nil, snoozedUntil: Date? = nil, conversationID: String? = nil,
-    requesterID: String? = nil
+    requesterID: String? = nil, snapshotContext: AttentionContext? = nil
   ) {
     self.id = id
     self.revision = revision
@@ -70,6 +72,7 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
     self.snoozedUntil = snoozedUntil
     self.conversationID = conversationID
     self.requesterID = requesterID
+    self.snapshotContext = snapshotContext
   }
 
   /// Fractal still lists a snoozed row; the tray hides it until its snooze ends.

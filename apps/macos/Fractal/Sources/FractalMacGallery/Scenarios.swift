@@ -21,7 +21,8 @@ struct Content {
   func record(
     _ id: String, title: String, detail: String = "", from: String, kind: String = "person-step",
     actions: [String] = ["work.done"], request: RequestForm? = nil, update: UpdateNote? = nil,
-    askedAgo: TimeInterval, deadlineIn: TimeInterval? = nil, urgent: Bool = false, snoozedFor: TimeInterval? = nil
+    askedAgo: TimeInterval, deadlineIn: TimeInterval? = nil, urgent: Bool = false, snoozedFor: TimeInterval? = nil,
+    snapshot: AttentionContext? = nil
   ) -> AttentionRecord {
     AttentionRecord(
       id: "attention/\(id)", revision: "claim/1", kind: kind, state: "open", sourceID: "step-run/\(id)",
@@ -30,7 +31,7 @@ struct Content {
       promptAnswers: [], request: request, update: update,
       workDoneDefaults: update == nil ? nil : WorkDoneAnswer(summary: "Read", answerID: "read"), url: url,
       isUrgent: urgent, snoozedUntil: snoozedFor.map { now + $0 },
-      conversationID: from.hasPrefix("agent/") ? from : nil, requesterID: from)
+      conversationID: from.hasPrefix("agent/") ? from : nil, requesterID: from, snapshotContext: snapshot)
   }
 
   var shipDecision: RequestForm {
