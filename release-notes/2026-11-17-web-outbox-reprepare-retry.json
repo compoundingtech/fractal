@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prepare deliberate chat and thread retries as fresh attempts after proven nonapplication",
+  "replay": {"status": "changed", "detail": "Supersedes the exact-packet retry policy in the earlier thread outbox note: explicit applied:none now permits a deliberate new attempt of the same immutable intent, with a fresh snapshot, action ID and idempotency key. Unknown delivery still never permits Retry or replay. There is no browser transport-level exact-packet resend path."},
+  "schema": {"status": "none", "detail": "Reuses the existing browser-local IndexedDB envelope and attachment spool; no browser or server schema version changes or migrations."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes or coordinated member upgrades."},
+  "compatibility": {"status": "changed", "detail": "Protected and visibly unprotected chat, thread Start and reply use the fresh-attempt retry policy. Thread retries revalidate the original recipient or open thread before selecting the fresh fence; failed validation retains the draft and recovery card with its reason. Chat binds each prepared message identity to the existing optimistic row before dispatch to avoid duplicate rows."},
+  "downtime": {"status": "none", "detail": "No server interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator actions, client re-pairing or configuration changes are required."},
+  "recovery": {"status": "changed", "detail": "New protected retry children require atomic acceptance against an undismissed not-applied predecessor; concurrent tabs converge on one child permit. Original intent, target and attachment bytes are preserved, while old terminal evidence remains intact. Unknown and discarded attempts do not acquire retry permission."}
+}
