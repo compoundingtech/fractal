@@ -796,6 +796,39 @@ pub(crate) mod retained_discussion {
         (status, serde_json::from_slice(&body).unwrap())
     }
 
+    async fn opening_post(state: &AppState, packet: ActionRequest) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let response = crate::api::router(state.clone()).oneshot(
+            axum::http::Request::builder().method("POST").uri("/v1/client/actions")
+                .header(LOCAL_PERSON_HEADER, PERSON).header("Content-Type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&packet).unwrap())).unwrap(),
+        ).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn assert_start_refusal_fixture(status: StatusCode, mut body: Value, name: &str) {
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+        body["request_id"] = json!("<request-id>");
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json")).unwrap();
+        assert_eq!(body, fixtures[name], "{name}");
+        assert!(body["details"].get("reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn thread_start_refusal_stale_snapshot_router_matches_fixture() {
+        let (_root, state, origin) = fixture(true);
+        let mut packet = request(&state, &origin, "thread/stale-start", "stale-start");
+        packet.fence.snapshot_id = "snapshot/another-host/0/digest".into();
+        let before = state.store.read_snapshot(Ok).unwrap();
+        let (status, body) = opening_post(&state, packet).await;
+        assert_start_refusal_fixture(status, body, "stale-snapshot");
+        assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+    }
+
     #[tokio::test]
     async fn thread_start_context_person_owned_typed_notice_has_no_implicit_agent() {
         for suppressed in [false, true] {
@@ -857,14 +890,12 @@ pub(crate) mod retained_discussion {
             let origin = InboxOrigin { source_id:source.into(), episode:opening.id };
             let before = state.store.read_snapshot(Ok).unwrap();
             let (status, refused) = opening_preview(&state, PERSON, &origin).await;
-            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-            assert_eq!(refused["message"], "this Inbox source has no configured responsible agent");
+            assert_start_refusal_fixture(status, refused.clone(), "recipient-unassigned");
             assert!(refused["value"]["start_recipient"].is_null());
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
-            let owner = ClientSession::local(Some(PERSON)).unwrap();
-            assert_eq!(start(&state, &owner, request(&state, &origin,
-                "thread/unconfigured-notice", "unconfigured-notice")).await.unwrap_err().status,
-                StatusCode::CONFLICT);
+            let (status, refused) = opening_post(&state, request(&state, &origin,
+                "thread/unconfigured-notice", "unconfigured-notice")).await;
+            assert_start_refusal_fixture(status, refused, "recipient-unassigned");
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
             let intent = crate::graph::parse_intent(
                 "version 2\nagent \"garden/seed\" { workspace \"/work/garden\"; harness \"omp\" {} }",
@@ -1008,14 +1039,13 @@ pub(crate) mod retained_discussion {
             if resolved { state.store.set_step_state(&step.subject, "completed", None).unwrap(); }
             let before = state.store.read_snapshot(Ok).unwrap();
             let (status, refused) = opening_preview(&state, PERSON, &origin).await;
-            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-            assert_eq!(refused["message"], "this Inbox source has no configured responsible agent");
+            assert_start_refusal_fixture(status, refused.clone(), "recipient-unassigned");
             assert!(refused["value"]["start_recipient"].is_null());
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+            let (status, refused) = opening_post(&state, request(&state, &origin,
+                "thread/unconfigured-system", "unconfigured-system")).await;
+            assert_start_refusal_fixture(status, refused, "recipient-unassigned");
             let owner = ClientSession::local(Some(PERSON)).unwrap();
-            assert_eq!(start(&state, &owner, request(&state, &origin,
-                "thread/unconfigured-system", "unconfigured-system")).await.unwrap_err().status,
-                StatusCode::CONFLICT);
             assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
             state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
             let before = state.store.read_snapshot(Ok).unwrap();
@@ -1134,12 +1164,10 @@ pub(crate) mod retained_discussion {
         state.store.configure_inbox_fallback_agent(None).unwrap();
         let before = state.store.read_snapshot(Ok).unwrap();
         let (status, refused) = opening_preview(&state, PERSON, &origin).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-        assert_eq!(refused["code"], "recipient-retired");
-        let owner = ClientSession::local(Some(PERSON)).unwrap();
-        let refused = start(&state, &owner,
-            request(&state, &origin, "thread/no-retirement-fallback", "no-retirement-fallback")).await.unwrap_err();
-        assert_eq!(refused.code, "recipient-retired");
+        assert_start_refusal_fixture(status, refused, "recipient-retired");
+        let (status, refused) = opening_post(&state,
+            request(&state, &origin, "thread/no-retirement-fallback", "no-retirement-fallback")).await;
+        assert_start_refusal_fixture(status, refused, "recipient-retired");
         assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
         assert_not_in_attention(&state);
     }

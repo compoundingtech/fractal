@@ -2075,6 +2075,7 @@ export type EpisodeState = ({
 
 export type ErrorCode = (
   "recipient-retired"
+  | "recipient-unassigned"
   | "agents-publication-row-too-large"
   | "identity-cycle"
   | "identity-occupied"

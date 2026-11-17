@@ -184,7 +184,13 @@ pub(super) async fn timeline(
 fn store_error(error: FractalError) -> ApiError {
     match error.code {
         "thread-unavailable" => ApiError::not_found("the thread is unavailable"),
-        "stale-thread-cursor" | "stale-thread-title" | "stale-subject" | "thread-responsibility-unassigned"
+        "thread-responsibility-unassigned" => ApiError {
+            status: StatusCode::CONFLICT,
+            code: "recipient-unassigned".into(),
+            message: error.message,
+            details: Box::default(),
+        },
+        "stale-thread-cursor" | "stale-thread-title" | "stale-subject"
         | "thread-state-unchanged" | "thread-ask-already-linked" => stale(&error.message),
         "thread-authority-expired" | "device-key-not-enrolled" => forbidden(&error.message),
         "thread-rollout-unavailable" => ApiError {
