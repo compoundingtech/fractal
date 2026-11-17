@@ -17,7 +17,8 @@
     "./schema": "./Schema.generated.ts",
     "./schema/read": "./ReadSchema.generated.ts",
     "./markdown": "./markdown-text.ts",
-    "./fabric": "./fabric.mjs"
+    "./fabric": "./fabric.mjs",
+    "./test-support": "./testSupport.ts"
   },
   "peerDependencies": {
     "effect": "4.1.0"

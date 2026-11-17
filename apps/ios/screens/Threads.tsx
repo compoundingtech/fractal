@@ -904,10 +904,10 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
     const title = renameTitle?.trim();
     if (!thread || !title || title === displayed?.title || !editable) return;
     setRenameTitle(undefined);
-    void runEdit(() => actions.editThread(thread, { kind: 'rename', title }), true);
+    void runEdit(() => actions.editThread(thread, { kind: 'rename', title }));
   };
   const changeState = () => {
-    if (thread) void runEdit(() => actions.editThread(thread, { kind: closed ? 'reopen' : 'close' }), true);
+    if (thread) void runEdit(() => actions.editThread(thread, { kind: closed ? 'reopen' : 'close' }));
   };
 
   const earlier = page.more && !page.issue ? <Button label="Earlier history" onPress={page.more} disabled={page.loading} /> : null;

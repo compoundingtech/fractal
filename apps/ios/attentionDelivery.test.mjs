@@ -3,14 +3,14 @@ import { test } from 'node:test';
 import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 import { submitAnswer } from './answerDelivery.ts';
 import { AttentionDeliveryTracker, retainDeliveryPrincipal } from './attentionDelivery.ts';
-test('unknown keeps exact request and blocks opposite answer until explicit same-key check', async () => {
+test('unknown keeps exactly one POST and blocks opposite answer after a read-only check', async () => {
  const tracker=new AttentionDeliveryTracker(), original={id:'action/original',idempotency_key:'original'},sent=[];let builds=0,connected=false,cleared=0;
  const ports={build:async()=>{builds++;return builds === 1 ? original : {...original, id:`action/rebuilt-${builds}`};},send:async request=>{sent.push(request);if(!connected)throw new TypeError('Network request failed');return {value:{kind:'action-result',status:'completed',action_id:request.id}};},stillWaiting:async()=>true,wait:async()=>{}};
  const result=await tracker.run('attention/item',async()=>tracker.accept('attention/item',await submitAnswer(ports),()=>{cleared++;}));
  assert.equal(result,false);assert.equal(tracker.snapshot().delivery['attention/item'],'unconfirmed');
  let opposite=0;assert.equal(await tracker.run('attention/item',async()=>{opposite++;return true;}),false);assert.equal(opposite,0);
  assert.equal(await tracker.check('attention/item'),false);assert.equal(builds,1);assert(sent.every(request=>request===original));assert.equal(cleared,0);
- connected=true;assert.equal(await tracker.check('attention/item'),true);assert.equal(cleared,1);assert.equal(tracker.snapshot().delivery['attention/item'],'confirmed');assert.equal(builds,1);assert(sent.every(request=>request===original));
+ connected=true;assert.equal(await tracker.check('attention/item'),false);assert.equal(cleared,0);assert.equal(tracker.snapshot().delivery['attention/item'],'unconfirmed');assert.equal(builds,1);assert.equal(sent.length,1);assert.equal(sent[0],original);
 });
 test('old connection cannot check retained writes or erase drafts after profile change', async()=>{
  const tracker=new AttentionDeliveryTracker();let check=0,cleared=0;
@@ -24,7 +24,7 @@ test('unclassified send errors cannot authorize a fresh opposite answer', async(
  assert.equal(outcome.how,'unconfirmed');await tracker.accept('attention/item',outcome);
  assert.equal(await tracker.run('attention/item',async()=>true),false);
  assert.equal(sent,1,'an unclassified local error is not automatically retried');
- await tracker.check('attention/item');assert.equal(built,1);assert.equal(sent,2);
+ await tracker.check('attention/item');assert.equal(built,1);assert.equal(sent,1);assert.equal(tracker.snapshot().delivery['attention/item'],'unconfirmed');
 });
 
 test('socket capability loss preserves identity while authenticated-client or principal changes replace it',()=>{
