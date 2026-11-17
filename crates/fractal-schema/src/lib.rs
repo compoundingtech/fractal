@@ -5368,6 +5368,7 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        current.claims.get_mut("operational.failure").unwrap().fields.remove("objective").unwrap();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
