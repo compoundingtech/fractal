@@ -443,7 +443,7 @@ fn series_privacy_claim(state: &AppState, subject: &str, kind: &str, mut fields:
     if kind == "message.sent" {
         fields["from"] = json!("agent/reviewer");
         fields["to"] = json!("person/owner");
-        // A real event field time, also usable by a declared count objective.
+        // message.sent has no time field; numeric content supplies a parseable count event time.
         fields["content"] = json!(series_privacy_now().to_string());
         fields["status"] = json!("sent");
     } else if kind.starts_with("custom.") {
@@ -452,7 +452,7 @@ fn series_privacy_claim(state: &AppState, subject: &str, kind: &str, mut fields:
     let input = ClaimInput {
         subject: subject.into(), kind: kind.into(), actor: Some("agent/reviewer".into()),
         fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
-        expected_subject: None, idempotency_key: Some(subject.into()),
+        expected_subject: None, idempotency_key: Some(format!("{subject}:{kind}")),
     };
     if input.fields.contains_key("thread_id") {
         crate::store::thread_delivery::append_reply(&state.store, &input,
@@ -513,6 +513,7 @@ async fn assert_series_privacy_counts(state: &AppState, selection: &str, claims:
 
 fn series_privacy_thread(state: &AppState) -> ClaimRecord {
     state.store.configure_thread_write_rollout([]);
+    // thread.created has no time field; use a numeric title and prove its indexed candidacy below.
     crate::store::thread_metadata::apply(
         &state.store, "person/owner", "thread/series-private", "series-private-thread",
         crate::store::thread_metadata::Edit::Create {
@@ -554,6 +555,12 @@ objective "privacy/messages" {
         series_privacy_claim(&state, "message/private-series", "message.sent", json!({"thread_id": "thread/series-private"})),
         series_privacy_claim(&state, "message/public-series", "message.sent", json!({})),
     ];
+    let times = claims.each_ref().map(|claim| claim.body["fields"]["content"].as_str().unwrap().parse::<u64>().unwrap());
+    let candidates = state.store.objective_series_claims(
+        &[("message.sent", Some("content"))], &["message.sent"], "message/",
+        *times.iter().min().unwrap(), times.iter().max().unwrap() + 1,
+    ).unwrap();
+    assert_eq!(candidates.len(), 2, "both message events must reach the visibility filter");
     assert_series_privacy_counts(&state, "objective=privacy%2Fmessages", &claims, 1).await;
 }
 
@@ -587,6 +594,19 @@ objective "privacy/{name}" {{
         series_privacy_claim(&state, "custom/acme/series-notice", "custom.attention.notice-created", json!({})),
         series_privacy_claim(&state, "custom/acme/series-public", "custom.acme.series-event", json!({})),
     ];
+    // Every thread subject and every reserved notice kind is private, so no public
+    // counterpart can match those declarations. Prove their raw candidates exist instead.
+    for (index, kind, field, prefix) in [
+        (0, "thread.created", "title", "thread/"),
+        (2, "custom.attention.notice-created", "at", "custom/"),
+    ] {
+        let value = &claims[index].body["fields"][field];
+        let at = value.as_u64().or_else(|| value.as_str().and_then(|text| text.parse().ok())).unwrap();
+        let candidates = state.store.objective_series_claims(
+            &[(kind, Some(field))], &[kind], prefix, at, at + 1,
+        ).unwrap();
+        assert_eq!(candidates.len(), 1, "{kind} must reach the visibility filter");
+    }
     assert_series_privacy_counts(&state, "objective=privacy%2Fthreads", &claims, 0).await;
     assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-subjects", &claims, 1).await;
     assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-kinds", &claims, 0).await;
@@ -622,7 +642,6 @@ objective "privacy/interval" {
     // A single bucket avoids timing assumptions: one public completion, never two.
     assert_series_privacy_counts(&state, "objective=privacy%2Finterval", &claims, 1).await;
 }
-
 
 #[tokio::test]
 async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
