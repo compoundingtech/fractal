@@ -33,7 +33,7 @@ type PostedStart = {
   parameters: { target_id: string; agent_id: string; origin: { source_id: string; episode: string }; title: string; content: string }
 }
 
-it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the original first send after %s changes and the Inbox remounts', async change => {
+it.each(['metadata', 'episode', 'closed', 'removed'] as const)('retains the unknown first send without replay after %s changes and the Inbox remounts', async change => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
   const base = fixture.capabilities
@@ -132,7 +132,9 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
     expect(writes).toHaveLength(1)
     expect(button('Retry thread start')).toBeUndefined()
     await act(async () => loseFirst())
-    await vi.waitFor(() => expect(button('Retry thread start')?.disabled, host.textContent ?? '').toBe(false))
+    await vi.waitFor(() => expect(host.textContent).toContain('Fractal has not confirmed this action. Do not send it again.'))
+    expect(button('Retry thread start')).toBeUndefined()
+    expect(registry.get(threads.pendingStarts!()).map(start => start.state)).toEqual(['unconfirmed'])
     expect(host.querySelectorAll('[data-thread-panel]')).toHaveLength(1)
 
     const replacement = decodeUnknownSync(Attention)({ ...raw, title: 'Current review title', conversation_id: 'agent/example/replacement',
@@ -145,18 +147,17 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
     if (change === 'metadata') await expand()
     if (change === 'removed' || change === 'closed') expect(host.querySelector('[data-alert-id="attention/review"]')).toBeNull()
     else expect(host.textContent).toContain('Current review title')
-    await vi.waitFor(() => expect(button('Retry thread start')?.disabled, host.textContent ?? '').toBe(false))
+    await vi.waitFor(() => expect(host.textContent).toContain('Fractal has not confirmed this action. Do not send it again.'))
+    expect(button('Retry thread start')).toBeUndefined()
     expect(host.textContent).toContain('Original review')
     expect(host.textContent).toContain('To original')
     expect(host.textContent).not.toContain(originalAgent)
     expect(host.textContent).toContain(content)
     expect(host.querySelectorAll('[aria-label="Thread recovery"]')).toHaveLength(change === 'metadata' ? 0 : 1)
-    await act(async () => button('Retry thread start')?.click())
-    await vi.waitFor(() => expect(writes).toHaveLength(2))
-    expect(writes[1]?.id).toBe(writes[0]?.id)
-    expect(writes[1]?.idempotency_key).toBe(writes[0]?.idempotency_key)
-    expect(writes[1]?.parameters).toEqual(writes[0]?.parameters)
-    await vi.waitFor(() => expect(host.querySelector('textarea')?.value).toBe(''))
+    expect(registry.get(threads.pendingStarts!()).map(start => start.state)).toEqual(['unconfirmed'])
+    await act(async () => { await threads.retryStart!(registry.get(threads.pendingStarts!())[0]!.draftKey) })
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.parameters.agent_id).toBe(originalAgent)
     expect(button('Retry thread start')).toBeUndefined()
     expect(host.querySelectorAll('[data-thread-panel]')).toHaveLength(1)
     expect(open).not.toHaveBeenCalled()
