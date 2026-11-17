@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show human names in thread drafts and Inbox references instead of graph identifiers",
+  "replay": {"status": "none", "detail": "No projection or replay changes."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes."},
+  "rules": {"status": "none", "detail": "Thread delivery and consistency rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Thread drafts use the existing sender display names, raised-by rows omit agent identifiers, and Inbox step references show the human title or plain words rather than generated mission identifiers."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "none", "detail": "No configuration changes required."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}

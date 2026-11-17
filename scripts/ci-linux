@@ -44,8 +44,8 @@ fleet_compat() {
     fleet::previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback \
     fleet::previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items \
     fleet::service_grants::previous_release_refuses_service_grants_from_a_candidate_issuer \
-    fleet::service_grants::previous_release_refuses_offline_seeded_service_grants_with_its_own_origin \
-    fleet::service_grants::previous_release_refuses_plugin_service_grants_on_same_database_rollback 2>&1 | tee "$logs/compat-result.log" || return
+    fleet::service_grants::previous_release_refuses_upgraded_own_origin_grant_store_and_candidate_recovers \
+    fleet::service_grants::previous_release_refuses_upgraded_plugin_grant_store_and_candidate_recovers 2>&1 | tee "$logs/compat-result.log" || return
   grep -q "test result: ok. 9 passed" "$logs/compat-result.log" || return
   # The GitHub plugin store beside an older poller, and that poller upgraded in place.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
@@ -92,6 +92,20 @@ fleet_compat() {
     fleet::previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid_delivery \
     fleet::previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back 2>&1 | tee "$logs/compat-marks-result.log" || return
   grep -q "test result: ok. 6 passed" "$logs/compat-marks-result.log" || return
+  # Keep each real storage-floor reader scoped to its exact selector. The baseline
+  # helper verifies both the pinned archive and ELF before either test can use it.
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::thread_storage_floor::published_version_20_reader_refuses_upgraded_state_without_losing_history_or_pairing \
+    2>&1 | tee "$logs/compat-thread-floor-v20-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-thread-floor-v20-result.log" || return
+  local thread_floor_v22
+  thread_floor_v22=$(env -u COMPAT_BASELINE_ARCHIVE python3 scripts/compat-baseline \
+    thread-floor-v22 "$RUNNER_TEMP/thread-floor-v22") || return
+  FRACTAL_COMPAT_BIN="$thread_floor_v22" ST3_COMPAT_BIN="$thread_floor_v22" \
+    cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::thread_storage_floor::version_22_reader_refuses_upgraded_state_without_losing_history_or_pairing \
+    2>&1 | tee "$logs/compat-thread-floor-v22-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/compat-thread-floor-v22-result.log" || return
   # linux-fleet-compat's note is signed from this stage (scripts/st-test): its cargo messages, and `passed` last, only when the whole
   # stage passed, so a report without it says the stage did not.
   if [ -n "${CI_FLEET_COMPAT_REPORT:-}" ]; then

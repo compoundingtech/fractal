@@ -49,5 +49,9 @@ export const sidebarArrangement = (ctx: FactoryContext, agents: readonly Agent[]
     kind: 'arrangement', owner: ctx.cast.people[0]!.id, deleted: false,
     revision: huge ? `arrangement-${1 + Math.ceil(agents.length / 256)}` : revision, updated_at: ctx.t.at(-60_000),
     body: { version: 1, name: { revision, value: 'Sidebar' }, folders, placements },
+    resolved: {
+      parents: Object.fromEntries(Object.entries(folders).map(([id, folder]) => [id, folder.position.value.parent])),
+      folders: Object.fromEntries(Object.entries(placements).map(([id, placement]) => [id, placement.value.folder])),
+    },
   }
 }

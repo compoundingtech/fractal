@@ -1,7 +1,8 @@
 import { createContext, useContext, useCallback, useRef, useSyncExternalStore, type ReactNode, type Ref } from 'react';
 import { quality, localDrafts } from './qualityNative';
 import * as Clipboard from 'expo-clipboard';
-import { ActionSheetIOS, Linking, Pressable, StyleSheet, Text, TextInput, View, useColorScheme, type StyleProp, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, TextInput, View, useColorScheme, type LayoutChangeEvent, type StyleProp, type TextInputProps, type TextLayoutEventData, type NativeSyntheticEvent, type TextStyle, type ViewStyle } from 'react-native';
+import { showOwnedActionSheet } from './ownedPresentationNative';
 import { fonts, inLight, lightTheme, systemColors, theme, type Theme } from './theme';
 import type { Run } from './markdown';
 import { markdown } from './markdown';
@@ -48,6 +49,11 @@ export function useTextAppearance() {
 export function SystemScreen({ children }: { children: ReactNode }) {
   const colors = useSystemColors();
   return <AppearanceScope.Provider value="system"><View style={{ flex: 1, backgroundColor: colors.background }}>{children}</View></AppearanceScope.Provider>;
+}
+
+/** System text and appearance for one part of a screen (an embedded thread group), without a view of its own. */
+export function SystemText({ children }: { children: ReactNode }) {
+  return <AppearanceScope.Provider value="system">{children}</AppearanceScope.Provider>;
 }
 
 /** The Fractal terminal UI's look in the system appearance: Mocha when dark, its light palette when light, switching live. */
@@ -114,9 +120,9 @@ export function DraftRecoveryNote() {
   return issue ? <Note tone="warning">{issue}</Note> : null;
 }
 
-export function Button({ label, onPress, disabled = false, color = theme.accent, style }: { label: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
+export function Button({ label, accessibilityLabel = label, hint, onPress, disabled = false, color = theme.accent, style }: { label: string; accessibilityLabel?: string; hint?: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
   const appearance = useTextAppearance();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={hint} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
     <T bold color={color}>{label}</T>
   </Pressable>;
 }
@@ -124,10 +130,13 @@ export function Button({ label, onPress, disabled = false, color = theme.accent,
 /** A text input. Prose (messages, titles, requests) gets iOS's autocorrect and spell check;
  *  a field for an identifier (a URL, a code, a path) turns them off. */
 export function Field(props: TextInputProps & { ref?: Ref<TextInput> }) {
-  const { palette } = useTextAppearance();
+  const { system, colors, palette } = useTextAppearance();
   const keyHandler = useRef(props.onKeyPress); keyHandler.current = props.onKeyPress;
   const onKeyPress = useCallback<NonNullable<TextInputProps['onKeyPress']>>(event => { quality.key(); keyHandler.current?.(event); }, []);
-  return <TextInput placeholderTextColor={palette.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, { color: palette.text, backgroundColor: palette.mantle, borderColor: palette.surface1 }, props.multiline && styles.fieldMultiline, props.style]} />;
+  const fieldLook = system
+    ? { color: colors.text, backgroundColor: colors.grouped, borderColor: colors.separator, fontFamily: 'System', fontSize: 17 }
+    : { color: palette.text, backgroundColor: palette.mantle, borderColor: palette.surface1 };
+  return <TextInput placeholderTextColor={system ? colors.secondary : palette.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, fieldLook, props.multiline && styles.fieldMultiline, props.style]} />;
 }
 
 /** A banner under the header: a problem to read, tap to dismiss when it can be. */
@@ -151,7 +160,7 @@ function runStyle(run: Run, base: TextStyle, palette: Theme): StyleProp<TextStyl
 }
 // A path in a message names a file on the writer's machine: say so, and offer to copy it.
 function showPath(path: string) {
-  ActionSheetIOS.showActionSheetWithOptions(
+  showOwnedActionSheet(
     { title: 'A file on the writer’s machine', message: path, options: ['Copy path', 'Cancel'], cancelButtonIndex: 1 },
     index => { if (index === 0) void Clipboard.setStringAsync(path); },
   );
@@ -167,22 +176,42 @@ function Runs({ runs, base, onDocument = openDocumentLink }: { runs: Run[]; base
   return <>{runs.map((run, index) => <Text key={index} style={appearance.system ? [base, run.style === 'bold' && { fontWeight: '600' }, run.style === 'code' && { fontFamily: fonts.regular }, run.style === 'link' && { color: appearance.colors.action, textDecorationLine: 'underline' }] : runStyle(run, base, appearance.palette)} onPress={run.document ? () => onDocument(run.document!) : run.url ? () => void Linking.openURL(run.url!) : run.path ? () => showPath(run.path!) : undefined}>{run.text}</Text>)}</>;
 }
 
-/** Markdown as the Fractal terminal UI renders a reply: peach headings, lavender bullets, code in a gutter. */
-export function Markdown({ text, color = theme.text, selectable = true, onDocument }: { text: string; color?: string; selectable?: boolean; onDocument?: DocumentOpener }) {
+/** One rendered text line, in the Markdown root's coordinates. */
+export type MarkdownLine = { readonly y: number; readonly height: number };
+
+/** Markdown as the Fractal terminal UI renders a reply: peach headings, lavender bullets, code in a gutter.
+ * onLines reports every laid-out text line, top to bottom. Spacers, rules and gutters are not lines;
+ * a block whose position or text layout is not yet known contributes none.
+ */
+export function Markdown({ text, color = theme.text, selectable = true, onDocument, onLines }: { text: string; color?: string; selectable?: boolean; onDocument?: DocumentOpener; onLines?: (lines: readonly MarkdownLine[]) => void }) {
   const appearance = useTextAppearance();
   const { palette } = appearance;
   const base: TextStyle = appearance.system ? { fontFamily: 'System', fontSize: 17, color: appearance.color(color) } : { ...styles.text, color: appearance.color(color) };
+  const geometry = useRef<{ text: string; blocks: Map<number, { y?: number; lines?: readonly MarkdownLine[] }> }>({ text, blocks: new Map() });
+  if (geometry.current.text !== text) geometry.current = { text, blocks: new Map() };
+  const report = () => onLines?.([...geometry.current.blocks.values()].flatMap(({ y, lines }) =>
+    y === undefined || !lines ? [] : lines.map(line => ({ y: y + line.y, height: line.height }))).sort((a, b) => a.y - b.y));
+  const update = (index: number, change: { y?: number; lines?: readonly MarkdownLine[] }) => {
+    geometry.current.blocks.set(index, { ...geometry.current.blocks.get(index), ...change });
+    report();
+  };
+  // Quote and item text sit at the top of their block row, so the row's y is the text's y.
+  const position = (index: number) => onLines ? { onLayout: (event: LayoutChangeEvent) => update(index, { y: event.nativeEvent.layout.y }) } : {};
+  const lines = (index: number) => onLines ? { onTextLayout: (event: NativeSyntheticEvent<TextLayoutEventData>) => update(index, {
+    lines: event.nativeEvent.lines.filter(line => line.height > 0).map(line => ({ y: line.y, height: line.height })),
+  }) } : {};
+  const textBlock = (index: number) => ({ ...position(index), ...lines(index) });
   return <View>{markdown(text).map((block, index) => {
     switch (block.kind) {
       case 'blank': return <View key={index} style={{ height: LINE / 2 }} />;
-      case 'heading': return <Text key={index} style={[base, appearance.system ? { fontWeight: '600', color: appearance.color(theme.peach) } : [styles.bold, { color: palette.peach }, block.level === 1 && { textDecorationLine: 'underline' }]]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? { ...base, fontWeight: '600' } : { ...base, ...styles.bold, color: palette.peach }} /></Text>;
+      case 'heading': return <Text key={index} {...textBlock(index)} style={[base, appearance.system ? { fontWeight: '600', color: appearance.color(theme.peach) } : [styles.bold, { color: palette.peach }, block.level === 1 && { textDecorationLine: 'underline' }]]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? { ...base, fontWeight: '600' } : { ...base, ...styles.bold, color: palette.peach }} /></Text>;
       case 'rule': return <View key={index} style={[styles.mdRule, { backgroundColor: palette.surface2 }]} />;
-      case 'quote': return <View key={index} style={[styles.quote, { borderLeftColor: palette.surface2 }]}><Text style={[base, appearance.system ? { color: appearance.colors.secondary, fontStyle: 'italic' } : { color: palette.subtext0, fontFamily: fonts.italic }]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? base : { ...base, color: palette.subtext0, fontFamily: fonts.italic }} /></Text></View>;
-      case 'item': return <View key={index} style={[styles.item, { paddingLeft: block.indent * 7 }]}><Text style={[base, { color: appearance.color(theme.lavender) }]}>{block.marker}</Text><Text style={[base, styles.itemText]}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text></View>;
-      case 'fence': return <Text key={index} style={[base, { color: appearance.color(theme.overlay0) }]}>{block.text}</Text>;
-      case 'code': return <Text key={index} selectable={selectable} style={[base, { fontFamily: fonts.regular, color: appearance.color(theme.subtext1), paddingLeft: 14 }]}>{block.text || ' '}</Text>;
-      case 'table': return <Text key={index} style={[base, !appearance.system && { color: palette.subtext0 }]}>{block.text}</Text>;
-      case 'text': return <Text key={index} selectable={selectable} style={base}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text>;
+      case 'quote': return <View key={index} {...position(index)} style={[styles.quote, { borderLeftColor: palette.surface2 }]}><Text {...lines(index)} style={[base, appearance.system ? { color: appearance.colors.secondary, fontStyle: 'italic' } : { color: palette.subtext0, fontFamily: fonts.italic }]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? base : { ...base, color: palette.subtext0, fontFamily: fonts.italic }} /></Text></View>;
+      case 'item': return <View key={index} {...position(index)} style={[styles.item, { paddingLeft: block.indent * 7 }]}><Text style={[base, { color: appearance.color(theme.lavender) }]}>{block.marker}</Text><Text {...lines(index)} style={[base, styles.itemText]}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text></View>;
+      case 'fence': return <Text key={index} {...textBlock(index)} style={[base, { color: appearance.color(theme.overlay0) }]}>{block.text}</Text>;
+      case 'code': return <Text key={index} {...textBlock(index)} selectable={selectable} style={[base, { fontFamily: fonts.regular, color: appearance.color(theme.subtext1), paddingLeft: 14 }]}>{block.text || ' '}</Text>;
+      case 'table': return <Text key={index} {...textBlock(index)} style={[base, !appearance.system && { color: palette.subtext0 }]}>{block.text}</Text>;
+      case 'text': return <Text key={index} {...textBlock(index)} selectable={selectable} style={base}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text>;
     }
   })}</View>;
 }
@@ -203,7 +232,7 @@ export const styles = StyleSheet.create({
   legend: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, paddingVertical: 12, rowGap: 2 },
   legendEntry: { flexDirection: 'row', width: '33%' },
   note: { paddingHorizontal: 12, paddingVertical: 6 },
-  button: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4, backgroundColor: theme.surface0, marginTop: 8 },
+  button: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4, backgroundColor: theme.surface0, marginTop: 8 },
   disabled: { opacity: 0.4 },
   field: { fontFamily: fonts.regular, fontSize: SIZE, color: theme.text, backgroundColor: theme.mantle, borderColor: theme.surface1, borderWidth: StyleSheet.hairlineWidth * 2, borderRadius: 4, paddingHorizontal: 10, paddingVertical: 8, marginTop: 8 },
   fieldMultiline: { minHeight: 88, textAlignVertical: 'top' },

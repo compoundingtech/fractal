@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -76,9 +76,77 @@ describe('public changelog build gate', () => {
       .rejects.toThrow('Public build leaked private changelog entry 2000-01-01-synthetic-private-control')
   })
 
-  it('fails when a private changelog module enters the public graph', async () => {
+  it('fails when a private registry module enters the public graph', async () => {
+    const registry = privateRegistry()
+    await expect(buildPublic(`import { changelogDeployment as leaked } from ${JSON.stringify(registry)}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('fails when a private entry file enters the public graph', async () => {
     const registry = privateRegistry()
     await expect(buildPublic(`import leaked from ${JSON.stringify(join(root, 'private/.changelog', syntheticFile))}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('protects sibling private files when the registry file is a symlink to another directory', async () => {
+    const registry = privateRegistry()
+    const targetDirectory = join(root, 'registry-target')
+    writeRegistry(targetDirectory, `...publicSources, { file: '${syntheticFile}', source: synthetic, visibility: 'private' }`,
+      `import { changelogSources as publicSources } from ${JSON.stringify(publicRegistry)}\nexport const changelogDeployment = 'live'\n`)
+    rmSync(registry)
+    symlinkSync(join(targetDirectory, 'mod.ts'), registry)
+    const sibling = join(root, 'private/.changelog', syntheticFile)
+    writeFileSync(sibling, `export default ${JSON.stringify(synthetic)}\nexport const neutral = 'fixture'\n`)
+    await expect(buildPublic(`import { neutral } from ${JSON.stringify(sibling)}\nglobalThis.leak = neutral`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('rejects a neutral registry export through a registry-file symlink outside the private directory', async () => {
+    const registry = privateRegistry()
+    const targetDirectory = join(root, 'registry-target')
+    writeRegistry(targetDirectory, `...publicSources, { file: '${syntheticFile}', source: synthetic, visibility: 'private' }`,
+      `import { changelogSources as publicSources } from ${JSON.stringify(publicRegistry)}\nexport const changelogDeployment = 'live'\nexport const neutral = 'synthetic-neutral-export'\n`)
+    rmSync(registry)
+    symlinkSync(join(targetDirectory, 'mod.ts'), registry)
+    await expect(buildPublic(`import { neutral } from ${JSON.stringify(join(targetDirectory, 'mod.ts'))}\nglobalThis.leak = neutral`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('permits a neutral module in a neighbouring directory of a registry-file symlink target', async () => {
+    const registry = privateRegistry()
+    const targetDirectory = join(root, 'registry-target')
+    writeRegistry(targetDirectory, `...publicSources, { file: '${syntheticFile}', source: synthetic, visibility: 'private' }`,
+      `import { changelogSources as publicSources } from ${JSON.stringify(publicRegistry)}\nexport const changelogDeployment = 'live'\n`)
+    rmSync(registry)
+    symlinkSync(join(targetDirectory, 'mod.ts'), registry)
+    const neighbour = `${targetDirectory}-public`
+    mkdirSync(neighbour)
+    writeFileSync(join(neighbour, 'mod.ts'), "export const neutral = 'synthetic-public-neighbour'\n")
+    await expect(buildPublic(`import { neutral } from ${JSON.stringify(join(neighbour, 'mod.ts'))}\nglobalThis.allowed = neutral`, { public: publicRegistry, private: registry }))
+      .resolves.toContain('synthetic-public-neighbour')
+  })
+
+  it('uses native on-disk casing for a differently cased private registry path (requires a case-insensitive filesystem)', async ({ skip }) => {
+    privateRegistry()
+    const registry = join(root, 'PRIVATE/.changelog/mod.ts')
+    if (!existsSync(registry)) {
+      skip('Case-insensitive filesystem required; this filesystem treats PRIVATE and private as different paths')
+      return
+    }
+    const sibling = join(root, 'private/.changelog', syntheticFile)
+    writeFileSync(sibling, `export default ${JSON.stringify(synthetic)}\nexport const neutral = 'fixture'\n`)
+    await expect(buildPublic(`import { neutral } from ${JSON.stringify(sibling)}\nglobalThis.leak = neutral`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('rejects a neutral private export through a symlinked registry even when entry text is tree-shaken', async () => {
+    privateRegistry()
+    const alias = join(root, 'private-link')
+    symlinkSync(join(root, 'private'), alias, 'dir')
+    const registry = join(alias, '.changelog/mod.ts')
+    // Only the neutral deployment string reaches output. The private module
+    // graph itself must fail; the separate entry-text test cannot cover this.
+    await expect(buildPublic(`import { changelogDeployment as leaked } from ${JSON.stringify(registry)}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
       .rejects.toThrow('Public build leaked private changelog modules')
   })
 

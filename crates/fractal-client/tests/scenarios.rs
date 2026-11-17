@@ -140,6 +140,96 @@ fn scenarios_rebase_accepts_lowercase_rfc3339_separators() {
     assert_eq!(input["at"], "2030-01-01T11:59:01.750Z");
 }
 
+fn topic_thread_slice() -> scenarios::Slice {
+    let mut slice = scenarios::load_slice(fixtures().join("empty/attention.json")).unwrap();
+    slice.state["topic_threads"] = serde_json::json!([{
+        "origin_attention_id": "attention/scenario-fleet-mid-refactor-worker-typecheck",
+        "summary": {
+            "id": "thread/scenario-fixture",
+            "agent_id": "agent/example/atlas/builder",
+            "title": "Fixture/preliminary thread",
+            "title_revision": "title-1",
+            "revision": "thread-2",
+            "state": "closed"
+        },
+        "events": [
+            {
+                "kind": "thread.closed",
+                "id": "event/scenario-closed",
+                "actor_id": "person/robin",
+                "accepted_at_unix_ms": 1000
+            },
+            {
+                "kind": "message",
+                "id": "event/scenario-message",
+                "actor_id": "agent/example/atlas/builder",
+                "accepted_at_unix_ms": 2000,
+                "content": "Fixture/preliminary message before closure.",
+                "thread_quote_id": null
+            }
+        ],
+        "read_only": true
+    }]);
+    slice
+}
+
+#[test]
+fn scenarios_topic_threads_decode_typed_values_in_declared_order() {
+    let slice = topic_thread_slice();
+    assert_eq!(slice.decode, DecodeMode::Strict);
+    let decoded = slice.decode().unwrap();
+    let values: Vec<_> = decoded.iter()
+        .filter(|value| value.pointer.starts_with("/state/topic_threads/")).collect();
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0].pointer, "/state/topic_threads/0/summary");
+    let WireValue::ThreadSummary(summary) = &values[0].value else { panic!("expected typed thread summary") };
+    assert_eq!(summary.id, "thread/scenario-fixture");
+    assert_eq!(serde_json::to_value(summary).unwrap(), slice.state["topic_threads"][0]["summary"]);
+    for (index, value) in values[1..].iter().enumerate() {
+        assert_eq!(value.pointer, format!("/state/topic_threads/0/events/{index}"));
+        let WireValue::ThreadTimelineEvent(event) = &value.value else { panic!("expected typed thread event") };
+        assert_eq!(serde_json::to_value(event).unwrap(), slice.state["topic_threads"][0]["events"][index]);
+    }
+}
+
+#[test]
+fn scenarios_topic_threads_strict_errors_identify_the_wire_pointer() {
+    for (pointer, field, invalid) in [
+        ("/state/topic_threads/0/summary", "state", serde_json::json!("future-state")),
+        ("/state/topic_threads/0/summary", "unexpected", serde_json::json!(true)),
+        ("/state/topic_threads/0/events/0", "kind", serde_json::json!("thread.future")),
+        ("/state/topic_threads/0/events/0", "unexpected", serde_json::json!(true)),
+        ("/state/topic_threads/0/events/1", "content", serde_json::json!(42)),
+    ] {
+        let mut slice = topic_thread_slice();
+        slice.state.pointer_mut(pointer.strip_prefix("/state").unwrap()).unwrap()[field] = invalid;
+        let error = slice.decode().unwrap_err().to_string();
+        assert!(error.contains(pointer), "{error}");
+    }
+    for (pointer, invalid) in [
+        ("/topic_threads", serde_json::json!({})),
+        ("/topic_threads/0/events", Value::Null),
+    ] {
+        let mut slice = topic_thread_slice();
+        *slice.state.pointer_mut(pointer).unwrap() = invalid;
+        let error = format!("{:#}", slice.decode().unwrap_err());
+        assert!(error.contains(&format!("/state{pointer}")), "{error}");
+    }
+}
+
+#[test]
+fn scenarios_topic_threads_remain_optional() {
+    let mut slice = topic_thread_slice();
+    slice.state.as_object_mut().unwrap().remove("topic_threads");
+    let without = slice.decode().unwrap();
+    slice.state["topic_threads"] = serde_json::json!([]);
+    let empty = slice.decode().unwrap();
+    assert_eq!(
+        without.iter().map(|value| &value.pointer).collect::<Vec<_>>(),
+        empty.iter().map(|value| &value.pointer).collect::<Vec<_>>(),
+    );
+}
+
 #[test]
 fn scenarios_wire_definition_registry_matches_the_kit() {
     let source = fs::read_to_string(
