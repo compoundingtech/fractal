@@ -179,7 +179,12 @@ function visiblePreview(h, panel) {
 /** Production startThread signing fields and generated HTTP serialization over test ports. */
 function signedStartTransport(h) {
   const signed = [], posts = [];
+  // Same canonical capabilities response used by fractal-client/contract.test.cjs.
+  const capabilities = JSON.parse(readFileSync(new URL('../../docs/st3/client-v0/fixtures/capabilities.json', import.meta.url), 'utf8'));
   const client = new FractalClient({ baseUrl: 'https://fixture.example', fetchImpl: async (url, init) => {
+    if (String(url).endsWith('/capabilities')) {
+      return new Response(JSON.stringify(capabilities), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
     const body = JSON.parse(init.body);
     posts.push({ url: String(url), method: init.method, body });
     /** @type {import('../../clients/typescript/fractal-client').EnvelopeOf<import('../../clients/typescript/fractal-client').ActionResult>} */
