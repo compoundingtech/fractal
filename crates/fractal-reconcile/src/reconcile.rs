@@ -581,6 +581,12 @@ pub trait RuntimeControl: Send + Sync + 'static {
         guard()?;
         self.start(member)
     }
+    /// Allocate the actual native launch without releasing its user command. The
+    /// caller owns registration and must retire the exact runtime on refusal.
+    fn start_held(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<Option<Box<dyn fractal_runtime::LaunchRelease>>> {
+        self.start_guarded(member, guard)?;
+        Ok(None)
+    }
     /// A finite resource grant must never silently fall back to an ordinary detached start.
     fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
         anyhow::bail!("runtime does not support finite resource memberships")
@@ -694,6 +700,7 @@ pub trait RuntimeControl: Send + Sync + 'static {
 pub struct NativeRuntime {
     pty: fractal_runtime::PtyRuntime,
     exec: fractal_runtime::ExecRuntime,
+    launch_gate_root: PathBuf,
     /// Goes first on every member's PATH so its `git` and `gh` calls are recorded.
     recorder: Option<PathBuf>,
 }
@@ -708,6 +715,7 @@ impl NativeRuntime {
             )
             .with_binary(pty_binary.to_string_lossy()),
             exec: fractal_runtime::ExecRuntime::new(state_dir.join("exec"), state_dir.join("logs")),
+            launch_gate_root: state_dir.join("launch-gates"),
             recorder: None,
         }
     }
@@ -761,7 +769,10 @@ fn member_environment_from(
             crate::environment::remove_aliases(&mut inherited, name);
         }
     }
+    crate::environment::remove_aliases(&mut inherited, "ST3_INCARNATION");
     let mut environment = crate::environment::overlay(inherited, declared, executable)?;
+    // Incarnation is runtime authority, never an inherited or declared launch input.
+    crate::environment::remove_aliases(&mut environment, "ST3_INCARNATION");
     record_member_commands(&mut environment, recorder)?;
     Ok(environment)
 }
@@ -793,15 +804,15 @@ fn record_member_commands(
     Ok(())
 }
 
-fn observed_pty_status(observation: &fractal_runtime::PtyObservation) -> String {
+fn observed_pty_status(observation: &fractal_runtime::PtyObservation) -> &str {
     if observation.status == "running"
         && observation
             .pid
             .is_some_and(|pid| !local_process_is_alive(pid))
     {
-        return "vanished".into();
+        return "vanished";
     }
-    observation.status.clone()
+    &observation.status
 }
 
 #[cfg(unix)]
@@ -819,19 +830,32 @@ fn local_process_is_alive(_pid: u32) -> bool {
 }
 
 impl NativeRuntime {
-    fn snapshot_pty_registry(&self, include_provenance: bool) -> Result<PtyRegistrySnapshot> {
+    fn launch_is_held(&self, operation: Option<&str>) -> Result<bool> {
+        operation.map(|operation| self.launch_gate_root.join(operation).try_exists())
+            .transpose().map(|held| held.unwrap_or(false)).map_err(Into::into)
+    }
+    fn snapshot_pty_registry(&self, include_provenance: bool, physical_start: bool) -> Result<PtyRegistrySnapshot> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
         self.pty()?.protect_servers(&observations)?;
         let mut start_operations = HashMap::new();
         let observations = observations
             .into_iter()
-            .map(|item| {
+            .map(|item| -> Result<_> {
                 let incarnation_id = match (&item.pid, &item.created_at) {
                     (Some(pid), Some(created)) => Some(format!("{pid}:{created}")),
                     _ => None,
                 };
-                let status = observed_pty_status(&item);
+                // Ordinary observation cannot publish a held command around the
+                // launch writer fence. Only observe_start may inspect it as running.
+                let physical_status = observed_pty_status(&item);
+                let status = (if physical_status == "running" && !physical_start
+                    && self.launch_is_held(item.tags.get(start_jobs::OPERATION_TAG).map(String::as_str))?
+                {
+                    "starting"
+                } else {
+                    physical_status
+                }).to_owned();
                 if include_provenance
                     && let Some(incarnation) = &incarnation_id
                     && let Some(operation) = item.tags.get(start_jobs::OPERATION_TAG)
@@ -841,63 +865,30 @@ impl NativeRuntime {
                         (incarnation.clone(), operation.clone()),
                     );
                 }
-                RuntimeObservation {
+                Ok(RuntimeObservation {
                     runtime_id: item.name,
                     terminal: true,
                     status,
                     exit_code: item.exit_code,
                     incarnation_id,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok(PtyRegistrySnapshot { observations, start_operations })
     }
-}
-
-impl RuntimeControl for NativeRuntime {
-    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
-        Ok(self.snapshot_pty_registry(false)?.observations)
-    }
-
-    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
-        self.snapshot_pty_registry(true)
-    }
-
-    fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
-        self.pty()?.exit_evidence(runtime_id, incarnation)
-    }
-
-    fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (member, incarnation);
-            Ok(None)
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if member.terminal {
-                return self.pty()?.process_identity_if(&member.runtime_id, incarnation);
-            }
-            Ok(match self.exec.observe(&member.runtime_id)? {
-                Some(fractal_runtime::ExecObservation::Running(generation))
-                    if generation.generation_id == incarnation =>
-                {
-                    Some((generation.pid, generation.start_token))
-                }
-                _ => None,
-            })
-        }
-    }
-
-    fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
-        Ok(self
+    fn observe_native_exec(&self, runtime_id: &str, physical_start: bool) -> Result<Option<RuntimeObservation>> {
+        self
             .exec
             .observe(runtime_id)?
-            .map(|observation| match observation {
+            .map(|observation| Ok(match observation {
                 fractal_runtime::ExecObservation::Running(generation) => RuntimeObservation {
                     runtime_id: runtime_id.into(),
                     terminal: false,
-                    status: "running".into(),
+                    status: if !physical_start && self.launch_is_held(generation.start_operation.as_deref())? {
+                        "starting".into()
+                    } else {
+                        "running".into()
+                    },
                     exit_code: None,
                     incarnation_id: Some(generation.generation_id),
                 },
@@ -915,8 +906,76 @@ impl RuntimeControl for NativeRuntime {
                     exit_code: None,
                     incarnation_id: Some(reason),
                 },
-            }))
+            })).transpose()
     }
+}
+
+impl RuntimeControl for NativeRuntime {
+    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+        Ok(self.snapshot_pty_registry(false, false)?.observations)
+    }
+
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        self.snapshot_pty_registry(true, false)
+    }
+
+    fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
+        self.pty()?.exit_evidence(runtime_id, incarnation)
+    }
+    fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
+        if member.terminal {
+            return Ok(self.snapshot_pty_registry(false, true)?.observations.into_iter()
+                .find(|item| item.runtime_id == member.runtime_id));
+        }
+        self.observe_native_exec(&member.runtime_id, true)
+    }
+
+    fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (member, incarnation);
+            Ok(None)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if !member.one_shot {
+                return Ok(None);
+            }
+            let pid = if member.terminal {
+                self.pty()?.snapshot()?.into_iter().find(|item| {
+                    item.name == member.runtime_id && item.status == "running"
+                        && item.pid.zip(item.created_at.as_ref())
+                            .is_some_and(|(pid, created)| format!("{pid}:{created}") == incarnation)
+                }).and_then(|item| item.pid)
+            } else {
+                match self.exec.observe(&member.runtime_id)? {
+                    Some(fractal_runtime::ExecObservation::Running(generation))
+                        if generation.generation_id == incarnation => Some(generation.pid),
+                    _ => None,
+                }
+            };
+            pid.map(|pid| fractal_runtime::macos_process_identity(pid)
+                .map(|(_, token, _)| (pid, token))).transpose()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if member.terminal {
+                return self.pty()?.process_identity_if(&member.runtime_id, incarnation);
+            }
+            Ok(match self.exec.observe(&member.runtime_id)? {
+                Some(fractal_runtime::ExecObservation::Running(generation))
+                    if generation.generation_id == incarnation =>
+                {
+                    Some((generation.pid, generation.start_token))
+                }
+                _ => None,
+            })
+        }
+    }
+    fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
+        self.observe_native_exec(runtime_id, false)
+    }
+
 
     fn rollout_exited(&self, runtime_id: &str, terminal: bool, incarnation: &str) -> Result<bool> {
         if !terminal {
@@ -987,6 +1046,22 @@ impl RuntimeControl for NativeRuntime {
     }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, Some(guard))
+    }
+    fn start_held(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<Option<Box<dyn fractal_runtime::LaunchRelease>>> {
+        if !member.one_shot {
+            self.start_guarded(member, guard)?;
+            return Ok(None);
+        }
+        let operation = member.tags.get(start_jobs::OPERATION_TAG)
+            .context("held native launch lacks start operation")?;
+        let gate = fractal_runtime::NativeLaunchGate::prepare(&self.launch_gate_root, operation)?;
+        let mut held = member.clone();
+        let fractal_runtime::Launch::Argv(argv) = gate.wrap(&fractal_runtime::Launch::from(&member.launch)) else {
+            unreachable!("native launch gate always uses argv")
+        };
+        held.launch = crate::model::LaunchSpec::Argv(argv);
+        self.start_checked(&held, Some(guard))?;
+        Ok(Some(Box::new(gate)))
     }
     fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
@@ -8528,6 +8603,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 fields.insert("runtime_pid_start_token".into(), Value::String(token.to_string()));
             }
         }
+        let held = self.start_jobs.held.lock().unwrap_or_else(PoisonError::into_inner)
+            .contains_key(operation_id);
+        anyhow::ensure!(!held || fields.contains_key("runtime_pid_start_token"),
+            "held launch lacks operation-bound physical process identity");
         let succeeded = ClaimInput {
             subject: subject.subject.clone(),
             kind: "runtime.action.succeeded".into(),
@@ -8537,10 +8616,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        // Native drivers must bind before readiness can be established. Publish running
-        // authority at launch completion only for the physically observed incarnation
-        // owned by this start operation; readiness and restart completion remain separate.
-        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
+        // A held native command is physically allocated but cannot issue work until
+        // this exact operation's running authority commits. Readiness stays separate.
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some() || held) {
             self.runtime.observe_start(member)?.is_some_and(|observation| {
                 observation.status == "running"
                     && observation.incarnation_id.as_deref() == Some(incarnation)
@@ -8549,6 +8627,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             false
         };
+        anyhow::ensure!(!held || running, "held native launch is not the current running start operation");
         let mut starting = member_fields(
             member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
         );

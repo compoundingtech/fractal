@@ -555,6 +555,7 @@ mission "example/report" state="ready" {
     mod program_faults;
     mod program_children;
     mod native_retry;
+    mod one_shot_launch_fence;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
