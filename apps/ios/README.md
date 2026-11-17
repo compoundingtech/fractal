@@ -143,13 +143,14 @@ repository. The shared client owns restoration/CAS state transitions and packets
 This is a JS contract boundary only: delivery has **not** switched to a durable
 outbox, and the notice is not yet wired into the UI. No crash-safe sending is
 claimed. `expo-sqlite` 57.0.3 is now a direct dependency and Expo config plugin.
-The narrow `NSURLIsExcludedFromBackupKey` bridge with readback is still not built.
+The narrow `NSURLIsExcludedFromBackupKey` bridge/readback and private attachment
+spool are authored under `modules/fractal-outbox-files`, but not compiled/installed.
 Protected storage failures must reject acceptance and keep the draft, never fall
 back to legacy sending; that delivery integration remains outside this step.
 The binding contract tests retain immutable intent and private attachment references
 in `pending/preparing`, then persist `prepareOutboxRecord` with the exact packet and
 shared packet-derived identities in `pending/ready` before dispatch can be marked.
-Attachment bytes belong to the future iOS spool, not the serialized intent.
+Attachment bytes belong to the private iOS spool, not the serialized intent.
 Repository CAS must call `isAllowedOutboxTransition` inside the same transaction;
 revision equality alone is insufficient. Exact original authoritative timeline
 identity observations use the shared core; absence never proves nonapplication.
@@ -167,11 +168,17 @@ is fabricated. Unsupported schema versions fail closed instead of resetting stor
 `outboxSqliteNative.ts` supplies an Expo SQLite connection with serialized operations,
 `BEGIN IMMEDIATE`/commit/rollback, FULL synchronization and queued close. The path
 is `defaultDatabaseDirectory/fractal-outbox/outbox.sqlite` (app-private Documents
-on iOS), not a purgeable cache. Backup exclusion for this whole root, including
-journals and future spool files, belongs to step 3 and is **not established yet**.
-The factory is not connected to production sending. Expo prebuild/Pods regeneration
-and a rebuilt installed binary are still required; no generated native files were
-hand-edited. Node SQLite integration tests are not native binary/crash proof.
+on iOS), not a purgeable cache. Before SQLite opens, the optional native files
+module creates and excludes both this directory and its `spool` subdirectory from
+backup, then reads each flag back using fresh resource-value URLs. The JS gate
+requires both read-backs and the exact SQLite directory; missing module, mismatched
+path, false flag or opener failure raises `OutboxStorageProtectionError` with mode
+`unprotected-storage` and `keepDraft: true`, never legacy-send fallback. SQLite
+loads only after that gate so older installed binaries fail closed.
+The factory is not connected to production sending. Normal Expo local-module
+autolinking/prebuild/Pods and a rebuilt installed binary are still required; no
+generated native files were hand-edited. JS fake-bridge and Node SQLite tests do
+not establish native compilation, actual backup exclusion or installed crash proof.
 
 The core exports a reference repository but no reusable runnable contract suite.
 One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope
@@ -183,6 +190,20 @@ Retention/deletion is planned for step 4 or later: seven days for terminal conte
 and 30 days for minimal tombstones, retaining delivered content until exact timeline
 observation. Pending/unknown never automatically expire. No retention/delete worker
 or discard API has been implemented by the repository step.
+
+`acceptProtectedOutboxIntent` captures text/images, checks protected storage, hashes
+each attachment, and awaits immutable native file writes before committing the
+shared `pending/preparing` intent. That intent contains only SHA-256 names, private
+relative references and media metadata, never base64 bytes or expiring picker URLs.
+The native module verifies hashes, synchronizes a private temporary file, links it
+without overwriting the final hash name, and synchronizes the spool directory.
+An existing final file must pass digest verification; reads verify contents again.
+The bridge exposes no arbitrary path read/write or final-file delete method.
+Failed acceptance leaves the caller draft unchanged; completed orphan files are
+retained until the later retention implementation. Only unaccepted temporary files
+are removed during native writes. No upload/network action runs in this adapter.
+Actual iOS flag readback, directory synchronization and process-kill recovery still
+require the later native build/capture; no sudden-power-loss guarantee is claimed.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.
