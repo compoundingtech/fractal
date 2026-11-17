@@ -118,7 +118,7 @@ const sendUnprotected = async (
     try {
       const decoded = decodeParameters(retained ?? input.parameters)
       const source = retained ?? input.parameters
-      parameters = { ...source, tags: [...source.tags], attachments: [...decoded.attachments ?? []] }
+      parameters = { ...source, tags: [...source.tags ?? []], attachments: [...decoded.attachments ?? []] }
     }
     catch { return { _tag: 'Refused', reason: 'invalid', detail: 'The message does not match the supported send format.' } }
     const images = retained === undefined ? input.images ?? [] : []
