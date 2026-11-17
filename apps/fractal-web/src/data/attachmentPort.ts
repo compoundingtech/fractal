@@ -1,7 +1,7 @@
 import {
   ClientError, appliedAnswer, actionReceiptCheck, createOutboxRecord, expectedPreparedPacketIdentities,
-  observeOutbox, prepareMessageSendPacket, prepareOutboxRecord,
-  type Capabilities, type EnvelopeOf, type FractalClient, type OutboxRecord, type OutboxObservation, type PreparedPacket, type PreparedMessageSendPacket, type OutboxIntent,
+  prepareMessageSendPacket, prepareOutboxRecord,
+  type Capabilities, type EnvelopeOf, type FractalClient, type OutboxRecord, type PreparedPacket, type PreparedMessageSendPacket, type OutboxIntent,
 } from '@fractal/client'
 import type { ActionResult } from '@fractal/client/schema'
 import * as Native from '@fractal/client/schema/read'
@@ -13,6 +13,7 @@ import type { AttachmentPort, AttachmentSendRequest, ConversationPortResult } fr
 import { spoolAttachment, type IndexedDbOutbox } from './outbox/indexedDb.ts'
 import { OutboxIdentityUnavailable, sameScope, type SpoolInput } from './outbox/repository.ts'
 import { scopeFromCapabilities } from './outbox/scoped.ts'
+import { dispatchOutbox, OutboxScopeMismatch } from './outbox/delivery.ts'
 
 /** Scope selection is local; this callback must not make send-work network requests. */
 export interface ChatOutbox {
@@ -288,49 +289,20 @@ export const gatewayMessageSend = (
       catch { return preparationBlocked }
       currentRecord = prepared
     }
-    const dispatchScope = scopeFromCapabilities(await client.capabilities())
-    if (dispatchScope === undefined || !sameScope(repo.scope, dispatchScope)) return {
+    if (!('packet' in currentRecord) || currentRecord.packet.type !== 'message.send') return unconfirmed()
+    const outcome = await dispatchOutbox(client, repo, currentRecord, {
+      kind: 'message', actionId: currentRecord.packet.id, messageId: currentRecord.expectedIdentities[0],
+    }, Native.decodeUnknownSync(schema.ActionResult))
+    if (outcome.how === 'sent') return { _tag: 'Success', value: outcome.receipt }
+    if (outcome.how === 'unconfirmed') return unconfirmed()
+    const cause = outcome.error
+    return cause instanceof ClientError && cause.response.code === 'stale-fence'
+      ? { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
+      : conversationPortFailure(cause)
+  } catch (cause) {
+    if (cause instanceof OutboxScopeMismatch) return {
       _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and deployment to send this message.',
     }
-    // Only the transaction winner receives the single-use dispatch permission.
-    try { currentRecord = await repo.acquireDispatchPermit(key, currentRecord.revision) }
-    catch { return unconfirmed() }
-    if (!('packet' in currentRecord) || currentRecord.packet.type !== 'message.send') return unconfirmed()
-    const retained = currentRecord
-    const retainObservation = async (observation: OutboxObservation): Promise<OutboxRecord<PreparedPacket> | undefined> => {
-      let current: OutboxRecord<PreparedPacket> | undefined = retained
-      while (current !== undefined) {
-        const identity = scopeFromCapabilities(await client.capabilities())
-        if (identity === undefined || !sameScope(repo.scope, identity)) return undefined
-        const outcome = observeOutbox(current, observation)
-        if (outcome === current) return current
-        const written = await repo.compareAndSwapWritable(current.revision, outcome)
-        if (written._tag === 'written') return written.record
-        if (written._tag === 'not-writable') return undefined
-        current = await repo.read(key)
-      }
-      return undefined
-    }
-    try {
-      const response = await actionReceiptCheck({ kind: 'message', actionId: retained.packet.id, messageId: retained.expectedIdentities[0] })(
-        () => client.submitAction(retained.packet),
-      )
-      const receipt = Native.decodeUnknownSync(schema.ActionResult)(response.value)
-      if (response.value.status !== 'completed') return unconfirmed()
-      const outcome = await retainObservation({ kind: 'delivered', receipt: { ...response.value, status: 'completed' } })
-      if (outcome?.state !== 'delivered') return unconfirmed()
-      return { _tag: 'Success', value: receipt }
-    } catch (cause) {
-      const applied = appliedAnswer(cause)
-      let outcome: OutboxRecord<PreparedPacket> | undefined
-      try { outcome = await retainObservation({ kind: 'failure', applied }) }
-      catch { return unconfirmed() }
-      if (outcome?.state !== 'not-applied') return unconfirmed()
-      return cause instanceof ClientError && cause.response.code === 'stale-fence'
-        ? { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
-        : conversationPortFailure(cause)
-    }
-  } catch (cause) {
     return currentRecord.mayHaveDispatched ? unconfirmed() : conversationPortFailure(cause)
   }
 }

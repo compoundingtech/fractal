@@ -44,7 +44,8 @@ export type OutboxWriteResult =
   | { readonly _tag: 'not-writable' }
 export interface IndexedDbOutbox extends OutboxRepository<PreparedPacket> {
   readonly persistence: 'granted' | 'denied' | 'unsupported'
-  readonly accept: (record: OutboxPreparingRecord, spool?: readonly SpoolInput[], intentBytes?: Uint8Array) => Promise<boolean>
+  /** A retry child is accepted only while its predecessor is undismissed and proven not-applied. */
+  readonly accept: (record: OutboxPreparingRecord, spool?: readonly SpoolInput[], intentBytes?: Uint8Array, predecessor?: { readonly id: string; readonly revision: number }) => Promise<boolean>
   readonly acquireDispatchPermit: (id: string, revision: number) => Promise<OutboxRecord<PreparedPacket>>
   readonly compareAndSwapWritable: (revision: number, record: OutboxRecord<PreparedPacket>) => Promise<OutboxWriteResult>
   readonly readSpool: (id: string, hash: string) => Promise<Uint8Array | undefined>
@@ -225,10 +226,12 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
     const encoded = await Effect.runPromise(spoolAttachment(encodeBytes(record.packet)))
     return { packetBytes: Array.from(encoded.bytes), fingerprint: { version: 1, sha256: encoded.hash } }
   }
-  const accept: IndexedDbOutbox['accept'] = async (record, spool = [], intentBytes) => {
+  const accept: IndexedDbOutbox['accept'] = async (record, spool = [], intentBytes, predecessor) => {
     // Capture caller-owned inputs before the first asynchronous hashing operation.
     const accepted = decodeRecord(Schema.decodeUnknownSync(json)(encodeJson(record)))
     const ownedIntentBytes = intentBytes === undefined ? undefined : Array.from(intentBytes)
+    const previous = predecessor === undefined ? undefined : { ...predecessor }
+    if (previous !== undefined && accepted.id !== `${previous.id}/retry`) throw invalid('Retry child must use its predecessor identity.')
     const inputs = spool.map((item) => ({ hash: item.hash, bytes: new Uint8Array(item.bytes) }))
     if (accepted.state !== 'pending' || accepted.phase !== 'preparing' || accepted.revision !== 0 || accepted.mayHaveDispatched || accepted.ambiguous) throw invalid('New attempts must be pristine preparing records.')
     const owned: SpoolInput[] = []
@@ -241,16 +244,24 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
     const timestamp = now()
     const envelope: Envelope = { schemaVersion: 2, localAttemptId: accepted.id, scope, record: accepted, createdAt: timestamp, updatedAt: timestamp, timelineObserved: false, ...(ownedIntentBytes === undefined ? {} : { intentBytes: ownedIntentBytes }) }
     return run('readwrite', 'accept', (tx, done, fail) => {
-      const store = tx.objectStore(attemptsStore)
-      const request = store.get(accepted.id)
-      request.onsuccess = () => {
-        try {
-          if (request.result !== undefined) { done(false); return }
-          store.add(envelope)
-          for (const item of owned) tx.objectStore(spoolStore).add({ localAttemptId: accepted.id, hash: item.hash, bytes: item.bytes })
-          done(true)
-        } catch (cause) { fail(cause) }
+      const insert = () => {
+        const store = tx.objectStore(attemptsStore)
+        const request = store.get(accepted.id)
+        request.onsuccess = () => {
+          try {
+            if (request.result !== undefined) { done(false); return }
+            store.add(envelope)
+            for (const item of owned) tx.objectStore(spoolStore).add({ localAttemptId: accepted.id, hash: item.hash, bytes: item.bytes })
+            done(true)
+          } catch (cause) { fail(cause) }
+        }
       }
+      if (previous === undefined) { insert(); return }
+      get(tx, previous.id, (parent) => {
+        if (parent?.dismissed !== undefined || parent?.record?.state !== 'not-applied'
+          || parent.record.revision !== previous.revision) { done(false); return }
+        insert()
+      }, fail)
     })
   }
   const change = (id: string, revision: number, update: (record: OutboxRecord<PreparedPacket>) => OutboxRecord<PreparedPacket> | undefined, metadata?: PacketMetadata): Promise<OutboxWriteResult> => run('readwrite', 'compareAndSwap', (tx, done, fail) => {

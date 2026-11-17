@@ -1,4 +1,5 @@
 import * as Native from '@fractal/client/schema/read'
+import * as Write from '@fractal/client/schema'
 import { FractalClient } from '@fractal/client'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -693,4 +694,46 @@ it('keeps the connection sentence, without Fractal\'s words, when it refuses the
       _tag: 'Unavailable', reason: 'ungranted', detail: 'This connection has no access to threads.',
     }))
   } finally { view.dispose() }
+})
+
+it.each(['thread.start', 'thread.reply'] as const)('retries the exact %s packet only after explicit applied:none', async kind => {
+  const bodies: string[] = []
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
+    if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: {
+      ...base.value, transport: 'local-web', capabilities: [
+        ...base.value.capabilities,
+        { id: 'threads-v1', version: 3, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
+        { id: kind, version: 0, state: 'granted' },
+      ],
+    } })
+    const body = String(init?.body)
+    bodies.push(body)
+    const action = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(body))
+    if (action.type !== 'thread.start' && action.type !== 'thread.reply') throw new TypeError('Expected thread message')
+    if (bodies.length === 1) return Response.json({
+      api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refusal',
+      code: 'forbidden', message: 'Nothing applied.', retryable: false, applied: 'none', details: { applied: 'none' },
+    }, { status: 403 })
+    return Response.json({ ...base, value: {
+      kind: 'action-result', action_id: action.id, operation_id: 'operation/retried', status: 'completed',
+      affected_ids: [action.parameters.target_id, 'message/retried'], snapshot_id: base.snapshot.id,
+    } })
+  } })
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(client, registry)
+  const stop = registry.mount(source.access)
+  const parameters = { agent_id: agent, origin: { source_id: 'source/retry', episode: 'episode/original' }, title: 'Original title', content: 'Original content' }
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has(kind)).toBe(true))
+    const send = () => kind === 'thread.start' ? source.start('draft/retry', parameters) : source.reply({ target_id: id, content: parameters.content })
+    expect(await send()).toMatchObject({ _tag: 'Refused', explanation: 'Nothing applied.' })
+    if (kind === 'thread.start') {
+      expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
+      expect(await source.retryStart!('draft/retry')).toMatchObject({ _tag: 'Sent' })
+    } else expect(await send()).toMatchObject({ _tag: 'Sent' })
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toBe(bodies[0])
+    expect(registry.get(source.pendingStarts!())).toEqual([])
+  } finally { stop(); registry.dispose() }
 })

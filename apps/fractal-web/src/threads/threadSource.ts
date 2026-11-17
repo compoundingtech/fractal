@@ -1,4 +1,4 @@
-import { actionReceiptCheck, appliedAnswer, sendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
+import { actionReceiptCheck, sendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import type { RequestHistoryPage, ThreadStartContext, ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { ErrorEnvelope } from '@fractal/client/schema'
@@ -8,6 +8,8 @@ import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
+import { createScopedChatOutbox, type ScopedChatOutbox } from '../data/outbox/scoped.ts'
+import { createThreadOutboxSender, type ThreadOutboxInput } from '../data/outbox/threadSender.ts'
 import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
 import { readRequestHistoryPages, RequestHistoryPagingError } from './requestHistoryPages.ts'
 
@@ -55,7 +57,7 @@ type ThreadStartIntent = Readonly<Omit<ThreadStartParameters, 'target_id' | 'sig
 export interface RetainedThreadStart {
   readonly draftKey: string
   readonly targetId: string
-  readonly state: 'sending' | 'unconfirmed'
+  readonly state: 'sending' | 'unconfirmed' | 'not-applied'
   readonly parameters: ThreadStartIntent
 }
 
@@ -65,6 +67,7 @@ type ThreadAccess = {
   readonly upgradeRequired?: boolean
   readonly actions: ReadonlySet<string>
   readonly actor?: string
+  readonly protection?: 'durable' | 'unprotected'
   /** Fractal has not answered which thread operations this connection holds, because the path to it is lost: `read: false` is a default, not a refusal. */
   readonly unknown?: true
   /** The capabilities read completed and failed: a refused credential, or a broken answer (an HTTP error or one that does not decode). */
@@ -139,10 +142,11 @@ const logReadFailure = (message: string, error: unknown) => Effect.runSync(Effec
 }))
 const sameAccess = (a: ThreadAccess, b: ThreadAccess) => a.failure === undefined && b.failure === undefined
   && a.read === b.read && a.inboxOrigins === b.inboxOrigins && a.upgradeRequired === b.upgradeRequired
-  && a.unknown === b.unknown && a.actor === b.actor && a.actions.size === b.actions.size && [...b.actions].every(action => a.actions.has(action))
+  && a.unknown === b.unknown && a.actor === b.actor && a.protection === b.protection && a.actions.size === b.actions.size && [...b.actions].every(action => a.actions.has(action))
 
 /** `transportLive`, when given, re-reads access each time the gateway connection is live again, as grants do. */
-export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches, transportLive?: Atom.Atom<boolean>): ThreadSource {
+export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches, transportLive?: Atom.Atom<boolean>, outbox: ScopedChatOutbox = createScopedChatOutbox(client)): ThreadSource {
+  const sendThread = createThreadOutboxSender(client, outbox).send
   let observedAccess: ThreadAccess | undefined
   const access = Atom.make<ThreadAccess>(get => {
     // Retry (`reload`) reads access again too, so a failed capabilities read can recover.
@@ -151,8 +155,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     if (transportLive !== undefined && !get(transportLive) && observedAccess !== undefined) return observedAccess
     const abort = new AbortController()
     get.addFinalizer(() => abort.abort())
-    void client.capabilities({ signal: abort.signal }).then(({ value }) => {
-      const caps = Native.decodeUnknownSync(Native.Capabilities)(value)
+    void client.capabilities({ signal: abort.signal }).then(response => {
+      const caps = outbox.observe(response)
       const upgradeRequired = ([['threads-v1', threadProtocolVersion], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
       const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= threadProtocolVersion && capability.state === 'granted')
       const read = inboxOrigins && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')
@@ -162,7 +166,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        const answered = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor }
+        const answered = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor, protection: outbox.protection() }
         // An unchanged answer keeps its identity, so reading access again does not read every thread projection twice.
         if (observedAccess === undefined || !sameAccess(observedAccess, answered)) observedAccess = answered
         get.setSelf(observedAccess)
@@ -433,24 +437,25 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     readonly kind: ThreadActionKind
     readonly start?: ThreadStartIntent
     readonly startDraft?: ThreadDraft
+    readonly threadInput?: ThreadOutboxInput
+    deliveryState?: 'unconfirmed' | 'not-applied'
     run?: () => Promise<ThreadSendResult>
     retry?: BoundAction<Request>
     pending?: Promise<ThreadSendResult>
   }
   const attempts = new Map<string, Attempt>()
-  // Outbox identity is independent of presentation: all thread actions retain their original
-  // intent and transport after a lost receipt, just like ordinary conversation sends.
+  // Metadata changes retain their existing bound-action policy. Start/reply use the
+  // same durable delivery owner and core transitions as ordinary conversation sends.
   const deliver = (
     destination: string,
     fingerprint: string,
-    kind: ThreadActionKind,
+    kind: Exclude<ThreadActionKind, 'thread.start' | 'thread.reply'>,
     target: () => string,
     prepare: (attempt: Attempt) => {
       readonly expected: ActionReceiptExpectation
       readonly send: (request: Request) => ReturnType<FractalClient['threadReply']>
       readonly revisions?: Record<string, string>
     },
-    start?: ThreadStartIntent,
   ): Promise<ThreadSendResult> => {
     const reject = (detail: string): ThreadSendResult => ({ _tag: 'Refused', detail })
     const grant = registry.get(access)
@@ -461,13 +466,9 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     if (previous?.pending !== undefined) return previous.pending
     if (previous?.retry !== undefined) return Promise.resolve(reject('Fractal has not confirmed this action. Do not send it again.'))
     if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
-    const draft = start === undefined ? undefined : registry.get(drafts(destination))
-    const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor, kind,
-      ...(start === undefined ? {} : { start }),
-      ...(draft !== undefined && draft.content.trim() === start?.content && draft.quote === undefined ? { startDraft: draft } : {}),
-    }
+    const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor, kind }
     attempts.set(destination, attempt)
-    attempt.run = () => deliver(destination, fingerprint, kind, target, prepare, start)
+    attempt.run = () => deliver(destination, fingerprint, kind, target, prepare)
     attempt.pending = (async () => {
       try {
         const prepared = prepare(attempt)
@@ -476,8 +477,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           if (value.session_actor !== attempt.actor) throw new Error('The connected account changed. Return to the original account to retry this action.')
           if (!value.capabilities.some(capability => capability.id === kind && capability.state === 'granted')
             || ((kind === 'thread.mark-unread' || kind === 'thread.clear-unread')
-              && !['thread.mark-unread', 'thread.clear-unread'].every(id => value.capabilities.some(capability => capability.id === id && capability.state === 'granted')))
-            || ((kind === 'thread.start' || kind === 'thread.reply') && !canSendUnsignedThread(value))) {
+              && !['thread.mark-unread', 'thread.clear-unread'].every(id => value.capabilities.some(capability => capability.id === id && capability.state === 'granted')))) {
             throw new Error('This connection cannot perform that thread action.')
           }
           return { snapshot_id: snapshot.id, subject_revisions: prepared.revisions ?? {} }
@@ -503,13 +503,6 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         // Keep the daemon's refusal reason where available.
         const error = outcome.error
         if (error instanceof ClientError && error.status < 500) {
-          if (kind === 'thread.start' && start !== undefined && appliedAnswer(error) === 'none' && (
-            (error.status === 404 && error.response.code === 'not-found')
-            || (error.status === 409 && (error.response.code === 'stale-fence' || error.response.code === 'recipient-retired' || error.response.code === recipientUnassigned))
-          )) {
-            // The definitive refusal applied nothing. Re-read visibly; only a new explicit Send may use the new preview.
-            await reloadStartContext(start.origin.source_id, start.origin.episode)
-          }
           const explanation = error.response.message.trim()
           return { _tag: 'Refused', detail: refusedAction[kind], ...(explanation === '' ? {} : { explanation }) }
         }
@@ -527,16 +520,77 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   const send = (destination: string, parameters: Omit<ThreadStartParameters, 'target_id' | 'signature'> | Omit<ThreadReplyParameters, 'signature'>): Promise<ThreadSendResult> => {
     const intent = structuredClone(parameters)
     const kind = 'target_id' in intent ? 'thread.reply' : 'thread.start'
-    return deliver(destination, JSON.stringify(intent), kind,
-      () => 'target_id' in intent ? intent.target_id : `thread/${crypto.randomUUID()}`,
-      attempt => ({
-        expected: { kind: 'message', actionId: `action/${attempt.key}`, targetId: attempt.target },
-        send: request => 'target_id' in intent
-          ? client.threadReply({ ...request, parameters: intent })
-          : client.threadStart({ ...request, parameters: { ...intent, target_id: attempt.target } }),
-      }),
-      'target_id' in intent ? undefined : intent,
-    )
+    const fingerprint = JSON.stringify(intent)
+    const grant = registry.get(access)
+    const reject = (detail: string): ThreadSendResult => ({ _tag: 'Refused', detail })
+    let previous = attempts.get(destination)
+    if (previous !== undefined && previous.fingerprint !== fingerprint) {
+      if (previous.deliveryState !== 'not-applied') return Promise.resolve(reject('Fractal has not confirmed the previous action. Do not send it again.'))
+      previous = undefined
+    }
+    if (previous !== undefined && previous.actor !== grant.actor) return Promise.resolve(reject('Return to the original account to inspect or retry this thread action.'))
+    if (previous?.pending !== undefined) return previous.pending
+    if (previous?.deliveryState === 'unconfirmed') return Promise.resolve(reject('Fractal has not confirmed this action. Do not send it again.'))
+    if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
+    const key = previous?.key ?? crypto.randomUUID()
+    const input: ThreadOutboxInput = previous?.threadInput ?? ('target_id' in intent
+      ? { key, type: 'thread.reply', parameters: intent }
+      : { key, type: 'thread.start', parameters: { ...intent, target_id: `thread/${crypto.randomUUID()}` } })
+    const draft = input.type === 'thread.start' ? registry.get(drafts(destination)) : undefined
+    const attempt: Attempt = previous ?? {
+      fingerprint, key, target: input.parameters.target_id, actor: grant.actor, kind, threadInput: input,
+      ...('target_id' in intent ? {} : { start: intent }),
+      ...(draft !== undefined && draft.content.trim() === input.parameters.content && draft.quote === undefined ? { startDraft: draft } : {}),
+    }
+    attempts.set(destination, attempt)
+    attempt.run = () => send(destination, intent)
+    attempt.pending = (async (): Promise<ThreadSendResult> => {
+      try {
+        const outcome = await sendThread(input, {
+          expectedActor: attempt.actor,
+          ...(input.type === 'thread.start' ? {
+            beforeFirstDispatch: async () => {
+              await reloadStartContext(input.parameters.origin.source_id, input.parameters.origin.episode)
+              const preview = registry.get(readStartContext(input.parameters.origin.source_id)(input.parameters.origin.episode))
+              if (preview._tag !== 'Observed' || preview.value.start_recipient.agent_id !== input.parameters.agent_id) {
+                throw new Error('Review the current recipient before sending this saved thread. Nothing was sent.')
+              }
+            },
+          } : {}),
+        })
+        if (outcome.how === 'sent') {
+          attempts.delete(destination)
+          return { _tag: 'Sent', threadId: attempt.target }
+        }
+        if (outcome.how === 'unconfirmed') {
+          attempt.deliveryState = 'unconfirmed'
+          return reject('Fractal has not confirmed this action. Do not send it again.')
+        }
+        const error = outcome.error
+        if (outcome.how === 'not-applied') attempt.deliveryState = 'not-applied'
+        else attempts.delete(destination)
+        if (error instanceof ClientError && error.status < 500) {
+          if (input.type === 'thread.start' && outcome.how === 'not-applied' && (
+            (error.status === 404 && error.response.code === 'not-found')
+            || (error.status === 409 && (error.response.code === 'stale-fence' || error.response.code === 'recipient-retired' || error.response.code === recipientUnassigned))
+          )) {
+            // This proof permits a new explicit Send using the visibly refreshed recipient.
+            attempts.delete(destination)
+            await reloadStartContext(input.parameters.origin.source_id, input.parameters.origin.episode)
+          }
+          const explanation = error.response.message.trim()
+          return { _tag: 'Refused', detail: refusedAction[kind], ...(explanation === '' ? {} : { explanation }) }
+        }
+        return reject(error instanceof ClientError || error instanceof TypeError ? unreachableSend
+          : error instanceof Error ? error.message : 'Fractal could not perform this action.')
+      } finally {
+        delete attempt.pending
+        if (attempt.deliveryState === 'unconfirmed') deliveryChanged()
+        else invalidate()
+      }
+    })()
+    deliveryChanged()
+    return attempt.pending
   }
   const pageKey = (subject: string, cursor?: string) => cursor === undefined ? subject : `${subject}\n${cursor}`
   const refusal = (result: ThreadSendResult): ThreadRefusal | undefined => result._tag === 'Sent' ? undefined
@@ -586,7 +640,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       if (!grant.read) return []
       return [...attempts].flatMap(([draftKey, attempt]): RetainedThreadStart[] => {
         if (attempt.start === undefined || (sourceId !== undefined && attempt.start.origin.source_id !== sourceId) || attempt.actor !== grant.actor) return []
-        return [{ draftKey, targetId: attempt.target, state: attempt.pending === undefined ? 'unconfirmed' : 'sending',
+        return [{ draftKey, targetId: attempt.target, state: attempt.pending === undefined ? attempt.deliveryState ?? 'unconfirmed' : 'sending',
           parameters: structuredClone(attempt.start) }]
       })
     })),

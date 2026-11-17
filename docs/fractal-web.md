@@ -718,17 +718,30 @@ setup state: no responsible agent is configured. It offers no recipient,
 Start or Retry and does not loop refreshing the preview. No message matching
 or internal store error code determines this state. Other failed reads offer Retry.
 
-A signed Start is definitive only with explicit `applied: none` under the shared
-application-certainty interpreter; absent metadata is NOT proof. Unknown in either
-metadata location dominates none. A definitive `409 stale-fence`, `recipient-retired`,
-`recipient-unassigned` or recipient-mismatch 404 visibly re-reads the exact preview.
-The draft stays; a changed recipient needs a NEW explicit Send and a refused preview
-stays refused. The canonical unassigned golden carries none in both metadata locations.
-Without positive evidence (including bare golden stale-fence), retain the original signed packet, recipient, identities and retry key
-for explicit receipt recovery, even if the displayed preview changes. Never
-silently resend or retarget. Replies use the existing thread's stored
-participants, regardless of later routing policy. Storybook's
-`Fractal/App/Threads/Start recipient` covers every state.
+A Start or reply is definitively not applied only with explicit `applied: none` under
+the shared application-certainty interpreter; absent metadata is NOT proof. Unknown
+in either metadata location dominates none. A definitive `409 stale-fence`,
+`recipient-retired`, `recipient-unassigned` or recipient-mismatch 404 visibly re-reads
+the exact preview. The draft stays; a changed recipient needs a NEW explicit Send and
+a refused preview stays refused. The canonical unassigned golden carries none in both
+metadata locations. Other proven-unapplied sends allow an explicit Retry of the exact
+original prepared packet, never a fresh target or fence. Unknown retains its original
+packet, recipient and identities without a Retry or automatic replay.
+
+Start and reply share chat's issuer-scoped IndexedDB owner, dispatch permit and
+outcome-retention path. The immutable intent includes every Start parameter (including
+the allocated thread target and origin) or the full reply text/quote before any send
+network work. Preparation uses the core packet builders and a real snapshot exactly
+once; only the winning durable permit submits those bytes. Missing issuer identity is
+visibly unprotected; storage errors in protected mode never select that fallback.
+Restored never-dispatched Starts cannot dispatch without revalidating the original
+recipient through the exact canonical preview. Startup recovery remains discard-only:
+it does not automatically continue saved sends. Thread entries share chat's recovery
+list, including foreign-identity and damaged entries. Discard during an in-flight
+request settles unconfirmed without an outcome-retention loop.
+
+Replies use the existing thread's stored participants, regardless of later routing
+policy. Storybook's `Fractal/App/Threads/Start recipient` covers the recipient states.
 
 While a first send is pending, the draft remains visible and read-only with a
 `Sending…` status. Send is focusable but announced as disabled using

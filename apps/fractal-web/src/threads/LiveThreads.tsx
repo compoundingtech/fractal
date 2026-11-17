@@ -32,6 +32,8 @@ type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
 /** The same words the alert answer box uses for a device without control access. */
 const readOnlyThread = 'Read-only on this device. Reply from a device with control access.'
+/** The one sentence a send without a local outbox carries beside its composer. */
+const unprotectedSend = 'Unprotected: messages are not saved on this device before sending.'
 
 /** The host places the same embedded thread group in its conversation reading lane. */
 export function LiveAgentThreads({ agentId, onOpenThread }: OpenThread & { readonly agentId: string }) {
@@ -317,7 +319,7 @@ function InboxThreadsContent({ source, originSource, episode, title, onOpenThrea
       </div>}
     </div>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    {pending.map(start => <PendingStartPanel key={start.draftKey} start={start} />)}
+    {pending.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} />)}
     {/* A draft opens at the top of the list, where its thread lands once sent. */}
     {!offerStart ? null : starting
       ? <ThreadPanel thread={{ title: startTitle, state: 'open' }} initiallyExpanded onHideDraft={() => { restoreStart.current = true; setStarting(false) }}>
@@ -326,11 +328,12 @@ function InboxThreadsContent({ source, originSource, episode, title, onOpenThrea
           <Input {...stylex.props(styles.titleInput, narrow && styles.titleInputTouch)} />
         </TextField>
         {ready === undefined ? status : <>
-          {changed ? <p role="status" data-start-recipient-changed="" {...stylex.props(styles.recipientChanged)}>
+          {changed ? <p role="status" data-start-recipient-changed="" {...stylex.props(styles.attentionNote)}>
             The recipient changed to <AgentName id={ready.agent_id} />. Nothing has been sent; review the recipient and send again.
           </p> : null}
           <StartRecipient recipient={ready} lead="to" />
         </>}
+        <UnprotectedNotice source={source} />
         {/* The editor stays mounted while the recipient is read again, so its draft and refusal stay on screen. */}
         <ThreadEditor source={source} destination={draftKey} label={startTitle} inputRef={startInput} gatewayLive={gatewayLive} send={send}
           onSent={id => { setFocused(id); setStarting(false); setTitleInput(undefined); setReviewed(undefined) }} />
@@ -394,17 +397,45 @@ function PendingInboxStarts({ source, items }: { readonly source: ThreadSource; 
   if (starts.length === 0) return null
   return <section aria-label="Thread recovery" {...stylex.props(styles.recovery)}>
     <h3 {...stylex.props(styles.note)}>Thread recovery</h3>
-    {starts.map(start => <PendingStartPanel key={start.draftKey} start={start} />)}
+    {starts.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} />)}
   </section>
 }
 
-function PendingStartPanel({ start }: { readonly start: RetainedThreadStart }) {
+/**
+ * A retained first send. Only a start Fractal proved it did not apply offers Retry, and Retry sends the original
+ * retained start again under its own draft key; an unconfirmed one may have landed, so it is never offered again.
+ */
+function PendingStartPanel({ source, start }: { readonly source: ThreadSource; readonly start: RetainedThreadStart }) {
+  const [retrying, setRetrying] = React.useState(false)
+  const [refusal, setRefusal] = React.useState<ThreadRefusal>()
+  const retryStart = source.retryStart
+  const retry = retryStart === undefined ? undefined : async () => {
+    setRetrying(true)
+    setRefusal(undefined)
+    try {
+      const result = await retryStart(start.draftKey)
+      if (result._tag === 'Refused') setRefusal(result)
+    } finally {
+      setRetrying(false)
+    }
+  }
   return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded
     pendingChange="thread start" retryPending={start.state === 'sending'}>
     {start.state === 'unconfirmed' ? <p {...stylex.props(styles.note)}>Fractal has not confirmed this action. Do not send it again.</p> : null}
+    {start.state === 'not-applied' ? <div data-thread-start-not-applied="" {...stylex.props(styles.retryRow)}>
+      <p {...stylex.props(styles.note)}>Fractal did not apply this thread start. Retry sends the same message to the same recipient.</p>
+      {retry === undefined ? null : <ActionButton variant="outline" isDisabled={retrying} onPress={() => { void retry() }}>Retry thread start</ActionButton>}
+    </div> : null}
+    {refusal === undefined ? null : <ThreadRefusalAlert refusal={refusal} />}
     <p {...stylex.props(styles.note)}>To <AgentName id={start.parameters.agent_id} /></p>
     <div {...stylex.props(styles.message)}>{start.parameters.content}</div>
   </ThreadPanel>
+}
+
+/** Shown beside a composer only when the source says its sends are not first saved on this device. */
+function UnprotectedNotice({ source }: { readonly source: ThreadSource }) {
+  const { protection } = useAtomValue(source.access)
+  return protection === 'unprotected' ? <p data-thread-unprotected="" {...stylex.props(styles.attentionNote)}>{unprotectedSend}</p> : null
 }
 
 /**
@@ -678,6 +709,7 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
     {!canReply ? <p {...stylex.props(styles.note)}>{readOnlyThread}</p> : !editable ? null : <>
       {/* Replying never changes the lifecycle; only Reopen does. */}
       {thread.state === 'closed' ? <p {...stylex.props(styles.note)}>This thread is closed. Replying won’t reopen it.</p> : null}
+      <UnprotectedNotice source={source} />
       <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput} gatewayLive={gatewayLive}
         send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />
     </>}
@@ -820,7 +852,9 @@ const styles = stylex.create({
     color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap' },
   // A fallback is the one basis to notice before sending: a stronger rule and weight, never a colour alone.
   recipientBadgeNew: { borderColor: c.borderStrong, color: c.fgSoft, fontWeight: 600 },
-  // A changed recipient is the one thing to review before sending again: the attention rule marks it without colouring the words.
-  recipientChanged: { margin: 0, paddingInlineStart: s.sm, borderInlineStartWidth: 2, borderInlineStartStyle: 'solid', borderInlineStartColor: c.attention,
+  // A changed recipient or an unprotected send is the one thing to review before sending: the attention rule marks it without colouring the words.
+  attentionNote: { margin: 0, paddingInlineStart: s.sm, borderInlineStartWidth: 2, borderInlineStartStyle: 'solid', borderInlineStartColor: c.attention,
     color: c.fg, fontSize: t.metaSize, overflowWrap: 'anywhere' },
+  // A not-applied start's explanation and its Retry share one line, wrapping on a narrow pane.
+  retryRow: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.sm, minWidth: 0 },
 })
