@@ -18,6 +18,9 @@ pub struct AuthoredEvidence {
     pub opening_claim_id: String,
     pub attempt: u64,
     pub readiness_epoch: u64,
+    /// Immutable variables at this generation's materialization, not the later
+    /// requested retry. Missions owns interpolation of the retained payload.
+    pub materialization_variables: BTreeMap<String, String>,
 }
 
 impl QualifiedDiscussionSource {
@@ -186,6 +189,7 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
         epoch: Option<u64>,
         status: String,
         evidence: Vec<String>,
+        materialization_variables: BTreeMap<String, String>,
     }
     let order = canonical::order_sql("claims", false);
     let candidate_order = canonical::order_sql("candidate", false);
@@ -256,7 +260,7 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
                 "created_at_unix_ms":0, "updated_at_unix_ms":0
             });
             let Ok(historical) = serde_json::from_value::<MissionRunView>(historical) else { continue };
-            let variables = mission_run_variables(&historical, &revision);
+            let mut variables = mission_run_variables(&historical, &revision);
             // Successor materialization does not inherit the initial default.
             let predecessor: Option<String> = row.get(17).map_err(internal)?;
             let default = if predecessor.is_none() {
@@ -272,11 +276,24 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
                 .find(|(step, _, _)| step.path == path && step.definition_hash == hash)
                 .and_then(|(_, selector, _)| interpolate_selector(&selector, &variables).ok())
                 .and_then(|(assignee, _, _)| assignee);
+            if predecessor.is_none() { variables.remove("PATH"); }
+            variables.insert("ST_STEP".into(), path.clone());
+            variables.insert("ST_STEP_RUN".into(), key.source_id.clone());
+            variables.insert("ST_ATTEMPT".into(), "1".into());
+            let materialized_assignee = recipient.as_deref()
+                .map(|recipient| identities::resolve_reference_conn(connection, recipient))
+                .transpose()?.unwrap_or_default();
+            variables.insert("ST_ASSIGNEE".into(), materialized_assignee);
+            variables.insert("ST_PARENT_STEP_RUN".into(),
+                crate::mission::parent_step_path(&mission, &path)
+                    .map(|parent| format!("step-run/{generation}/{parent}"))
+                    .or_else(|| historical.parent_step_run.clone()).unwrap_or_default());
             states.insert(index, State {
                 generation: format!("run-generation/{generation}"), revision, recipient,
                 current_recipient: row.get(7).map_err(internal)?, attempt: 1, epoch: None,
                 status: "pending".into(), evidence: vec![row.get(4).map_err(internal)?,
                     row.get(15).map_err(internal)?, row.get(16).map_err(internal)?],
+                materialization_variables: variables,
             });
         }
         let state = states.get_mut(&index).expect("initialized authored fold");
@@ -290,6 +307,9 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
         let claim_attempt = fields["attempt"].as_u64();
         if matches!(kind.as_str(), "step-run.carried" | "step-run.retried") {
             if let Some(attempt) = claim_attempt { state.attempt = attempt; }
+            if kind == "step-run.carried" && let Some(attempt) = claim_attempt {
+                state.materialization_variables.insert("ST_ATTEMPT".into(), attempt.to_string());
+            }
             // A carried ready state inherits its epoch from the exact source lifecycle
             // before the carry, never the source's current projection.
             state.epoch = if kind == "step-run.carried" && claim_attempt.is_some() {
@@ -311,12 +331,16 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
             state.evidence.push(claim_id.clone());
         }
         if let Some(status) = fields["status"].as_str() { state.status = status.into(); }
-        if kind == "step-run.state" {
+        let handoff_ready = matches!(kind.as_str(), "work.released" | "work.handoff-returned")
+            && claim_attempt == Some(state.attempt)
+            && fields["handoff_to"].as_str().is_some()
+            && fields["status"] == "ready";
+        if kind == "step-run.state" || handoff_ready {
             state.epoch = fields["readiness_epoch"].as_u64();
         }
         if kind == "step-run.state" && let Some(attempt) = claim_attempt { state.attempt = attempt; }
         let Some(epoch) = state.epoch else { continue };
-        if !matches!(kind.as_str(), "step-run.state" | "step-run.carried")
+        if !(matches!(kind.as_str(), "step-run.state" | "step-run.carried") || handoff_ready)
             || fields["status"] != "ready"
             || key.episode != format!("{}:{}:{epoch}", state.generation, state.attempt)
             || opening_at > at
@@ -333,6 +357,7 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
             authored: Some(AuthoredEvidence {
                 generation: state.generation.clone(), revision: state.revision.clone(),
                 opening_claim_id: claim_id, attempt: state.attempt, readiness_epoch: epoch,
+                materialization_variables: std::mem::take(&mut state.materialization_variables),
             }),
         });
     }
@@ -369,7 +394,8 @@ fn carried_ready_epoch(connection: &Connection, carry: &str, wanted_attempt: u64
     let sql = format!(
         "SELECT prior.id,prior.kind,json_extract(prior.body,'$.fields.status'),
          json_extract(prior.body,'$.fields.attempt'),
-         json_extract(prior.body,'$.fields.readiness_epoch')
+         json_extract(prior.body,'$.fields.readiness_epoch'),
+         json_extract(prior.body,'$.fields.handoff_to')
          FROM claims carry JOIN claims prior
            ON prior.subject=json_extract(carry.body,'$.fields.source_step_run')
          WHERE carry.id=?1 AND carry.kind='step-run.carried' AND {before}
@@ -399,8 +425,13 @@ fn carried_ready_epoch(connection: &Connection, carry: &str, wanted_attempt: u64
                 ready = None;
                 inherited = None;
             }
+            let recorded: Option<u64> = row.get(3).map_err(internal)?;
+            if recorded.is_some_and(|recorded| recorded != attempt) { continue; }
+            let handoff_ready = matches!(kind.as_str(), "work.released" | "work.handoff-returned")
+                && recorded == Some(attempt)
+                && row.get::<_, Option<String>>(5).map_err(internal)?.is_some();
             if let Some(next) = row.get::<_, Option<String>>(2).map_err(internal)? { status = next; }
-            if kind == "step-run.state" && status == "ready" {
+            if (kind == "step-run.state" || handoff_ready) && status == "ready" {
                 ready = row.get::<_, Option<u64>>(4).map_err(internal)?
                     .map(|epoch| row.get::<_, String>(0).map(|id| (epoch, id))).transpose()
                     .map_err(internal)?;
@@ -782,7 +813,6 @@ mod authored_tests {
         let (store, key) = fixture("person/other");
         let transfer = claim(&store, &key, "work.released",
             json!({"status":"ready","attempt":1,"handoff_to":"person/reader","readiness_epoch":1}));
-        claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
         store.connection.write().execute("UPDATE step_runs SET assignee='person/reader' WHERE subject=?1", [&key.source_id]).unwrap();
         let proof = qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().unwrap();
         assert!(proof.evidence().contains(&transfer));
@@ -792,7 +822,6 @@ mod authored_tests {
         let (store, key) = fixture("person/reader");
         claim(&store, &key, "work.handoff-returned",
             json!({"status":"ready","attempt":1,"handoff_to":"person/other","readiness_epoch":1}));
-        claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
         assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
     }
 }
@@ -803,13 +832,13 @@ mod bounded_authored_tests {
     use super::*;
 
     #[test]
-    fn admission_requester_is_historical_and_missing_ready_epoch_is_not_inferred() {
-        let (store, key) = fixture("${ST_REQUESTER}");
+    fn admission_variables_are_historical_and_missing_ready_epoch_is_not_inferred() {
+        let (store, key) = fixture("person/${ST_MISSION}");
         claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
         store.connection.write().execute(
             "UPDATE mission_runs SET requester='person/other',current_generation_id='current-poison'", [],
         ).unwrap();
-        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_some());
+        assert!(qualify(&store.readers.get(), "person/proof", &key, now_ms()).unwrap().is_some());
         let (store, key) = fixture("person/reader");
         claim(&store, &key, "work.released",
             json!({"attempt":1,"handoff_to":"person/reader","readiness_epoch":1}));

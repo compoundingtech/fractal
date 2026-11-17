@@ -84,6 +84,12 @@ generation-pinned mission revision, and the immutable `mission-run.created` inpu
 requester, root/parent/workspace and initial default selector. The opening recipient is
 reconstructed with the native selector materialization and canonically ordered assignment
 mutations before the opening; today's assignee or generation is never opening proof.
+Native recipient-bearing `work.released` and `work.handoff-returned` READY receipts
+also open exact episodes; no synthetic second `step-run.state` receipt is required.
+The shared proof passes bounded immutable materialization variables to the missions
+reader, which interpolates historical title/goals with the existing template engine.
+An unchanged title keeps its generation-creation attempt; retry goals are already
+materialized and are never interpolated again.
 Carried openings recover their epoch from the canonically prior actual READY write,
 following the exact source-generation chain and matching attempts. Literal/inherited and
 retained-input selectors qualify; missing admission/definition/interpolation/READY facts,

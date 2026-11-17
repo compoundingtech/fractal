@@ -181,18 +181,29 @@ fn retained_definition_with_tampered_revision_content_cannot_prove_recipient() {
 }
 
 #[test]
-fn unretained_historical_interpolation_never_uses_current_materialized_text() {
+fn retained_historical_interpolation_uses_creation_context_not_current_materialized_text() {
     let store = Store::open_memory("authored-history").unwrap();
-    let definition = ORIGINAL_DEFINITION.replace("Original question", "Question ${ST_ATTEMPT}");
+    let definition = ORIGINAL_DEFINITION
+        .replace("Original question", "Question ${ST_ATTEMPT} for ${ST_REQUESTER}")
+        .replace("Original title", "Created at attempt ${ST_ATTEMPT}");
     let initial = crate::store::tests::publish_mission(&store, &definition, "history-definition");
     let key = run_initial(&store, &initial);
     store.connection.write().execute(
         "UPDATE step_runs SET goals='[\"CURRENT MATERIALIZED POISON\"]' WHERE subject=?1",
         [&key.source_id],
     ).unwrap();
-    assert!(matches!(read(&store, &key).payload, HistoricalPayload::Unavailable {
-        reason: PayloadUnavailable::HistoricalInterpolationUnavailable,
-    }));
+    store.connection.write().execute(
+        "UPDATE mission_runs SET requester='person/current-poison'", [],
+    ).unwrap();
+    assert!(matches!(read(&store, &key).payload, HistoricalPayload::Available { title: Some(title), text, .. }
+        if title == "Created at attempt 1" && text == "Question 1 for person/test"));
+    let (generation, _, _) = episode_parts(&key.episode).unwrap();
+    claim(&store, &key.source_id, "step-run.retried", json!({
+        "attempt":2,"status":"pending","goals":["Already materialized ${ST_ATTEMPT}"]}));
+    claim(&store, &key.source_id, "step-run.state", json!({"status":"ready","readiness_epoch":2}));
+    let retry = SourceEpisode { source_id:key.source_id.clone(), episode:format!("{generation}:2:2") };
+    assert!(matches!(read(&store, &retry).payload, HistoricalPayload::Available { title: Some(title), text, .. }
+        if title == "Created at attempt 1" && text == "Already materialized ${ST_ATTEMPT}"));
 }
 
 #[test]
@@ -226,4 +237,51 @@ fn carried_ready_opening_recovers_actual_ready_epoch_for_history_and_inventory()
     ).unwrap();
     assert!(retained_person_episode(&store.readers.get(), "person/test", &key, u64::MAX)
         .unwrap().is_none());
+}
+
+#[test]
+fn native_handoff_release_opens_exact_retained_human_episode_without_extra_ready_claim() {
+    let store = Store::open_memory("authored-history").unwrap();
+    let definition = format!("version 2\nagent \"worker\" {{ workspace \"/tmp\"; command \"true\"; }}\n{}",
+        ORIGINAL_DEFINITION.strip_prefix("version 2\n").unwrap()
+            .replace("person/test", "agent/authored-history.worker"));
+    let initial = crate::store::tests::publish_mission(&store, &definition, "history-handoff-definition");
+    let original = run_initial(&store, &initial);
+    let actor = "agent/authored-history.worker";
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running","runtime_id":"history-worker","incarnation_id":"history-worker-one"})),
+        ("harness.observed", json!({"state":"idle","driver":"codex","incarnation_id":"history-worker-one"})),
+    ] {
+        store.append_claim(&crate::model::ClaimInput {
+            subject:actor.into(), kind:kind.into(), actor:Some("daemon/runtime".into()),
+            fields:serde_json::from_value(fields).unwrap(), evidence:Vec::new(),
+            expected_subject:None, idempotency_key:Some(format!("history-handoff-{kind}")),
+        }).unwrap();
+    }
+    store.work_action(&original.source_id, "claim", &crate::model::WorkRequest {
+        wait_ms:None, actor:Some(actor.into()), incarnation:Some("history-worker-one".into()),
+        summary:None, reason:None, evidence:Vec::new(), idempotency_key:"history-handoff-claim".into(),
+    }).unwrap();
+    let handed = store.handoff_work(&original.source_id, &crate::model::WorkHandoffRequest {
+        actor:actor.into(), incarnation:Some("history-worker-one".into()), to:"person/test".into(),
+        note:"Please review this exact request.".into(), evidence:Vec::new(),
+        idempotency_key:"history-native-handoff".into(),
+    }).unwrap();
+    let key = SourceEpisode { source_id:handed.subject.clone(),
+        episode:format!("{}:{}:{}", handed.generation, handed.attempt, handed.readiness_epoch) };
+    assert_ne!(key.episode, original.episode);
+    let conn = store.readers.get();
+    let proof = fractal_store::store::discussion_source::qualify(
+        &conn, "person/test", &key, crate::store::now_ms()).unwrap().unwrap();
+    let kind:String = conn.query_row("SELECT kind FROM claims WHERE id=?1",
+        [&proof.authored_evidence().unwrap().opening_claim_id], |row| row.get(0)).unwrap();
+    assert_eq!(kind, "work.released");
+    drop(conn);
+    assert!(matches!(&read(&store, &key).payload, HistoricalPayload::Available { text, .. }
+        if text == "Original question"));
+    store.set_step_state(&key.source_id, "completed", None).unwrap();
+    assert!(matches!(&read(&store, &key).payload, HistoricalPayload::Available { text, .. }
+        if text == "Original question"));
+    assert!(retained_episode_keys(&store.readers.get(), "person/test", &key, u64::MAX)
+        .unwrap().0.contains(&key));
 }

@@ -22,7 +22,7 @@ use fractal_store::store::thread_metadata::request_history::{
 const RETAINED_BODY_BYTES: usize = 256 * 1024;
 const RETAINED_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 const PERSON_HISTORY_KINDS: &str =
-    "'step-run.state','step-run.carried','step-run.retried','work.person-done','work.person-cancelled'";
+    "'step-run.state','step-run.carried','step-run.retried','work.released','work.handoff-returned','work.person-done','work.person-cancelled'";
 
 struct RetainedEvent {
     id: String,
@@ -91,8 +91,11 @@ fn lifecycle_attempt(kind: &str, fields: &Value, current: &mut u64) -> u64 {
 }
 
 fn opening_epoch(event: &RetainedEvent) -> Option<u64> {
-    if !matches!(event.kind.as_str(), "step-run.state" | "step-run.carried")
-        || event.body.pointer("/fields/status").and_then(Value::as_str) != Some("ready")
+    let fields = &event.body["fields"];
+    let handoff = matches!(event.kind.as_str(), "work.released" | "work.handoff-returned")
+        && fields["attempt"].as_u64().is_some() && fields["handoff_to"].as_str().is_some();
+    if !(matches!(event.kind.as_str(), "step-run.state" | "step-run.carried") || handoff)
+        || fields["status"] != "ready"
     { return None; }
     event.body.pointer("/fields/readiness_epoch").and_then(Value::as_u64)
 }
@@ -231,14 +234,15 @@ pub fn retained_person_episode(
     let Some(opening) = opening else {
         return Ok(unavailable(PayloadUnavailable::OpeningUnavailable));
     };
-    // Only literals/escaped templates can be materialized without retained historical inputs.
-    let variables = BTreeMap::new();
-    let title = step.title.as_deref().map(|text| crate::mission::interpolate(text, &variables)).transpose();
+    // The lower proof supplies bounded immutable materialization variables. Retry
+    // goals are already materialized, while the title retains its creation attempt.
+    let variables = &proof.materialization_variables;
+    let title = step.title.as_deref().map(|text| crate::mission::interpolate(text, variables)).transpose();
     // Retry goals are already materialized; interpolating again would corrupt literal templates.
     let text = if goals_materialized {
         Ok(goals)
     } else {
-        goals.iter().map(|goal| crate::mission::interpolate(goal, &variables))
+        goals.iter().map(|goal| crate::mission::interpolate(goal, variables))
             .collect::<Result<Vec<_>, _>>()
     };
     let (Ok(title), Ok(text)) = (title, text) else {
