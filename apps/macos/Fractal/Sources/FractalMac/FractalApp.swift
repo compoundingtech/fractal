@@ -107,6 +107,9 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     Self.log("Fractal \(build.machineVersion) started")
+    #if DEBUG
+      Task { await NativePanelDiagnostic.run(model: self.model) }
+    #endif
     if isConfigured {
       Self.log(model.speech == nil ? "speech off: FRACTAL_SPEECH_SOCKET unset" : "speech gate on")
     }
