@@ -21,10 +21,12 @@ pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
 pub mod resource_membership;
+pub mod shell_resources;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
+pub mod continuity;
 pub mod mission_run_query;
 pub mod step_executions;
 mod mission_supersession;
@@ -2929,6 +2931,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -2960,6 +2963,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -2996,6 +3000,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -21273,7 +21278,7 @@ fn reviewers_for_changed_path<'a>(
         .expect("the mission metadata is always present")
 }
 
-fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
+pub fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
     let mut flat = Vec::new();
     flatten_steps(mission, None, &[], &mut flat);
     flat.into_iter()
@@ -21521,7 +21526,7 @@ pub fn carried_step_lease(
     )
 }
 
-fn flattened_dependencies(mission: &MissionSpec) -> BTreeMap<String, BTreeSet<String>> {
+pub fn flattened_dependencies(mission: &MissionSpec) -> BTreeMap<String, BTreeSet<String>> {
     fn collect(
         mission: &MissionSpec,
         prefix: &str,

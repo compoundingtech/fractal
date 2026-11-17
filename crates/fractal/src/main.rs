@@ -91,6 +91,7 @@ mod follow_tests;
 mod presentation;
 mod actor_contract;
 mod inspection_actor;
+mod continuity_cli;
 mod pairing_qr;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
@@ -98,6 +99,7 @@ mod agents_cli;
 mod attention_cli;
 mod claims_cli;
 mod hosts_cli;
+mod resources_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -458,6 +460,17 @@ enum Command {
     Hosts {
         #[command(subcommand)]
         command: hosts_cli::HostsCommand,
+    },
+    /// Run and inspect host-accounted finite shell executions.
+    Resources {
+        #[command(subcommand)]
+        command: resources_cli::ResourcesCommand,
+    },
+    #[command(hide = true)]
+    ResourcePayload {
+        result: PathBuf,
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
     },
     /// Save or restore the signed claim log.
     Backup {
@@ -1378,6 +1391,11 @@ enum MissionViewCommand {
     /// Uses the latest published revision unless --same-revision is set. The source run
     /// and its history remain unchanged; incompatible latest inputs are refused.
     Retry(MissionRunRetryArgs),
+    /// Preview or recover continuity evidence for mission runs.
+    Run {
+        #[command(subcommand)]
+        command: continuity_cli::RunCommand,
+    },
     /// Cancel one exact running mission and stop its owned work and runtimes.
     Cancel(MissionCancelArgs),
     /// Change who a running run tells when it fails, is cancelled or stalls, or clear it.
@@ -6179,6 +6197,9 @@ fn daemon_is_unreachable(error: &anyhow::Error) -> bool {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Command::ResourcePayload { result, argv } = cli.command {
+        return resources_cli::payload(&result, argv);
+    }
     let own = fractal_drivers::contracts::env("ST_AGENT");
     anyhow::ensure!(
         own.is_some() || !agent_environment_present(),
@@ -6545,6 +6566,8 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
         Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
+        Command::Resources { command } => resources_cli::run(&client, config.person.as_deref(), command, cli.json).await,
+        Command::ResourcePayload { .. } => unreachable!("resource payload is dispatched before daemon connection"),
         Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
             migrate_cli::run(&endpoint, args, cli.json).await
@@ -6666,6 +6689,8 @@ fn guard_mutating_cli_actor(
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
+        Command::Resources { command: resources_cli::ResourcesCommand::Hold { actor, .. }
+            | resources_cli::ResourcesCommand::Release { actor, .. } } => actor.as_deref(),
         Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
@@ -6687,6 +6712,7 @@ fn guard_mutating_cli_actor(
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retry(args) => Some(args.actor.as_str()),
+            MissionViewCommand::Run { command } => command.actor(),
             MissionViewCommand::Check(args) => args.actor.as_deref(),
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
@@ -7840,7 +7866,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             (
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
-                    "mission_resource_lane": 1,
+                    "mission_resource_lane": 2,
+                    "shell_resource_exec": 1,
                     "thread_read_privacy": fractal_schema::threads::READ_PRIVACY_VERSION,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
@@ -7968,7 +7995,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
         config.unlaned_seat.clone(),
-    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_seat_admission(config.seat_admission.clone(), state.seat_admission.clone()).with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_finite_resources(config.finite_resources.clone()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_wait_for_peers_after_start(config.waits_for_peers_after_start()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);

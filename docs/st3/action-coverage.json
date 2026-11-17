@@ -544,6 +544,24 @@
   ],
   "cli": [
     {
+      "command": "st missions run continuity preview",
+      "description": "Read original superseded-run evidence and its hash without writing",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Real Unix CLI/API preview remains stable across reopen and records no new claims."
+    },
+    {
+      "command": "st missions run continuity startup-preview",
+      "description": "Read owner-local startup supersession candidates without dispatching work",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Real Unix CLI/API startup preview is read-only before and after reopen."
+    },
+    {
+      "command": "st missions run continuity recover",
+      "description": "Recover original completed evidence by reference using an exact preview hash and explicit actor",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Stale hashes write nothing; accepted recovery creates a linked successor whose carried references survive reopen without fabricated work submissions."
+    },
+    {
       "command": "st effects status",
       "description": "Read durable native-effect state by its full idempotency key without sending",
       "tests": [
@@ -1649,6 +1667,52 @@
         "crates/fractal-store/src/store/host_holds.rs::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"
       ],
       "verification": "real Clap parsing plus API and store authority, revision and history regressions"
+    },
+    {
+      "command": "st resources exec",
+      "description": "Admit a finite shell payload and forward its actual outcome after custody retirement",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::exec_requires_resources_and_preserves_payload_argv",
+        "crates/fractal/src/resources_cli.rs::platform_refusal_precedes_daemon_contact_and_capacity_acquisition",
+        "crates/fractal/src/resources_cli.rs::payload_exit_code_is_passed_through_and_result_is_durable",
+        "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard",
+        "crates/fractal-api-core/src/api/resources.rs::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials"
+      ],
+      "verification": "real Clap parsing and payload execution; router/native-owner isolation and wait credential-redaction regressions"
+    },
+    {
+      "command": "st resources ls",
+      "description": "List native memberships, holds, shell executions and host accounting",
+      "tests": [
+        "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard"
+      ],
+      "verification": "HTTP router through the native transport guard; owner-filtered resource inventory"
+    },
+    {
+      "command": "st resources show",
+      "description": "Inspect a shell execution's admission blockers, custody and actual outcome",
+      "tests": [
+        "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard"
+      ],
+      "verification": "HTTP router through the native transport guard; exact execution ownership and credential redaction"
+    },
+    {
+      "command": "st resources hold",
+      "description": "Place a native execution-host admission hold without reserving capacity",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart",
+        "crates/fractal-api-core/src/api/resources.rs::native_hold_release_wakes_a_queued_shell_without_polling"
+      ],
+      "verification": "delegated hosts CLI hold implementation over a real Unix socket and disk restart; native shell admission hold regression"
+    },
+    {
+      "command": "st resources release",
+      "description": "Resolve an owned native host hold at its observed revision",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart",
+        "crates/fractal-api-core/src/api/resources.rs::native_hold_release_wakes_a_queued_shell_without_polling"
+      ],
+      "verification": "delegated hosts CLI release implementation over a real Unix socket and disk restart; native shell admission wake regression"
     },
     {
       "command": "st lanes approve",

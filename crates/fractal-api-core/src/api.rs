@@ -98,6 +98,7 @@ use crate::store::local_commits;
 pub mod wire_names;
 pub mod seat_freshness;
 mod host_holds;
+mod resources;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -198,6 +199,7 @@ mod native_delivery;
 pub mod replication;
 mod replication_replay;
 mod runs;
+mod continuity;
 mod agent_invocations;
 pub mod sessions;
 pub mod work;
@@ -655,6 +657,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/internal/resources", get(resources::list))
+        .route("/v1/internal/resources/exec", post(resources::submit))
+        .route("/v1/internal/resources/{id}", get(resources::show))
+        .route("/v1/internal/resources/{id}/wait", post(resources::wait))
+        .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -995,6 +1002,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/evals/{*run}", get(runs::get_eval))
         .route("/v1/mission-runs", get(runs::list_mission_runs))
         .route("/v1/mission-runs/tree", get(runs::list_mission_run_tree))
+        .route("/v1/mission-runs/continuity/preview", post(continuity::preview))
+        .route("/v1/mission-runs/continuity/recover", post(continuity::recover))
+        .route("/v1/mission-runs/continuity/startup-preview", get(continuity::startup_preview))
         .route("/v1/mission-overview", get(runs::mission_overview))
         .route("/v1/outcome-history", get(runs::outcome_history))
         .route("/v1/performance", get(runs::performance_report))
@@ -1195,6 +1205,8 @@ async fn response_envelope_unbounded(
     let effect_resolution = request.method() == axum::http::Method::POST
         && request.uri().path().starts_with("/v1/effects/")
         && request.uri().path().ends_with("/resolve");
+    let continuity_recovery = request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/mission-runs/continuity/recover";
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -1297,6 +1309,7 @@ async fn response_envelope_unbounded(
     // Bearers on native Unix routes must not evade the assistant route boundary.
     let (client_authentication, client_snapshot) = if client_request
         || effect_resolution
+        || continuity_recovery
         || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
@@ -8366,6 +8379,11 @@ pub async fn guard_bound_request(
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        // Resource handlers bind submission to native ownership and scope inspection/control
+        // to that same owner. No other internal route (or method) admits bound callers.
+        if resources::allows_bound_request(request.method(), request.uri().path()) {
+            return Ok(request);
+        }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
@@ -8551,6 +8569,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
     });
     if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
         health["service_manager"] = supervisor;

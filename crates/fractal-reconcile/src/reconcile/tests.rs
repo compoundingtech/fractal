@@ -5284,6 +5284,29 @@ mission "self-assigned" state="ready" {
             Arc::new(Notify::new()),
         );
         let owner = "step-run/golden.approval";
+        let golden = r#"{"attempt":1,"decisions":["approved","rejected"],"mission_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mode":"approve","owner":"step-run/golden.approval","question":"Is the candidate ready?","review_targets":["resource/candidate"],"reviewer":"person/alex","step_definition":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
+        let mut expected: BTreeMap<String, Value> = serde_json::from_str(golden).unwrap();
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(serde_json::to_vec(&expected).unwrap())),
+            "b7ddd150865ffde5e4501c8d861399b013cb43a4d602505ae28aaa4c597e6af6",
+            "historical unbound human request fields retain their canonical encoding"
+        );
+        // The native producer binds pinned mission contracts, authority, inputs and workspace.
+        // Do not copy those digests into a second test-only binding implementation.
+        let (binding, previous) = store.human_gate_continuity(&run, owner, &expected).unwrap();
+        assert!(previous.is_none());
+        assert_eq!(binding["version"], 1);
+        assert_eq!(binding["step"], "$run");
+        assert_eq!(binding["person"], "person/alex");
+        assert_eq!(binding["asker"], "daemon/runtime");
+        assert_eq!(binding["question"], "Is the candidate ready?");
+        assert_eq!(binding["request"], serde_json::json!({
+            "kind": "human-gate", "mode": "approve",
+            "decisions": ["approved", "rejected"], "review_targets": ["resource/candidate"],
+        }));
+        expected.insert("continuity".into(), binding);
+        let digest = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&expected).unwrap()));
+        let operation = format!("gate-operation/step-run.golden.approval/{}", &digest[..24]);
         let evaluate = || {
             reconciler
                 .evaluate_mission_human_gate(
@@ -5301,21 +5324,23 @@ mission "self-assigned" state="ready" {
         };
         assert!(matches!(evaluate(), GateOutcome::Pending));
         let request = store.gate_request_for_owner(owner).unwrap().unwrap();
-        let operation = "gate-operation/step-run.golden.approval/b7ddd150865ffde5e4501c8d";
+        // Emission must hash the complete bound request, not the historical unbound golden.
         assert_eq!(request.subject, operation);
         assert_eq!(request.actor, None);
         let mut fields = request.body["fields"].as_object().unwrap().clone();
         assert_eq!(
             fields.remove("operation"),
-            Some(Value::String(operation.into()))
+            Some(Value::String(operation))
         );
-        let golden = r#"{"attempt":1,"decisions":["approved","rejected"],"mission_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mode":"approve","owner":"step-run/golden.approval","question":"Is the candidate ready?","review_targets":["resource/candidate"],"reviewer":"person/alex","step_definition":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
         let fields: BTreeMap<_, _> = fields.into_iter().collect();
-        assert_eq!(serde_json::to_string(&fields).unwrap(), golden);
-        assert_eq!(
-            hex::encode(sha2::Sha256::digest(serde_json::to_vec(&fields).unwrap())),
-            "b7ddd150865ffde5e4501c8d861399b013cb43a4d602505ae28aaa4c597e6af6"
-        );
+        assert_eq!(fields, expected);
+        // The operation hashes the producer's ordered binding before append; claim
+        // storage recursively canonicalizes object keys, including that nested binding.
+        // Assert each representation against its own authoritative encoder.
+        let canonical = smallclaims::hash::canonical_json_text(
+            &serde_json::to_value(&expected).unwrap(),
+        ).unwrap();
+        assert_eq!(serde_json::to_string(&fields).unwrap(), canonical);
         assert!(matches!(evaluate(), GateOutcome::Pending));
         assert_eq!(
             store.gate_request_for_owner(owner).unwrap().unwrap().id,

@@ -2501,6 +2501,9 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
             if advance == "another-ask" {
                 input.incarnation = Some("asker-new".into());
                 input.idempotency_key = "second-release-question".into();
+                // A new key alone intentionally reuses an equivalent answer. This
+                // regression needs a genuinely different outstanding ask episode.
+                input.reason = "Choose a different release date.".into();
                 owner.ask_person(&input).unwrap();
             }
             let before = owner.step_run(&origin.subject).unwrap().unwrap();
@@ -2561,6 +2564,15 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
                     assert_eq!(after.claim_incarnation, before.claim_incarnation);
                     assert_eq!(after.claim_expires_at_unix_ms, before.claim_expires_at_unix_ms);
                     assert_eq!(after.readiness_epoch, before.readiness_epoch);
+                    if advance == "another-ask" {
+                        let asking = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+                        let binding = serde_json::from_value::<
+                            fractal_store::store::person_work::AskContinuityBinding
+                        >(asking.body["fields"]["continuity"].clone()).unwrap();
+                        assert!(fractal_store::store::person_work::continuity::equivalent_answer_tx(
+                            &store.readers.get(), &after, &binding,
+                        ).unwrap().is_none(), "revoking the original answer must prevent its original contract from being reused");
+                    }
                 };
                 check();
                 store.replay_replication_graph().unwrap();
