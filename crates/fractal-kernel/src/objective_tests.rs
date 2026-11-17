@@ -156,6 +156,7 @@ fn a_nonsensical_objective_is_refused_never_defaulted() {
     let refused = |text: &str| one(text).unwrap_err().message;
     let interval = |replace: &str, with: &str| INTERVAL.replace(replace, with);
     for (text, says) in [
+        (interval("indicator \"interval\"", "indicator \"histogram\""), "unknown indicator `histogram`"),
         (interval("  window \"7d\" min-samples=20\n", ""), "needs a `window`"),
         (interval("target \"p95\" within=\"5m\"", "target \"p95\" within=\"5m\"\n  target \"p95\" within=\"9m\""), "repeats target"),
         (interval("target \"p95\"", "target \"p100\""), "no target `p100`"),
