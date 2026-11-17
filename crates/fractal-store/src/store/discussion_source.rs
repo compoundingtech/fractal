@@ -339,6 +339,25 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
     Ok(result)
 }
 
+/// Recover coordinates omitted by the existing carried writer. This is not
+/// authority: consumers must still qualify the resulting exact source/episode.
+pub fn carried_episode(connection: &Connection, source: &str, opening: &str)
+    -> Result<Option<String>, FractalError>
+{
+    let key = SourceEpisode { source_id: source.into(), episode: opening.into() };
+    if !inputs_preflight(connection, &key)? { return Ok(None); }
+    let Some(claim) = claim_by_id_tx(connection, opening).map_err(internal)? else { return Ok(None) };
+    if claim.subject != source || claim.kind != "step-run.carried"
+        || claim.body["fields"]["status"] != "ready" { return Ok(None); }
+    let Some(attempt) = claim.body["fields"]["attempt"].as_u64() else { return Ok(None) };
+    let Some(epoch) = carried_ready_epoch(connection, opening, attempt, &mut Vec::new())?
+        else { return Ok(None) };
+    let generation: Option<String> = connection.query_row(
+        "SELECT generation_id FROM step_runs WHERE subject=?1", [source], |row| row.get(0),
+    ).optional().map_err(internal)?;
+    Ok(generation.map(|generation| format!("run-generation/{generation}:{attempt}:{epoch}")))
+}
+
 /// A carried claim does not record an epoch. Follow its exact predecessor chain
 /// until an actual READY write supplies one, folding retries before that boundary.
 /// All visited subjects were byte/cardinality-admitted by inputs_preflight.

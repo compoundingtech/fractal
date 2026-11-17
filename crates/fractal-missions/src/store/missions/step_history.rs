@@ -128,7 +128,13 @@ pub fn retained_episode_keys(
         {
             keys.insert(SourceEpisode { source_id: seed.source_id.clone(), episode: episode.into() });
         } else if event.kind == "step-run.carried" {
-            complete = false;
+            if let Some(episode) = fractal_store::store::discussion_source::carried_episode(
+                conn, &seed.source_id, &event.id,
+            )? {
+                let key = SourceEpisode { source_id: seed.source_id.clone(), episode };
+                openings.insert(key.clone());
+                keys.insert(key);
+            } else { complete = false; }
         }
     }
     complete &= openings.contains(seed) && keys.iter().all(|key| openings.contains(key));
@@ -216,8 +222,7 @@ pub fn retained_person_episode(
             goals = retained;
             goals_materialized = true;
         }
-        if attempt == wanted_attempt && opening_epoch(event) == Some(epoch)
-            && event.id == proof.opening_claim_id
+        if attempt == wanted_attempt && event.id == proof.opening_claim_id
         {
             opening = Some(index);
             break;

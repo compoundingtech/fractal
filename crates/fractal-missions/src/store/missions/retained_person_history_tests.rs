@@ -194,3 +194,36 @@ fn unretained_historical_interpolation_never_uses_current_materialized_text() {
         reason: PayloadUnavailable::HistoricalInterpolationUnavailable,
     }));
 }
+
+#[test]
+fn carried_ready_opening_recovers_actual_ready_epoch_for_history_and_inventory() {
+    let store = Store::open_memory("authored-history").unwrap();
+    let initial = crate::store::tests::publish_mission(&store, ORIGINAL_DEFINITION, "history-definition");
+    let replacement = crate::store::tests::publish_mission(&store,
+        &ORIGINAL_DEFINITION.replace("Retain questions.", "Retain questions across revisions."),
+        "history-replacement");
+    let original = run_initial(&store, &initial);
+    let run: String = store.readers.get().query_row(
+        "SELECT run_id FROM step_runs WHERE subject=?1", [&original.source_id], |row| row.get(0),
+    ).unwrap();
+    store.adopt_mission_revision(&run, &replacement, "person/test", "Carry ready", "history-carry").unwrap();
+    let current = store.mission_run(&run).unwrap().unwrap();
+    let step = &current.steps[0];
+    assert_eq!(step.status, "ready");
+    let key = SourceEpisode {
+        source_id: step.subject.clone(),
+        episode: format!("{}:{}:{}", step.generation, step.attempt, step.readiness_epoch),
+    };
+    assert!(matches!(&read(&store, &key).payload, HistoricalPayload::Available { text, .. }
+        if text == "Original question"));
+    assert!(retained_episode_keys(&store.readers.get(), "person/test", &key, u64::MAX)
+        .unwrap().0.contains(&key));
+    // Removing the predecessor's actual READY evidence must not fall back to the
+    // successor's current projection or to the syntactically valid episode.
+    store.connection.write().execute(
+        "DELETE FROM claims WHERE subject=?1 AND kind='step-run.state'",
+        [&original.source_id],
+    ).unwrap();
+    assert!(retained_person_episode(&store.readers.get(), "person/test", &key, u64::MAX)
+        .unwrap().is_none());
+}

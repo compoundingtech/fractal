@@ -79,12 +79,19 @@ mismatch refuses without rewriting the signed packet. Refresh the preview before
 a changed recipient. The scoped MCP thread-read family mirrors this metadata-only preview
 under its existing exact conversation binding; MCP remains read-only.
 
-Authored human steps require an exact retained ready opening, its generation-pinned
-validated mission revision and exact materialization inputs. The opening recipient is
-reconstructed from that pinned selector and canonically ordered assignment mutations
-before the opening; today's assignee alone is never proof. Literal person selectors are
-supported. Interpolated selectors require retained exact inputs; missing inputs, an
-unrecoverable readiness epoch or unorderable assignment evidence fail closed.
+Authored human steps require an exact retained READY opening, a hash-verified
+generation-pinned mission revision, and the immutable `mission-run.created` inputs,
+requester, root/parent/workspace and initial default selector. The opening recipient is
+reconstructed with the native selector materialization and canonically ordered assignment
+mutations before the opening; today's assignee or generation is never opening proof.
+Carried openings recover their epoch from the canonically prior actual READY write,
+following the exact source-generation chain and matching attempts. Literal/inherited and
+retained-input selectors qualify; missing admission/definition/interpolation/READY facts,
+unrecoverable carried epochs or a different current recipient fail closed.
+Before hydrating opening/source/manifest bodies, metadata-only admission bounds each
+proof's complete read set (including repaired history) to 512 entries and 256 KiB.
+Oversized/unprovable proofs are unavailable, never exempted from the bound. Notice
+disposition reads select an exact canonical latest claim, not complete snapshot history.
 Harness prompts, seat login, planning, revision proposals and operational faults have no
 supported retained proof. An unknown, fabricated or unsupported retained episode receives
 the same unavailable error. Phase A history uses this same qualifier, so a syntax-valid
