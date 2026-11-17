@@ -6,7 +6,8 @@
   "bundles": {
     "x86_64-unknown-linux-gnu": {
       "url": "https://github.com/compoundingtech/fractal/releases/download/fleet-a307411d49c8cf230f1925b1c59077236d41a4ff/fractal-x86_64-unknown-linux-gnu.tar.gz",
-      "sha256": "162d80742ec73732f3dcbe8cfb65343ed349ba8e83bd57013524c769d0784bfc"
+      "sha256": "162d80742ec73732f3dcbe8cfb65343ed349ba8e83bd57013524c769d0784bfc",
+      "elf_sha256": "0f2e4617c376842be88ed337e36126d656cd0b214d1a8e1ff2984dd9e9b457a6"
     },
     "aarch64-apple-darwin": {
       "url": "https://github.com/compoundingtech/fractal/releases/download/fleet-a307411d49c8cf230f1925b1c59077236d41a4ff/fractal-aarch64-apple-darwin.tar.gz",

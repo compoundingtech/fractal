@@ -881,7 +881,8 @@ fn rows_are_presented_from_the_fleet() {
     assert_eq!(
         rows[0]["presentation"],
         json!({"tier": "stopped", "kind": "review",
-        "agent": {"id": "agent/example/auditor", "label": "Auditor"},
+        // Fleet attribution is not canonical discussion responsibility.
+        "agent": null,
         "raised_by": {"id": "agent/example/auditor", "label": "Auditor"},
         // st has no such step, so the card names none.
         "waiting": null})
@@ -891,6 +892,11 @@ fn rows_are_presented_from_the_fleet() {
         json!({"tier": null, "kind": null, "agent": null,
         "raised_by": null, "waiting": null})
     );
+    // A daemon-resolved recipient is presented as the discussion agent.
+    rows[0]["conversation_id"] = json!("agent/example/auditor");
+    store.read_snapshot(|_| present_attention(&store, &mut rows, Some(&fleet))).unwrap();
+    assert_eq!(rows[0]["presentation"]["agent"],
+        json!({"id": "agent/example/auditor", "label": "Auditor"}));
 }
 
 /// The refresher presents every row with the fleet it reads, names a step st has by its path,

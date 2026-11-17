@@ -754,7 +754,9 @@ fn a_fault_snapshot_reads_a_run_its_failures_share_once() {
     // A failure costs its own claim and episode reads; its run's liveness is read once.
     // A ratchet on the reads per failure: a change here is a change in what each failure
     // reads, not lost parity, which the comparison above checks.
-    assert_eq!(reference_each, 6, "the reference walks the run for each failure, twice");
+    // Discussion responsibility also reads the Inbox fallback. The snapshot shares that
+    // lookup within its read cut; the deliberately unmemoized reference reads it again.
+    assert_eq!(reference_each, 7, "the reference walks the run for each failure, twice, plus discussion responsibility");
     assert_eq!(memoized_each, 2, "only the failure's own reads; its run is read once per snapshot");
 }
 

@@ -15,6 +15,7 @@ pub const WIRE_DEFINITIONS: &[&str] = &[
     "LaunchVariant", "Mission", "Work", "Attention",
     "Message", "Resource", "TimelineEntry", "TerminalScreen", "Capabilities",
     "ErrorEnvelope", "SyncPeer", "SloList", "SloHistory", "UsagePeriod",
+    "ThreadSummary", "ThreadTimelineEvent",
 ];
 const MIN_MS: i64 = -62_135_596_800_000;
 const MAX_MS: i64 = 253_402_300_799_999;
@@ -105,6 +106,8 @@ pub enum WireValue {
     SloList(crate::SloList),
     SloHistory(crate::SloHistory),
     UsagePeriod(crate::UsagePeriod),
+    ThreadSummary(crate::ThreadSummary),
+    ThreadTimelineEvent(crate::ThreadTimelineEvent),
 }
 
 pub fn load_index(path: impl AsRef<Path>) -> Result<Index> {
@@ -186,6 +189,8 @@ impl Slice {
                 "SloList" => WireValue::SloList(crate::SloList::deserialize(value)?),
                 "SloHistory" => WireValue::SloHistory(crate::SloHistory::deserialize(value)?),
                 "UsagePeriod" => WireValue::UsagePeriod(crate::UsagePeriod::deserialize(value)?),
+                "ThreadSummary" => WireValue::ThreadSummary(crate::ThreadSummary::deserialize(value)?),
+                "ThreadTimelineEvent" => WireValue::ThreadTimelineEvent(crate::ThreadTimelineEvent::deserialize(value)?),
                 _ => WireValue::Resource(Box::new(crate::Resource::deserialize(value)?)),
             };
             out.push(DecodedValue { pointer, value: decoded });
@@ -195,7 +200,17 @@ impl Slice {
         let fields: &[(&str, &str)] = match self.slice.as_str() {
             "roster" => &[("agents", "Agent"), ("arrangements", "Arrangement"), ("resources", "Resource"), ("runtimes", "Runtime"), ("machines", "Machine"), ("sessions", "Session"), ("devices", "Device")],
             "details" => &[("missions", "Mission"), ("resources", "Resource"), ("work", "Work"), ("launches", "Launch"), ("launch_variants", "LaunchVariant")],
-            "attention" => &[("attention", "Attention"), ("resources", "Resource"), ("messages", "Message")],
+            "attention" => {
+                if let Some(threads) = state.get("topic_threads") {
+                    for (index, thread) in threads.as_array().context("expected array: /state/topic_threads")?.iter().enumerate() {
+                        let base = format!("/state/topic_threads/{index}");
+                        add(format!("{base}/summary"), "ThreadSummary", &thread["summary"])?;
+                        add_list(&mut add, &format!("{base}/events"), array(thread, "events")
+                            .with_context(|| format!("at {base}/events"))?, "ThreadTimelineEvent")?;
+                    }
+                }
+                &[("attention", "Attention"), ("resources", "Resource"), ("messages", "Message")]
+            }
             "conversation" => {
                 for (index, thread) in array(state, "threads")?.iter().enumerate() {
                     add_list(&mut add, &format!("/state/threads/{index}/items"), array(thread, "items")?, "TimelineEntry")?;
