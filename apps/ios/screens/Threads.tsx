@@ -176,7 +176,7 @@ const NO_SNAPSHOTS: ReadonlyMap<string, Snapshot> = new Map();
  */
 function useMarkedUnreadPage(enabled: boolean, refresh: number) {
   const { unreadClient } = useStore();
-  const [result, setResult] = useState<{ items: ThreadSummary[]; issue?: string }>();
+  const [result, setResult] = useState<{ reader: typeof unreadClient; items: ThreadSummary[]; issue?: string; refused?: boolean }>();
   const [loading, setLoading] = useState(false);
   const request = useRef(0);
   const load = useCallback(async () => {
@@ -187,7 +187,8 @@ function useMarkedUnreadPage(enabled: boolean, refresh: number) {
     if (token !== request.current) return;
     // Only an authoritative summary reminder lists a row; natural unread alone never does.
     const items = list.kind === 'empty' ? [] : list.items.filter(thread => !!reminderFromSummary(thread));
-    setResult({ items, issue: list.kind === 'error' ? markedUnreadIssue(list.error) : undefined });
+    setResult({ reader: unreadClient, items, issue: list.kind === 'error' ? markedUnreadIssue(list.error) : undefined,
+      refused: list.kind === 'error' && list.error.kind === 'read-failed' && list.error.reason.kind === 'refused' });
     setLoading(false);
   }, [enabled, unreadClient]);
   useFocusEffect(useCallback(() => {
@@ -199,8 +200,9 @@ function useMarkedUnreadPage(enabled: boolean, refresh: number) {
   const replace = useCallback((item: ThreadSummary, _snapshot?: Snapshot) => setResult(previous => previous && {
     ...previous, items: previous.items.map(row => row.id === item.id ? item : row),
   }), []);
+  const visible = result?.reader === unreadClient ? result : undefined;
   return {
-    live: false, items: result?.items ?? NO_THREADS, snapshots: NO_SNAPSHOTS, issue: result?.issue, loading, replace,
+    live: false, items: visible?.items ?? NO_THREADS, snapshots: NO_SNAPSHOTS, issue: visible?.issue, refused: visible?.refused, loading, replace,
     reload: () => void load(), more: undefined,
   };
 }
@@ -224,16 +226,16 @@ export function AgentThreads({ agentId, openThread }: { agentId: string; openThr
 export function ThreadGroup({ context, openThread, title = 'Threads', excludeId }: {
   context: ThreadCollectionContext; openThread: OpenThread; title?: string; excludeId?: string;
 }) {
-  const { threadClient, unreadEnabled } = useStore();
+  const { threadClient, unreadEnabled, actor, draftGeneration } = useStore();
   if ('marked_unread' in context && !unreadEnabled) return null;
   // Embedded thread groups read in system text on every host, as the thread screen does.
-  return threadClient ? <SystemText><ContextThreadList client={threadClient} context={context} openThread={openThread} title={title} excludeId={excludeId} /></SystemText> : null;
+  return threadClient ? <SystemText><ContextThreadList key={`${actor}:${draftGeneration.current}`} client={threadClient} context={context} openThread={openThread} title={title} excludeId={excludeId} /></SystemText> : null;
 }
 
 function ContextThreadList({ context, client, openThread, title, excludeId }: {
   context: ThreadCollectionContext; client: ThreadClient; openThread: OpenThread; title: string; excludeId?: string;
 }) {
-  const { threadRefresh, feed, threadEdits } = useStore();
+  const { threadRefresh, feed, threadEdits, actor, draftGeneration } = useStore();
   const agent = 'agent_id' in context ? context.agent_id : undefined;
   const mission = 'mission_id' in context ? context.mission_id : undefined;
   const ask = 'origin_source' in context ? context.origin_source : undefined;
@@ -261,10 +263,32 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
   const markedPage = useMarkedUnreadPage(marked, threadRefresh);
   const page = marked ? markedPage : contextPage;
   useEffect(() => { page.items.forEach(thread => threadEdits?.observe(thread, page.snapshots.get(thread.id))); }, [page.items, page.snapshots, threadEdits, threadRefresh]);
-  const threads = page.items.filter(thread => thread.id !== excludeId);
   const placementScope = JSON.stringify(selector ?? null);
   const [show, setShow] = useState(false);
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const lifetime = JSON.stringify([actor, draftGeneration.current, placementScope]);
+  const [opened, setOpened] = useState<{ client: ThreadClient; lifetime: string; items: ReadonlyMap<string, ThreadSummary>; order: readonly string[] }>();
+  const owned = opened?.client === client && opened.lifetime === lifetime ? opened : undefined;
+  const expanded = owned?.items;
+  // Only navigation/ownership exits release the reading placement, never a list refresh.
+  useFocusEffect(useCallback(() => () => setOpened(undefined), [client, lifetime]));
+  const threads = page.items.filter(thread => thread.id !== excludeId && (!marked || !!reminderFromSummary(thread)));
+  if (marked && expanded) for (const thread of expanded.values()) {
+    if (thread.id !== excludeId && !threads.some(row => row.id === thread.id)) threads.push(thread);
+  }
+  if (marked && owned?.items.size) {
+    // Freeze the visit's row ordering: removing an open row from membership must
+    // not move its body/composer below the remaining rows in the same ScrollView.
+    const positions = new Map(owned.order.map((id, index) => [id, index]));
+    threads.sort((left, right) => (positions.get(left.id) ?? owned.order.length) - (positions.get(right.id) ?? owned.order.length));
+  }
+  const onSummary = useCallback((thread: ThreadSummary, snapshot?: Snapshot) => {
+    page.replace(thread, snapshot);
+    setOpened(previous => {
+      if (previous?.client !== client || previous.lifetime !== lifetime || !previous.items.has(thread.id) || previous.items.get(thread.id) === thread) return previous;
+      return { ...previous, items: new Map(previous.items).set(thread.id, thread) };
+    });
+  }, [page.replace, client, lifetime]);
+  useEffect(() => { if (marked && markedPage.refused) setOpened(undefined); }, [marked, markedPage.refused]);
   const { height } = useWindowDimensions();
   const titleLines = useTitleLines();
   // A host that scrolls (mission, Inbox) lets the group grow taller; above a conversation it
@@ -290,11 +314,12 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
     });
   }, []);
   const appearance = useTextAppearance();
+  if (marked && markedPage.refused) return <ThreadReadIssue message={markedPage.issue!} />;
   if (!threads.length && !page.issue && !page.more) return null;
   // The marked section adds no new count: each row's private marker is its only signal.
   const count = marked ? undefined : `${threads.length}${page.more ? '+' : ''}`;
   return <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.mantle }}>
-    <Pressable accessibilityRole="button" accessibilityState={{ expanded: show }} onPress={() => setShow(previous => !previous)}
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded: show }} onPress={() => { setShow(previous => !previous); if (show) setOpened(undefined); }}
       accessibilityLabel={marked ? title : `${title}, ${threads.length}${page.more ? ' or more' : ''}`}
       accessibilityValue={{ text: show ? 'Expanded' : 'Collapsed' }} accessibilityHint={show ? 'Hides the threads' : 'Shows the threads'}
       style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12 }}>
@@ -307,15 +332,16 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       style={{ maxHeight: Math.round(height * (hosted ? 0.75 : 0.5)), flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
       <ThreadViewport viewport={scroll}>
       {threads.map(thread => {
-        const open = expanded.has(thread.id);
-        const toggle = () => setExpanded(previous => {
-          const next = new Set(previous);
-          if (next.has(thread.id)) next.delete(thread.id);
-          else next.add(thread.id);
-          return next;
+        const open = expanded?.has(thread.id) ?? false;
+        const toggle = () => setOpened(previous => {
+          const previousOwned = previous?.client === client && previous.lifetime === lifetime ? previous : undefined;
+          const items = new Map(previousOwned?.items);
+          if (items.has(thread.id)) items.delete(thread.id);
+          else items.set(thread.id, thread);
+          return { client, lifetime, items, order: previousOwned?.items.size ? previousOwned.order : threads.map(row => row.id) };
         });
         return open ? <ExpandedContextThread key={thread.id} client={client} initial={thread} refresh={threadRefresh} placement={`context:${placementScope}:${thread.id}`} seekReminder={marked}
-          onSummary={page.replace} toggle={toggle} onOpen={() => openThread(thread.id, (threadEdits?.project(thread) ?? thread).title)} revealComposer={revealComposer} />
+          onSummary={onSummary} toggle={toggle} onOpen={() => openThread(thread.id, (threadEdits?.project(thread) ?? thread).title)} revealComposer={revealComposer} />
           : <ContextThreadHeader key={thread.id} thread={thread} open={false} toggle={toggle} />;
       })}
       </ThreadViewport>
