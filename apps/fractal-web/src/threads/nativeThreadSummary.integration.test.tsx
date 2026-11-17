@@ -9,6 +9,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import * as Native from '@fractal/client/schema/read'
 import type { Snapshot, ThreadSummary } from '@fractal/client/schema/read'
 import { Schema } from 'effect'
+import * as UnreadVisit from '../../../ios/unreadVisit.ts'
 
 // Exercise the production native paging, exact-summary hooks and JSX with real
 // React mount/update/cleanup. Only native hosts and the timeline body are ports;
@@ -97,7 +98,32 @@ function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) =>
   const Pressable = ({ children, onPress, accessibilityLabel, accessibilityState }: {
     children?: React.ReactNode; onPress: () => void; accessibilityLabel?: string; accessibilityState: { expanded: boolean }
   }) => <button onClick={onPress} aria-label={accessibilityLabel} aria-expanded={accessibilityState.expanded}>{children}</button>
+  // Execute the real visit entry/controller; only native navigation/AppState are ports.
+  const actionsOutput = ts.transpileModule(readFileSync(resolve('../ios/unreadActions.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const actions: { UnreadVisitController?: unknown } = {}
+  new Function('require', 'exports', actionsOutput)((name: string) => {
+    if (name === './unreadVisit.ts') return UnreadVisit
+    throw new Error(`Unexpected unread action dependency: ${name}`)
+  }, actions)
+  const nativeVisit = readFileSync(resolve('../ios/unreadVisitNative.ts'), 'utf8')
+  const visitStart = nativeVisit.indexOf('const visits =')
+  const visitEnd = nativeVisit.indexOf('/** Only mounted expanded bodies', visitStart)
+  expect(visitStart).toBeGreaterThanOrEqual(0)
+  expect(visitEnd).toBeGreaterThan(visitStart)
+  const entryOutput = ts.transpileModule(nativeVisit.slice(visitStart, visitEnd), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const entry: { useUnreadVisitEntry?: unknown } = {}
+  const useFocusEffect = (callback: React.EffectCallback) => React.useEffect(callback, [callback])
+  const navigation = { addListener: (_event: string, _listener: () => void) => () => {} }
+  new Function('exports', 'useMemo', 'useRef', 'useCallback', 'useFocusEffect', 'useNavigation', 'useRoute', 'AppState', 'UnreadVisitController', 'unreadVisit', entryOutput)(
+    entry, React.useMemo, React.useRef, React.useCallback, useFocusEffect, () => navigation, () => ({ key: 'route/native-summary' }),
+    { currentState: 'active' }, actions.UnreadVisitController, UnreadVisit.unreadVisit,
+  )
   const Component = production({
+    reminderFromSummary: UnreadVisit.reminderFromSummary, useUnreadVisitEntry: entry.useUnreadVisitEntry,
     useRef: React.useRef, useState: React.useState, useCallback: React.useCallback, useMemo: React.useMemo, useEffect: React.useEffect,
     useFocusEffect: (callback: React.EffectCallback) => React.useEffect(callback, [callback]),
     useStore: () => ({ threadRefresh: 0, feed }), useWindowDimensions: () => ({ height: 800 }),
