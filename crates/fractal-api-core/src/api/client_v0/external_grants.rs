@@ -17,6 +17,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("thread-detail", "read.assistant.conversation"),
     ("thread-timeline", "read.assistant.conversation"),
     ("thread-start-context", "read.assistant.conversation"),
+    ("thread-request-history", "read.assistant.conversation"),
     ("terminal-content", "read.assistant.terminal"),
     ("slo", "read.assistant.slo"), ("slo-history", "read.assistant.slo"),
 ];
@@ -331,7 +332,7 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
     let projection = request.uri().path().strip_prefix("/v1/client/assistant/");
     let Some((_, scope)) = ROUTES.iter().find(|(route, _)| projection == Some(*route))
         else { return Err(forbidden("assistants may access only explicit proof-bearing read projections")) };
-    if matches!(projection, Some("threads" | "thread-detail" | "thread-timeline" | "thread-start-context"))
+    if matches!(projection, Some("threads" | "thread-detail" | "thread-timeline" | "thread-start-context" | "thread-request-history"))
         && session.authority_actor != MCP_PRINCIPAL
     {
         return Err(forbidden("this thread projection requires an assistant/mcp grant"));

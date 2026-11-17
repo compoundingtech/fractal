@@ -2367,6 +2367,29 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn thread_request_history(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<RequestHistoryPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/threads/{}/request-history",
+            thread_path_segment(id)?
+        );
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
+        }
+        self.get(&path).await
+    }
     pub async fn harness_questions(
         &self,
         cursor: Option<&str>,

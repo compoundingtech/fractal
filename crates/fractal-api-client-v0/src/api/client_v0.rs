@@ -114,6 +114,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/threads/start-context", get(threads::start_context))
         .route("/v1/client/threads/{id}", get(threads::detail))
         .route("/v1/client/threads/{id}/timeline", get(threads::timeline))
+        .route("/v1/client/threads/{id}/request-history", get(threads::request_history))
         .route(
             "/v1/client/arrangements/{person_name}/{uuid}",
             get(arrangements::get),
@@ -257,6 +258,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/thread-detail", get(assistant::read_projection))
         .route("/v1/client/assistant/thread-timeline", get(assistant::read_projection))
         .route("/v1/client/assistant/thread-start-context", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-request-history", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/slo", get(assistant::read_projection))
         .route("/v1/client/assistant/slo-history", get(assistant::read_projection))
