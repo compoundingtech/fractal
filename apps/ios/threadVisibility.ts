@@ -8,11 +8,20 @@ export function intersectThreadBounds(left: ThreadBounds, right: ThreadBounds): 
   return width > 0 && height > 0 ? { x, y, width, height } : undefined;
 }
 
-/** Rows arrive in canonical newest-first order. A clipped or unknown row is never acknowledged. */
+/** Read evidence requires two lines (the whole body, when it is shorter than two lines),
+ * the entire content width and its trailing end. Metadata/author labels must not be
+ * included in the measured body bounds.
+ */
 export function visibleThreadMessages(
   viewport: ThreadBounds,
-  rows: readonly { id: string; bounds?: ThreadBounds }[],
+  rows: readonly { id: string; bounds?: ThreadBounds; lineHeight?: number }[],
   limit: number,
 ): string[] {
-  return rows.flatMap(row => row.bounds && intersectThreadBounds(viewport, row.bounds) ? [row.id] : []).slice(0, limit);
+  return rows.flatMap(row => {
+    if (!row.bounds || !row.lineHeight || row.lineHeight <= 0) return [];
+    const visible = intersectThreadBounds(viewport, row.bounds);
+    return visible && visible.height >= Math.min(row.bounds.height, 2 * row.lineHeight)
+      && visible.width >= row.bounds.width
+      && visible.y + visible.height >= row.bounds.y + row.bounds.height ? [row.id] : [];
+  }).slice(0, limit);
 }

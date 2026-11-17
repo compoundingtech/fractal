@@ -303,7 +303,7 @@ mod socket_budget_tests {
                     caps["api_version"] = json!(fractal_client::API_VERSION);
                     caps["value"]["capabilities"] = json!([
                         {"id":"collections","version":1,"state":"granted"},
-                        {"id":"threads-v1","version":2,"state":"granted"},
+                        {"id":"threads-v1","version":3,"state":"granted"},
                         {"id":"thread-summary-feed","version":1,"state":"granted"},
                         {"id":"inventory-collections","version":1,"state":"granted"},
                         {"id":"summary","version":1,"state":"granted"},
@@ -500,7 +500,7 @@ mod access_tests {
         let mut caps = capabilities(false);
         caps.capabilities = vec![fractal_client::Capability {
             id: "threads-v1".into(),
-            version: 2,
+            version: 3,
             state: fractal_client::CapabilityState::Granted,
         }];
         assert_eq!(access(&caps, false), ThreadAccess::default());

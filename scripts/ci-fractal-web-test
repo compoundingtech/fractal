@@ -778,10 +778,17 @@ threads_pairing_closure = [
     "apps/fractal-web/src/data/browserPairing.ts",
     "apps/fractal-web/src/data/conversationPort.ts",
     "apps/fractal-web/src/threads/LiveThreads.tsx",
+    "apps/fractal-web/src/threads/MarkedUnreadThreads.tsx",
+    "apps/fractal-web/src/threads/markedUnreadPages.ts",
+    "apps/fractal-web/src/threads/meaningfulGeometry.ts",
     "apps/fractal-web/src/threads/ThreadEditor.tsx",
     "apps/fractal-web/src/threads/ThreadPanel.tsx",
     "apps/fractal-web/src/threads/ThreadRefusalAlert.tsx",
     "apps/fractal-web/src/threads/threadSource.ts",
+    "apps/fractal-web/src/threads/UnreadReminderControls.tsx",
+    "apps/fractal-web/src/threads/unread-action-port.ts",
+    "apps/fractal-web/src/threads/unreadVisit.ts",
+    "apps/fractal-web/src/threads/useForegroundVisibility.ts",
     "apps/fractal-web/src/web/BrowserPairing.tsx",
     "apps/fractal-web/src/web/browserPairingState.ts",
 ]
@@ -806,7 +813,7 @@ with tempfile.TemporaryDirectory() as scratch:
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
     assert covered.returncode == 0 and "10 repository files, 0 outside" in covered.stdout, covered
     threads_pairing = graph(*[f"./../../{path}" for path in threads_pairing_closure])
-    assert threads_pairing.returncode == 0 and "9 repository files, 0 outside" in threads_pairing.stdout, threads_pairing
+    assert threads_pairing.returncode == 0 and f"{len(threads_pairing_closure)} repository files, 0 outside" in threads_pairing.stdout, threads_pairing
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):

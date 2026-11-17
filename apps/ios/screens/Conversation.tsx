@@ -1,5 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, Alert, AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
+import { ownedPresentations } from '../ownedPresentation';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
@@ -28,7 +30,7 @@ import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
 import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
-import { Button, Field, LINE, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
+import { Button, DraftRecoveryNote, Field, LINE, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
 import { AlertsStrip } from './Alerts';
 import { AgentThreads } from './Threads';
 
@@ -321,7 +323,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       // typed while it was on its way stay after it. The cache holds the box's text even if the person
       // has left the conversation, so the text is there when they come back.
       const restored = restoreDraft(draftCache.current.get(target) ?? '', text);
-      if (restored) rememberBounded(draftCache.current, target, restored, 24);
+      if (restored) draftCache.current.set(target, restored);
       draftTouched.current = true;
       if (tags) setDictated(true);
       setDraft(restored);
@@ -361,7 +363,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
     const pick = async () => {
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      const release = ownedPresentations.acquire();
+      let result;
+      try {
+        result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      } finally { release(); }
       if (result.canceled) return;
       const more = result.assets.map(asset => asset.base64 ? picked(asset.base64, asset.mimeType ?? 'image/jpeg', asset.fileName ?? undefined) : `${asset.fileName ?? 'That image'} could not be read.`);
       const next = addImages(images, more);
@@ -372,7 +378,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       const next = addImages(images, [image ? fromDataUri(image.data, 'Pasted image') : 'The clipboard holds no image.']);
       setImages(next.images); setImageIssue(next.refused);
     };
-    ActionSheetIOS.showActionSheetWithOptions({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
+    showOwnedActionSheet({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
       if (index === 0) void pick().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
       if (index === 1) void paste().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
     });
@@ -396,7 +402,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     if (then === 'cancel' || !words) return;
     if (then === 'send') { await send(draft.trim() ? `${draft.trimEnd()} ${words}` : words); return; }
     const text = draft.trim() ? `${draft.trimEnd()} ${words}` : words;
-    setDraft(text); rememberBounded(draftCache.current, target, text, 24);
+    setDraft(text); draftCache.current.set(target, text);
     setDictated(true);
   }
   // Debug builds only: type a message and send it, as a person would, so a recording can show
@@ -436,6 +442,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const bar = { backgroundColor: palette.mantle, borderTopColor: palette.surface0 };
 
   return <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={headerHeight}>
+    <DraftRecoveryNote />
     <Banners />
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
     {header ? <View style={strip}><T dim>{header}</T></View> : null}
@@ -516,7 +523,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
         <Field
           ref={box}
           value={draft}
-          onChangeText={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
+          onChangeText={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
           placeholder={`Message ${title}`}
           multiline
           style={[styles.input, canDictate ? { paddingRight: 36 } : null]}

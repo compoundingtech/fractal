@@ -48,6 +48,7 @@ import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalFore
 import { ownAvailability, servesAvailability, writeRefusal } from './availability';
 import { PresenceReporter } from './presence';
 import { ThreadEdits, threadRefusalMessage, type ThreadEdit, type ThreadEditResult } from './threadEdits';
+import { unreadClient as bindUnreadClient, unreadSupported, type UnreadClientPorts, type UnreadMutation } from './unreadClient';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -153,8 +154,8 @@ export type ThreadStartOrigin = { agentId: string; sourceId: string; episode: st
 export function threadDraftKey(thread: string): string {
   return `thread-draft/${thread}`;
 }
-export function threadStartScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>): string {
-  return JSON.stringify([origin.sourceId, origin.episode]);
+export function threadStartScope(thread: string): string {
+  return `start/${thread}`;
 }
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
@@ -189,10 +190,13 @@ function useAppStore(proof?: FabricProfile) {
   const foreground = useRef(new ForegroundGate(proof && !proof.ready ? 'background' : AppState.currentState));
   const [feed, setFeed] = useState<Feed | null>(null), [connectionIssue, setConnectionIssue] = useState('');
   const [cachedHostId, setCachedHostId] = useState('');
-  const [caps, setCaps] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [caps, setCapsState] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
-  capsRef.current = caps;
+  const setCaps = useCallback((next: Capabilities | null) => {
+    capsRef.current = next;
+    setCapsState(next);
+  }, []);
   const [availability, setAvailability] = useState<{ person: PersonAvailability | null; note: DirectiveNote | null; issue: string }>(NO_AVAILABILITY);
   const [autoResolved, setAutoResolved] = useState(NO_AUTO_RESOLVED);
   // Episodes with an override in flight: the ref refuses a second send at once, the state redraws the rows.
@@ -204,7 +208,14 @@ function useAppStore(proof?: FabricProfile) {
   const presence = useRef<PresenceReporter | null>(null);
   useEffect(() => foreground.current.subscribe(active => { if (active) lastInput.current = Date.now(); }), []);
   const noteInput = useCallback(() => { lastInput.current = Date.now(); presence.current?.input(); }, []);
-  const [status, setStatus] = useState<Status>('setup');
+  const [status, setStatusState] = useState<Status>('setup');
+  const statusRef = useRef(status);
+  const setStatus = useCallback((next: Status | ((previous: Status) => Status)) => {
+    const value = typeof next === 'function' ? next(statusRef.current) : next;
+    // Native connection callbacks can race a retained retry before React renders.
+    statusRef.current = value;
+    setStatusState(value);
+  }, []);
   const [hasSynced, setHasSynced] = useState(false);
   // The page `sync` notice (this host lacks records a peer holds): the socket's frames carry none, so a
   // small page read supplies it while online. Unread is `undefined`, and level with its peers is `null`.
@@ -236,6 +247,7 @@ function useAppStore(proof?: FabricProfile) {
   const conversationCache = useRef(new Map<string, Conversation<TimelineEntry>>()), draftCache = useRef(new Map<string, string>());
   const [draftsReady, setDraftsReady] = useState(0);
   const draftsOwner = useRef('');
+  const draftGeneration = useRef(0);
   useEffect(() => {
     const owner = caps?.session_actor;
     if (proof || !owner || draftsOwner.current === owner) return;
@@ -588,6 +600,7 @@ function useAppStore(proof?: FabricProfile) {
   }, [proof?.url, proof?.credential]);
 
   function clearCaches() {
+    draftGeneration.current++;
     sidebarSeen.current.clear(); sidebarCreation.current = null; sidebarRemoved.current = false;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
@@ -1055,7 +1068,7 @@ function useAppStore(proof?: FabricProfile) {
   };
   async function submitThreadAction(
     targetId: string,
-    kind: ThreadEdit['kind'] | 'start' | 'reply' | 'read',
+    kind: ThreadEdit['kind'] | 'start' | 'reply' | 'read' | UnreadMutation,
     revisions: Record<string, string>,
     prepare: (client: FractalClient, key: string) => Promise<PreparedThreadAction>,
   ): Promise<ThreadEditResult> {
@@ -1067,6 +1080,13 @@ function useAppStore(proof?: FabricProfile) {
     const ensureOriginalConnection = () => {
       if (threadConnection.current !== threadClient || (originalFabric && carrier.snapshot !== originalFabric)) {
         throw new Error('The original thread connection is no longer available.');
+      }
+      if ((kind === 'mark-unread' || kind === 'clear-unread') && (capsClient.current !== threadClient || !unreadSupported(capsRef.current))) {
+        throw new Error('Upgrade the connected Fractal to use unread reminders.');
+      }
+      if ((kind === 'mark-unread' || kind === 'clear-unread') && (statusRef.current !== 'online'
+        || !capsRef.current?.capabilities.some(capability => capability.id === `thread.${kind}` && capability.state === 'granted'))) {
+        throw new Error('The original unread change is waiting for an online connection with its action permission.');
       }
     };
     const id = actionId();
@@ -1090,6 +1110,7 @@ function useAppStore(proof?: FabricProfile) {
           const prepared = await prepare(threadClient, id);
           const confirm = actionReceiptCheck(prepared.readMessageIds
             ? { kind: 'read', actionId: id, readMessageIds: prepared.readMessageIds }
+            : kind === 'mark-unread' || kind === 'clear-unread' ? { kind: 'unread', actionId: id, targetId }
             : prepared.messageId ? { kind: 'message', actionId: id, targetId, messageId: prepared.messageId } : { kind: 'metadata', actionId: id, targetId });
           submit = async request => { acceptedSnapshot = (await confirm(() => prepared.send(request))).snapshot; };
         }
@@ -1165,7 +1186,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
       const signingProfile = signingKeyRef.current;
-      return trackThreadDelivery(threadStartScope(origin), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
+      return trackThreadDelivery(threadStartScope(thread), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
         const signing = await readPhoneSigning(signingProfile);
         if (!signing) throw new Error('Pair this phone again to sign thread messages.');
         const { signature, messageId } = await signThreadMessage(key, signing, {
@@ -1636,12 +1657,33 @@ function useAppStore(proof?: FabricProfile) {
   const gatewayMachineId = knownHostId ? `machine/${knownHostId.replace(/^host\//, '')}` : '';
   const gatewayHost = data.machines.find(m => m.id === gatewayMachineId)?.name ?? (knownHostId ? knownHostId.replace(/^host\//, '') : '');
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
+  const unreadPorts = useRef<UnreadClientPorts>({
+    supported: () => false,
+    canRead: () => false, canWrite: () => false, read: actions.markThreadRead,
+    submit: async () => ({ how: 'failed', error: 'The thread connection is unavailable.' }),
+  });
+  unreadPorts.current = {
+    supported: () => capsClient.current === client && unreadSupported(capsRef.current),
+    canRead: () => threadConnection.current === client && status === 'online',
+    canWrite: kind => threadConnection.current === client && status === 'online' && !!capsRef.current?.capabilities.some(capability => capability.id === `thread.${kind}` && capability.state === 'granted'),
+    read: actions.markThreadRead,
+    submit: (target, kind, send) => trackThreadDelivery(`unread/${target}`, target, () =>
+      submitThreadAction(target, kind, {}, async member => ({ send: request => send(member, request) }))),
+  };
+  const unreadClient = useMemo(() => bindUnreadClient(client, {
+    supported: () => threadConnection.current === client && unreadPorts.current.supported(),
+    canRead: () => threadConnection.current === client && unreadPorts.current.canRead(),
+    canWrite: kind => threadConnection.current === client && unreadPorts.current.canWrite(kind),
+    read: (thread, ids) => threadConnection.current === client ? unreadPorts.current.read(thread, ids) : Promise.resolve({ how: 'failed', error: 'The original thread connection is unavailable.' }),
+    submit: (target, kind, send) => threadConnection.current === client ? unreadPorts.current.submit(target, kind, send) : Promise.resolve({ how: 'failed', error: 'The original thread connection is unavailable.' }),
+  }), [client]);
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
-    error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, draftsOwner, draftGeneration, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, threadEdits, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,
+    unreadClient, unreadEnabled: capsClient.current === client && unreadSupported(caps),
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,

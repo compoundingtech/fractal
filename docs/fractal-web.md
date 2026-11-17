@@ -3,6 +3,16 @@
 Run the commands below from the repository root after a frozen workspace install.
 The [development guide](development.md) covers shared build and contribution tools.
 
+## Private unread reminder preview
+
+The `Fractal/App/Threads/Unread walkthrough` Storybook story uses demo data:
+nothing is sent to Fractal. Its guide names conversations and threads rather than
+internal identifiers; raw action details remain in a collapsed Technical details
+disclosure. The Marked unread sidebar uses a bell with an accessible Private
+reminder label, distinct from the natural-unread dot. At narrow panel widths the
+existing header grid uses a smaller gap and no forced age minimum so open and
+closed thread titles keep usable space.
+
 ## fractal-web Content Security Policy
 
 The app server and Vite's development/preview servers set an enforcing

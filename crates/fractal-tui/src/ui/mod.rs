@@ -52,6 +52,8 @@ pub mod pane;
 pub mod playback;
 mod drafts_store;
 mod read_store;
+mod read_evidence;
+use read_evidence::BodyGeometry;
 mod prefs;
 mod recent;
 mod resource_sidebar;
@@ -65,6 +67,8 @@ pub mod text;
 pub mod theme;
 pub mod thread;
 mod threads_live;
+mod unread_visit;
+mod marked_unread;
 mod objectives;
 mod triage;
 mod usage;
@@ -154,6 +158,10 @@ struct ThreadBodyRow {
     message: String,
     rect: Rect,
     layer: usize,
+    complete: bool,
+    body_row: usize,
+    body_rows: usize,
+    geometry: BodyGeometry,
 }
 
 #[derive(Default)]
@@ -191,14 +199,34 @@ struct FrameInfo {
 }
 
 impl FrameInfo {
+    fn thread_rows<'a>(&'a self, host: &'a str, thread: &'a str) -> impl Iterator<Item = &'a ThreadBodyRow> {
+        self.thread_body.iter().filter(move |row| {
+            row.host == host && row.thread == thread && row.complete && row.rect.width > 0
+                && (row.rect.x..row.rect.right()).all(|x| !self.covers.iter().skip(row.layer).any(|(cover, _)| {
+                    contains(*cover, x, row.rect.y)
+                }))
+        })
+    }
+
     fn visible_thread_messages(&self, host: &str, thread: &str) -> HashSet<String> {
-        self.thread_body.iter().filter_map(|row| {
-            if row.host != host || row.thread != thread { return None; }
-            let visible = (row.rect.x..row.rect.right()).any(|x| !self.covers.iter().skip(row.layer).any(|(cover, _)| {
-                contains(*cover, x, row.rect.y)
-            }));
-            visible.then(|| row.message.clone())
-        }).collect()
+        self.thread_rows(host, thread).map(|row| row.message.clone()).collect()
+    }
+
+    fn readable_thread_messages(&self, host: &str, thread: &str) -> BTreeMap<String, read_evidence::BodyGeometry> {
+        let mut messages: BTreeMap<&str, (read_evidence::BodyGeometry, usize, u8, bool)> = BTreeMap::new();
+        for row in self.thread_rows(host, thread) {
+            let (geometry, count, final_rows, consistent) = messages.entry(&row.message)
+                .or_insert((row.geometry, row.body_rows, 0, true));
+            *consistent &= *geometry == row.geometry && *count == row.body_rows;
+            if row.body_row.checked_add(1) == Some(*count) {
+                *final_rows |= 1;
+            } else if row.body_row.checked_add(2) == Some(*count) {
+                *final_rows |= 2;
+            }
+        }
+        messages.into_iter().filter(|(_, (_, count, final_rows, consistent))| {
+            *consistent && *count > 0 && *final_rows == if *count == 1 { 1 } else { 3 }
+        }).map(|(id, (geometry, ..))| (id.to_owned(), geometry)).collect()
     }
 }
 
@@ -493,6 +521,7 @@ pub struct Ui {
     /// The person's own availability and directive note, as last read.
     availability: availability::Availability,
     threads: threads_live::Threads,
+    terminal_foreground: Option<bool>,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -532,7 +561,7 @@ pub struct Ui {
     /// the page before it.
     older_wanted: RefCell<BTreeSet<String>>,
     /// This device opens an agent's tab on its conversation rather than attaching its terminal:
-    /// its own choice, or `None` when it never chose and the terminal attaches.
+    /// its own choice, or `None` when it never chose and the conversation opens.
     conversation_first: Option<bool>,
     /// This device permits the daemon after a failed direct terminal route.
     pub(crate) terminal_fallback: bool,
@@ -772,7 +801,7 @@ impl Ui {
 
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
-        if self.help
+        if self.terminal_foreground != Some(true) || self.help
             || self.popover.is_some()
             || self.glasses.palette_open()
         {
@@ -781,13 +810,41 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
+    /// Presentation, not hover or a cached timeline, is evidence of reading.
+    fn read_presented_threads(&mut self) {
+        self.read_presented_threads_at(Instant::now());
+    }
+
+    fn read_presented_threads_at(&mut self, now: Instant) {
+        if self.terminal_foreground != Some(true) || self.help || self.popover.is_some()
+            || self.glasses.palette_open() || self.confirmation_open() {
+            self.threads.stop_reading();
+            return;
+        }
+        let Some(pane) = self.focused_pane() else {
+            self.threads.leave_view();
+            return;
+        };
+        let host = pane.key();
+        let shown = {
+            let frame = self.frame.borrow();
+            let ids: BTreeSet<_> = self.threads.reading_ids(&pane).into_iter()
+                .chain(frame.thread_body.iter().filter(|row| row.host == host).map(|row| row.thread.clone())).collect();
+            ids.into_iter().map(|id| {
+                let messages = frame.readable_thread_messages(&host, &id);
+                (id, messages)
+            }).collect()
+        };
+        self.threads.presented(&host, &shown, now);
+    }
+
     /// Call only after terminal presentation succeeds. Advance through visible prose entries,
     /// resolving their absolute timestamps from the transcript rather than the newer roster.
     pub(crate) fn read_presented_conversations(
         &mut self,
         timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>,
     ) {
-        if self.help || self.popover.is_some() || self.glasses.palette_open() {
+        if self.terminal_foreground != Some(true) || self.help || self.popover.is_some() || self.glasses.palette_open() {
             return;
         }
         let shown: Vec<(String, i64)> = {
@@ -946,6 +1003,7 @@ impl Ui {
             documents: documents::Documents::default(),
             availability: availability::Availability::default(),
             threads: threads_live::Threads::default(),
+            terminal_foreground: None,
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -1303,7 +1361,7 @@ impl Ui {
 
     /// Whether this device opens agents on their conversation instead of attaching.
     pub(crate) fn conversation_first(&self) -> bool {
-        self.conversation_first == Some(true)
+        self.conversation_first != Some(false)
     }
 
     /// Attach the terminal of an agent just opened whose tab has been in front for a moment,
@@ -1883,6 +1941,7 @@ impl Ui {
                 let mut list = screens::home_list(&self.world, &self.closed, &self.override_pending);
                 self.threads.mark_inbox_unread(&mut list);
                 self.threads.recently_closed(&mut list);
+                self.threads.marked_unread(&mut list);
                 list
             },
             1 if self.tree => screens::agents_tree(&self.world, self.spinner(), width),
@@ -3168,6 +3227,12 @@ impl Ui {
             {
                 state.top = start.saturating_add_signed(anchor.offset);
             }
+            if let Some(message) = self.threads.take_anchor_scroll(key)
+                && let Some((_, line)) = doc.entries.iter().find(|(id, _)| *id == message) {
+                state.follow = false;
+                state.top = line.saturating_sub(height / 3);
+                anchors.remove(key);
+            }
             state.reconcile(total, height);
             // The note about earlier entries stays first while they load above it, so the
             // place is kept by the first entry read instead.
@@ -3275,9 +3340,21 @@ impl Ui {
                 };
                 match &target.hit {
                     Hit::InlineImage(_) => {}
-                    Hit::ThreadBody { host, thread, message } => {
+                    Hit::ThreadBody { host, thread, message, body_row, body_rows, body_start, body_end, digest } => {
                         self.frame.borrow_mut().thread_body.push(ThreadBodyRow {
-                            host: host.clone(), thread: thread.clone(), message: message.clone(), rect, layer,
+                            host: host.clone(), thread: thread.clone(), message: message.clone(),
+                            rect: Rect { x: area.x, width: area.width.saturating_sub(1), ..rect }, layer,
+                            complete: target.width <= area.width.saturating_sub(target.column).saturating_sub(1),
+                            body_row: *body_row,
+                            body_rows: *body_rows,
+                            geometry: read_evidence::BodyGeometry {
+                                viewport: area,
+                                scroll_top: top,
+                                document_rows: total,
+                                body_start: *body_start,
+                                body_end: *body_end,
+                                digest: *digest,
+                            },
                         });
                     }
                     hit => self.hit(rect, hit.clone()),
@@ -3986,10 +4063,11 @@ impl Ui {
                 ("p", "open the marked thread in its own tab"),
                 ("z", "close the thread, or reopen a closed one"),
                 ("n", "rename the thread"),
-                ("v", "mark the visible replies read"),
+                ("v", "mark visible replies read"),
+                ("u", "mark unread with a private reminder at a visible message"),
                 ("r", "send an action again when its outcome was not confirmed"),
                 (
-                    "alt+p z n v r",
+                    "alt+p z n v u r",
                     "the same in an agent or a thread tab, where a bare letter types",
                 ),
                 (
@@ -4070,7 +4148,7 @@ impl Ui {
                 (terminal_keys.as_str(), terminal_what.as_str()),
                 (
                     "opening an agent",
-                    "attaches its terminal; \"Conversation first\" in the palette (ctrl+k) opens the conversation instead, on this device",
+                    "opens its conversation by default; turn off \"Conversation first\" in the palette (ctrl+k) to attach terminals on this device",
                 ),
                 (
                     "click an alert",
@@ -4540,6 +4618,8 @@ impl Ui {
             return !self.recent_open() && self.mouse_moved(mouse);
         }
         if event == Event::FocusLost {
+            self.terminal_foreground = Some(false);
+            self.threads.stop_reading();
             self.hover.clear();
             self.threads.hover(None);
             self.hover.pressed.set(false);
@@ -4550,6 +4630,7 @@ impl Ui {
         }
         // Back from another window: what was decided there may have changed availability.
         if event == Event::FocusGained {
+            self.terminal_foreground = Some(true);
             self.availability.refresh();
         }
         let focused = self.input_terminal();
@@ -6856,6 +6937,13 @@ impl Ui {
                     self.flash_as(Severity::Info, "No visible replies to mark read");
                 }
             }
+            Hit::Thread(host, thread::Tap::MarkUnread(id)) => {
+                if self.confirmation_open() { return; }
+                let visible = self.frame.borrow().visible_thread_messages(&host, &id);
+                if !self.threads.mark_unread(&host, &id, &visible) {
+                    self.flash_as(Severity::Info, "No visible message to mark unread");
+                }
+            }
             Hit::Thread(host, tap) => {
                 if matches!(&tap, thread::Tap::Start(_) | thread::Tap::Compose(_) | thread::Tap::Reply { .. }) {
                     self.answering = None;
@@ -7576,6 +7664,10 @@ mod tests {
             message: message.into(),
             rect: Rect::new(4, y, 8, 1),
             layer: 1,
+            complete: true,
+            body_row: 0,
+            body_rows: 1,
+            geometry: read_evidence::BodyGeometry::default(),
         };
         let frame = FrameInfo {
             covers: vec![(Rect::new(0, 0, 20, 4), 0), (Rect::new(4, 2, 8, 1), 0)],
@@ -7592,6 +7684,178 @@ mod tests {
             frame.visible_thread_messages("home:ask", "thread/one"),
             HashSet::from(["message/visible".to_owned()]),
         );
+    }
+
+    #[test]
+    fn thread_auto_read_accepts_a_fully_visible_one_line_body() {
+        let frame = FrameInfo {
+            thread_body: vec![body_evidence_row(0, 1, 1)],
+            ..FrameInfo::default()
+        };
+        assert_eq!(frame.readable_thread_messages("thread:one", "thread/one"),
+            BTreeMap::from([("message/one".into(), frame.thread_body[0].geometry)]));
+    }
+
+    fn body_evidence_row(body_row: usize, body_rows: usize, y: u16) -> ThreadBodyRow {
+        ThreadBodyRow {
+            host: "thread:one".into(), thread: "thread/one".into(), message: "message/one".into(),
+            rect: Rect::new(4, y, 20, 1), layer: 0, complete: true, body_row, body_rows,
+            geometry: read_evidence::BodyGeometry {
+                viewport: Rect::new(4, 1, 21, 5),
+                scroll_top: 0, document_rows: 10, body_start: 1, body_end: 6, digest: [1; 32],
+            },
+        }
+    }
+
+    #[test]
+    fn thread_auto_read_refuses_covered_or_clipped_body_width() {
+        let mut frame = FrameInfo {
+            thread_body: vec![body_evidence_row(0, 1, 1)],
+            ..FrameInfo::default()
+        };
+        frame.covers.push((Rect::new(23, 1, 1, 1), 0));
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(),
+            "even a cover outside the text glyphs excludes the full message row");
+        assert!(frame.visible_thread_messages("thread:one", "thread/one").is_empty());
+        frame.covers.clear();
+        frame.thread_body[0].complete = false;
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(),
+            "horizontally clipped body is not fully visible");
+        frame.thread_body[0].complete = true;
+        frame.thread_body[0].rect.width = 0;
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty());
+    }
+
+    #[test]
+    fn thread_auto_read_requires_the_final_two_consecutive_nonblank_ordinals() {
+        let mut frame = FrameInfo {
+            thread_body: vec![body_evidence_row(0, 4, 1), body_evidence_row(3, 4, 4)],
+            ..FrameInfo::default()
+        };
+        assert_eq!(frame.visible_thread_messages("thread:one", "thread/one").len(), 1);
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(),
+            "an early row plus the trailing row does not prove the penultimate row");
+        frame.thread_body.push(body_evidence_row(2, 4, 2));
+        frame.covers.push((Rect::new(23, 2, 1, 1), 0));
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(),
+            "the penultimate row must be uncovered across its width");
+        frame.covers.clear();
+        assert_eq!(frame.readable_thread_messages("thread:one", "thread/one").len(), 1,
+            "blank rendered rows between final nonblank ordinals do not disqualify them");
+        frame.thread_body.retain(|row| row.body_row != 0);
+        assert_eq!(frame.readable_thread_messages("thread:one", "thread/one").len(), 1,
+            "only the final min(body_rows, 2) rows are required");
+        frame.thread_body[0].body_row = 2;
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(),
+            "duplicate penultimate rows cannot replace the trailing row");
+    }
+
+    #[test]
+    fn thread_read_evidence_retains_scroll_layout_and_body_identity() {
+        let mut frame = FrameInfo {
+            thread_body: vec![body_evidence_row(0, 1, 1)],
+            ..FrameInfo::default()
+        };
+        let original = frame.readable_thread_messages("thread:one", "thread/one");
+        let geometry = frame.thread_body[0].geometry;
+        let mut scroll = geometry;
+        scroll.scroll_top += 1;
+        let mut layout = geometry;
+        layout.viewport.x += 1;
+        let mut height = geometry;
+        height.document_rows += 1;
+        let mut start = geometry;
+        start.body_start += 1;
+        let mut end = geometry;
+        end.body_end += 1;
+        let mut body = geometry;
+        body.digest[0] ^= 1;
+        for changed in [scroll, layout, height, start, end, body] {
+            frame.thread_body[0].geometry = changed;
+            assert_ne!(frame.readable_thread_messages("thread:one", "thread/one"), original);
+        }
+    }
+
+    #[test]
+    fn unknown_foreground_never_reads_threads_until_focus_gained() {
+        use fractal_client::{Envelope, ThreadCollectionRows, ThreadSummary};
+        use fractal_feed::{ThreadAccess, ThreadInterest};
+
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Thread("thread/focus".into()), glass::Open::Tab);
+        ui.threads.enable(true);
+        ui.threads.set_access(ThreadAccess { mark_read: true, ..ThreadAccess::default() });
+        let summary: Envelope<ThreadSummary> = serde_json::from_value(serde_json::json!({
+            "api_version": fractal_client::API_VERSION, "request_id": "request/focus",
+            "snapshot": { "id": "snapshot/focus", "host_id": "host/test", "store_index": 1,
+                "projection_version": "1", "created_at": "2026-11-16T00:00:00Z" },
+            "value": { "id": "thread/focus", "agent_id": "agent/example/atlas/builder",
+                "title": "Focus evidence", "revision": "claim/current", "title_revision": "claim/title",
+                "state": "open", "message_count": 1, "unread": true }
+        })).unwrap();
+        let snapshot = summary.snapshot;
+        ui.threads.window(
+            ThreadInterest::Timeline("thread/focus".into()), snapshot.clone(), true,
+            ThreadCollectionRows::Summaries(vec![summary.value]), Vec::new(),
+            vec!["thread/focus".into()], false,
+        );
+        ui.threads.window(
+            ThreadInterest::Timeline("thread/focus".into()), snapshot, true,
+            ThreadCollectionRows::Timeline(vec![serde_json::from_value(serde_json::json!({
+                "id": "message/focus", "actor_id": "agent/example/atlas/builder",
+                "accepted_at_unix_ms": 1_000, "kind": "message",
+                "content": "A fully visible single line", "thread_quote_id": null
+            })).unwrap()]),
+            Vec::new(), vec!["message/focus".into()], false,
+        );
+        let now = Instant::now();
+        frame(&ui, 120, 40);
+        assert_eq!(ui.terminal_foreground, None);
+        assert_eq!(ui.frame.borrow().readable_thread_messages("thread:thread/focus", "thread/focus").len(), 1);
+        ui.read_presented_threads_at(now);
+        ui.read_presented_threads_at(now + std::time::Duration::from_millis(500));
+        assert!(ui.threads.writes().is_empty(), "startup is not evidence of OS foreground");
+        ui.input_event(Event::FocusGained);
+        ui.read_presented_threads_at(now + std::time::Duration::from_secs(1));
+        assert!(ui.threads.writes().is_empty(), "focus gain must begin a fresh dwell");
+        ui.read_presented_threads_at(now + std::time::Duration::from_millis(1500));
+        assert_eq!(ui.threads.writes().len(), 1);
+        ui.input_event(Event::FocusLost);
+        assert_eq!(ui.terminal_foreground, Some(false));
+    }
+
+    #[test]
+    fn unknown_foreground_never_reads_history_until_focus_gained() {
+        let mut ui = Ui::new(demo::test_world());
+        let conversation = "agent/example/atlas/builder".to_owned();
+        let items: Vec<fractal_client::TimelineEntry> = serde_json::from_value(serde_json::json!([{
+            "id": "entry/focus", "sequence": 1, "revision": 1,
+            "timestamp": "2026-11-16T00:00:00Z", "role": "assistant", "type": "content", "final": true,
+            "body": { "media_type": "text/plain", "text": "Foreground history evidence" }
+        }])).unwrap();
+        let entries = adapt::conversation(&items, &BTreeMap::new());
+        let entry = entries.first().unwrap().id.clone();
+        ui.world.conversations.insert(conversation.clone(), Load::Ready(entries));
+        let timelines = BTreeMap::from([(conversation.clone(), fractal_conversation_ui::Timeline {
+            items, ..Default::default()
+        })]);
+        ui.frame.borrow_mut().panes.push(FramePane {
+            key: format!("chat:{conversation}"), rect: Rect::new(0, 0, 40, 4),
+            top: 0, total: 1, lines: Rc::new(Vec::new()),
+            entries: vec![(entry, 0)], images: Vec::new(), layer: 0,
+        });
+        ui.frame.borrow_mut().read_messages.insert("message/focus".into());
+        ui.reads.merge([(conversation.clone(), 0)]);
+        let at = read_store::at_ms("2026-11-16T00:00:00Z").unwrap();
+        assert!(ui.visible_messages().is_empty());
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread(&conversation, Some(at)), "startup must not advance history");
+        ui.input_event(Event::FocusGained);
+        assert_eq!(ui.visible_messages(), HashSet::from(["message/focus".into()]));
+        ui.read_presented_conversations(&timelines);
+        assert!(!ui.reads.unread(&conversation, Some(at)));
+        ui.input_event(Event::FocusLost);
+        assert!(ui.visible_messages().is_empty());
     }
 
     #[test]

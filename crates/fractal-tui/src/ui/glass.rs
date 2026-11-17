@@ -955,6 +955,13 @@ pub(crate) enum Open {
     Glass,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ThreadReading {
+    host: String,
+    id: String,
+    visible: HashSet<String>,
+}
+
 #[derive(Default)]
 struct Palette {
     query: String,
@@ -969,6 +976,8 @@ struct Palette {
     /// The palette is asking for a glass's name; the query is the name.
     naming: Option<Naming>,
     sidebar: Option<resource_sidebar::PaletteMode>,
+    /// Visible body evidence captured before the palette covers the active pane.
+    thread_reading: Option<ThreadReading>,
 }
 
 /// What a name typed into the palette is for.
@@ -1004,6 +1013,7 @@ enum Action {
     /// Agents open on their terminal, or on their conversation.
     ToggleConversationFirst,
     ToggleTerminalFallback,
+    ThreadReading { target: ThreadReading, unread: bool },
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -1405,6 +1415,17 @@ impl Ui {
             search,
             action,
         };
+        if let Some(target) = self.glasses.palette.as_ref().and_then(|palette| palette.thread_reading.as_ref()) {
+            for (unread, allowed, label, detail) in [
+                (false, self.threads.can_mark_read(&target.id), "Mark read", "clear private reminders or mark visible thread replies read"),
+                (true, !target.visible.is_empty() && self.threads.can_mark_unread(&target.id), "Mark unread", "private reminder at a visible thread message"),
+            ] {
+                if allowed {
+                    choices.push(start(label.into(), detail, format!("{label} thread reminder"),
+                        Action::ThreadReading { target: target.clone(), unread }));
+                }
+            }
+        }
         choices.push(start(
             "New mission".into(),
             "describe it; a planner drafts it for you to approve",
@@ -1433,7 +1454,7 @@ impl Ui {
             } else {
                 "Conversation first: on".into()
             },
-            "this device; opening an agent attaches its terminal unless this is on",
+            "this device; conversation is the default; turn off to attach terminals",
             "conversation first terminal default view open agents attach tui setting".into(),
             Action::ToggleConversationFirst,
         ));
@@ -3699,9 +3720,17 @@ impl Ui {
     }
 
     pub(crate) fn open_palette(&mut self, section: Option<usize>, enter: Open) {
+        let thread_reading = self.focused_pane()
+            .and_then(|pane| {
+                let id = self.threads.reading_target(&pane)?;
+                let host = pane.key();
+                let visible = self.frame.borrow().visible_thread_messages(&host, &id);
+                Some(ThreadReading { host, id, visible })
+            });
         self.glasses.palette = Some(Palette {
             section,
             enter,
+            thread_reading,
             ..Palette::default()
         });
     }
@@ -3742,6 +3771,14 @@ impl Ui {
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleConversationFirst => self.toggle_conversation_first(),
             Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
+            Action::ThreadReading { target, unread } => {
+                let sent = if unread {
+                    self.threads.mark_unread(&target.host, &target.id, &target.visible)
+                } else {
+                    self.threads.mark_visible_read(&target.host, target.id, &target.visible)
+                };
+                if !sent { self.flash_as(Severity::Info, "No visible message to mark"); }
+            }
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -6941,12 +6978,13 @@ mod tests {
     }
 
     #[test]
-    fn opening_an_agent_attaches_its_terminal_unless_this_device_chose_conversation_first() {
-        // 2026-10-15: attaching is the default and conversation first the setting; flicking
-        // through tabs attaches nothing.
+    fn opening_an_agent_respects_the_default_and_stored_terminal_choice() {
+        // Explicit terminal-first still attaches; flicking through tabs attaches nothing.
         let mut ui = glass();
         ui.live = true;
-        assert!(!ui.conversation_first(), "attaching is the default");
+        let stored: prefs::Prefs = serde_json::from_str(r#"{"conversation_first":false}"#).unwrap();
+        ui.conversation_first = prefs::conversation_first(&stored);
+        assert!(!ui.conversation_first());
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
             Open::Tab,
@@ -6981,11 +7019,40 @@ mod tests {
             ui.focused_pane(),
             Some(Pane::Terminal("agent/example/atlas/builder".into()))
         );
-        // Conversation first: the same agent opens on its conversation.
+        // No stored choice: the same agent opens on its conversation.
         let mut ui = glass();
         ui.live = true;
-        ui.toggle_conversation_first();
+        assert_eq!(ui.conversation_first, None);
         assert!(ui.conversation_first());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        ui.effects.clear();
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Agent(Some("agent/example/atlas/builder".into())))
+        );
+        // The existing toggle selects terminal-first, then returns to conversation-first.
+        ui.toggle_conversation_first();
+        assert_eq!(ui.conversation_first, Some(false));
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        ui.effects.clear();
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::OpenTerminal { .. })));
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Terminal("agent/example/atlas/builder".into()))
+        );
+        ui.toggle_conversation_first();
+        assert_eq!(ui.conversation_first, Some(true));
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
             Open::Tab,

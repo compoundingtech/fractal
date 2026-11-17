@@ -3,14 +3,23 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadEdits } from './threadEdits.ts';
-import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
+import { LocalDrafts } from './draftsStorage.ts';
+import { savedThreadStarts, startRecoveryKey } from './threadStartRecovery.ts';
+import { ClientError, FractalClient } from '../../clients/typescript/fractal-client/index.ts';
 import { threadClock, threadExactTime, threadRelativeTime } from './threadClock.ts';
+import { anchorPresentation, reminderFromSummary } from './unreadVisit.ts';
+import { pendingUnreadAPI } from './unreadActions.ts';
+import { nativeVisitPorts } from './unreadVisitTestPorts.mjs';
+import { unreadClient as bindUnreadClient, unreadSupported } from './unreadClient.ts';
 
 const React = { createElement: (type, props, ...children) => ({ type, props, children: children.flat() }) };
 const find = (node, type) => findBy(node, candidate => candidate.type === type);
 const findBy = (node, match) => !node || typeof node !== 'object' ? undefined : match(node) ? node
   : node.children?.map(child => findBy(child, match)).find(Boolean);
 const button = (node, label) => findBy(node, candidate => candidate.type === 'Button' && candidate.props.label === label);
+// The store's unread service; bodies bind it per thread. Tests needing behavior pass their own.
+const unreadClient = { forThread: () => ({ state: 'ready', actions: {} }), listMarked: async () => ({ kind: 'empty' }) };
+let lineEvidence;
 
 function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -23,7 +32,16 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   const exports = {};
   // Components rendered as children stay inspectable without mounting a second hook scope.
   dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', threadClock, threadExactTime, threadRelativeTime,
+    reminderFromSummary, anchorPresentation, pendingUnreadAPI, useUnreadVisit: nativeVisitPorts().useUnreadVisit,
+    savedThreadStarts, startRecoveryKey,
+    useUnreadVisitEntry: nativeVisitPorts().useUnreadVisitEntry,
+    renderedLineEvidence: (...args) => (lineEvidence ??= compile('renderedLineEvidence', 'function threadTextIssue', {}))(...args),
     useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(), ...dependencies };
+  if (dependencies.useStore) {
+    const useStore = dependencies.useStore;
+    const ownership = { draftsOwner: { current: 'person/one' }, draftGeneration: { current: 0 } };
+    dependencies.useStore = () => ({ ...ownership, ...useStore() });
+  }
   new Function('exports', 'React', ...Object.keys(dependencies), outputText)(exports, React, ...Object.values(dependencies));
   return exports.component;
 }
@@ -60,7 +78,7 @@ test('a closed thread keeps its composer and exact-message quote without implici
   const calls = [];
   const draftCache = { current: new Map([['draft', JSON.stringify({ text: 'Follow up', quote: { id: message.id, from: 'Reviewer', text: message.content } })]]) };
   const store = {
-    actor: 'person/avery', data: { agents: [] }, threadActions: new Set(['thread.reply', 'thread.reopen']),
+    actor: 'person/avery', data: { agents: [] }, threadActions: new Set(['thread.reply', 'thread.reopen']), unreadClient,
     status: 'online', draftCache, draftsReady: true,
     actions: {
       replyToThread: async (...args) => { calls.push(['reply', ...args]); return { how: 'sent' }; },
@@ -133,7 +151,7 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
     useStore: () => ({}), threadSummaryLine: summaryLine, ThreadRow: 'ThreadRow',
   })({ thread, open: false, toggle() {} });
   assert.deepEqual({ ...header.props, toggle: undefined }, {
-    title: 'Review', label: 'Review, 2 messages, closed, unread', unread: true, trailing: 'Closed', expanded: false, toggle: undefined,
+    title: 'Review', label: 'Review, 2 messages, closed, unread', unread: true, reminder: false, trailing: 'Closed', expanded: false, toggle: undefined,
   });
   const row = threadRow(header.props);
   assert.equal(row.props.accessibilityRole, 'button');
@@ -142,14 +160,15 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   assert.deepEqual(row.props.accessibilityValue, { text: 'Collapsed' });
   assert.equal(row.props.accessibilityHint, 'Shows Review');
   assert.equal(row.props.style.minHeight, 44);
-  const [dot, title, trailing] = row.children;
+  const [dot, title, reminder, trailing] = row.children;
+  assert.equal(reminder, null, 'natural unread alone does not display a reminder');
   assert.deepEqual([dot.props.style.width, dot.props.style.backgroundColor], [8, 'accent']);
   assert.deepEqual(title.children, ['Review'], 'no disclosure glyph, count, state words or age');
   assert.equal(title.props.style.flex, 1);
   assert.deepEqual(trailing.children, ['Closed']);
   const openRow = threadRow({ title: 'Review', label: 'Review, 1 message, open', expanded: true, toggle() {} });
   assert.equal(openRow.children[0].props.style.backgroundColor, 'transparent', 'read rows keep the 8pt spacer');
-  assert.equal(openRow.children[2], null, 'open rows show no trailing state');
+  assert.equal(openRow.children[3], null, 'open rows show no trailing state');
   assert.deepEqual(openRow.props.accessibilityValue, { text: 'Expanded' });
   assert.equal(openRow.props.accessibilityHint, 'Hides Review');
 
@@ -160,7 +179,7 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => 1, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 20,
     useThreadPage: () => page, useTextAppearance: () => ({ system: false, palette: {} }), theme: {},
     View: 'View', Pressable: 'Pressable', T: 'T', ScrollView: 'ScrollView', ThreadViewport: 'ThreadViewport', Button: 'Button',
-    ExpandedContextThread: 'ExpandedContextThread', ContextThreadHeader: 'ContextThreadHeader',
+    ExpandedContextThread: 'ExpandedContextThread', ContextThreadHeader: 'ContextThreadHeader', useMarkedUnreadPage: () => ({ items: [] }),
   });
   const render = () => { state.reset(); return list({ context: { agent_id: 'agent/reviewer' }, client: {}, openThread() {}, title: 'Threads' }); };
   let group = find(render(), 'Pressable');
@@ -191,7 +210,7 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
 
   const body = compile('ThreadBody', 'type Quote', {
     ...hooks(), useCallback: fn => fn, useRef: current => ({ current }), threadEditScope: id => `edit/${id}`,
-    useStore: () => ({ actor: 'person/avery', data: { agents: [] }, status: 'online', actions: {},
+    useStore: () => ({ actor: 'person/avery', data: { agents: [] }, status: 'online', actions: {}, unreadClient,
       threadActions: new Set(['thread.reply', 'thread.rename', 'thread.close', 'thread.reopen']) }),
     useThreadPage: () => ({ items: [], loading: true }), useWindowDimensions: () => ({ width: 400, height: 800 }),
     useSafeAreaInsets: () => ({}), useHeaderHeight: () => 0, useContext: () => 0, BottomTabBarHeightContext: {},
@@ -220,7 +239,7 @@ test('a closed thread explains that replying keeps it closed, and a missing repl
     event('message/latest-day', 'message', at(9, 12, 57)), event('message/earlier-day', 'message', at(7, 10, 0)),
   ];
   items[2].thread_quote_id = items[3].id;
-  const store = { actor: 'person/avery', data: { agents: [] }, status: 'online', actions: {}, threadActions: new Set(['thread.reply', 'thread.reopen']) };
+  const store = { actor: 'person/avery', data: { agents: [] }, status: 'online', actions: {}, unreadClient, threadActions: new Set(['thread.reply', 'thread.reopen']) };
   const page = { items, loading: false, live: true };
   const state = hooks();
   const body = compile('ThreadBody', 'type Quote', {
@@ -251,7 +270,7 @@ test('a closed thread explains that replying keeps it closed, and a missing repl
 
   const timelineRows = rendered => rendered.children.filter(child => child?.type === 'ContextMenu' || child?.props?.testID?.startsWith('thread-event:'));
   const rows = timelineRows(tree);
-  const time = row => row.type === 'ContextMenu' ? row.children[0].children[0].children[1].children[1] : row.children[0].children[1].children[1];
+  const time = row => find(row, 'Text').children[1];
   const spoken = row => (row.type === 'ContextMenu' ? row.children[0] : row).props.accessibilityLabel;
   assert.deepEqual(rows.map(time), ['2d ago', '3m ago', '2m ago', '1m ago']);
   assert.equal(rows.length, items.length, 'no day heading is inserted between timeline rows');
@@ -361,7 +380,7 @@ test('pull to refresh on thread hosts reloads thread readers, which drop manual 
 test('the thread screen docks its one composer below the scrolling history; embedded threads keep it inline', () => {
   const at = (day, hour, minute) => new Date(2026, 10, day, hour, minute).getTime();
   const page = { items: [{ id: 'message/one', kind: 'message', actor_id: 'agent/reviewer', accepted_at_unix_ms: at(9, 12, 0), content: 'Hello' }], loading: false, live: true };
-  const store = { actor: 'person/avery', data: { agents: [] }, status: 'online', actions: {}, threadActions: new Set(['thread.reply', 'thread.reopen', 'thread.rename']) };
+  const store = { actor: 'person/avery', data: { agents: [] }, status: 'online', actions: {}, unreadClient, threadActions: new Set(['thread.reply', 'thread.reopen', 'thread.rename']) };
   const state = hooks();
   const body = compile('ThreadBody', 'type Quote', {
     ...state, useCallback: fn => fn, useRef: current => ({ current }), threadEditScope: id => `edit/${id}`,
@@ -443,7 +462,7 @@ test('thread groups read in system text, titles wrap at accessibility sizes and 
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => undefined, useThreadViewports: () => viewports,
     THREAD_WINDOW_SIZE: 20, useThreadPage: () => page, useTextAppearance: () => ({ system: true, colors: {} }), theme: {},
     View: 'View', Pressable: 'Pressable', T: 'T', ScrollView: 'ScrollView', ThreadViewport: 'ThreadViewport', Button: 'Button',
-    ExpandedContextThread: 'ExpandedContextThread', ContextThreadHeader: 'ContextThreadHeader',
+    ExpandedContextThread: 'ExpandedContextThread', ContextThreadHeader: 'ContextThreadHeader', useMarkedUnreadPage: () => ({ items: [] }),
   });
   const render = () => { state.reset(); return list({ context: { agent_id: 'agent/reviewer' }, client: {}, openThread() {}, title: 'Threads' }); };
   const header = find(render(), 'Pressable');
@@ -592,8 +611,8 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   const original = Object.freeze({ origin: { source_id: origin.sourceId, episode: origin.episode }, agent_id: origin.agentId, content: 'Original content', title: 'Original title', signature: 'original-signature', idempotency_key: 'original-key' });
   const observed = [];
   const retry = async () => { exactRetries++; observed.push(original); return { how: 'sent' }; };
-  const scope = value => JSON.stringify([value.sourceId, value.episode]);
-  await exports.track(scope(origin), 'thread/original', async () => ({ how: 'unconfirmed', retry }), undefined,
+  const scope = target => `start/${target}`;
+  await exports.track(scope('thread/original'), 'thread/original', async () => ({ how: 'unconfirmed', retry }), undefined,
     { origin: { ...origin }, title: original.title });
   const ledger = byClient.current.get(client);
   const cache = { current: new Map() };
@@ -607,7 +626,7 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   });
   // A fresh component instance sees the same valid source, but the new row carries no
   // usable episode or assigned conversation. Its changed title cannot rewrite the retry.
-  const props = entry({ sourceId: origin.sourceId, initialTitle: 'Changed title', onOpen() {} }).props;
+  const props = entry({ sourceId: origin.sourceId, pendingScope: scope('thread/original'), initialTitle: 'Changed title', onOpen() {} }).props;
   assert.deepEqual(props.origin, origin);
   assert.equal(props.agentId, origin.agentId);
   assert.equal(props.initialTitle, original.title);
@@ -634,7 +653,7 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   assert.equal(ledger.size, 0);
 });
 
-test('Inbox recovery exposes orphaned first starts from the same ledger without duplicating listed origins', () => {
+test('Inbox recovery lists each independent pending attempt separately, including origins still listed', () => {
   const listed = { sourceId: 'notice/listed', episode: 'episode/one', agentId: 'agent/one' };
   const orphan = { sourceId: 'notice/orphan', episode: 'episode/first', agentId: 'agent/original' };
   const nextEpisode = { ...orphan, episode: 'episode/second' };
@@ -653,11 +672,9 @@ test('Inbox recovery exposes orphaned first starts from the same ledger without 
   const collect = node => !node || typeof node !== 'object' ? [] : node.type === 'InboxThread' ? [node]
     : node.children?.flatMap(collect) ?? [];
   const recovered = collect(tree);
-  assert.equal(recovered.length, 2);
-  assert.deepEqual(recovered.map(node => node.props.sourceId), [orphan.sourceId, orphan.sourceId]);
-  assert.deepEqual(recovered.map(node => node.props.pendingScope), [
-    JSON.stringify([orphan.sourceId, orphan.episode]), JSON.stringify([nextEpisode.sourceId, nextEpisode.episode]),
-  ]);
+  assert.equal(recovered.length, 3);
+  assert.deepEqual(recovered.map(node => node.props.sourceId), [listed.sourceId, orphan.sourceId, orphan.sourceId]);
+  assert.deepEqual(recovered.map(node => node.props.pendingScope), ['listed', 'orphan-first', 'orphan-second']);
   assert.ok(recovered.every(node => node.props.origin === undefined), 'retained context never authorizes a new Start');
 });
 
@@ -667,7 +684,7 @@ test('thread buttons and inline rename act immediately without dialogs, flash af
   const calls = [], pending = [];
   const edits = new ThreadEdits(() => {}, error => String(error));
   const store = {
-    actor: 'person/avery', data: { agents: [] }, status: 'online',
+    actor: 'person/avery', data: { agents: [] }, status: 'online', unreadClient,
     threadActions: new Set(['thread.close', 'thread.reopen', 'thread.rename']), threadEdits: edits,
     actions: {
       editThread: (summary, edit) => {
@@ -931,10 +948,718 @@ test('composer announces validation issues and a newly applied quote with its se
 
 test('expanded summary Retry names the thread without changing the visible Retry title', () => {
   const expanded = compile('ExpandedContextThread', 'export function ThreadScreen', {
-    useThreadSummary: () => ({ items: [], issue: 'Updates paused', loading: false, reload() {} }),
+    useThreadSummary: () => ({ items: [], issue: 'Updates paused', loading: false, reload() {} }), useStore: () => ({}),
     View: 'View', ContextThreadHeader: 'ContextThreadHeader', ThreadBody: 'ThreadBody', T: 'T', Button: 'Button',
   });
   const tree = expanded({ client: {}, initial: { id: 'thread/one', title: 'Review' }, refresh: 0 });
   assert.equal(button(tree, 'Retry').props.accessibilityLabel, 'Retry loading Review');
   assert.equal(find(tree, 'ThreadReadIssue').props.message, 'Updates paused');
+});
+
+test('loading wrappers start the visit entry before the body exists; a reminder that loads later is never captured', async () => {
+  const reminder = { marks: [{ mark_id: 'opaque/summary-only', anchor_message_id: 'message/visible' }], anchor_message_id: 'message/visible' };
+  const marked = { id: 'thread/one', title: 'Review', unread: false, unread_reminder: reminder };
+  const plain = { ...marked, unread_reminder: null };
+  const visit = async (wrapper, initial) => {
+    // One port instance: the production wrapper and the body hook share its placement registry.
+    const ports = nativeVisitPorts();
+    const client = {};
+    let page = { items: [], loading: true, reload() {} };
+    const dependencies = {
+      useStore: () => ({ actor: 'person/one' }), useThreadSummary: () => page, useUnreadVisitEntry: ports.useUnreadVisitEntry,
+      ThreadDetailContent: 'ThreadDetailContent', View: 'View', ContextThreadHeader: 'ContextThreadHeader',
+      ThreadBody: 'ThreadBody', ReminderThreadBody: 'ReminderThreadBody', T: 'T', Button: 'Button',
+    };
+    const component = wrapper === 'InlineThread'
+      ? compile('InlineThread', 'function useThreadSummary', dependencies)
+      : compile('ExpandedContextThread', 'export function ThreadScreen', dependencies);
+    const render = () => component(wrapper === 'InlineThread'
+      ? { client, id: 'thread/one', placement: 'thread:thread/one', refresh: 0 }
+      : { client, initial, placement: 'context:{}:thread/one', refresh: 0, onSummary() {}, toggle() {}, onOpen() {}, revealComposer() {} });
+    render();
+    ports.focus(); // Entry: the summary is still loading.
+    page = { items: [marked], loading: false, reload() {} };
+    const body = findBy(render(), node => node.type === 'ThreadDetailContent' || node.type === 'ThreadBody');
+    const edits = [];
+    ports.useUnreadVisit({
+      ...ports.options, scope: client, placementKey: body.props.placement, threadId: 'thread/one', actor: 'person/one', summary: marked,
+      canEdit: true, api: { state: 'ready', actions: { edit: async edit => { edits.push(edit); return { how: 'sent' }; } } },
+    });
+    ports.focus(); await ports.flush(); await ports.advance(500);
+    return { edits, placement: body.props.placement };
+  };
+  const inline = await visit('InlineThread');
+  assert.equal(inline.placement, 'thread:thread/one', 'the body shares the wrapper placement key');
+  assert.deepEqual(inline.edits, [], 'Unknown at navigation entry: the later reminder stays');
+  assert.deepEqual((await visit('ExpandedContextThread', plain)).edits, [], 'a listed row without a reminder enters as none');
+  const known = await visit('ExpandedContextThread', marked);
+  assert.equal(known.placement, 'context:{}:thread/one');
+  assert.deepEqual(known.edits, [{ kind: 'clear', observed_marks: ['opaque/summary-only'] }], 'a reminder known at expansion is captured');
+});
+
+const texts = node => !node || typeof node !== 'object' ? typeof node === 'string' ? [node] : [] : node.children?.flatMap(texts) ?? [];
+const reminderOn = anchor => ({ marks: [{ mark_id: 'opaque/summary-only', anchor_message_id: anchor }], anchor_message_id: anchor });
+const bodyDependencies = store => ({
+  ...hooks(), useCallback: fn => fn, useRef: current => ({ current }),
+  useStore: () => store, threadEditScope: id => `edit/${id}`,
+  useThreadPage: () => ({ items: [{ id: 'message/reply', kind: 'message', content: 'Meaningful reply', actor_id: 'agent/one', accepted_at_unix_ms: 0 }] }),
+  useWindowDimensions: () => ({ width: 400, height: 800 }), useSafeAreaInsets: () => ({}),
+  useHeaderHeight: () => 0, useContext: () => 0, BottomTabBarHeightContext: {},
+  useNavigation: () => ({}), useThreadViewports: () => [], theme: {},
+  View: 'View', T: 'T', Button: 'Button', Pressable: 'Pressable', Markdown: 'Markdown', ContextMenu: 'ContextMenu',
+  ThreadActionFeedback: 'ThreadActionFeedback', ThreadComposer: 'ThreadComposer',
+});
+
+test('unread buttons follow the live thread.mark-unread and thread.clear-unread grants and bind the store client per thread', () => {
+  const grantSets = [[], ['thread.read'], ['thread.clear-unread'], ['thread.mark-unread'], ['thread.read', 'thread.mark-unread', 'thread.clear-unread']];
+  for (const granted of grantSets) for (const reminder of [false, true]) {
+    const bound = [];
+    const store = {
+      actor: 'person/one', data: { agents: [] }, status: 'online', actions: {}, threadActions: new Set(granted),
+      // control.messages alone grants nothing here: the thread action capabilities are authoritative.
+      caps: { capabilities: [{ id: 'control.messages', state: 'granted' }] },
+      unreadClient: { forThread: thread => { bound.push(thread); return { state: 'ready', actions: {} }; } },
+    };
+    const thread = { id: 'thread/one', title: 'Review', unread: true, state: 'open', unread_reminder: reminder ? reminderOn('message/reply') : null };
+    const tree = compile('ThreadBody', 'type Quote', bodyDependencies(store))({ client: {}, thread, placement: 'thread:thread/one' });
+    const has = id => granted.includes(id);
+    assert.equal(!!button(tree, 'Mark unread'), has('thread.mark-unread') && has('thread.clear-unread'), `${granted}`);
+    assert.equal(!!button(tree, 'Mark read'), has('thread.read') || reminder && has('thread.clear-unread'), `${granted}`);
+    assert.equal(button(tree, 'Mark unread')?.props.disabled ?? false, false);
+    assert.ok(bound.every(summary => summary === thread) && bound.length > 0, 'the body binds the store client to exactly its summary');
+    assert.ok(!texts(tree).some(text => /upcoming client API/.test(text)), 'no pending-API copy remains');
+  }
+});
+
+test('the private reminder marker never changes the natural unread dot or counts', () => {
+  const reminder = reminderOn('message/reply');
+  assert.equal(summaryLine({ message_count: 3, unread: false, unread_reminder: reminder }, ', ', false), '3 messages, marked unread reminder');
+  assert.equal(summaryLine({ message_count: 3, unread: true, unread_reminder: null }, ', ', false), '3 messages, unread');
+  assert.equal(summaryLine({ unread: false, anchor: { message_id: 'message/pending', state: 'pending' } }, ', ', false), '');
+  const row = threadRow({ title: 'Review', label: 'Review, marked unread reminder', unread: false, reminder: true, expanded: false, toggle() {} });
+  const [dot, , marker] = row.children;
+  assert.equal(dot.props.style.backgroundColor, 'transparent', 'a reminder alone is not a natural unread dot');
+  assert.deepEqual(marker.children, ['Marked unread']);
+  const store = { actor: 'person/one', data: { agents: [] }, status: 'online', actions: {}, threadActions: new Set(), unreadClient };
+  const tree = compile('ThreadBody', 'type Quote', bodyDependencies(store))({
+    client: {}, placement: 'thread:thread/one', thread: { id: 'thread/one', title: 'Review', unread: false, state: 'open', message_count: 1, unread_reminder: reminder },
+  });
+  const message = findBy(tree, node => node.props?.testID === 'thread-message:message/reply');
+  assert.match(message.props.accessibilityLabel, /^Your marked unread return message\. /);
+  assert.ok(texts(message).includes('Marked unread · return here'));
+});
+
+test('visible evidence counts whole rendered body lines, never paragraph spacing or margins', async () => {
+  const evidence = compile('renderedLineEvidence', 'function threadTextIssue', {});
+  const { visibleThreadMessages } = await import('./threadVisibility.ts');
+  const viewport = { x: 0, y: 0, width: 400, height: 100 };
+  const bounds = (y, height) => ({ x: 0, y, width: 400, height });
+  // A one-line body whose only line is whole offers its bounds; the shared rule then needs the whole body.
+  const oneLine = evidence(viewport, bounds(40, 20), [{ y: 0, height: 20 }]);
+  assert.deepEqual(oneLine, { bounds: bounds(40, 20), lineHeight: 20 });
+  // A clipped one-line body fails closed, at either edge.
+  assert.deepEqual(evidence(viewport, bounds(90, 20), [{ y: 0, height: 20 }]), { lineHeight: 20 });
+  assert.deepEqual(evidence(viewport, bounds(-10, 20), [{ y: 0, height: 20 }]), { lineHeight: 20 });
+  // One visible line of a two-line body is not evidence, even with its trailing line whole.
+  assert.deepEqual(evidence(viewport, bounds(-20, 40), [{ y: 0, height: 20 }, { y: 20, height: 20 }]), { lineHeight: 20 });
+  // Two lines separated by a spacer, the second cut off: the trailing line is not visible.
+  assert.deepEqual(evidence(viewport, bounds(50, 60), [{ y: 0, height: 20 }, { y: 40, height: 20 }]), { lineHeight: 20 });
+  // Two whole lines, last included: bounds are offered to the shared geometry rule.
+  const shown = evidence(viewport, bounds(20, 60), [{ y: 0, height: 20 }, { y: 40, height: 20 }]);
+  assert.deepEqual(shown, { bounds: bounds(20, 60), lineHeight: 20 });
+  assert.deepEqual(visibleThreadMessages(viewport, [
+    { id: 'two', ...shown }, { id: 'one', ...oneLine },
+    { id: 'clipped-one', ...evidence(viewport, bounds(90, 20), [{ y: 0, height: 20 }]) },
+    { id: 'one-of-two', ...evidence(viewport, bounds(-20, 40), [{ y: 0, height: 20 }, { y: 20, height: 20 }]) },
+  ], 20), ['two', 'one']);
+  assert.deepEqual(evidence(viewport, bounds(0, 40), undefined), {}, 'no laid-out lines fails closed');
+  assert.deepEqual(evidence(undefined, bounds(0, 40), [{ y: 0, height: 20 }, { y: 20, height: 20 }]), {});
+});
+
+test('a fully visible one-line reply is read, clears its viewed reminder and can be the Mark unread return anchor; a clipped one is not', async () => {
+  const { visibleThreadMessages } = await import('./threadVisibility.ts');
+  const message = { id: 'message/one-line', kind: 'message', content: 'Short reply', actor_id: 'agent/one', accepted_at_unix_ms: 0 };
+  const visit = async ({ bounds, unread, unread_reminder }) => {
+    const ports = nativeVisitPorts();
+    const reads = [], edits = [];
+    const store = {
+      actor: 'person/one', data: { agents: [] }, status: 'online',
+      threadActions: new Set(['thread.read', 'thread.clear-unread', 'thread.mark-unread']),
+      actions: { markThreadRead: async (_thread, ids) => { reads.push([...ids]); return { how: 'sent' }; } },
+      unreadClient: { forThread: () => ({ state: 'ready', actions: {
+        edit: async edit => { edits.push(edit); return { how: 'sent' }; }, seek: () => assert.fail('the body never seeks'),
+      } }) },
+    };
+    const body = compile('ThreadBody', 'type Quote', {
+      ...bodyDependencies(store), useUnreadVisit: options => ports.useUnreadVisit({ ...options, clock: ports.options.clock }), useThreadPage: () => ({ items: [message] }),
+      measureThreadViewport: async () => ({ x: 0, y: 0, width: 400, height: 100 }),
+      measureThreadBounds: async view => view ? bounds : undefined, visibleThreadMessages, THREAD_WINDOW_SIZE: 20,
+    });
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread, unread_reminder };
+    const tree = body({ client: {}, thread, placement: 'thread:thread/one' });
+    findBy(tree, node => node.type === 'View' && node.props?.collapsable === false).props.ref({});
+    find(tree, 'Markdown').props.onLines([{ y: 0, height: 20 }]);
+    ports.focus(); await ports.flush(); await ports.advance(500);
+    return { tree, reads, edits };
+  };
+  const whole = { x: 0, y: 40, width: 400, height: 20 };
+  const clipped = { ...whole, y: 90 };
+  let result = await visit({ bounds: whole, unread: true, unread_reminder: reminderOn('message/one-line') });
+  assert.deepEqual(result.reads, [['message/one-line']], 'a whole one-line reply is natural read after the dwell');
+  assert.deepEqual(result.edits, [{ kind: 'clear', observed_marks: ['opaque/summary-only'] }], 'its viewed captured reminder clears');
+  result = await visit({ bounds: clipped, unread: true, unread_reminder: reminderOn('message/one-line') });
+  assert.deepEqual([result.reads, result.edits], [[], []], 'a clipped one-line reply is no evidence');
+
+  for (const [bounds, expected] of [[whole, [{ kind: 'mark', anchor_message: 'message/one-line', observed_marks: [] }]], [clipped, []]]) {
+    result = await visit({ bounds, unread: false, unread_reminder: null });
+    button(result.tree, 'Mark unread').props.onPress();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(result.edits, expected, 'only a whole one-line reply can be the return anchor');
+    assert.deepEqual(result.reads, []);
+  }
+});
+
+const twoMarks = anchor => ({ marks: [
+  { mark_id: 'opaque/first', anchor_message_id: anchor }, { mark_id: 'opaque/second', anchor_message_id: 'message/later' },
+], anchor_message_id: anchor });
+
+test('Clear reminder in a body sends the observed summary marks for a current or scrolled-away anchor without reading, measuring or seeking', async () => {
+  const page = { items: [{ id: 'message/reply', kind: 'message', content: 'Meaningful reply', actor_id: 'agent/one', accepted_at_unix_ms: 0 }], next_cursor: null };
+  for (const anchor of ['message/reply', 'message/offscreen']) for (const granted of [true, false]) {
+    const edits = [];
+    const store = {
+      actor: 'person/one', data: { agents: [] }, status: 'online',
+      threadActions: new Set(granted ? ['thread.read', 'thread.clear-unread'] : ['thread.read']),
+      actions: { markThreadRead: () => assert.fail('an explicit clear never acknowledges messages') },
+      unreadClient: { forThread: () => ({ state: 'ready', actions: {
+        edit: async edit => { edits.push(edit); return { how: 'sent' }; }, seek: () => assert.fail('an explicit clear never seeks'),
+      } }) },
+    };
+    const never = () => assert.fail('an explicit clear needs no geometry or dwell');
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: true, unread_reminder: twoMarks(anchor) };
+    const tree = compile('ThreadBody', 'type Quote', { ...bodyDependencies(store), measureThreadViewport: never, measureThreadBounds: never })({
+      client: {}, thread, placement: 'thread:thread/one',
+      around: anchor === 'message/reply' ? { ...page, anchor: { message_id: anchor, state: 'current' } } : undefined,
+    });
+    const clear = button(tree, 'Clear reminder');
+    assert.ok(button(tree, 'Mark read'), 'natural Mark read stays a separate control');
+    if (!granted) { assert.equal(clear, undefined, `read-only connections get no clear control (${anchor})`); continue; }
+    assert.equal(clear.props.disabled, false);
+    clear.props.onPress();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/first', 'opaque/second'] }], `every observed summary mark (${anchor})`);
+  }
+});
+
+test('loading, rejected, pending and unavailable seeks offer summary-only Clear reminder, keeping retained retries first', async () => {
+  for (const anchorState of ['loading', 'rejected', 'pending', 'unavailable']) for (const granted of [true, false]) {
+    const edits = [], seeks = [];
+    const store = {
+      unreadEnabled: true, actor: 'person/one', status: 'online', threadDeliveries: new Map(),
+      threadActions: new Set(granted ? ['thread.clear-unread'] : []),
+      unreadClient: { forThread: () => ({ state: 'ready', actions: {
+        read: () => assert.fail('an explicit clear never acknowledges messages'),
+        seek: async id => {
+          seeks.push(id);
+          if (anchorState === 'loading') return new Promise(() => {});
+          if (anchorState === 'rejected') throw new Error('The seek failed.');
+          return { state: anchorState, anchor: { message_id: id, state: anchorState } };
+        },
+        edit: async edit => { edits.push(edit); return { how: 'sent' }; },
+      } }) },
+    };
+    const clearReminder = compile('ClearReminder', 'type Quote', {
+      ...hooks(), useStore: () => store, threadEditScope: id => `edit/${id}`,
+      View: 'View', Button: 'Button', ThreadActionFeedback: 'ThreadActionFeedback',
+    });
+    const state = hooks(), effects = [];
+    const body = compile('ReminderThreadBody', 'export function ThreadScreen', {
+      ...state, useRef: current => ({ current }), useStore: () => store, useEffect: effect => effects.push(effect),
+      unreadReadIssue: String, ClearReminder: clearReminder, ThreadReadIssue: 'ThreadReadIssue', ThreadBody: 'ThreadBody', View: 'View', T: 'T', Button: 'Button',
+    });
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: twoMarks('message/anchor') };
+    const props = { client: {}, thread, placement: 'context:marked:thread/one', onOpen() {} };
+    state.reset(); body(props);
+    for (const effect of effects.splice(0)) effect();
+    await new Promise(resolve => setImmediate(resolve));
+    state.reset();
+    const tree = body(props);
+    if (anchorState === 'loading') assert.deepEqual(texts(find(tree, 'T')), ['Finding the return message…']);
+    else if (anchorState === 'rejected') assert.ok(find(tree, 'ThreadReadIssue'), 'the seek error stays visible beside clear');
+    else assert.deepEqual(texts(find(tree, 'T')), [anchorPresentation({ message_id: 'message/anchor', state: anchorState }).notice]);
+    const control = findBy(tree, node => node.type === clearReminder);
+    assert.equal(control.props.thread, thread, 'the control reads the current authoritative summary');
+    const rendered = clearReminder(control.props);
+    if (!granted) { assert.equal(rendered, null, `read-only: no control beside a ${anchorState} notice`); continue; }
+    const clear = button(rendered, 'Clear reminder');
+    assert.equal(clear.props.disabled, false);
+    clear.props.onPress();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/first', 'opaque/second'] }], `${anchorState}: only the observed summary marks`);
+    assert.deepEqual(seeks, ['message/anchor'], 'clearing never seeks again or falls back to newer history');
+  }
+
+  // A retained unconfirmed unread change offers its own original retry first and blocks a new clear,
+  // with or without the clear grant; the metadata edit's retry waits behind it.
+  for (const granted of [true, false]) {
+    const retries = [];
+    const store = {
+      actor: 'person/one', status: 'online', threadActions: new Set(granted ? ['thread.clear-unread'] : []),
+      threadDeliveries: new Map([
+        ['unread/thread/one', { retry: async () => { retries.push('unread'); return { how: 'sent' }; } }],
+        ['edit/thread/one', { retry: async () => { retries.push('edit'); return { how: 'sent' }; } }],
+      ]),
+      unreadClient: { forThread: () => ({ state: 'ready', actions: { edit: () => assert.fail('no new clear while a delivery is held') } }) },
+    };
+    const rendered = compile('ClearReminder', 'type Quote', {
+      ...hooks(), useStore: () => store, threadEditScope: id => `edit/${id}`,
+      View: 'View', Button: 'Button', ThreadActionFeedback: 'ThreadActionFeedback',
+    })({ thread: { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: twoMarks('message/anchor') } });
+    assert.equal(button(rendered, 'Clear reminder')?.props.disabled ?? true, true);
+    const feedback = find(rendered, 'ThreadActionFeedback');
+    assert.equal(feedback.props.result.how, 'unconfirmed');
+    feedback.props.onRetry();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(retries, ['unread']);
+  }
+});
+
+test('the marked unread list reads through the bounded unread client; typed errors keep rows and are never empty', async () => {
+  const errorText = cause => cause instanceof Error ? cause.message : String(cause);
+  const unreadReadIssue = compile('unreadReadIssue', 'function markedUnreadIssue', { errorText });
+  const markedUnreadIssue = compile('markedUnreadIssue', 'const NO_THREADS', { unreadReadIssue });
+  const row = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: reminderOn('message/one') };
+  const read = async (list, enabled = true) => {
+    const state = hooks();
+    let focus, calls = 0;
+    const hook = compile('useMarkedUnreadPage', 'type ThreadClient', {
+      ...state, useRef: current => ({ current }), useCallback: fn => fn, useFocusEffect: effect => { focus = effect; },
+      useStore: () => ({ unreadClient: { listMarked: async maxPages => { calls++; assert.equal(maxPages, undefined, 'the client default bound applies'); return list; } } }),
+      markedUnreadIssue, NO_THREADS: [], NO_SNAPSHOTS: new Map(),
+    });
+    state.reset(); hook(enabled, 0);
+    focus();
+    await new Promise(resolve => setImmediate(resolve));
+    state.reset();
+    return { page: hook(enabled, 0), calls };
+  };
+  // Only an authoritative reminder lists a row; natural unread alone never does.
+  const natural = { id: 'thread/natural', title: 'Natural', state: 'open', unread: true, unread_reminder: null };
+  let { page, calls } = await read({ kind: 'items', items: [natural, row] });
+  assert.deepEqual([page.items, page.issue, page.live, page.more, calls], [[row], undefined, false, undefined, 1]);
+  ({ page } = await read({ kind: 'items', items: [natural] }));
+  assert.deepEqual([page.items, page.issue], [[], undefined], 'natural unread rows never fill the marked list');
+  ({ page } = await read({ kind: 'empty' }));
+  assert.deepEqual([page.items, page.issue], [[], undefined], 'empty only after cursor exhaustion');
+  ({ page, calls } = await read({ kind: 'items', items: [row] }, false));
+  assert.deepEqual([page.items, calls], [[], 0], 'other contexts never read the marked list');
+  const failures = [
+    [{ kind: 'page-bound', maxPages: 20 }, /More marked threads exist than 20 pages/],
+    [{ kind: 'invalid-page-bound', maxPages: 0 }, /0-page limit/],
+    [{ kind: 'repeated-cursor', cursor: 'c1' }, /repeated a page of marked threads/],
+    [{ kind: 'read-failed', reason: { kind: 'refused', code: 'forbidden' } }, /^This connection can't read marked threads\.$/],
+    [{ kind: 'read-failed', reason: { kind: 'refused', code: 'rate-limited' } }, /refused to load marked threads \(rate-limited\)/],
+    [{ kind: 'read-failed', reason: { kind: 'invalid-response' } }, /invalid response for marked threads/],
+    [{ kind: 'read-failed', reason: { kind: 'failed', cause: new Error('offline') } }, /Couldn't load marked threads\. offline/],
+  ];
+  for (const [error, text] of failures) for (const items of [[], [row]]) {
+    ({ page } = await read({ kind: 'error', error, items: [natural, ...items] }));
+    assert.match(page.issue, text);
+    assert.deepEqual(page.items, items, 'partial marked rows stay beside the error; natural rows are filtered');
+  }
+
+  // The group shows an error with no rows rather than disappearing as an empty list.
+  const state = hooks();
+  let reader, follower, contextItems = [];
+  const marked = { items: [], snapshots: new Map(), loading: false, live: false, issue: 'This connection can\'t read marked threads.', reload() {}, replace() {} };
+  const list = compile('ContextThreadList', 'function ContextThreadHeader', {
+    ...state, useStore: () => ({ threadRefresh: 0, feed: { belongsTo: () => true, followThreadSummaries: () => assert.fail('marked lists are not followed') } }),
+    useMemo: compute => compute(), useCallback: fn => fn, useEffect() {},
+    useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => 1, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 20,
+    useThreadPage: (read, _refresh, follow) => { reader = read; follower = follow; return { items: contextItems, snapshots: new Map() }; },
+    useMarkedUnreadPage: enabled => enabled ? marked : { items: [] },
+    useTextAppearance: () => ({ system: false, palette: {} }), theme: {},
+    View: 'View', Pressable: 'Pressable', T: 'T', ScrollView: 'ScrollView', ThreadViewport: 'ThreadViewport', Button: 'Button',
+    ExpandedContextThread: 'ExpandedContextThread', ContextThreadHeader: 'ContextThreadHeader',
+  });
+  const client = { threadList: () => assert.fail('marked rows come only from listMarked') };
+  const render = () => { state.reset(); return list({ context: { marked_unread: true }, client, openThread() {}, title: 'Marked unread' }); };
+  let tree = render();
+  assert.ok(tree, 'an error is never rendered as an empty (hidden) group');
+  assert.deepEqual((await reader(undefined, new AbortController().signal)).value, { items: [], next_cursor: null });
+  assert.equal(follower({}), undefined);
+  find(tree, 'Pressable').props.onPress();
+  tree = render();
+  assert.equal(find(tree, 'ThreadReadIssue').props.message, 'This connection can\'t read marked threads.');
+  marked.items = [row];
+  marked.issue = undefined;
+  find(render(), 'ContextThreadHeader').props.toggle();
+  const expanded = find(render(), 'ExpandedContextThread');
+  assert.equal(expanded.props.seekReminder, true, 'opening a marked row seeks its reminder anchor');
+  assert.equal(expanded.props.placement, 'context:{"marked_unread":true}:thread/one');
+
+  // No new count: the marked header is its title alone, visually and for VoiceOver,
+  // while the rows keep their own markers and natural unread state untouched.
+  const header = find(render(), 'Pressable');
+  assert.equal(header.props.accessibilityLabel, 'Marked unread');
+  assert.deepEqual(texts(header), ['Marked unread', 'Hide']);
+  assert.equal(expanded.props.initial, row, 'the row summary, including natural unread, passes through unchanged');
+  // Other context groups keep their existing count.
+  contextItems = [row];
+  state.reset();
+  const recent = find(list({ context: { state: 'closed' }, client, openThread() {}, title: 'Recently closed threads' }), 'Pressable');
+  assert.equal(recent.props.accessibilityLabel, 'Recently closed threads, 1');
+  assert.deepEqual(texts(recent).slice(0, 3), ['Recently closed threads', ' · ', '1']);
+});
+
+test('a marked row opens around its reminder anchor; only a current anchor shows a body and seeking never acknowledges', async () => {
+  const errorText = cause => cause instanceof Error ? cause.message : String(cause);
+  const unreadReadIssue = compile('unreadReadIssue', 'function markedUnreadIssue', { errorText });
+  const page = { anchor: { message_id: 'message/anchor', state: 'current' }, items: [], next_cursor: null };
+  const open = async (results, unread_reminder = reminderOn('message/anchor')) => {
+    const state = hooks();
+    const effects = [], seeks = [], committed = [];
+    let effectIndex = 0;
+    const acknowledge = () => assert.fail('seeking around a reminder never reads or clears');
+    // One stable store service, as the store memoizes it per connection.
+    const store = { unreadEnabled: true, unreadClient: { forThread: () => ({ state: 'ready', actions: { read: acknowledge, edit: acknowledge, seek: async id => {
+      seeks.push(id); return results.shift();
+    } } }) } };
+    const body = compile('ReminderThreadBody', 'export function ThreadScreen', {
+      ...state, useRef: current => ({ current }), useStore: () => store,
+      // Effects run only when their dependencies change, as React commits them.
+      useEffect: (effect, deps) => {
+        const at = effectIndex++;
+        if (committed[at] && deps.every((value, index) => Object.is(value, committed[at][index]))) return;
+        committed[at] = deps;
+        effects.push(effect);
+      },
+      unreadReadIssue, ThreadBody: 'ThreadBody', ClearReminder: 'ClearReminder', View: 'View', T: 'T', Button: 'Button',
+    });
+    let thread = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder };
+    const render = async () => {
+      state.reset(); effects.length = 0; effectIndex = 0;
+      const tree = body({ client: {}, thread, placement: 'context:marked:thread/one', onOpen() {} });
+      for (const effect of effects) effect();
+      await new Promise(resolve => setImmediate(resolve));
+      return tree;
+    };
+    const first = await render();
+    return { first, seeks, render, clear: () => { thread = { ...thread, unread_reminder: null }; } };
+  };
+
+  let view = await open([{ state: 'current', anchor: page.anchor, page }]);
+  assert.notEqual(view.first.type, 'ThreadBody', 'nothing renders from the head before the anchor is found');
+  assert.deepEqual(texts(view.first), ['Finding the return message…']);
+  assert.deepEqual(view.seeks, ['message/anchor']);
+  let tree = await view.render();
+  assert.equal(tree.type, 'ThreadBody');
+  assert.equal(tree.props.around, page, 'the body opens on the current anchor page');
+  assert.equal(tree.props.placement, 'context:marked:thread/one');
+  view.clear();
+  tree = await view.render();
+  assert.equal(tree.props.around, page, 'clearing the reminder during the visit keeps the anchored page');
+  assert.deepEqual(view.seeks, ['message/anchor'], 'no reseek without a new anchor');
+
+  for (const state of ['unavailable', 'pending']) {
+    view = await open([{ state, anchor: { message_id: 'message/anchor', state } }]);
+    tree = await view.render();
+    assert.equal(findBy(tree, node => node.type === 'ThreadBody'), undefined, `${state} anchors render no body`);
+    assert.deepEqual(texts(find(tree, 'T')), [anchorPresentation({ message_id: 'message/anchor', state }).notice]);
+    assert.ok(button(tree, 'Open thread'));
+    assert.ok(!texts(tree).some(text => /unread/i.test(text) && !/reminder is kept/.test(text)), 'no new unread signal');
+  }
+
+  view = await open([
+    { state: 'error', error: { kind: 'refused', code: 'forbidden' } },
+    { state: 'error', error: { kind: 'invalid-response' } },
+    { state: 'current', anchor: page.anchor, page },
+  ]);
+  tree = await view.render();
+  assert.equal(find(tree, 'ThreadReadIssue').props.message, 'This connection can\'t read the return message.');
+  assert.equal(button(tree, 'Retry').props.accessibilityLabel, 'Retry finding the return message in Review');
+  button(tree, 'Retry').props.onPress();
+  await view.render();
+  tree = await view.render();
+  assert.equal(find(tree, 'ThreadReadIssue').props.message, 'The connected Fractal returned an invalid response for the return message.');
+  button(tree, 'Retry').props.onPress();
+  await view.render();
+  tree = await view.render();
+  assert.equal(tree.props.around, page);
+  assert.deepEqual(view.seeks, ['message/anchor', 'message/anchor', 'message/anchor']);
+
+  view = await open([], null);
+  assert.equal(view.first.type, 'ThreadBody', 'without a reminder the thread opens at its latest history');
+  assert.equal(view.first.props.around, undefined);
+  assert.deepEqual(view.seeks, []);
+});
+
+test('threads-v1 v2 hides reminder UI and never requests the new list, seek or actions', async () => {
+  const requests = [];
+  const caps = { capabilities: [
+    { id: 'threads-v1', version: 2, state: 'granted' },
+    ...['thread.read', 'thread.mark-unread', 'thread.clear-unread'].map(id => ({ id, version: 1, state: 'granted' })),
+  ] };
+  const client = new FractalClient({ baseUrl: 'https://v2.invalid', fetchImpl: async (...args) => { requests.push(args); assert.fail('new v3 requests must not reach v2'); } });
+  const service = bindUnreadClient(client, {
+    supported: () => unreadSupported(caps), canRead: () => true, canWrite: () => true,
+    read: async () => ({ how: 'sent' }), submit: () => assert.fail('no reminder write on v2'),
+  });
+  const store = { unreadEnabled: unreadSupported(caps), unreadClient: service, threadClient: client,
+    actor: 'person/one', status: 'online', data: { agents: [] }, actions: {},
+    threadActions: new Set(caps.capabilities.filter(c => c.id.startsWith('thread.')).map(c => c.id)),
+  };
+  const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: true, unread_reminder: reminderOn('message/reply') };
+  const group = compile('ThreadGroup', 'function ContextThreadList', {
+    useStore: () => store, SystemText: 'SystemText', ContextThreadList: () => assert.fail('v2 must not mount the marked list reader'),
+  });
+  assert.equal(group({ context: { marked_unread: true }, title: 'Marked unread', openThread() {} }), null);
+  assert.ok(group({ context: { agent_id: 'agent/one' }, openThread() {} }), 'legacy thread lists still work on v2');
+  const tree = compile('ThreadBody', 'type Quote', bodyDependencies(store))({ client, thread, placement: 'thread:thread/one' });
+  assert.equal(button(tree, 'Mark unread'), undefined);
+  assert.ok(button(tree, 'Mark read'), 'legacy natural read remains available');
+  assert.equal(button(tree, 'Clear reminder'), undefined, 'v2 offers no reminder clear');
+  assert.ok(!texts(tree).some(text => /Marked unread|Couldn't load/.test(text)));
+  const effects = [];
+  const reminderBody = compile('ReminderThreadBody', 'export function ThreadScreen', {
+    ...hooks(), useRef: current => ({ current }), useStore: () => store, useEffect: effect => effects.push(effect),
+    ThreadBody: 'ThreadBody', T: 'T', View: 'View', Button: 'Button',
+  });
+  assert.equal(reminderBody({ client, thread, placement: 'context:marked', onOpen() {} }).type, 'ThreadBody');
+  for (const effect of effects) effect();
+  const upgrade = await service.listMarked();
+  const issue = compile('unreadReadIssue', 'function markedUnreadIssue', { errorText: String })(upgrade.error.reason, 'marked threads');
+  assert.equal(issue, 'Upgrade the connected Fractal to use unread reminders.');
+  assert.deepEqual(requests, []);
+});
+
+test('pending episode A never replaces or disables the fresh Start for episode B', () => {
+  const old = { sourceId: 'notice/same', episode: 'episode/A', agentId: 'agent/old' };
+  const origin = { sourceId: old.sourceId, episode: 'episode/B' };
+  const store = { threadClient: {}, threadActions: new Set(['thread.start']), threadDeliveries: new Map([
+    ['start/thread/old', { target: 'thread/old', start: { origin: old, title: 'Earlier' } }],
+  ]) };
+  const entry = compile('InboxThread', 'type ThreadStartDraft', {
+    useStore: () => store, InboxThreadStart: 'InboxThreadStart', T: 'T',
+  });
+  const fresh = entry({ sourceId: origin.sourceId, origin, agentId: 'agent/new', initialTitle: 'Current', onOpen() {} });
+  assert.equal(fresh.props.origin, origin);
+  assert.equal(fresh.props.agentId, 'agent/new');
+  assert.equal(fresh.props.initialTitle, 'Current');
+  assert.equal(fresh.props.canStart, true);
+  assert.equal(fresh.props.pendingTarget, undefined);
+  const recovered = entry({ sourceId: old.sourceId, pendingScope: 'start/thread/old', initialTitle: 'Ignored', onOpen() {} });
+  assert.equal(recovered.props.origin, old);
+  assert.equal(recovered.props.pendingTarget, 'thread/old');
+  assert.equal(recovered.props.canStart, false);
+});
+
+test('same-origin Starts have independent slots and action keys; first recovery cannot replay the second', async () => {
+  const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
+  const track = source.slice(source.indexOf('  async function trackThreadDelivery('), source.indexOf('  const actions ='));
+  const start = source.slice(source.indexOf('    startThread(thread:'), source.indexOf('    replyToThread('));
+  const scope = source.slice(source.indexOf('export function threadStartScope('), source.indexOf('export function threadEditScope(')).replace('export ', '');
+  const { outputText } = ts.transpileModule(`${scope}\n${track}\nconst actions = {${start}}; exports.start = actions.startThread;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  const client = {}, byClient = { current: new WeakMap() }, exports = {}, sent = [];
+  let nextKey = 0;
+  const submit = async (target, _kind, _revisions, prepare) => {
+    const id = `action/${++nextKey}`;
+    const member = { threadStart: async request => { sent.push(request); return { how: 'sent' }; } };
+    const prepared = await prepare(member, id);
+    const request = { id, idempotency_key: id };
+    const run = () => prepared.send(request);
+    await run();
+    return { how: 'unconfirmed', retry: run };
+  };
+  new Function('exports', 'threadClient', 'deliveriesByClient', 'setThreadDeliveryRevision',
+    'threadActionErrorText', 'submitThreadAction', 'signingKeyRef', 'readPhoneSigning', 'signThreadMessage', outputText)(
+    exports, client, byClient, () => {}, String, submit, { current: {} },
+    async () => ({ person: 'person/one' }), async key => ({ signature: `signature/${key}`, messageId: `message/${key}` }));
+  const origin = { sourceId: 'notice/same', episode: 'episode/same', agentId: 'agent/one' };
+  const first = await exports.start('thread/first', origin, 'First', 'One');
+  const second = await exports.start('thread/second', origin, 'Second', 'Two');
+  assert.equal(first.how, 'unconfirmed');
+  assert.equal(second.how, 'unconfirmed');
+  assert.deepEqual(sent.map(request => request.parameters.target_id), ['thread/first', 'thread/second']);
+  assert.notEqual(sent[0].id, sent[1].id);
+  assert.notEqual(sent[0].idempotency_key, sent[1].idempotency_key);
+  const ledger = byClient.current.get(client);
+  assert.deepEqual([...ledger.keys()], ['start/thread/first', 'start/thread/second']);
+  assert.equal((await first.retry()).how, 'sent');
+  assert.deepEqual(sent[2], sent[0], 'first recovery retains only its original signed intent and key');
+  assert.deepEqual([...ledger.keys()], ['start/thread/second'], 'only the first slot is released');
+  assert.equal((await second.retry()).how, 'sent');
+  assert.deepEqual(sent[3], sent[1]);
+  assert.equal(ledger.size, 0);
+});
+
+test('an unconfirmed first composer moves to separate recovery and leaves a fresh UUID-free Start available', () => {
+  const state = hooks(), origin = { sourceId: 'notice/same', episode: 'episode/same' }, client = {};
+  const draftCache = { current: new Map() }, threadDeliveries = new Map();
+  const component = compile('InboxThreadStart', 'function InlineThread', {
+    ...state, useStore: () => ({ status: 'online', threadRefresh: 0, threadDeliveries, draftCache, draftsReady: true, saveDrafts() {} }),
+    threadStartScope: target => `start/${target}`, threadDraftKey: value => value, threadTitleFromAsk: value => value,
+    View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+  });
+  const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
+  const render = () => { state.reset(); return component(props); };
+  button(render(), 'Start thread').props.onPress();
+  const first = find(render(), 'InlineThread').props.start;
+  threadDeliveries.set('start/thread/first', { target: 'thread/first', start: { origin, title: 'Notice' }, retry() {} });
+  first.onSubmitted('thread/first', JSON.stringify({ text: '' }));
+  const after = render();
+  assert.equal(find(after, 'InlineThread'), undefined, 'the first signed request is recovered separately');
+  assert.equal(button(after, 'Start thread').props.disabled, false);
+  button(after, 'Start thread').props.onPress();
+  assert.equal(find(render(), 'InlineThread').props.start.target, undefined, 'the next send allocates a new thread UUID');
+  assert.ok(threadDeliveries.has('start/thread/first'), 'the first attempt remains recoverable');
+});
+
+test('a nonempty Start draft transfers intact to its own recovery across remount and a durable store restart', async () => {
+  const origin = { sourceId: 'notice/same', episode: 'episode/same' }, client = {};
+  const originKey = 'thread-draft/["notice/same","episode/same"]', attemptKey = 'thread-draft/start/thread/first';
+  const original = JSON.stringify({ text: 'Original first message\nwith a second line', quote: { id: 'message/quote', from: 'Agent', text: 'Exact quoted words' } });
+  const values = new Map(), storage = {
+    async getItem(key) { return values.get(key) ?? null; },
+    async setItem(key, value) { values.set(key, value); },
+  };
+  let persistence = new LocalDrafts(storage), writes = [];
+  let store = {
+    status: 'online', threadRefresh: 0, draftsReady: true,
+    draftCache: { current: new Map([[originKey, original]]) },
+    threadDeliveries: new Map([['start/thread/first', { target: 'thread/first', retry() {} }]]),
+    saveDrafts() { writes.push(persistence.save('person/one', store.draftCache.current)); },
+  };
+  store.saveDrafts(); await Promise.all(writes);
+  const panel = () => {
+    const state = hooks();
+    const component = compile('InboxThreadStart', 'function InlineThread', {
+      ...state, useStore: () => store, threadStartScope: target => `start/${target}`,
+      threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
+      View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+    });
+    return props => { state.reset(); return component(props); };
+  };
+  const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
+  const first = find(panel()(props), 'InlineThread').props.start;
+  first.onSubmitted('thread/first', original);
+  await Promise.all(writes);
+  assert.equal(store.draftCache.current.get(attemptKey), original, 'copy precedes the persisted origin deletion');
+  assert.equal(store.draftCache.current.has(originKey), false);
+  const parse = compile('readThreadDraft', 'function ThreadComposer', {});
+  const assertRemount = () => {
+    const fresh = panel()(props);
+    assert.equal(find(fresh, 'InlineThread'), undefined, 'the fresh origin composer is empty and independent');
+    assert.equal(button(fresh, 'Start thread').props.disabled, false);
+    const recovery = find(panel()({ ...props, canStart: false, pendingTarget: 'thread/first', showHistory: false }), 'InlineThread').props.start;
+    assert.equal(recovery.cacheKey, attemptKey);
+    assert.deepEqual(parse(store.draftCache.current.get(recovery.cacheKey)), JSON.parse(original), 'the recovered composer reads the original text and quote');
+    return recovery;
+  };
+  const remounted = assertRemount();
+  // A retry that remains unknown must not delete text typed into a later fresh composer.
+  const later = JSON.stringify({ text: 'A separate next Start' });
+  store.draftCache.current.set(originKey, later);
+  remounted.onSubmitted('thread/first', original);
+  await Promise.all(writes);
+  assert.equal(store.draftCache.current.get(originKey), later);
+  assert.equal(store.draftCache.current.get(attemptKey), original);
+  store.draftCache.current.delete(originKey); store.saveDrafts(); await Promise.all(writes);
+  // Simulate process loss: neither a cache nor a bound-delivery closure is reused.
+  persistence = new LocalDrafts(storage);
+  store = { ...store, draftCache: { current: new Map() }, threadDeliveries: new Map() };
+  assert.equal(await persistence.restore('person/one', store.draftCache.current), 2);
+  store.threadClient = client;
+  const pending = compile('PendingInboxThreads', 'type ThreadStartDraft', {
+    useStore: () => store, threadStartScope: target => `start/${target}`,
+    View: 'View', T: 'T', InboxThread: 'InboxThread',
+  })({ onOpen() {} });
+  const route = find(pending, 'InboxThread');
+  assert.ok(route, 'production PendingInboxThreads discovers the restored attempt without a ledger');
+  const copied = [], state = hooks();
+  const entry = compile('InboxThread', 'type ThreadStartDraft', {
+    ...state, useStore: () => store, threadStartScope: target => `start/${target}`,
+    threadDraftKey: key => `thread-draft/${key}`, readThreadDraft: parse,
+    Clipboard: { setStringAsync: async text => { copied.push(text); } },
+    View: 'View', T: 'T', Button: 'Button', InboxThreadStart: 'InboxThreadStart',
+  })(route.props);
+  const restored = entry.type(entry.props);
+  assert.ok(texts(restored).includes(JSON.parse(original).text));
+  assert.ok(texts(restored).some(text => text.includes('Delivery status unknown after restart')));
+  assert.equal(find(restored, 'ThreadComposeField'), undefined, 'no reconstructed original send or old-target write');
+  button(restored, 'Copy message').props.onPress();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(copied, [JSON.parse(original).text]);
+  const fresh = panel()(props);
+  assert.equal(find(fresh, 'InlineThread'), undefined);
+  assert.equal(button(fresh, 'Start thread').props.disabled, false);
+  button(restored, 'Discard saved draft').props.onPress();
+  await Promise.all(writes);
+  assert.equal(savedThreadStarts(store.draftCache.current).length, 0);
+  assert.equal(store.draftCache.current.has(attemptKey), false);
+});
+
+for (const divergence of ['before invocation', 'while pending', 'owner switched', 'generation reset'])
+for (const outcome of divergence === 'owner switched' || divergence === 'generation reset' ? ['unconfirmed', 'sent'] : ['unconfirmed'])
+test(`a Start fences its ${outcome} draft result when ${divergence}`, async () => {
+  const origin = { sourceId: 'notice/delayed', episode: 'episode/one' }, client = {};
+  const originKey = 'thread-draft/["notice/delayed","episode/one"]';
+  const original = JSON.stringify({ text: 'Submitted original', quote: { id: 'message/quote', from: 'Agent', text: 'Original quote' } });
+  const later = JSON.stringify({ text: 'Typed after navigating back' });
+  const pending = Promise.withResolvers(), calls = [], saves = [];
+  const store = {
+    status: 'online', threadRefresh: 0, draftsReady: true,
+    draftsOwner: { current: 'person/first' }, draftGeneration: { current: 0 },
+    draftCache: { current: new Map([[originKey, original]]) }, threadDeliveries: new Map(),
+    saveDrafts() { saves.push([...store.draftCache.current]); },
+    actions: { startThread: async (...args) => { calls.push(args); return pending.promise; } },
+  };
+  const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
+  const createPanel = () => compile('InboxThreadStart', 'function InlineThread', {
+    ...hooks(), useStore: () => store, threadStartScope: target => `start/${target}`,
+    threadDraftKey: key => `thread-draft/${key}`, threadTitleFromAsk: value => value,
+    View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+  });
+  const start = find(createPanel()(props), 'InlineThread').props.start;
+  const composer = compile('ThreadComposer', 'function ThreadComposeField', {
+    ...hooks(), useStore: () => store, useRef: current => ({ current }), useEffect() {}, useFocusEffect() {},
+    useCallback: callback => callback,
+    threadDraftKey: key => `thread-draft/${key}`, threadStartScope: target => `start/${target}`,
+    readThreadDraft: JSON.parse, threadTextIssue: () => undefined,
+    Crypto: { randomUUID: () => 'first' }, View: 'View', T: 'T', Button: 'Button',
+    ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
+  })({ start, canReply: true, selectionVersion: 0 });
+  if (divergence === 'before invocation') store.draftCache.current.set(originKey, later);
+  find(composer, 'ThreadComposeField').props.onSend();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][3], 'Submitted original');
+  // Remounting while the network is pending can legitimately create later typing.
+  if (divergence === 'while pending') store.draftCache.current.set(originKey, later);
+  const ownershipChanged = divergence === 'owner switched' || divergence === 'generation reset';
+  if (ownershipChanged) {
+    // clearCaches resets this same Map in place, then the next owner can type
+    // even the exact same text. Neither compare-delete nor persistence is safe.
+    store.draftCache.current.clear();
+    store.draftCache.current.set(originKey, original);
+    if (divergence === 'owner switched') store.draftsOwner.current = 'person/second';
+    else store.draftGeneration.current++;
+  }
+  const remounted = find(createPanel()(props), 'InlineThread').props.start;
+  assert.equal(remounted.target, undefined);
+  pending.resolve({ how: outcome, retry: async () => ({ how: 'sent' }) });
+  await new Promise(resolve => setImmediate(resolve));
+  if (ownershipChanged) {
+    assert.deepEqual([...store.draftCache.current], [[originKey, original]], 'no old-owner draft, metadata or cleanup touches the reset cache');
+    assert.deepEqual(saves, [], 'the old completion cannot persist into the new owner');
+    assert.equal(calls.length, 1, 'no reconstruction or resend');
+    return;
+  }
+  assert.equal(store.draftCache.current.get('thread-draft/start/thread/first'), original);
+  assert.equal(store.draftCache.current.get(originKey), later);
+  assert.deepEqual(savedThreadStarts(store.draftCache.current), [{
+    target: 'thread/first', origin: { ...origin, agentId: 'agent/one' }, title: 'Notice',
+  }]);
+  assert.equal(calls.length, 1, 'the handoff never reconstructs or re-signs the submitted action');
 });
