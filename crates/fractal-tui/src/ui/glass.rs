@@ -4216,6 +4216,7 @@ impl Ui {
         match self.focused_pane() {
             Some(pane) => self.focus_pane(&pane),
             None => {
+                self.threads.select_inbox_detail(None);
                 self.kdl = false;
                 self.note_focus();
             }

@@ -333,6 +333,27 @@ fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
 }
 
 #[test]
+fn unread_inbox_detail_releases_on_collapse_disable_and_read_refusal() {
+    for release in ["collapse", "disable", "read-refusal"] {
+        let mut ui = fixture(false, &[]);
+        ui.open_home();
+        ui.threads.select_inbox_detail(Some(ID.into()));
+        assert_eq!(ui.main_pane(), Pane::Home(Some(ID.into())));
+        match release {
+            "collapse" => ui.click(super::super::doc::Hit::Thread(
+                Pane::Home(Some(ID.into())).key(), thread::Tap::Toggle(ID.into()))),
+            "disable" => ui.threads.enable(false),
+            "read-refusal" => ui.threads.failure(
+                ThreadInterest::Timeline(ID.into()), Some(fractal_client::ErrorCode::Forbidden),
+                "Read permission revoked".into(), true),
+            _ => unreachable!(),
+        }
+        assert!(ui.threads.inbox_detail().is_none(), "{release}: release the identity pin");
+        assert_ne!(ui.main_pane(), Pane::Home(Some(ID.into())), "{release}: stop mounting the pinned detail");
+    }
+}
+
+#[test]
 fn unread_stable_reading_rule_is_shared_by_all_thread_placements() {
     for host in [HOST, "home:attention/item", "chat:agent/example/atlas/builder", "mission:mission/test"] {
         let mut ui = fixture(true, &[]);
