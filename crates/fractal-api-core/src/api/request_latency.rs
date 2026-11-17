@@ -345,6 +345,7 @@ impl Meter {
                     .resize_with(targets.latency.len(), Default::default);
             }
             self.targets[target][usize::from(remote)].record(now, elapsed, over);
+            crate::slo::note_latency(target, remote, now, over);
         }
     }
 
@@ -380,9 +381,11 @@ impl Meter {
                     "p99_ms": latency.p99_ms,
                     "windows": windows(false),
                 });
+                row["budget"] = crate::slo::latency_budget(index, false, now);
                 if let Some(remote) = latency.remote_p99_ms {
                     row["remote_p99_ms"] = json!(remote);
                     row["remote_windows"] = windows(true);
+                    row["remote_budget"] = crate::slo::latency_budget(index, true, now);
                 }
                 row
             })
