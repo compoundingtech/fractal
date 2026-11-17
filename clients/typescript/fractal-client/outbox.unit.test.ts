@@ -2,9 +2,26 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ClientError } from './Client.generated.ts';
 import { appliedAnswer } from './errors.ts';
 import {
-  createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, restoreOutboxRecord, isAllowedOutboxTransition,
+  createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, restoreOutboxRecord, isAllowedOutboxTransition, outboxDeploymentId,
   type OutboxIntent, type OutboxObservation, type OutboxPreparedRecord, type OutboxReceipt, type OutboxRecord,
 } from './outbox.ts';
+
+it('deployment IDs encode issuer tuples without comma or quote collisions', () => {
+  const tuples = [
+    ['issuer', 'key'],
+    ['issuer,key', ''],
+    ['issuer', 'key,'],
+    ['issuer,"key', 'value'],
+    ['issuer', '"key,value'],
+    ['', 'issuer,key'],
+  ] as const;
+  const ids = tuples.map(([issuer, issuerKey]) => outboxDeploymentId(issuer, issuerKey));
+  expect(new Set(ids).size).toBe(tuples.length);
+  for (let index = 0; index < tuples.length; index++) {
+    expect(JSON.parse(ids[index]!)).toEqual(tuples[index]);
+  }
+  expect(outboxDeploymentId('issuer', 'key')).toBe('["issuer","key"]');
+});
 
 const packet = {
   api_version: 'st3.client.v0', id: 'action/original', idempotency_key: 'original',
