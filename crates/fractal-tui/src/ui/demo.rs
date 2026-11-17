@@ -18,10 +18,18 @@ const SLICES: &[(&str, &str)] = &[
     ("sync", include_str!("../../../../fixtures/scenarios/fleet-mid-refactor/sync.json")),
 ];
 
+#[derive(serde::Deserialize)]
+pub(super) struct TopicThread {
+    pub origin_attention_id: String,
+    pub summary: fractal_client::ThreadSummary,
+    pub events: Vec<fractal_client::ThreadTimelineEvent>,
+}
+
 pub(super) struct DemoWorld {
     pub world: World,
     pub terminals: BTreeMap<String, fractal_client::TerminalScreen>,
     pub arrangements: Vec<fractal_client::Arrangement>,
+    pub threads: super::threads_live::Threads,
 }
 
 pub(super) fn load() -> Result<DemoWorld> {
@@ -50,6 +58,7 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
     let mut conversations: BTreeMap<String, Vec<fractal_client::TimelineEntry>> = BTreeMap::new();
     let mut terminals = BTreeMap::new();
     let mut arrangements = Vec::new();
+    let mut topic_threads = Vec::new();
     for &(name, source) in sources {
         let slice = scenarios::parse_slice(source)
             .and_then(|slice| {
@@ -60,6 +69,12 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
             }).with_context(|| format!("demo scenario fleet-mid-refactor/{name}.json"))?;
         let decoded = slice.decode()
             .with_context(|| format!("demo scenario fleet-mid-refactor/{name}.json strict decode failed"))?;
+        if name == "attention"
+            && let Some(rows) = slice.state.get("topic_threads")
+        {
+            topic_threads = serde_json::from_value::<Vec<TopicThread>>(rows.clone())
+                .context("demo scenario fleet-mid-refactor/attention.json topic_threads")?;
+        }
         for item in decoded {
             // Validate replay too, but the initial screen is the slice's initial state.
             if !item.pointer.starts_with("/state/") || item.pointer.starts_with("/state/recorded_history/") { continue; }
@@ -102,7 +117,9 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
     }
     let mut world = adapt::world_at(&model, person, &extras, clock);
     world.worktrees = Load::Failed("The scenario kit does not model worktrees".into());
-    Ok(DemoWorld { world, terminals, arrangements })
+    let mut threads = super::threads_live::Threads::default();
+    threads.demo_windows(&model, &snapshot, topic_threads)?;
+    Ok(DemoWorld { world, terminals, arrangements, threads })
 }
 
 /// Product callers use `load` to report errors before entering terminal raw mode.
@@ -166,6 +183,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn demo_sidebar_renders_the_ready_scenario_layout() {
+        use super::super::{Ui, glass};
+        use ratatui::{Terminal, backend::TestBackend};
+        let demo = load().unwrap();
+        let mut ui = Ui::new(demo.world);
+        ui.resource_sidebar.arrangements = demo.arrangements;
+        ui.glasses = glass::Glasses::open(None, None);
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let shown = (0..44).map(|y| {
+            (0..160).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("Implementation"), "{shown}");
+        assert!(shown.contains("Review"), "{shown}");
+        assert!(shown.contains("Atlas Builder"), "{shown}");
+        assert!(!shown.contains("Sidebar layout unavailable"), "{shown}");
+        assert!(!shown.contains("NotReady"), "{shown}");
+    }
+
+    #[test]
     fn demo_rebases_inventory_instants_but_keeps_relative_ages() {
         let first = load_at(SLICES, 1_700_000_000_000).unwrap().world;
         let later = load_at(SLICES, 1_700_000_060_000).unwrap().world;
@@ -216,6 +255,24 @@ mod tests {
         assert_eq!(demo.world.conversations.len(), 2);
         let screen = &demo.terminals["agent/example/atlas/builder"];
         assert!(screen.lines.iter().any(|line| line.text.contains("typecheck")));
+    }
+
+    #[test]
+    fn demo_hydrates_native_inbox_threads_without_write_access() {
+        use super::super::{edit, pane::Pane};
+        let demo = load().unwrap();
+        let item = "attention/scenario-fleet-mid-refactor-worker-typecheck";
+        assert!(demo.threads.available());
+        assert!(!demo.threads.can_start(item));
+        let cursor = edit::Cursor::default();
+        let texts = std::collections::HashMap::new();
+        let doc = demo.threads.mount(
+            &Pane::Home(Some(item.into())), 120, &cursor, &demo.world, &texts,
+        );
+        let text = doc.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n").to_lowercase();
+        assert!(text.contains("fixture / preliminary"), "{text}");
+        assert!(text.contains("closed"), "{text}");
+        assert!(text.contains("read-only"), "{text}");
     }
 }
 

@@ -112,6 +112,33 @@ describe('rebase', () => {
     expect(times).toContain('/state/agents/0/current_work/0/since')
     expect(times).toContain('/timeline/0/upserts/0/updated_at')
   })
+
+  it('declares durable-topic instants without sorting canonical clock-skewed events', () => {
+    const world = loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
+    const slice = world.slices.attention
+    const topics = slice.state.topic_threads!
+    expect(topics).toHaveLength(3)
+    const origin = slice.state.attention.find(({ id }) => id === topics[0]!.origin_attention_id)!
+    expect(origin.conversation_id).toBe('agent/example/atlas/builder')
+    expect(origin.episode).toBe('claim/scenario-worker-typecheck')
+    expect(topics.every((topic) => topic.origin_attention_id === origin.id)).toBe(true)
+    expect(topics.map(({ summary }) => summary.state)).toEqual(['open', 'closed', 'open'])
+    const times = sliceTimes(slice)
+    const expected = topics.flatMap((topic, index) => topic.events.map((_, event) => ({
+      pointer: `/state/topic_threads/${index}/events/${event}/accepted_at_unix_ms`,
+      codec: 'epoch-ms',
+    })))
+    expect(times.filter(({ pointer }) => pointer.startsWith('/state/topic_threads/'))).toEqual(expected)
+    const skewed = topics[1]!.events
+    expect(skewed.map(({ kind }) => kind)).toEqual(['message', 'thread.closed', 'message'])
+    expect(skewed[0]!.accepted_at_unix_ms).toBeLessThan(skewed[2]!.accepted_at_unix_ms)
+    const shifted = rebase({ state: slice.state, timeline: slice.timeline }, times, ANCHOR, ANCHOR_MS + 123_456)
+    expect(shifted.state.topic_threads!.map(({ events }) => events.map(({ id }) => id))).toEqual(topics.map(({ events }) => events.map(({ id }) => id)))
+    topics.forEach((topic, index) => topic.events.forEach((event, eventIndex) => {
+      expect(shifted.state.topic_threads![index]!.events[eventIndex]!.accepted_at_unix_ms).toBe(event.accepted_at_unix_ms + 123_456)
+    }))
+    expect(loadWorld('first-run-onboarding', { now: ANCHOR_MS }).slices.attention.state.topic_threads).toBeUndefined()
+  })
 })
 
 describe('worlds', () => {
