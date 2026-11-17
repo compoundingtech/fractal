@@ -8187,6 +8187,144 @@
     "projection": "repairs",
     "wakes_reconciler": true
   },
+  "resource.exec-receipt": {
+    "kind": "resource.exec-receipt",
+    "subjects": [
+      "resource"
+    ],
+    "fields": {
+      "class": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "landing",
+          "check",
+          "agent"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "clean_end": {
+        "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "clean_start": {
+        "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "coverage": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "logical",
+          "enforced"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "disk_reserved_bytes": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "exec_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "exit_code": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "exit_signal": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "head_end": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "head_start": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "host": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "io": {
+        "value_type": "string",
+        "required": false,
+        "values": [
+          "heavy"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "memory_bytes": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "memory_peak_bytes": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "owner": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "queue_wait_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "state": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "completed",
+          "refused",
+          "cancelled"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "wall_duration_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": null,
+    "wakes_reconciler": false
+  },
   "resource.observed": {
     "kind": "resource.observed",
     "subjects": [

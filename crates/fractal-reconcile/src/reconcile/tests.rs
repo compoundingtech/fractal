@@ -1021,6 +1021,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     /// The exec a hook waits for, and what happens right after that exec is next observed.
     type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
 
+    type ResourceRecoveryHook = Box<dyn Fn(&Store) + Send>;
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
@@ -1030,6 +1032,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
+        resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
+        resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,
@@ -1420,7 +1425,229 @@ mission "retained-reason" state="ready" {
         assert!(runtime.removes.lock().unwrap().is_empty());
     }
 
+    fn released_shell_fixture(expire_owner: bool) -> (
+        tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>,
+    ) {
+        use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+        use crate::store::shell_resources::{Command, PayloadResult};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.driver_state_dir = root.path().join("drivers");
+        reconciler.ensure_resource_authority().unwrap();
+        let owner = if expire_owner {
+            let blob = store.put_blob(b"export default {}").unwrap();
+            apply_source(&store, &format!(r#"version 2
+mission "shell-owner" state="ready" {{
+  goal "Retain shell outcome when its owner ends."
+  step "work" {{ program "/unused.mjs" sha256="{blob}" }}
+}}"#), "shell-owner-source");
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "shell-owner".into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "shell-owner-run".into(),
+            }).unwrap();
+            Owner { run: run.subject.clone(), step: run.steps[0].subject.clone(),
+                attempt: run.steps[0].attempt, invocation: None }
+        } else {
+            Owner { run: "shell:outcome".into(), step: "shell:outcome".into(), attempt: 1, invocation: None }
+        };
+        let lane = LaneRequest {
+            id: "shell:outcome".into(), name: "checks".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
+        };
+        let now = u64::try_from(now_ms()).unwrap();
+        let mut execution = store.submit_shell_resource(Command {
+            id: "outcome".into(), lane: lane.clone(), argv: vec!["true".into()],
+            cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
+        }, now).unwrap();
+        let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit, now).unwrap() else {
+            panic!("fixture was not admitted");
+        };
+        store.prepare_resource_membership(&grant, "outcome").unwrap();
+        let generation: fractal_runtime::ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema":"st.runtime.exec-generation.v1", "pid":1, "createdAtUnixMs":now,
+            "startToken":1, "generationId":"outcome-generation", "payloadReleasedAtUnixMs":now,
+        })).unwrap();
+        store.launch_resource_membership(&grant, "outcome", &generation, now).unwrap();
+        execution.state = "admitted".into();
+        execution.started_at = Some(now);
+        store.update_shell_resource(&execution).unwrap();
+        runtime.execs.lock().unwrap().insert("outcome".into(), RuntimeObservation {
+            runtime_id: "outcome".into(), terminal: false, status: "exited".into(),
+            exit_code: Some(37), incarnation_id: Some("outcome-generation".into()),
+        });
+        let path = reconciler.shell_result_path("outcome");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(&PayloadResult {
+            head_start: Some("abc123".into()), head_end: Some("def456".into()),
+            clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
+            wall_duration_ms: 1234, memory_peak_bytes: None,
+        }).unwrap()).unwrap();
+        if expire_owner {
+            store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
+        }
+        (root, store, runtime, reconciler)
+    }
+
+    fn assert_one_shell_outcome(store: &Store, state: &str) {
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, state);
+        assert_eq!(execution.exit_code, Some(37));
+        assert_eq!(execution.result.as_ref().unwrap().wall_duration_ms, 1234);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert_eq!(page.claims[0].body["fields"]["exit_code"], 37);
+        assert_eq!(page.claims[0].body["fields"]["wall_duration_ms"], 1234);
+    }
+
+    #[test]
+    fn shell_recovery_reads_synced_helper_result_before_predecessor_retirement() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        assert!(store.shell_resource("outcome").unwrap().result.is_none());
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = _root.path().join("drivers");
+        // The fake native recovery boundary refuses to retire any released shell lacking
+        // a persisted observation; the real Store and receipt transaction are unchanged.
+        recovered.reconcile_shell_resources().unwrap();
+        recovered.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "completed");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ended_shell_owner_finalizes_refusal_with_payload_observations_exactly_once() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(true);
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(store.shell_resource("outcome").unwrap().state, "failing");
+        assert!(store.shell_resource("outcome").unwrap().cancellation_started_at.is_some());
+        assert_eq!(*runtime.stops.lock().unwrap(), vec!["outcome".to_owned()]);
+        tokio::task::yield_now().await;
+        reconciler.reconcile_shell_resources().unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "refused");
+        assert!(store.shell_resource("outcome").unwrap().reason.contains("owner"));
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn running_shell_recovery_awaits_payload_publication_before_generic_retirement() {
+        use crate::store::shell_resources::PayloadResult;
+        let (root, store, runtime, reconciler) = released_shell_fixture(false);
+        let path = reconciler.shell_result_path("outcome");
+        fs::remove_file(&path).unwrap();
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        // Publication occurs on another thread only after SIGTERM. Its exit notification
+        // follows the atomic publication, matching the real helper/native wait boundary.
+        *runtime.resource_exit_publication.lock().unwrap() = Some(Box::new(move || {
+            let temporary = path.with_extension("pending");
+            fs::write(&temporary, serde_json::to_vec(&PayloadResult {
+                head_start: Some("abc123".into()), head_end: Some("def456".into()),
+                clean_start: Some(true), clean_end: Some(false),
+                exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+            }).unwrap()).unwrap();
+            fs::rename(temporary, path).unwrap();
+        }));
+        *runtime.before_resource_recovery.lock().unwrap() = Some(Box::new(|store| {
+            let execution = store.shell_resource("outcome").unwrap();
+            let result = execution.result.unwrap();
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.exit_signal, Some(9));
+            assert_eq!(result.wall_duration_ms, 2345);
+        }));
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
+        recovered.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, "completed");
+        assert_eq!(execution.exit_code, None); // The observer's exit code 37 is not the payload's.
+        assert_eq!(execution.exit_signal, Some(9));
+        assert_eq!(execution.result.unwrap().wall_duration_ms, 2345);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert_eq!(page.claims[0].body["fields"]["exit_signal"], 9);
+        assert_eq!(page.claims[0].body["fields"]["wall_duration_ms"], 2345);
+        assert!(page.claims[0].body["fields"].get("exit_code").is_none());
+    }
+
+    #[test]
+    fn recovered_observer_exit_without_payload_publication_leaves_payload_status_unknown() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        fs::remove_file(reconciler.shell_result_path("outcome")).unwrap();
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        // The fake observer exits on TERM without publishing a payload result.
+        reconciler.prepare_shell_resource_recovery().unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, "completed");
+        assert_eq!(execution.exit_code, None);
+        assert_eq!(execution.exit_signal, None);
+        let result = execution.result.unwrap();
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.exit_signal, None);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert!(page.claims[0].body["fields"].get("exit_code").is_none());
+        assert!(page.claims[0].body["fields"].get("exit_signal").is_none());
+    }
+
     impl RuntimeControl for FakeRuntime {
+        fn recover_resource_lanes(&self, store: &Store, host: &str, _now: u64) -> Result<usize> {
+            if let Some(before) = self.before_resource_recovery.lock().unwrap().take() { before(store); }
+            for execution in store.shell_resources(host, true)? {
+                if execution.started_at.is_some() {
+                    anyhow::ensure!(execution.result.is_some(), "recovery retired a shell before preserving its observations");
+                }
+            }
+            Ok(0)
+        }
+        fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+            Ok(true)
+        }
+        fn watch_resource_exec(&self, id: &str, generation: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+            let execs = self.execs.lock().unwrap();
+            let observation = execs.get(id).context("fake shell missing")?;
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
+            if observation.status == "exited" { wake(); }
+            else { self.resource_exit_watches.lock().unwrap().insert(id.into(), wake); }
+            Ok(())
+        }
+        fn resource_exec_output(&self, _id: &str, _generation: &str) -> Result<(String, String)> {
+            Ok((String::new(), String::new()))
+        }
+        fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
+            Ok(None)
+        }
+        fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+            let mut execs = self.execs.lock().unwrap();
+            let observation = execs.get_mut(id).context("fake shell missing")?;
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
+            observation.status = "exited".into();
+            self.stops.lock().unwrap().push(id.into());
+            drop(execs);
+            let wake = self.resource_exit_watches.lock().unwrap().remove(id);
+            if let Some(publish) = self.resource_exit_publication.lock().unwrap().take() {
+                std::thread::spawn(move || {
+                    publish();
+                    if let Some(wake) = wake { wake(); }
+                });
+            } else if let Some(wake) = wake { wake(); }
+            Ok(())
+        }
         fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
             Ok(self.exit_evidence.lock().unwrap()
                 .get(&(runtime_id.into(), incarnation.into())).cloned())
