@@ -75,7 +75,7 @@ test('existing exact-ID metadata supplies agentName for display only, while acce
     const tree = StartRecipientPreview({ recipient });
     const texts = findAll(tree, node => node.type === 'T');
     assert.equal(text(texts[0]), 'New discussion with Image Sorter');
-    assert.equal(texts[0].props.accessibilityLabel, 'New discussion with Image Sorter (agent/harbor.image-sorter)');
+    assert.equal(tree.props.accessibilityLabel, "New discussion with Image Sorter (agent/harbor.image-sorter) Original source agent · agent/original-source. This agent is retired. The original request's history and participants are unchanged.");
     assert.equal(recipient.agent_id, 'agent/harbor.image-sorter', 'display metadata cannot rewrite routing');
     assert.deepEqual(lines(recipient), [
       'New discussion with Image Sorter', 'Original source agent · agent/original-source',

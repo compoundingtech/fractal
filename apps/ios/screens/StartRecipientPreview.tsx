@@ -16,10 +16,14 @@ export function StartRecipientPreview({ recipient, changed = false }: { recipien
   const agent = data.agents.find(candidate => candidate.id === agentId);
   const name = agent ? agentName(agent) : agentId;
   const heading = `${basis._tag === 'fallback' ? 'New discussion with' : 'To'} ${name}`;
-  return <View accessible accessibilityLiveRegion={changed ? 'polite' : undefined} style={{ gap: 2 }}>
+  const accessibilityLabel = [
+    changed ? 'Recipient changed. Review before sending again.' : undefined,
+    name === agentId ? heading : `${heading} (${agentId})`,
+    basis._tag === 'fallback' ? `Original source agent · ${basis.original_agent_id}. This agent is retired. The original request's history and participants are unchanged.` : undefined,
+  ].filter(Boolean).join(' ');
+  return <View accessible accessibilityLabel={accessibilityLabel} accessibilityLiveRegion={changed ? 'polite' : undefined} style={{ gap: 2 }}>
     {changed ? <T bold color={theme.waiting}>Recipient changed. Review before sending again.</T> : null}
-    <T bold color={basis._tag === 'fallback' ? theme.waiting : undefined}
-      accessibilityLabel={name === agentId ? heading : `${heading} (${agentId})`}>{heading}</T>
+    <T bold color={basis._tag === 'fallback' ? theme.waiting : undefined}>{heading}</T>
     {basis._tag === 'fallback' ? <>
       <T dim selectable>Original source agent · {basis.original_agent_id}</T>
       <T dim>This agent is retired.</T>
