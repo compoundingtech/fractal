@@ -2,18 +2,17 @@ import 'fake-indexeddb/auto'
 import { createOutboxRecord, FractalClient, outboxDeploymentId, prepareMessageSendPacket, prepareOutboxRecord, type Capabilities, type EnvelopeOf } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import { IDBFactory } from 'fake-indexeddb'
-import { Schema } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 import fixture from '../subjectReadPort.gateway.fixtures.json'
 import { gatewayMessageSend } from '../attachmentPort.ts'
 import { createScopedChatOutbox, scopeFromCapabilities, type ScopedChatOutbox } from './scoped.ts'
 
-const wireCapabilities = Schema.encodeSync(Native.Capabilities)(Native.decodeUnknownSync(Native.Capabilities)(fixture.capabilities.value))
+const decodedCapabilities = Native.decodeUnknownSync(Native.Capabilities)(fixture.capabilities.value)
 const base = {
   ...fixture.capabilities,
   api_version: 'st3.client.v0',
   snapshot: { ...fixture.capabilities.snapshot, projection_version: 'client-projection.v0' },
-  value: { ...wireCapabilities, capabilities: [...wireCapabilities.capabilities], issuer: 'person/example', issuer_key: 'issuer-key/a' },
+  value: { ...fixture.capabilities.value, kind: 'capabilities', transport: decodedCapabilities.transport, capabilities: [...decodedCapabilities.capabilities], issuer: 'person/example', issuer_key: 'issuer-key/a' },
 } satisfies EnvelopeOf<Capabilities>
 const owners: ScopedChatOutbox[] = []
 const setup = () => {
