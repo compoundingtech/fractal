@@ -1569,6 +1569,18 @@ const PROBES: &[Probe] = &[
     ),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
+    post("POST /v1/agents/rename-id/plan", "/v1/agents/rename-id/plan", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id/plan", "/v1/missions/rename-id/plan", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
     post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
         "from": format!("agent/bench/cost/rename-{attempt}"),
         "to": format!("agent/bench/cost/renamed-{attempt}"),
@@ -1581,6 +1593,10 @@ const PROBES: &[Probe] = &[
         "actor": "person/bench-operator", "reason": "Invented rename",
         "idempotency_key": format!("cost-mission-rename-{attempt}"),
     })),
+    get("GET /v1/agents/rename-proof",
+        "/v1/agents/rename-proof?from=agent%2Fbench%2Fcost%2Frename-0&to=agent%2Fbench%2Fcost%2Frenamed-0"),
+    get("GET /v1/missions/rename-proof",
+        "/v1/missions/rename-proof?from=mission%2Fcost-rename-0&to=mission%2Fcost-renamed-0"),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -3687,7 +3703,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/work/start" {
             prepare_handoffs(&store, &mut fixture);
         }
-        if probe.route == "POST /v1/agents/rename-id" {
+        if probe.route == "POST /v1/agents/rename-id/plan" {
             prepare_renames(&store);
         }
         if probe.route == "POST /v1/mission-runs/{run}/retry" {
