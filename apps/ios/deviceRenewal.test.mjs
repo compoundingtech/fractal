@@ -167,3 +167,12 @@ test('renewal preserves protected profile incarnation and requires the same veri
     }
   }
 });
+
+test('renewal rejects an issuer-only change even when the authority key matches', async () => {
+  const t = setup();
+  t.previous.profileId = 'profile/avery';
+  t.previous.pairingIssuer = { issuer: 'host/different', issuerKey: vector.proofs[1].body.fields.issuer_key };
+  t.ports.read = async () => structuredClone(t.previous);
+  await assert.rejects(approveRenewal('profile/avery', t.previous, t.previous.url, t.challenge, 'st3.client.v0', t.ports), /different pairing authority/);
+  assert.equal(t.events.some(event => event[0] === 'save'), false);
+});

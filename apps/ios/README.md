@@ -145,6 +145,13 @@ claimed. The approved next native work requires `expo-sqlite` 57.0.3 and a narro
 `NSURLIsExcludedFromBackupKey` bridge with readback; neither is added by this step.
 Protected storage failures must reject acceptance and keep the draft, never fall
 back to legacy sending; that delivery integration remains outside this step.
+The binding contract tests retain immutable intent and private attachment references
+in `pending/preparing`, then persist `prepareOutboxRecord` with the exact packet and
+shared packet-derived identities in `pending/ready` before dispatch can be marked.
+Attachment bytes belong to the future iOS spool, not the serialized intent.
+Repository CAS must call `isAllowedOutboxTransition` inside the same transaction;
+revision equality alone is insufficient. Exact original authoritative timeline
+identity observations use the shared core; absence never proves nonapplication.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.

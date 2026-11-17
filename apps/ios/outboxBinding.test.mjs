@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { outboxProfileMode, pairingDeploymentId, acknowledgeOutboxNotice, restoreBoundAttempt, REPAIR_OUTBOX_NOTICE } from './outboxBinding.ts';
-import { createOutboxRecord, markOutboxDispatched, observeOutbox } from '../../clients/typescript/fractal-client/outbox.ts';
-import { prepareMessageSendPacket, prepareThreadStartPacket, prepareThreadReplyPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
+import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, isAllowedOutboxTransition } from '../../clients/typescript/fractal-client/outbox.ts';
+import { prepareMessageSendPacket, prepareThreadStartPacket, prepareThreadReplyPacket, expectedPreparedPacketIdentities } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 
 const issuer = { issuer: 'host/original', issuerKey: 'authority/original' };
 const profile = { profileId: 'profile/avery', pairingIssuer: issuer };
@@ -16,9 +16,14 @@ const repository = () => {
   const rows = new Map();
   return {
     scope: mode().scope, reads: 0, conflict: false,
-    async commit(record) { if (record.revision !== 0 || rows.has(record.id)) return false; rows.set(record.id, clone(record)); return true; },
+    async commit(record) {
+      if (record.revision !== 0 || record.state !== 'pending' || record.phase !== 'preparing'
+        || record.mayHaveDispatched || record.ambiguous || rows.has(record.id)) return false;
+      rows.set(record.id, clone(record)); return true;
+    },
     async compareAndSwap(revision, record) {
-      if (this.conflict || rows.get(record.id)?.revision !== revision || record.revision !== revision + 1) return false;
+      const previous = rows.get(record.id);
+      if (this.conflict || previous?.revision !== revision || !isAllowedOutboxTransition(previous, record)) return false;
       rows.set(record.id, clone(record)); return true;
     },
     async read(id) { this.reads++; return rows.has(id) ? clone(rows.get(id)) : undefined; },
@@ -32,6 +37,14 @@ const packets = [
   prepareThreadStartPacket({ ...base, parameters: { agent_id: 'agent/dotfiles/manager', target_id: 'thread/original', content: 'start', title: 'title', origin: { source_id: 'inbox/original', episode: 'episode/original' }, signature } }),
   prepareThreadReplyPacket({ ...base, parameters: { target_id: 'thread/original', content: 'reply', thread_quote_id: 'message/quote', signature } }),
 ];
+// References stand for future private iOS spool entries; no attachment bytes are stored here.
+const intentFor = packet => ({
+  text: packet.parameters.content,
+  attachments: packet.type === 'message.send'
+    ? [{ contentHash: 'sha256:original', mediaType: 'image/png', reference: 'spool/original' }] : [],
+});
+const identitiesFor = packet => expectedPreparedPacketIdentities(packet, 'person/avery',
+  async bytes => new Uint8Array(createHash('sha256').update(bytes).digest()));
 
 test('deployment tuple encoding is injective across delimiters, escapes and Unicode', () => {
   const inputs = [['host/a', 'b:c'], ['host/a:b', 'c'], ['host/a', 'b"c'], ['host/a', 'b\\c'], ['host/é', '雪'], ['host/é', '雪']];
@@ -52,25 +65,43 @@ test('legacy profiles remain unprotected; notice acknowledgement survives reopen
 
 for (const packet of packets) test(`${packet.type}: exact packet survives repository reopen and core recovery`, async () => {
   const repo = repository();
-  const original = createOutboxRecord('attempt/original', packet);
+  const intent = intentFor(packet);
+  const original = createOutboxRecord('attempt/original', intent);
   assert.equal(await repo.commit(original), true);
   assert.equal(await repo.commit(original), false);
-  const prepared = await restoreBoundAttempt(repo, mode(), original.id);
-  assert.equal(prepared.state, 'bound');
-  assert.deepEqual(prepared.record.packet, packet);
-  assert.equal(prepared.record.mayHaveDispatched, false);
-  const dispatched = markOutboxDispatched(prepared.record);
-  assert.equal(await repo.compareAndSwap(0, dispatched), true);
+  const preparing = await restoreBoundAttempt(repo, mode(), original.id);
+  assert.equal(preparing.state, 'bound');
+  assert.equal(preparing.record.phase, 'preparing');
+  assert.deepEqual(preparing.record.intent, intent);
+  assert.equal('packet' in preparing.record, false);
+  assert.equal(markOutboxDispatched(preparing.record), undefined);
+  const identities = await identitiesFor(packet);
+  const prepared = prepareOutboxRecord(preparing.record, packet, identities);
+  assert.equal(await repo.compareAndSwap(0, prepared), true);
+  const reopened = await restoreBoundAttempt(repo, mode(), original.id);
+  assert.equal(reopened.record.phase, 'ready');
+  assert.deepEqual(reopened.record.intent, intent);
+  assert.deepEqual(reopened.record.packet, packet);
+  assert.deepEqual(reopened.record.expectedIdentities, identities);
+  assert.equal(await repo.compareAndSwap(1, { ...reopened.record, revision: 2, intent: { ...intent, text: 'changed' } }), false);
+  const dispatched = markOutboxDispatched(reopened.record);
+  assert.equal(await repo.compareAndSwap(1, dispatched), true);
   const recovered = await restoreBoundAttempt(repo, mode(), original.id);
   assert.equal(recovered.record.state, 'unknown');
   assert.deepEqual(recovered.record.packet, packet);
   assert.equal(markOutboxDispatched(recovered.record), undefined);
   assert.equal(observeOutbox(recovered.record, { kind: 'failure', applied: 'none' }).state, 'unknown');
+  assert.equal(observeOutbox(recovered.record, { kind: 'observed', identity: 'message/not-original', source: 'timeline' }).state, 'unknown');
+  const delivered = observeOutbox(recovered.record, { kind: 'observed', identity: identities[0], source: 'timeline' });
+  assert.equal(delivered.state, 'delivered');
+  assert.equal(await repo.compareAndSwap(recovered.record.revision, delivered), true);
+  assert.deepEqual(delivered.intent, intent);
+  assert.deepEqual(delivered.packet, packet);
 });
 
 test('each binding mismatch remains unknown without reading or adopting repository records', async () => {
   const repo = repository();
-  const original = createOutboxRecord('attempt/original', packets[0]);
+  const original = createOutboxRecord('attempt/original', intentFor(packets[0]));
   await repo.commit(original);
   for (const changed of [
     outboxProfileMode({ ...profile, profileId: 'profile/ada' }, 'member/original'),
@@ -85,8 +116,11 @@ test('each binding mismatch remains unknown without reading or adopting reposito
 
 test('revision conflicts fail closed; missing records grant no packet', async () => {
   const repo = repository();
-  await repo.commit(createOutboxRecord('attempt/original', packets[0]));
-  await repo.compareAndSwap(0, markOutboxDispatched(await repo.read('attempt/original')));
+  const original = createOutboxRecord('attempt/original', intentFor(packets[0]));
+  await repo.commit(original);
+  const ready = prepareOutboxRecord(original, packets[0], await identitiesFor(packets[0]));
+  await repo.compareAndSwap(0, ready);
+  await repo.compareAndSwap(1, markOutboxDispatched(ready));
   repo.conflict = true;
   assert.deepEqual(await restoreBoundAttempt(repo, mode(), 'attempt/original'), { state: 'unknown', reason: 'revision-conflict' });
   assert.deepEqual(await restoreBoundAttempt(repo, mode(), 'attempt/missing'), { state: 'bound', record: undefined });
