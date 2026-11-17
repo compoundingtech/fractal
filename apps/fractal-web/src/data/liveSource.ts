@@ -1,5 +1,5 @@
 import { gatewayThreads } from '../threads/threadSource.ts'
-import { ClientError, FractalClient, isTransient } from '@fractal/client'
+import { ClientError, FractalClient, isTransient, type OutboxScope } from '@fractal/client'
 import { sidebarPins } from './sidebarPins.ts'
 import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
@@ -42,6 +42,7 @@ import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAvailability } from '../availability/availability-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
+import { openIndexedDbOutbox, type IndexedDbOutbox } from './outbox/indexedDb.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
@@ -59,7 +60,6 @@ import {
 import {
   type ConversationPage,
   type AttachmentPort,
-  type AttachmentSendRequest,
   type ConversationPortResult,
   type DataSource,
   type NetworkReachability,
@@ -144,6 +144,7 @@ export const liveSource = ({
   telemetryLayer,
   ux,
   sessionTraceLayer,
+  outboxScope,
 }: {
   readonly options: FractalOptions
   /** The live page opts in; replay and other retained sources never take a page-global socket. */
@@ -153,6 +154,8 @@ export const liveSource = ({
   readonly ux?: () => UxTelemetry
   /** Optional independent trace provider; the public default only knows native Fractal meters. */
   readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider> | undefined
+  /** Verified daemon/account identity only. Undefined explicitly selects visible unprotected mode. */
+  readonly outboxScope?: OutboxScope
 }): LiveSource => {
   const { baseUrl } = options
   const clientName = options.client
@@ -846,20 +849,22 @@ export const liveSource = ({
         )
       }),
     )
-  const submitMessage = gatewayMessageSend(client)
+  let outboxConnection: Promise<IndexedDbOutbox> | undefined
+  const outbox = {
+    repository: async () => outboxScope === undefined ? undefined
+      : outboxConnection ??= Effect.runPromise(openIndexedDbOutbox({ scope: outboxScope })),
+  }
+  const submitMessage = gatewayMessageSend(client, messageSnapshot, outbox)
 
   // Atom.family is weakly memoized. Keep the 24 recent snapshot controllers explicitly.
   const visibleConversations = new Map<string, boolean>()
-  const attachments = gatewayAttachments(client, messageSnapshot)
+  const attachments = gatewayAttachments(client, messageSnapshot, outbox)
   const conversationFamily = Atom.family((ref: string): RetainedConversation => {
     const timeline = new LiveTimeline()
     // A Sent row retires only when its identity-correlated server content is in the window.
     // Until Fractal #1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
-    // Fractal deduplicates a key by its whole request except the fence. Each key's first action
-    // id and parameters are what every Resend of it repeats, even after its row retires.
-    const sentActions = new Map<string, Pick<AttachmentSendRequest, 'id' | 'parameters'>>()
     let lastSendId: string | undefined
     let painted = false
     let publishedItems: ConversationPage['items'] = []
@@ -970,18 +975,24 @@ export const liveSource = ({
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
       const id = `pending/${idempotencyKey}`
-      const action = sentActions.get(idempotencyKey) ?? { id: request.id, parameters: request.parameters }
-      sentActions.set(idempotencyKey, action)
-      const local: PendingSend = {
+      const previous = pending.get(id)
+      // A caller-supplied retry key cannot manufacture queued content or a transport permission.
+      if (request._tag === 'Resend' && previous === undefined) return submitMessage(request, idempotencyKey)
+      const action = { id: request.id, parameters: request.parameters }
+      const local: PendingSend = request._tag === 'Resend' && previous !== undefined ? previous : {
         item: {
           _tag: 'Text', id, role: 'user',
           text: action.parameters.content ?? '',
-          attachments: action.parameters.attachments.map((attachment) => ({
-            id: attachment.blob,
-            mediaType: attachment.media_type,
-            // The encoded wire side carries `name: null`; the view model has no null names.
-            ...(typeof attachment.name === 'string' ? { name: attachment.name } : {}),
-          })),
+          attachments: [
+            ...action.parameters.attachments.map((attachment) => ({
+              id: attachment.blob,
+              mediaType: attachment.media_type,
+              ...(typeof attachment.name === 'string' ? { name: attachment.name } : {}),
+            })),
+            ...(request.images ?? []).map((image, index) => ({
+              id: `local-image/${idempotencyKey}/${index}`, mediaType: image.mediaType, name: image.name,
+            })),
+          ],
           streaming: false, at: pending.get(id)?.item.at ?? new Date().toISOString(), sendState: { _tag: 'Pending' },
         },
       }
@@ -999,18 +1010,7 @@ export const liveSource = ({
         const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(idempotencyKey)))
         const messageIds = [`message/${[...hash.slice(0, 8)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`]
         if (request._tag === 'Send') timeline.keepOwnSendId(messageIds, id)
-        const submit = async () => {
-          const current = await messageSnapshot()
-          if (current._tag === 'Refused') return current
-          return submitMessage({
-            api_version: request.api_version,
-            type: request.type,
-            id: action.id,
-            fence: { snapshot_id: current.value, subject_revisions: {} },
-            parameters: action.parameters,
-            idempotency_key: idempotencyKey,
-          })
-        }
+        const submit = () => submitMessage(request, idempotencyKey)
         if (request._tag === 'Resend' && timeline.shownMessageIds().has(messageIds[0]!)) return submit()
         if (request._tag === 'Resend') {
           pending.set(id, local)
@@ -1018,9 +1018,15 @@ export const liveSource = ({
           publishPending()
         }
         const result = await submit()
+        if (result._tag === 'Refused' && result.reason === 'storage') {
+          // Failed acceptance is not a queued send; the composer restores the submitted draft.
+          pending.delete(id)
+          publishPending()
+          return result
+        }
         if (result._tag === 'Success' && result.value.status === 'rejected') {
           local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.' } }
-        } else if (result._tag === 'Refused') {
+        } else if (result._tag === 'Refused' && result.reason !== 'storage') {
           local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
             ? { _tag: 'Unconfirmed', detail: result.detail }
             : { _tag: 'Failed', reason: result.reason, detail: result.detail } }
@@ -1231,6 +1237,7 @@ export const liveSource = ({
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
             terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
+            sendProtection: outboxScope === undefined ? 'unprotected' : 'durable',
           }
           get.setSelf(observedGrants)
         }),
@@ -1394,6 +1401,7 @@ export const liveSource = ({
       for (const entry of recentTerminals.values()) entry.release()
       recentTerminals.clear()
       registry.dispose()
+      await outboxConnection?.then((connection) => connection.close(), () => {})
       await runtime.dispose()
       setDebug('Wf.conversationEntries', 0)
     },

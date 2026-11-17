@@ -578,12 +578,12 @@ History range, earlier-message and search navigation stay in the transcript view
 ## Fractal web composer
 
 The conversation pane mounts the kit's `EmbraceComposer`. Its app-side binding lives in
-`apps/fractal-web/src/web/composerSend.ts`; sending, idempotency, the in-memory outbox and
-echo reconciliation remain owned by `source.attachments.send`. New submissions use `Send`;
-a failed outbox row's Retry uses `Resend` with the exact original source-owned key.
-Outbox rows keep their original send time on Retry and stay after earlier or equal-time
-transcript rows, before later replies. Multiple own sends retain submission order; only an
-authoritative message-identity echo replaces the matching outbox row.
+`apps/fractal-web/src/web/composerSend.ts`; sending, idempotency and echo reconciliation remain
+owned by `source.attachments.send`. Runtime rows are presentation, not delivery authority.
+New submissions use `Send`; the legacy-named `Resend` reads the original durable attempt and
+never posts an unknown/dispatched attempt again. Rows retain their submission time and stay
+after earlier or equal-time transcript rows, before later replies. Multiple own sends retain
+submission order; only an authoritative message-identity echo replaces the matching row.
 Merging visits transcript and retained outbox timestamps at most once each per projection,
 using monotone insertion boundaries to preserve that order even if send times move backward.
 The source retains the newest new Send's identity as `lastSendId`, which the pane passes
@@ -597,24 +597,43 @@ Each pane retains its mapped runtime items and transcript turns across clock/syn
 and semantically unchanged frames, including a replacement decode with new object references.
 The cache uses the conversation model's schema equivalence and retains only the latest projection.
 A confirmed Sent row stays visible until its authoritative in-window echo, even if a later
-read omits remotely owned mail. The active send path still uses its runtime outbox; it is not
-yet connected to the durable storage adapter.
+read omits remotely owned mail.
 
-`src/data/outbox/` provides an isolated IndexedDB repository and attachment spool, not a
-send-path migration. Its temporary local contract mirrors the pending client-core interface.
-Intent and content-hashed image bytes commit together before acceptance; transaction completion
-is the acknowledgement barrier, with strict durability requested where supported. Revision CAS
-grants a single ready-to-dispatched permit across connections. Opening classifies unresolved
-dispatch markers as unknown; unsupported or corrupt records remain quarantined and cannot send.
-Storage failures are typed, without a memory fallback, and persistent-storage permission is
-reported as granted, denied or unsupported. Browser eviction, site-data deletion and device
-loss are not covered by this durability guarantee.
+Both chat entry paths share `data/attachmentPort.ts` and the client-core outbox transitions.
+With an injected verified principal/deployment/member scope, immutable intent and content-hashed
+image bytes commit to IndexedDB before any send-work request, including attachment uploads.
+The complete authorized unsigned packet is prepared once and committed by revision CAS;
+only the winner of the durable dispatch permit may POST it. A validated completed receipt
+settles delivered, explicit uncontradicted `applied:none` settles not-applied, and every other
+post-dispatch outcome remains unknown. The IndexedDB CAS invokes the core transition validator
+inside its transaction rather than maintaining another delivery state machine.
+
+Until the browser receives a verified daemon issuer identity, it explicitly uses the existing
+unprotected send mode and shows “Unprotected: messages are not saved on this device before
+sending.” This is not a fallback after storage failure. No URL, loopback port or telemetry
+deployment label substitutes for a verified scope. Storage refusal in protected mode makes no
+message request and restores the submitted composer text and images.
+In unprotected mode only an explicit `applied: none` retains the exact original packet for
+an in-session retry; ambiguous outcomes are never replayed. This transient exception does
+not provide crash recovery or replace the protected IndexedDB repository.
+Both modes preserve send preparation order: text acquires its snapshot before capability
+discovery; local images check capabilities and upload before acquiring their snapshot.
+Snapshot-acquisition failures retain their distinct `snapshot-unavailable` classification.
+
+`src/data/outbox/` implements the core fixed-scope repository with versioned storage envelopes
+and an attachment spool. Transaction completion is the acknowledgement barrier, with strict
+durability requested where supported. Opening classifies unresolved dispatch markers as
+unknown; unsupported or corrupt records remain quarantined and cannot send. Storage failures
+are typed, without a memory fallback, and persistent-storage permission is reported as granted,
+denied or unsupported. Browser eviction, site-data deletion and device loss are not covered
+by this durability guarantee. The separate startup/recovery UI and cross-tab live-owner
+coordination are not part of this chat transport integration.
 
 Cleanup never expires unresolved attempts. Terminal content/spool lasts seven days (delivered
 content additionally waits for exact timeline observation), then minimal identity/evidence
 tombstones last another thirty days. Explicit dismissal preserves uncertainty in a tombstone;
 it does not cancel an action. Quota exhaustion refuses new acceptance without evicting old work.
-The adapter performs no upload, signing, dispatch, retry or UI integration.
+The storage adapter itself performs no upload, signing, dispatch or retry.
 
 Only `grants.messageSend` authorizes the composer. An absent send port shows Unknown, and
 non-retryable refusals disable new submissions with their classified human-readable reason. Retryable send failures

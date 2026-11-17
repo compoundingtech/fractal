@@ -6,7 +6,7 @@ import { EmbraceComposer, EmbraceRuntimeProvider, Transcript, assistantDarkTheme
 import { surfaceVars as surface, spaceVars as space, textVars as text } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { imageUploadAdapter } from './composerSend.ts'
 
-/** The production adapter owns acceptance and size limits; only the upload transport is a controlled fixture. */
+/** Production acceptance and size limits with a fixture-only, cancellable upload presentation. */
 function ComposerImages({ scheme, slow = false, previewImages = false, stateLabel }: { readonly scheme: 'dark' | 'light'; readonly slow?: boolean; readonly previewImages?: boolean; readonly stateLabel?: string }) {
   const [receipts, setReceipts] = React.useState<readonly string[]>([])
   const [messages, setMessages] = React.useState<readonly (TextItem & { readonly role: 'user' })[]>([])
@@ -33,7 +33,13 @@ function ComposerImages({ scheme, slow = false, previewImages = false, stateLabe
       finish: () => finish(),
     }
   })
-  const [adapter] = React.useState(() => imageUploadAdapter(async ({ bytes, mediaType, signal }) => {
+  const [adapter] = React.useState(() => {
+    const local = imageUploadAdapter()
+    return { ...local, send: async (...args: Parameters<typeof local.send>) => {
+    const staged = await local.send(...args)
+    const bytes = args[0].file
+    const mediaType = args[0].contentType!
+    const signal = args[1]?.signal
     signal?.throwIfAborted()
     let attempt = 0
     let freshSignal = true
@@ -56,7 +62,7 @@ function ComposerImages({ scheme, slow = false, previewImages = false, stateLabe
       })
     }
     signal?.throwIfAborted()
-    const file = bytes instanceof Blob ? bytes : new Blob([bytes instanceof ArrayBuffer ? bytes : new Uint8Array(bytes).buffer], { type: mediaType })
+    const file = bytes
     const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))].map(byte => byte.toString(16).padStart(2, '0')).join('')
     const blob = `blob/${sha256}`
     const url = await new Promise<string>((resolve, reject) => {
@@ -68,8 +74,9 @@ function ComposerImages({ scheme, slow = false, previewImages = false, stateLabe
     signal?.throwIfAborted()
     blobUrls.set(blob, url)
     setTransport({ _tag: 'Complete', attempt, freshSignal })
-    return { _tag: 'Success', value: { blob, sha256, size: file.size, media_type: mediaType } }
-  }))
+    return { ...staged, content: [{ type: 'file' as const, data: blob, mimeType: mediaType, filename: staged.name, sourceType: 'id' as const }] }
+    } }
+  })
   const options: ConversationRuntimeOptions = {
     messages, adapters: { attachments: adapter },
     onNew: async message => {

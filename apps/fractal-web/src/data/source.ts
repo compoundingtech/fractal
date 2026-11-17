@@ -251,6 +251,8 @@ export interface Grants {
   readonly terminalInput: 'granted' | 'ungranted'
   /** `terminal.control`: a raw PTY ATTACH that types on the socket and votes the shared size. */
   readonly terminalControl: 'granted' | 'ungranted'
+  /** Absent outside live chat; unprotected is explicit identity mode, never a storage fallback. */
+  readonly sendProtection?: 'durable' | 'unprotected'
   /** No capabilities answer has been read yet: every grant above is a default, not a refusal. */
   readonly unread?: true
 }
@@ -268,7 +270,7 @@ export type ConversationPortResult<T> =
   | {
       readonly _tag: 'Refused'
       /** `unconfirmed`: Fractal said `applied: "unknown"`; the identical request may still complete. */
-      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed'
+      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed' | 'storage'
       readonly detail: string
       /** Preserve the daemon's complete refusal, including its retry policy. */
       readonly error?: ErrorEnvelope
@@ -295,17 +297,20 @@ type MessageSendFields = Omit<MessageSendInput, 'parameters' | 'idempotency_key'
   }
 }
 
+export interface SendImage {
+  readonly bytes: Blob | ArrayBuffer | Uint8Array
+  readonly mediaType: BlobUpload['media_type']
+  readonly name: string
+}
+
 /**
- * A first send (`Send`) never carries a caller-owned key: the data layer generates one
- * and paints the optimistic row synchronously. `Resend` is an explicit retry of an
- * uncertain send with its original key; its authoritative identity is reconciled
- * before any optimistic row can duplicate mail the stream already shows. Fractal deduplicates
- * a key by its whole request except the fence, so a Resend repeats the original action
- * id and parameters; a source that recorded the key's first send substitutes them.
+ * New sends hand raw images to the durable data layer before upload. A legacy-named
+ * Resend only reads the original attempt; unknown attempts must never be posted again.
  */
-export type AttachmentSendRequest =
+export type AttachmentSendRequest = (
   | ({ readonly _tag: 'Send' } & MessageSendFields)
   | ({ readonly _tag: 'Resend'; readonly idempotencyKey: string } & MessageSendFields)
+) & { readonly images?: readonly SendImage[] }
 
 /** The wire-level message action once its idempotency key is chosen. */
 export type MessageSendAction = MessageSendFields & {

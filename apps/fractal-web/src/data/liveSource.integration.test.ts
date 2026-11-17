@@ -2104,7 +2104,7 @@ describe('optimistic conversation sends', () => {
     ),
   )
 
-  it.live('never duplicates mail an idempotent resubmission already shows', () =>
+  it.live('never reposts or duplicates mail when a missing original retry key already appears in the timeline', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
         const key = 'resend-stable-key'
@@ -2128,10 +2128,9 @@ describe('optimistic conversation sends', () => {
           ],
         })
         yield* settle
-        let resolvePost!: () => void
-        gateway.sendGate = new Promise<void>((resolve) => { resolvePost = resolve })
-        const sending = live.source.attachments!.send({ ...request, _tag: 'Resend', idempotencyKey: key })
-        yield* Effect.promise(() => gateway.nextAction())
+        const result = yield* Effect.promise(() => live.source.attachments!.send({ ...request, _tag: 'Resend', idempotencyKey: key }))
+        expect(result).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+        expect(gateway.messageActions).toHaveLength(0)
         yield* settle
         // The authoritative copy is already in the window: no second, pending copy.
         const feed = live.registry.get(conversation)
@@ -2139,8 +2138,6 @@ describe('optimistic conversation sends', () => {
         if (feed._tag !== 'Observed') return
         // A person's mail reads as the person's one row; its header joins its body.
         expect(feed.value.items.map((item) => item._tag)).toEqual(['Text'])
-        resolvePost()
-        expect((yield* Effect.promise(() => sending))._tag).toBe('Success')
         yield* settle
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [
@@ -2151,24 +2148,19 @@ describe('optimistic conversation sends', () => {
     ),
   )
 
-  it.live('publishes an unseen idempotent resubmission as pending before the POST resolves', () =>
+  it.live('refuses an unseen retry key without creating an optimistic send or making a POST', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
         live.registry.mount(live.source.conversationInterest!(agent.id))
         live.registry.mount(live.source.conversation(agent.id))
         yield* settle
-        let resolvePost!: () => void
-        gateway.sendGate = new Promise<void>((resolve) => { resolvePost = resolve })
-        const sending = live.source.attachments!.send({ ...request, _tag: 'Resend', idempotencyKey: 'unseen-resend-key' })
-        yield* Effect.promise(() => gateway.nextAction())
-        yield* settle
-        expect(live.registry.get(live.source.conversation(agent.id))).toMatchObject({
-          _tag: 'Observed', value: { items: [
-            { _tag: 'Text', text: 'hello', sendState: { _tag: 'Pending' } },
-          ] },
-        })
-        resolvePost()
-        expect((yield* Effect.promise(() => sending))._tag).toBe('Success')
+        const before = live.registry.get(live.source.conversation(agent.id))
+        const result = yield* Effect.promise(() => live.source.attachments!.send({
+          ...request, _tag: 'Resend', idempotencyKey: 'unseen-resend-key',
+        }))
+        expect(result).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+        expect(gateway.messageActions).toHaveLength(0)
+        expect(live.registry.get(live.source.conversation(agent.id))).toEqual(before)
       }),
     ),
   )

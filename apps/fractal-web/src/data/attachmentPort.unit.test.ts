@@ -222,11 +222,11 @@ describe('native attachment port', () => {
     expect(calls).toHaveLength(2)
   })
 
-  it('carries an explicit retry key unchanged instead of generating a fresh one', async () => {
+  it('refuses a Resend without its original durable record instead of inventing a new send', async () => {
     const { port, calls } = attachmentClient()
-    expect(await port.send({ ...request, _tag: 'Resend', idempotencyKey: 'image-send-stable-key' })).toMatchObject({ _tag: 'Success' })
-    expect(Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(calls[1]?.init?.body))
-      .toMatchObject({ id: request.id, idempotency_key: 'image-send-stable-key' })
+    expect(await port.send({ ...request, _tag: 'Resend', idempotencyKey: 'image-send-stable-key' }))
+      .toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    expect(calls).toEqual([])
   })
 
   it('sends the generated maximum of four supported image references', async () => {
@@ -288,14 +288,14 @@ describe('native attachment port', () => {
     expect(calls.map(({ url }) => url.pathname)).toEqual(['/v1/client/capabilities', '/v1/client/capabilities'])
   })
 
-  it('preserves the server refusal envelope and never substitutes delivery', async () => {
+  it('never treats a server refusal without explicit nonapplication as delivery or safe retry', async () => {
     const error = {
       api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'forbidden',
       message: 'Credential cannot send attachments', retryable: false,
       request_id: 'request/native-refusal', details: { scope: 'control.messages' },
     }
     const { port, calls } = attachmentClient({ reply: () => Response.json(error, { status: 403 }) })
-    expect(await port.send(request)).toEqual({ _tag: 'Refused', reason: 'unconfirmed', detail: 'Fractal has not confirmed this message. Do not send it again.', error })
+    expect(await port.send(request)).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
     expect(calls).toHaveLength(2)
   })
 
