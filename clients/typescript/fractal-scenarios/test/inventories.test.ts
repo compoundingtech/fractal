@@ -84,4 +84,27 @@ describe('canonical inventories', () => {
     expect(nextRoster.state.devices[0]).toEqual(device)
     expect(nextDetails.state.launches[0]).toEqual(launch)
   })
+
+  it('does not fold control lifecycle metadata into visible scenario state', () => {
+    const { roster } = loadWorld('fleet-mid-refactor', { now: ANCHOR_MS }).slices
+    for (const state of ['started', 'ended', 'revoked'] as const) {
+      const lifecycle = {
+        id: 'client-control-grant/scenario-fixture/lifecycle', kind: 'client-control-grant-lifecycle' as const,
+        revision: '1', updated_at: new Date(ANCHOR_MS).toISOString(),
+        grant_id: 'client-control-grant/scenario-fixture', run_id: 'mission-run/scenario-fixture',
+        device: 'device/scenario-fixture', session: 'client-session/scenario-fixture',
+        state, reason: state === 'started' ? 'granted' : state === 'ended' ? 'run-ended' : 'revoked', sequence: 1,
+      }
+      const next = foldSlice({ ...roster, timeline: [{
+        _tag: 'changes', at_ms: 1, store: 1, upserts: [lifecycle], removes: [], order: [lifecycle.id],
+      }] }, 1)
+      expect(next.state).toEqual(roster.state)
+      const device = { ...roster.state.devices[0]!, revision: 'device-2' }
+      const mixed = foldSlice({ ...roster, timeline: [{
+        _tag: 'changes', at_ms: 1, store: 1, upserts: [lifecycle, device], removes: [],
+      }] }, 1)
+      expect(mixed.state.devices[0]).toEqual(device)
+      expect(mixed.state.resources).toEqual(roster.state.resources)
+    }
+  })
 })
