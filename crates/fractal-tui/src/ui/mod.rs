@@ -347,7 +347,7 @@ pub enum Effect {
     RetryConversation {
         target: String,
     },
-    /// Send a failed or unconfirmed message again, as the same request.
+    /// Send a message again only after explicit nonapplication proof.
     Resend {
         entry: String,
     },
@@ -1900,8 +1900,19 @@ impl Ui {
             .map(|entry| entry.id.clone())
     }
 
-    /// Take the message st never had back into the box, ahead of anything written since, to
-    /// change and send or delete there: nothing typed is lost.
+    fn retryable_undelivered(&self) -> Option<String> {
+        let agent = self.selected_id()?;
+        let Load::Ready(entries) = self.world.conversations.get(&agent)? else {
+            return None;
+        };
+        entries.iter().rev().find(|entry| matches!(
+            entry.body,
+            Body::Pending { failed: Some(_), unconfirmed: false, .. }
+        )).map(|entry| entry.id.clone())
+    }
+
+    /// Copy the retained message into the composer. Unknown delivery remains retained;
+    /// sending the copy is a separate decision that may duplicate the original.
     fn take_back_undelivered(&mut self) {
         let (Some(agent), Some(entry)) = (self.selected_id(), self.undelivered()) else {
             return;
@@ -1909,13 +1920,14 @@ impl Ui {
         let Some(Load::Ready(entries)) = self.world.conversations.get(&agent) else {
             return;
         };
-        let Some(Body::Pending { text, .. }) = entries
+        let Some(Body::Pending { text, unconfirmed, .. }) = entries
             .iter()
             .find(|candidate| candidate.id == entry)
             .map(|entry| &entry.body)
         else {
             return;
         };
+        let unknown = *unconfirmed;
         let draft = self.conversation_state.drafts.entry(agent).or_default();
         *draft = if draft.is_empty() {
             text.clone()
@@ -1923,7 +1935,11 @@ impl Ui {
             format!("{text}\n\n{draft}")
         };
         self.editing = true;
-        self.effects.push(Effect::Forget { entry });
+        if unknown {
+            self.flash("Copied to composer; the original may already have arrived. Sending this copy may duplicate it");
+        } else {
+            self.effects.push(Effect::Forget { entry });
+        }
     }
 
     /// The tab and the id selected in it.
@@ -5262,7 +5278,7 @@ impl Ui {
                 }
             }
             KeyCode::Char(letter @ ('r' | 'x')) if self.tab() == 1 && self.live => {
-                match self.undelivered() {
+                match if letter == 'r' { self.retryable_undelivered() } else { self.undelivered() } {
                     Some(entry) if letter == 'r' => self.effects.push(Effect::Resend { entry }),
                     Some(entry) => self.effects.push(Effect::Forget { entry }),
                     None => {}

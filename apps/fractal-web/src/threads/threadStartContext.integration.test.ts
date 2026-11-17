@@ -118,19 +118,17 @@ it('keeps POST404 without applied metadata unknown despite a changed exact-key p
   const parameters = { agent_id: original, origin, title: 'Review', content: 'Please explain.' }
   try {
     await vi.waitFor(() => expect(registry.get(atom)._tag).toBe('Observed'))
-    expect(await source.start('draft/review', parameters)).toMatchObject({ _tag: 'Refused', detail: 'Fractal has not confirmed this action. Retry to check the same action.' })
-    await vi.waitFor(() => expect(registry.get(atom)).toMatchObject({ _tag: 'Observed', value: context(fallbackRecipient) }))
+    expect(await source.start('draft/review', parameters)).toMatchObject({ _tag: 'Refused', detail: 'Fractal has not confirmed this action. Do not send it again.' })
+    expect(registry.get(atom)).toMatchObject({ _tag: 'Observed', value: context(originalRecipient) })
     expect(actions).toHaveLength(1)
-    expect(keys.length).toBeGreaterThanOrEqual(2)
+    expect(keys).toHaveLength(1)
     expect(keys.every(key => key[0] === origin.source_id && key[1] === origin.episode)).toBe(true)
     expect(registry.get(pending)).toMatchObject([{ draftKey: 'draft/review', state: 'unconfirmed', parameters }])
     expect(actions[0]?.parameters).toMatchObject(parameters)
     expect((await source.start('draft/review', { ...parameters, agent_id: fallback }))._tag).toBe('Refused')
     expect(actions).toHaveLength(1)
-    expect((await source.retryStart!('draft/review'))._tag).toBe('Sent')
-    expect(actions).toHaveLength(2)
-    expect(actions[1]).toEqual(actions[0])
-    expect(actions[1]).toMatchObject({ type: 'thread.start', parameters: { agent_id: original } })
+    expect((await source.retryStart!('draft/review'))._tag).toBe('Refused')
+    expect(actions).toHaveLength(1)
   } finally { stops.forEach(stop => stop()); registry.dispose() }
 })
 
@@ -159,9 +157,8 @@ it('keeps unconfirmed first intent and IDs immutable across recipient changes an
     expect(registry.get(pending)).toMatchObject([{ state: 'unconfirmed', parameters }])
     expect((await source.start('draft/review', { ...parameters, agent_id: fallback }))._tag).toBe('Refused')
     expect(actions).toHaveLength(1)
-    expect((await source.retryStart!('draft/review'))._tag).toBe('Sent')
-    expect(actions).toHaveLength(2)
-    expect(actions[1]).toEqual(actions[0])
+    expect((await source.retryStart!('draft/review'))._tag).toBe('Refused')
+    expect(actions).toHaveLength(1)
   } finally { stops.forEach(stop => stop()); registry.dispose() }
 })
 

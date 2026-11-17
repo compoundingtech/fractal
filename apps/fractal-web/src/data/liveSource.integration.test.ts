@@ -1695,7 +1695,7 @@ describe('optimistic conversation sends', () => {
     ),
   )
 
-  it.live('retains a typed stale-fence failure and resends the same key after refresh', () =>
+  it.live('keeps a bare stale-fence outcome unknown even after the snapshot refreshes', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
         live.registry.mount(live.source.agents)
@@ -1708,13 +1708,13 @@ describe('optimistic conversation sends', () => {
         gateway.staleSendFence = true
         const refused = yield* Effect.promise(() => live.source.attachments!.send(request))
         expect(refused).toMatchObject({
-          _tag: 'Refused', reason: 'stale-fence', detail: 'The observed snapshot belongs to an old gateway store.',
+          _tag: 'Refused', reason: 'unconfirmed', detail: 'Fractal has not confirmed this message. Do not send it again.',
           error: { code: 'stale-fence' },
         })
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [{
             _tag: 'Text', text: 'hello',
-            sendState: { _tag: 'Failed', reason: 'stale-fence', detail: refused._tag === 'Refused' ? refused.detail : '' },
+            sendState: { _tag: 'Unconfirmed', detail: refused._tag === 'Refused' ? refused.detail : '' },
           }] },
         })
         const first = gateway.messageActions[0]!
@@ -1725,21 +1725,18 @@ describe('optimistic conversation sends', () => {
           has_more: false, upserts: [], removes: [], order: [agent.id], snapshot: refreshed,
         })
         yield* settle
-        expect((yield* Effect.promise(() => live.source.attachments!.send({
+        expect(yield* Effect.promise(() => live.source.attachments!.send({
           ...request, _tag: 'Resend', idempotencyKey: first.idempotency_key,
-        })))._tag).toBe('Success')
-        expect(gateway.messageActions[1]).toMatchObject({
-          id: first.id, idempotency_key: first.idempotency_key, parameters: first.parameters,
-          fence: { snapshot_id: refreshed.id, subject_revisions: {} },
-        })
+        }))).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+        expect(gateway.messageActions).toHaveLength(1)
         expect(live.registry.get(conversation)).toMatchObject({
-          _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
+          _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Unconfirmed' } }] },
         })
       }),
     ),
   )
 
-  it.live('keeps an unconfirmed send Unconfirmed and resends the identical action, not a rebuilt one', () =>
+  it.live('keeps an unconfirmed send Unconfirmed without replaying its retained action', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
         live.registry.mount(live.source.conversationInterest!(agent.id))
@@ -1759,7 +1756,7 @@ describe('optimistic conversation sends', () => {
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [{
             _tag: 'Text', id: `pending/${first.idempotency_key}`, text: 'hello',
-            sendState: { _tag: 'Unconfirmed', detail: 'st could not confirm the send in time' },
+            sendState: { _tag: 'Unconfirmed', detail: 'Fractal has not confirmed this message. Do not send it again.' },
           }] },
         })
         gateway.unconfirmSend = false
@@ -1771,21 +1768,11 @@ describe('optimistic conversation sends', () => {
         const retried = yield* Effect.promise(() => live.source.attachments!.send({
           ...rebuilt, _tag: 'Resend', idempotencyKey: first.idempotency_key,
         }))
-        expect(retried).toMatchObject({ _tag: 'Success', value: { status: 'completed' } })
-        const second = gateway.messageActions[1]!
-        expect(second.id).toBe(first.id)
-        expect(second.idempotency_key).toBe(first.idempotency_key)
-        expect(second.parameters).toStrictEqual(first.parameters)
+        expect(retried).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+        expect(gateway.messageActions).toHaveLength(1)
         expect(live.registry.get(conversation)).toMatchObject({
-          _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
+          _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Unconfirmed' } }] },
         })
-        // Fractal refuses the rebuilt request itself: the same key with a different action.
-        const conflict = yield* Effect.promise(() => gateway.fetch('http://gateway.example/v1/client/actions', {
-          method: 'POST',
-          body: JSON.stringify({ ...first, id: rebuilt.id, parameters: rebuilt.parameters }),
-        }))
-        expect(conflict.status).toBe(409)
-        expect(yield* Effect.promise(() => conflict.json())).toMatchObject({ code: 'idempotency-conflict' })
       }),
     ),
   )
@@ -1857,25 +1844,21 @@ describe('optimistic conversation sends', () => {
         gateway.rejectSend = true
         releaseSecond()
         yield* Effect.promise(() => secondSending)
-        expect(observed().items[1]).toMatchObject({ id: second.id, sendState: { _tag: 'Failed' } })
+        expect(observed().items[1]).toMatchObject({ id: second.id, sendState: { _tag: 'Unconfirmed' } })
         expect(observed().lastSendId).toBe(second.id)
         expect(observed().items[0]).toMatchObject({ id: first.id, sendState: { _tag: 'Pending' } })
         gateway.rejectSend = false
         releaseFirst()
         yield* Effect.promise(() => firstSending)
         expect(observed().lastSendId).toBe(second.id)
-        let releaseRetry!: () => void
-        gateway.sendGate = new Promise<void>((resolve) => { releaseRetry = resolve })
         const retrying = live.source.attachments!.send({
           ...request, _tag: 'Resend', idempotencyKey: gateway.messageActions[1]!.idempotency_key,
         })
-        yield* Effect.promise(() => gateway.nextAction(3))
-        yield* settle
-        expect(observed().items[1]).toMatchObject({ id: second.id, sendState: { _tag: 'Pending' } })
+        expect((yield* Effect.promise(() => retrying))._tag).toBe('Refused')
+        expect(gateway.messageActions).toHaveLength(2)
+        expect(observed().items[1]).toMatchObject({ id: second.id, sendState: { _tag: 'Unconfirmed' } })
         expect(observed().lastSendId).toBe(second.id)
-        releaseRetry()
-        yield* Effect.promise(() => retrying)
-        expect(observed().lastSendId).toBe(second.id)
+        gateway.sendGate = undefined
         gateway.mailEcho()
         yield* settle
         const secondEcho = observed().items.find(item => item.id === second.id)
@@ -1947,25 +1930,16 @@ describe('optimistic conversation sends', () => {
         page(true)
         yield* settle
         expect(observed().items.map(item => item.id)).toEqual(['history', 'equal-time', pendingRow.id, 'reply'])
-        const beforeRetry = observed()
         gateway.transportFailure = false
-        gateway.sendGate = new Promise<void>((resolve) => { release = resolve })
+        gateway.sendGate = undefined
         vi.setSystemTime('2026-10-08T12:00:05.000Z')
         const retrying = live.source.attachments!.send({
           ...request, _tag: 'Resend', idempotencyKey: gateway.messageActions[0]!.idempotency_key,
         })
-        yield* Effect.promise(() => gateway.nextAction(2))
-        yield* settle
-        expect(observed().items[2]).toMatchObject({ id: pendingRow.id, at: sendAt, sendState: { _tag: 'Pending' } })
-        expect(observed().change?.from).toBe(beforeRetry.items)
-        expect(observed().change?.index).toBe(2)
-        release()
-        expect((yield* Effect.promise(() => retrying))._tag).toBe('Success')
-        expect(observed().items[2]).toMatchObject({ id: pendingRow.id, at: sendAt, sendState: { _tag: 'Sent' } })
-        expect(gateway.messageActions.map(action => action.idempotency_key)).toEqual([
-          gateway.messageActions[0]!.idempotency_key, gateway.messageActions[0]!.idempotency_key,
-        ])
-        // A second send belongs after the reply; retry did not move the first send after it.
+        expect((yield* Effect.promise(() => retrying))._tag).toBe('Refused')
+        expect(observed().items[2]).toMatchObject({ id: pendingRow.id, at: sendAt, sendState: { _tag: 'Unconfirmed' } })
+        expect(gateway.messageActions).toHaveLength(1)
+        // A second new send belongs after the reply; the blocked resend never moves the first.
         yield* Effect.promise(() => live.source.attachments!.send(request))
         const secondRow = observed().items.at(-1)!
         expect(observed().items.map(item => item.id)).toEqual(['history', 'equal-time', pendingRow.id, 'reply', secondRow.id])
@@ -2052,7 +2026,7 @@ describe('optimistic conversation sends', () => {
           yield* Effect.promise(() => live.source.attachments!.send(request))
           expect(live.registry.get(conversation)).toMatchObject({
             _tag: 'Observed', value: { items: [
-              { _tag: 'Text', role: 'user', text: 'hello', sendState: failure === 'failed' ? { _tag: 'Unconfirmed' } : { _tag: 'Failed', reason: failure } },
+              { _tag: 'Text', role: 'user', text: 'hello', sendState: failure === 'ungranted' ? { _tag: 'Failed', reason: failure } : { _tag: 'Unconfirmed' } },
             ] },
           })
         }),

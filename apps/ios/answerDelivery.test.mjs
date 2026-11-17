@@ -29,20 +29,19 @@ function world(steps, waiting) {
   assert.equal(log.asked, 0, 'a success asks nothing');
 }
 
-// Cos, 2026-10-10: the answer landed but the reply was lost. The identical request is sent again
-// (the same key), and Fractal's first answer comes back: a success, no second record.
+// A lost reply stays unknown and cannot cause a second POST.
 {
   const { ports, log } = world([new TypeError('Network request failed'), 'ok'], true);
-  assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
-  assert.deepEqual(log.sent, ['action/1', 'action/1'], 'the same request, not a rebuilt one');
+  assert.equal((await submitAnswer(ports)).how, 'unconfirmed');
+  assert.deepEqual(log.sent, ['action/1']);
   assert.equal(log.built, 1);
 }
 
 // Fractal said it may still complete: the same.
 {
   const { ports, log } = world([refused('unavailable', { applied: 'unknown' }), 'ok'], true);
-  assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
-  assert.deepEqual(log.sent, ['action/1', 'action/1']);
+  assert.equal((await submitAnswer(ports)).how, 'unconfirmed');
+  assert.deepEqual(log.sent, ['action/1']);
 }
 
 // The reply is lost twice, but the step is no longer waiting: it landed. Answered, not failed.
@@ -59,12 +58,12 @@ function world(steps, waiting) {
   assert.deepEqual(log.sent, ['action/1'], 'no pointless retries once it is answered');
 }
 
-// A stale fence while it still waits is a race: a fresh request each time, then the refusal.
+// A stale fence retries only when explicit none proves nonapplication.
 {
-  const { ports, log } = world([refused('stale-fence'), 'ok'], true);
+  const { ports, log } = world([refused('stale-fence', { applied: 'none' }), 'ok'], true);
   assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
   assert.deepEqual(log.sent, ['action/1', 'action/2']);
-  const stuck = world([refused('stale-fence')], true);
+  const stuck = world([refused('stale-fence', { applied: 'none' })], true);
   const outcome = await submitAnswer(stuck.ports);
   assert.equal(outcome.ok, false);
   assert.equal(stuck.log.sent.length, 8, 'a stuck race gives up after eight requests');
@@ -105,11 +104,11 @@ for (const details of [{applied:'unknown'},{applied:'none',replay_unsafe:true}])
  const {ports,log}=world([refused('stale-fence',details)],true);
  const result=await submitAnswer(ports);assert.equal(result.how,'unconfirmed');assert.equal(log.built,1);
  const checked=await result.check();assert.equal(checked.how,'unconfirmed');assert.equal(log.built,1);
- assert(log.sent.every(id=>id==='action/1'));
+ assert.deepEqual(log.sent,['action/1']);
 }
 
-// A resolved transport promise is not a matching Completed receipt. Explicit checks keep
-// the original identity even when a later replay is refused, then accept only its receipt.
+// A resolved transport promise is not a matching Completed receipt.
+// Explicit checks read state only, without invoking any later scripted POST outcome.
 for (const receipt of [undefined, {}, {value:{kind:'action-result',status:'accepted',action_id:'action/1'}}, {value:{kind:'action-result',status:'completed',action_id:'action/other'}}]) {
   const {ports,log}=world([receipt,refused('stale-fence',{applied:'none'}),'ok'],true);
   const first=await submitAnswer(ports);
@@ -118,6 +117,6 @@ for (const receipt of [undefined, {}, {value:{kind:'action-result',status:'accep
   const second=await first.check();
   assert.equal(second.how,'unconfirmed','later refusal cannot erase prior ambiguity');
   assert.equal(log.built,1);
-  assert.deepEqual(await second.check(),{ok:true,how:'sent'});
-  assert.deepEqual(log.sent,['action/1','action/1','action/1']);
+  assert.equal((await second.check()).how,'unconfirmed');
+  assert.deepEqual(log.sent,['action/1']);
 }

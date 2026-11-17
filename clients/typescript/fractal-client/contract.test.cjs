@@ -784,7 +784,7 @@ test('structured HTTP errors keep their complete server envelope', async () => {
     });
 });
 
-test('applied outcome merges outer and details flags before legacy refusal shortcuts', () => {
+test('applied outcome requires explicit nonapplication without contradictory flags', () => {
     const cases = [
         [{}, {}, undefined],
         [{ applied: 'none' }, {}, 'none'],
@@ -806,8 +806,8 @@ test('applied outcome merges outer and details flags before legacy refusal short
             const before = JSON.stringify(wire), error = new ClientError(wire, 409);
             const label = JSON.stringify({ code, outer, details });
             assert.equal(appliedAnswer(error), expected, label);
-            assert.equal(outcomeUnknown(error), expected === 'unknown', label);
-            assert.equal(notApplied(error), expected !== 'unknown' && (expected === 'none' || code !== 'internal'), label);
+            assert.equal(outcomeUnknown(error), expected !== 'none', label);
+            assert.equal(notApplied(error), expected === 'none', label);
             assert.equal(JSON.stringify(error.response), before, 'classification never rewrites the wire envelope');
         }
     }
@@ -1468,7 +1468,7 @@ test('schedules list preserves unknown rows and explicitly encodes one page; old
 });
 
 test('legacy product sentences render as Fractal without rewriting other server text', () => {
-    assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way, so it was not applied');
+    assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way');
     assert.equal(plainMessage('stale-fence', 'that prompt is no longer waiting: it was answered or replaced'), 'that prompt is no longer waiting: it was answered or replaced');
     assert.equal(plainMessage('timeline-history-incomplete', 'the retained transcript starts after its first entries; st cannot show it from the start'), 'the retained transcript starts after its first entries; Fractal cannot show it from the start');
     assert.equal(plainMessage('timeline-history-incomplete', 'st kept a partial note'), 'st kept a partial note');
@@ -1481,7 +1481,7 @@ test('legacy product sentences render as Fractal without rewriting other server 
     assert.equal(plainError(new TypeError('Network request failed')), 'the connection to Fractal broke (Network request failed)');
     assert.equal(plainError(new TypeError('please use st')), 'please use st');
     const unconfirmed = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'message-send-unconfirmed', message: 'the database has not confirmed the send', retryable: false, details: { applied: 'unknown' } }, 503);
-    assert.equal(plainError(unconfirmed), 'Fractal may have taken it and has not confirmed it yet; sending it again is safe');
+    assert.equal(plainError(unconfirmed), 'Fractal may have taken it and has not confirmed it yet; do not send it again');
     assert.equal(unconfirmed.response.message, 'the database has not confirmed the send');
 });
 

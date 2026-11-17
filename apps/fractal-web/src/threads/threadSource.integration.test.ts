@@ -109,7 +109,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
   }
 })
 
-it('starts with the exact ask episode and retries the same first message after an uncertain response', async () => {
+it('retains the exact ask episode without dispatching an uncertain first message again', async () => {
   const bodies: Array<Record<string, unknown>> = []
   const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input).endsWith('/capabilities')) return Response.json({
@@ -144,14 +144,14 @@ it('starts with the exact ask episode and retries the same first message after a
     expect((await source.start('ask/review', { ...input, content: 'Different message' }))._tag).toBe('Refused')
     expect((await source.start('ask/review', input))._tag).toBe('Refused')
     expect((await source.start('ask/review', input))._tag).toBe('Refused')
-    expect((await source.start('ask/review', input))._tag).toBe('Sent')
-    expect(bodies).toHaveLength(4)
-    for (const retry of bodies.slice(1)) expect(retry).toEqual(bodies[0])
-    expect(bodies[1]).toMatchObject({
+    const stillUnknown = await source.start('ask/review', input)
+    expect(stillUnknown._tag).toBe('Refused')
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toMatchObject({
       type: 'thread.start',
       parameters: { ...input, target_id: expect.stringMatching(/^thread\//) },
     })
-    expect(bodies[1]?.parameters).not.toHaveProperty('in_reply_to')
+    expect(bodies[0]?.parameters).not.toHaveProperty('in_reply_to')
   } finally {
     stop()
     registry.dispose()
@@ -362,11 +362,10 @@ it('retains the exact rename intent across malformed receipt, denial and a chang
     if (!source.pendingChange || !source.retryChange) throw new Error('Expected retained metadata actions')
     expect(registry.get(source.pendingChange(id))).toBe('rename')
     expect(await source.retryChange(id)).toBeDefined()
-    expect(await source.retryChange(id)).toBeUndefined()
-    expect(registry.get(source.pendingChange(id))).toBeUndefined()
-    expect(writes).toHaveLength(3)
-    expect(writes[1]).toEqual(writes[0])
-    expect(writes[2]).toEqual(writes[0])
+    const stillUnknown = await source.retryChange(id)
+    expect(stillUnknown).toBeDefined()
+    expect(registry.get(source.pendingChange(id))).toBe('rename')
+    expect(writes).toHaveLength(1)
   } finally { stop(); registry.dispose() }
 })
 
@@ -390,7 +389,7 @@ it('requires the current Inbox origin version before reading or sending', async 
   } finally { stop(); registry.dispose() }
 })
 
-it('discovers original first sends by source across changed episodes and retries only their bound intent', async () => {
+it('discovers retained first sends across changed episodes without replaying unknown attempts', async () => {
   const writes: Array<{ id: string; idempotency_key: string; parameters: { target_id: string; origin: { source_id: string; episode: string } } }> = []
   let release!: () => void
   const held = new Promise<void>(resolve => { release = resolve })
@@ -460,14 +459,14 @@ it('discovers original first sends by source across changed episodes and retries
     const newerDraft = { content: original.content }
     registry.set(source.draft(old.draftKey), newerDraft)
     const retry = await retryStart(old.draftKey)
-    expect(retry).toEqual({ _tag: 'Sent', threadId: old.targetId })
-    expect(writes[2]).toEqual(writes[0])
+    expect(retry).toMatchObject({ _tag: 'Refused', detail: 'Fractal has not confirmed this action. Do not send it again.' })
+    expect(writes).toHaveLength(2)
     expect(registry.get(source.draft(old.draftKey))).toBe(newerDraft)
-    expect(registry.get(retained).map(start => start.draftKey)).toEqual(['draft/new'])
-    expect((await retryStart('draft/new'))._tag).toBe('Sent')
-    expect(writes[3]).toEqual(writes[1])
-    expect(registry.get(source.draft('draft/new'))).toEqual({ content: '' })
-    expect(registry.get(pendingStarts())).toEqual([])
+    expect(registry.get(retained).map(start => start.draftKey)).toEqual(['draft/old', 'draft/new'])
+    expect((await retryStart('draft/new'))._tag).toBe('Refused')
+    expect(writes).toHaveLength(2)
+    expect(registry.get(source.draft('draft/new'))).toEqual({ content: original.content })
+    expect(registry.get(pendingStarts())).toHaveLength(2)
   } finally { release(); stop(); stopAccess(); registry.dispose() }
 })
 
@@ -641,9 +640,7 @@ it.each(refusedActions.flatMap(([action, title]) => [403, 422].map(status => [ac
     try {
       await vi.waitFor(() => expect(view.registry.get(view.source.access).actions.size).toBe(5))
       const refusal = await perform(view.source, action)
-      expect(refusal).toStrictEqual(action === 'start'
-        ? { detail: 'Fractal has not confirmed this action. Retry to check the same action.' }
-        : { detail: title, explanation: 'The thread owner stopped accepting changes.' })
+      expect(refusal).toStrictEqual({ detail: 'Fractal has not confirmed this action. Do not send it again.' })
       expect(JSON.stringify(refusal)).not.toContain('no access to threads')
       expect(view.writes).toHaveLength(1)
     } finally { view.dispose() }
@@ -654,8 +651,7 @@ it.each(refusedActions)('names a refused %s with its title alone when Fractal gi
   const view = actionSource(() => actionReply(422, '   '))
   try {
     await vi.waitFor(() => expect(view.registry.get(view.source.access).actions.size).toBe(5))
-    expect(await perform(view.source, action)).toStrictEqual({ detail: action === 'start'
-      ? 'Fractal has not confirmed this action. Retry to check the same action.' : title })
+    expect(await perform(view.source, action)).toStrictEqual({ detail: 'Fractal has not confirmed this action. Do not send it again.' })
   } finally { view.dispose() }
 })
 

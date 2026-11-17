@@ -193,7 +193,9 @@ describe('native attachment port', () => {
       actual = acknowledgement(init, status)
       return Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: actual })
     } })
-    expect(await port.send(request)).toEqual({ _tag: 'Success', value: Native.decodeUnknownSync(Native.ActionResult)(actual) })
+    const result = await port.send(request)
+    if (status === 'completed') expect(result).toEqual({ _tag: 'Success', value: Native.decodeUnknownSync(Native.ActionResult)(actual) })
+    else expect(result).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
     expect(calls.map(({ url }) => url.pathname)).toEqual(['/v1/client/capabilities', '/v1/client/actions'])
     expect(calls[1]?.init?.method).toBe('POST')
     expect(Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(calls[1]?.init?.body)).toEqual(firstSendBody(request))
@@ -293,7 +295,7 @@ describe('native attachment port', () => {
       request_id: 'request/native-refusal', details: { scope: 'control.messages' },
     }
     const { port, calls } = attachmentClient({ reply: () => Response.json(error, { status: 403 }) })
-    expect(await port.send(request)).toEqual({ _tag: 'Refused', reason: 'ungranted', detail: error.message, error })
+    expect(await port.send(request)).toEqual({ _tag: 'Refused', reason: 'unconfirmed', detail: 'Fractal has not confirmed this message. Do not send it again.', error })
     expect(calls).toHaveLength(2)
   })
 

@@ -1102,17 +1102,16 @@ impl ClientError {
         }
     }
 
-    /// A first attempt was refused before application. Callers with earlier ambiguous delivery
-    /// must keep that history and replay the original request, regardless of this attempt's refusal.
-    pub fn not_applied(&self)->bool {
-        self.applied()!=Some("unknown") && (self.applied()==Some("none") || matches!(self,ClientError::Api(ErrorCode::StaleFence|ErrorCode::RateLimited,..)))
+    /// Only explicit, uncontradicted `applied: none` proves nonapplication.
+    /// Earlier ambiguous delivery remains caller state and must never be replayed.
+    pub fn not_applied(&self) -> bool {
+        self.applied() == Some("none")
     }
 
-    /// A transport failure or explicit/malformed application metadata may leave delivery unknown.
-    /// False is not a nonapplication guarantee. Earlier ambiguity remains caller state even if a
-    /// later attempt is refused; repeat only the original request and key to recover its receipt.
+    /// After dispatch, every error without explicit nonapplication proof is unknown.
+    /// This does not authorize replay, rebuilding, re-signing or retargeting the action.
     pub fn outcome_unknown(&self) -> bool {
-        matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
+        !self.not_applied()
     }
 
     /// Stable plain diagnostic used by gate reports and other machine/durable consumers.
@@ -1130,7 +1129,7 @@ impl ClientError {
         let product = if human { "Fractal" } else { "st" };
         match self {
             ClientError::Api(..) if self.applied() == Some("unknown") => {
-                format!("{product} may have taken it and has not confirmed it yet; sending it again is safe")
+                format!("{product} may have taken it and has not confirmed it yet; do not send it again")
             }
             ClientError::Api(code, message, _) => render_message(Some(code), message, human),
             ClientError::Transport(message) if message.contains("deadline") => {
@@ -1204,7 +1203,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         // answered elsewhere or replaced, or only its terminal can answer it.
         ErrorCode::StaleFence if message.starts_with(PROMPT_REFUSAL_PREFIX) => message.to_owned(),
         ErrorCode::StaleFence => {
-            format!("{product} changed while this was on its way, so it was not applied")
+            format!("{product} changed while this was on its way")
         }
         ErrorCode::PageCursorExpired | ErrorCode::CursorGap => {
             "the list changed while it was being read".into()
@@ -3806,15 +3805,48 @@ mod tests {
         assert!(unknown.outcome_unknown());
         assert_eq!(
             unknown.plain(),
-            "st may have taken it and has not confirmed it yet; sending it again is safe"
+            "st may have taken it and has not confirmed it yet; do not send it again"
         );
         let none = with_applied("none");
         assert_eq!(none.applied(), Some("none"));
         assert!(!none.outcome_unknown());
-        // A lost answer is unknown too, with or without a word from st; a plain refusal is not.
+        // A lost answer or refusal without explicit proof is unknown after dispatch.
         assert!(ClientError::Transport("client-v0 request deadline exceeded".into()).outcome_unknown());
-        assert!(!api(ErrorCode::Forbidden, "no").outcome_unknown());
+        assert!(api(ErrorCode::Forbidden, "no").outcome_unknown());
         assert_eq!(api(ErrorCode::Forbidden, "no").applied(), None);
+    }
+
+    #[test]
+    fn delivery_certainty_requires_explicit_uncontradicted_none() {
+        use serde_json::json;
+        for code in [ErrorCode::StaleFence, ErrorCode::RateLimited, ErrorCode::Forbidden] {
+            for (outer, legacy, not_applied) in [
+                (None, None, false),
+                (Some(json!("none")), None, true),
+                (None, Some(json!("none")), true),
+                (Some(json!("none")), Some(json!("none")), true),
+                (Some(json!("unknown")), Some(json!("none")), false),
+                (Some(json!("none")), Some(json!("unknown")), false),
+                (Some(json!(null)), Some(json!("none")), false),
+                (Some(json!("none")), Some(json!(42)), false),
+            ] {
+                let mut error = api(code.clone(), "refused");
+                let ClientError::Api(_, _, envelope) = &mut error else { unreachable!() };
+                envelope.applied = outer;
+                if let Some(value) = legacy {
+                    envelope.details.insert("applied".into(), value);
+                }
+                assert_eq!(error.not_applied(), not_applied, "{error:?}");
+                assert_eq!(error.outcome_unknown(), !not_applied, "{error:?}");
+            }
+        }
+        for error in [
+            ClientError::Transport("connection lost after dispatch".into()),
+            ClientError::Protocol("malformed receipt".into()),
+        ] {
+            assert!(!error.not_applied());
+            assert!(error.outcome_unknown());
+        }
     }
 
     #[test]
@@ -3945,7 +3977,7 @@ mod tests {
         );
         assert_eq!(
             stale.plain(),
-            "st changed while this was on its way, so it was not applied"
+            "st changed while this was on its way"
         );
         // A prompt's refusal keeps st's own words: why it cannot be answered from here.
         assert_eq!(
@@ -5153,8 +5185,8 @@ mod observer_tests {
             let expected=if present.is_empty(){None}else if present.iter().any(|value|value.as_str()!=Some("none")){Some("unknown")}else{Some("none")};
             let error=ClientError::Api(ErrorCode::StaleFence,"fixture".into(),Box::new(envelope));
             assert_eq!(error.applied(),expected);
-            assert_eq!(error.not_applied(),expected!=Some("unknown"));
-            assert_eq!(error.outcome_unknown(),expected==Some("unknown"));
+            assert_eq!(error.not_applied(),expected==Some("none"));
+            assert_eq!(error.outcome_unknown(),expected!=Some("none"));
             let ClientError::Api(_,_,preserved)=error else {unreachable!()};
             assert_eq!(&preserved.applied,outer);
             assert_eq!(preserved.details.get("applied"),inner.as_ref());
