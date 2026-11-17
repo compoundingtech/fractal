@@ -498,8 +498,11 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         // refused action, with Fractal's own reason under it.
         const error = outcome.error
         if (error instanceof ClientError && error.status < 500) {
-          if (kind === 'thread.start' && start !== undefined && error.status === 404 && error.response.code === 'not-found') {
-            // Nothing was appended. Refresh the exact recipient for explicit confirmation, never silently resend.
+          if (kind === 'thread.start' && start !== undefined && (
+            (error.status === 404 && error.response.code === 'not-found')
+            || (error.status === 409 && (error.response.code === 'stale-fence' || error.response.code === 'recipient-retired'))
+          )) {
+            // The definitive refusal applied nothing. Re-read visibly; only a new explicit Send may use the new preview.
             await reloadStartContext(start.origin.source_id, start.origin.episode)
           }
           const explanation = error.response.message.trim()

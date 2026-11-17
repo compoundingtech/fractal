@@ -209,7 +209,7 @@ function AgentName({ id }: { readonly id: string }) {
 type StartRecipientView =
   | { readonly _tag: 'Ready'; readonly recipient: ThreadStartRecipient }
   | { readonly _tag: 'Loading' }
-  /** Fractal refused the recipient; its error does not prove an original agent existed. */
+  /** The generated recipient-retired error is terminal: no target and no default to offer. */
   | { readonly _tag: 'NoRecipient'; readonly explanation?: string | undefined }
   /** This source cannot read a start preview, so it has no recipient to name. */
   | { readonly _tag: 'NoPreview' }
@@ -224,7 +224,7 @@ const startRecipientView = (feed: Feed<ThreadStartContext> | undefined): StartRe
 }
 
 const idleStartContext = Atom.make<Feed<ThreadStartContext>>(waiting)
-const unconfiguredNote = 'Fractal has no recipient configured for this item, so no thread can start here.'
+const retiredNote = 'The recipient is retired, so no thread can start here.'
 const noPreviewNote = 'This connection cannot preview a first-send recipient, so no thread can start here.'
 const noRecipientSend = 'There is no recipient for this thread right now, so nothing was sent.'
 
@@ -366,7 +366,7 @@ function StartRecipient({ recipient, lead }: { readonly recipient: ThreadStartRe
 function StartRecipientStatus({ recipient, onRetry }: { readonly recipient: Exclude<StartRecipientView, { readonly _tag: 'Ready' }>; readonly onRetry: () => void }) {
   switch (recipient._tag) {
     case 'Loading': return <SystemNotice kind="loading" scope="inline" title="Loading the recipient" />
-    case 'NoRecipient': return <SystemNotice kind="error" scope="inline" title={unconfiguredNote} data-start-recipient="retired"
+    case 'NoRecipient': return <SystemNotice kind="error" scope="inline" title={retiredNote} data-start-recipient="retired"
       {...(recipient.explanation === undefined ? {} : { explanation: recipient.explanation })} />
     case 'NoPreview': return <p data-start-recipient="none" {...stylex.props(styles.note)}>{noPreviewNote}</p>
     // Reading again cannot qualify a source Fractal does not know for this person.

@@ -47,6 +47,20 @@ const refusal = (code: string, status: number) => Response.json({
   api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refused',
   code, message: 'The requested recipient is unavailable.', retryable: false, details: {},
 }, { status })
+
+// Serialized client-v0 error bodies at e16690bb: threads.rs:184–198 maps responsibility absence to
+// api/client_v0.rs:803–809 stale-fence. api.rs:579–588,2007–2020 wraps fields/applied/retryable.
+// Recipient retirement: inbox.rs:57–60 → retirements.rs:81–89 → model.rs:2809–2825;
+// thread_fence_tests.rs:1131–1143 proves both preview and POST return 409 recipient-retired.
+const startRefusalWire = {
+  'stale-fence': '{"api_version":"fractal.client.v0","error_version":"fractal.client.error.v0","request_id":"request/stale","code":"stale-fence","message":"this Inbox source has no configured responsible agent","retryable":false,"details":{}}',
+  'recipient-retired': '{"api_version":"fractal.client.v0","error_version":"fractal.client.error.v0","request_id":"request/retired","code":"recipient-retired","message":"Retired: recipient `agent/workshop/atlas` refuses this first send","retryable":false,"details":{"applied":"none","refusal":{"variant":"Retired","recipient":"agent/workshop/atlas"}},"applied":"none"}',
+} as const
+const wireRefusal = (code: keyof typeof startRefusalWire) => new Response(startRefusalWire[code], { status: 409, headers: { 'content-type': 'application/json' } })
+
+it.each(Object.values(startRefusalWire))('decodes a real serialized server 409 error body through the generated contract', body => {
+  expect(() => Schema.decodeUnknownSync(Schema.fromJsonString(Write.ErrorEnvelope))(body)).not.toThrow()
+})
 const decodeAction = Schema.decodeUnknownSync(Schema.fromJsonString(Write.ActionRequest))
 type Action = Extract<Write.ActionRequest, { type: 'thread.start' | 'thread.reply' }>
 const threadAction = (body: unknown): Action => {
@@ -61,7 +75,7 @@ const startParameters = (action: Action | undefined) => action?.type === 'thread
 
 /** Mounts one thread surface on a real gateway thread source. `preview` answers the exact-key start preview, `action` every write. */
 async function mount(element: React.ReactElement, { preview, action = receipt, read = () => page([]), offline = false, withoutPreview = false }: {
-  readonly preview: (url: URL, actions: readonly Action[]) => Response
+  readonly preview: (url: URL, actions: readonly Action[]) => Response | Promise<Response>
   readonly action?: (action: Action, actions: readonly Action[]) => Response
   readonly read?: (url: URL) => Response
   readonly offline?: boolean
@@ -178,14 +192,14 @@ it('previews a fallback recipient as new beside the retired original agent and s
   } finally { await view.dispose() }
 })
 
-it('refuses an unconfigured source with no original agent without claiming retirement or choosing a default', async () => {
-  const view = await mount(<LiveInboxThreads alert={notice} />, { preview: () => refusal('recipient-retired', 409) })
+it('keeps the real recipient-retired preview terminal with no target, Retry or send', async () => {
+  const view = await mount(<LiveInboxThreads alert={notice} />, { preview: () => wireRefusal('recipient-retired') })
   try {
     await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient="retired"]')).not.toBeNull())
     const notice = view.host.querySelector('[data-start-recipient="retired"]')
-    expect(notice?.textContent).toContain('Fractal has no recipient configured for this item, so no thread can start here.')
-    expect(notice?.textContent).not.toContain('was retired')
-    expect(notice?.textContent).toContain('The requested recipient is unavailable.')
+    expect(notice?.textContent).toContain('The recipient is retired, so no thread can start here.')
+    expect(notice?.textContent).toContain('Retired: recipient `agent/workshop/atlas` refuses this first send')
+    expect(view.button('Retry')).toBeUndefined()
     expect(view.button('Start thread')).toBeUndefined()
     expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
     expect(view.host.querySelector('textarea')).toBeNull()
@@ -242,6 +256,93 @@ it('reads the recipient again after a mismatch, keeps the draft and refusal, and
   } finally { await view.dispose() }
 })
 
+it.each(['changed', 'refused', 'retired'] as const)('visibly rereads after a real stale-fence POST and requires explicit confirmation when %s', async next => {
+  let release!: () => void
+  let pendingRead: Promise<Response> | undefined
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    preview: (url, actions) => {
+      if (actions.length === 0) return context(url, originalRecipient)
+      if (pendingRead === undefined) {
+        const { promise, resolve } = Promise.withResolvers<Response>()
+        pendingRead = promise
+        release = () => resolve(next === 'changed' ? context(url, configuredRecipient)
+          : wireRefusal(next === 'retired' ? 'recipient-retired' : 'stale-fence'))
+      }
+      return pendingRead.then(response => response.clone())
+    },
+    action: (action, actions) => actions.length === 1 ? wireRefusal('stale-fence') : receipt(action),
+  })
+  try {
+    await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
+    await act(async () => view.button('Start thread')?.click())
+    await view.type('Keep this exact draft.')
+    await act(async () => view.button('Send')?.click())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Loading the recipient'))
+    expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
+    expect(view.actions).toHaveLength(1)
+    expect(view.host.querySelector('textarea')?.value).toBe('Keep this exact draft.')
+    await act(async () => release())
+    await vi.waitFor(() => expect(view.host.querySelector('[role="alert"]')?.textContent).toContain("Couldn't start this thread."))
+    await view.settle()
+    expect(view.actions).toHaveLength(1)
+    expect(view.previews.every(url => url.searchParams.get('source_id') === ask.source_id && url.searchParams.get('episode') === episode)).toBe(true)
+    if (next === 'changed') {
+      expect(view.host.querySelector('[data-start-recipient-id]')?.textContent).toBe(configured)
+      await act(async () => view.button('Send')?.click())
+      await vi.waitFor(() => expect(view.actions).toHaveLength(2))
+      expect(startParameters(view.actions[1])?.agent_id).toBe(configured)
+      expect(view.actions[1]?.id).not.toBe(view.actions[0]?.id)
+      expect(view.actions[1]?.idempotency_key).not.toBe(view.actions[0]?.idempotency_key)
+      expect(view.actions[1]?.parameters.target_id).not.toBe(view.actions[0]?.parameters.target_id)
+    } else {
+      expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
+      if (next === 'retired') {
+        expect(view.host.querySelector('[data-start-recipient="retired"]')).not.toBeNull()
+        expect(view.button('Retry')).toBeUndefined()
+      } else expect(view.host.textContent).toContain('this Inbox source has no configured responsible agent')
+      await act(async () => view.button('Send')?.click())
+      await view.settle()
+      expect(view.actions).toHaveLength(1)
+    }
+  } finally { await view.dispose() }
+})
+
+it('fails closed on the real GET stale-fence body without inventing an unconfigured state', async () => {
+  const view = await mount(<LiveInboxThreads alert={notice} />, { preview: () => wireRefusal('stale-fence') })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('this Inbox source has no configured responsible agent'))
+    expect(view.button('Start thread')).toBeUndefined()
+    expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
+    expect(view.host.querySelector('textarea')).toBeNull()
+    expect(view.host.querySelector('[data-start-recipient="retired"]')).toBeNull()
+    await view.settle()
+    expect(view.actions).toHaveLength(0)
+  } finally { await view.dispose() }
+})
+
+it('keeps an unknown Start outcome on the exact original identity and retry key without automatic resend', async () => {
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    preview: url => context(url, originalRecipient),
+    action: (action, actions) => {
+      if (actions.length === 1) throw new TypeError('Receipt lost')
+      return receipt(action)
+    },
+  })
+  try {
+    await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
+    await act(async () => view.button('Start thread')?.click())
+    await view.type('Recover the original intent.')
+    await act(async () => view.button('Send')?.click())
+    await vi.waitFor(() => expect(view.button('Retry thread start')).toBeDefined())
+    await view.settle()
+    expect(view.actions).toHaveLength(1)
+    await act(async () => view.button('Retry thread start')?.click())
+    await vi.waitFor(() => expect(view.actions).toHaveLength(2))
+    expect(view.actions[1]).toEqual(view.actions[0])
+    expect(startParameters(view.actions[1])?.agent_id).toBe(original)
+  } finally { await view.dispose() }
+})
+
 it('names an offline original agent as the recipient without inferring retirement', async () => {
   const view = await mount(<LiveInboxThreads alert={ask} />, { preview: url => context(url, originalRecipient), offline: true })
   try {
@@ -286,5 +387,25 @@ it('keeps replies on the existing thread’s stored agent without a recipient pr
     expect(view.actions[0]?.parameters).not.toHaveProperty('agent_id')
     expect(view.previews).toHaveLength(0)
     expect(view.host.querySelector('[data-start-recipient]')).toBeNull()
+  } finally { await view.dispose() }
+})
+
+it('keeps a real recipient-retired POST terminal after rereading, without another send', async () => {
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    preview: (url, actions) => actions.length === 0 ? context(url, originalRecipient) : wireRefusal('recipient-retired'),
+    action: () => wireRefusal('recipient-retired'),
+  })
+  try {
+    await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
+    await act(async () => view.button('Start thread')?.click())
+    await view.type('Do not redirect this intent.')
+    await act(async () => view.button('Send')?.click())
+    await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient="retired"]')).not.toBeNull())
+    expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
+    expect(view.button('Retry')).toBeUndefined()
+    expect(view.actions).toHaveLength(1)
+    await act(async () => view.button('Send')?.click())
+    await view.settle()
+    expect(view.actions).toHaveLength(1)
   } finally { await view.dispose() }
 })

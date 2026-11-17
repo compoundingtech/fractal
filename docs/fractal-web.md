@@ -645,17 +645,22 @@ its basis: `Original recipient` for a source agent or an agent-run requester;
 `Configured recipient` when no original agent exists, such as a person-requested
 run or a person-owned notice. A terminal-retirement fallback is labelled
 `New recipient`; the retired original agent and its exact id appear separately.
-Runtime offline status never selects a fallback. An unconfigured source is
-refused with `recipient-retired` and no default or Start, including when no
-original agent exists; the error alone never claims an agent retired.
+Runtime offline status never selects a fallback. A `recipient-retired` refusal
+identifies terminal retirement and offers no target, Start or Retry. An ordinary
+GET `409 stale-fence` fails closed with the server's refusal and no recipient.
+Neutral "no recipient configured" classification is NOT DONE: it requires a
+future API-authored typed `details.reason` discriminator, not message matching
+or an internal store error code.
 While the preview loads or after it fails there is no Start either, and a
 failed read offers Retry.
 
-If Start returns a recipient-mismatch 404, the source reads that exact preview
-again and returns the refusal; the draft stays, the changed recipient is called
-out, and only another explicit Send starts the thread. Nothing is resent
-silently. A retained, unconfirmed Start keeps its original signed intent and
-identifiers on Retry. Replies continue to use the existing thread's stored
+If Start definitively returns `409 stale-fence` or a recipient-mismatch 404,
+the source invalidates the visible recipient, visibly re-reads that exact
+preview, and returns the refusal. The draft stays; a changed recipient needs a
+NEW explicit Send and a refused preview remains refused. Nothing is resent
+silently. An unknown transport outcome retains the original signed intent,
+action/target identities and retry key for explicit receipt recovery. Replies
+continue to use the existing thread's stored
 participants, regardless of later routing policy. Storybook's
 `Fractal/App/Threads/Start recipient` covers every state.
 
