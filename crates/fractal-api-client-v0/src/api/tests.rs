@@ -435,6 +435,190 @@ async fn series_counts_repeatable_claim_kinds_and_typed_field_groups() {
     }
 }
 
+// Seed already-admitted history so reserved records reach the serving boundary.
+fn series_privacy_claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
+    let mut fields = fields;
+    let at = fields.as_object_mut().unwrap().remove("at").unwrap();
+    if kind == "message.sent" {
+        fields["from"] = json!("agent/reviewer");
+        fields["to"] = json!("person/owner");
+        fields["content"] = json!(at.to_string());
+        fields["status"] = json!("sent");
+    } else {
+        fields["at"] = at.clone();
+    }
+    let claim = if fields.get("thread_id").is_some() {
+        crate::store::thread_delivery::append_reply(&state.store, &ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some("agent/reviewer".into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: Some(subject.into()),
+        }, crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: "agent/reviewer" }, None).unwrap().0
+    } else {
+        // Seed historical custom events independently of today's custom subject admission.
+        let admitted_subject = if kind.starts_with("custom.") && !subject.starts_with("custom/") {
+            "custom/acme/series-history"
+        } else { subject };
+        state.store.connection.batched(|tx| crate::store::append_claim_tx(
+            tx, state.store.origin(), admitted_subject, kind, None,
+            &json!({"fields": fields}), &[], None,
+        )).unwrap().unwrap()
+    };
+    state.store.connection.batched(|tx| {
+        tx.execute("UPDATE claims SET subject=?1, accepted_at_unix_ms=?2 WHERE id=?3",
+            [subject, &at.to_string(), &claim.id])
+    }).unwrap().unwrap();
+    // Appending runs the normal timestamp projector after the historical edit.
+    state.store.connection.batched(|tx| crate::store::append_claim_tx(
+        tx, state.store.origin(), "custom/acme/series-flush", "custom.acme.series-fixture",
+        None, &json!({"fields": {}}), &[], None,
+    )).unwrap().unwrap();
+    state.store.committed_index.fetch_max(claim.store_index, std::sync::atomic::Ordering::Release);
+}
+
+async fn assert_series_privacy_counts(state: &AppState, selection: &str, counts: &[u64]) {
+    let query = format!("{selection}&from=1000&to=3000&bucket_seconds=1");
+    let expected = json!({
+        "from": 1000, "to": 3000, "bucket_seconds": 1,
+        "buckets": [
+            {"start": 1000, "end": 2000, "count": counts[0]},
+            {"start": 2000, "end": 3000, "count": counts[1]},
+        ],
+    });
+    // This paired reader is not a participant in the private thread.
+    let Json(paired) = client_v0::series_read(
+        State(state.clone()),
+        Extension(client_v0::ClientSession::for_tests_scoped(
+            "person/outsider", "person/outsider", &["read.projections"],
+        )),
+        Query(vec![
+            {
+                let (key, value) = selection.split_once('=').unwrap();
+                (key.to_owned(), value.replace("%2F", "/"))
+            },
+            ("from".into(), "1000".into()), ("to".into(), "3000".into()),
+            ("bucket_seconds".into(), "1".into()),
+        ]),
+    ).await.unwrap();
+    assert_eq!(paired, expected, "paired reader: {selection}");
+    let (status, local) = get_request(router(state.clone()), &format!("/v1/series?{query}")).await;
+    assert_eq!(status, StatusCode::OK, "{local}");
+    assert_eq!(local, expected, "local reader: {selection}");
+}
+
+fn series_privacy_thread(state: &AppState) {
+    state.store.configure_thread_write_rollout([]);
+    crate::store::thread_metadata::apply(
+        &state.store, "person/owner", "thread/series-private", "series-private-thread",
+        crate::store::thread_metadata::Edit::Create {
+            agent: "agent/reviewer", title: "Private series discussion",
+        },
+    ).unwrap();
+}
+
+#[tokio::test]
+async fn series_kinds_hide_private_thread_messages_from_nonparticipants() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    series_privacy_thread(&state);
+    for (subject, thread) in [("message/private-series", Some("thread/series-private")), ("message/public-series", None)] {
+        let mut fields = json!({"at": 1000, "from": "person/owner", "to": "agent/reviewer",
+            "content": "Series fixture", "status": "sent"});
+        if let Some(thread) = thread { fields["thread_id"] = json!(thread); }
+        series_privacy_claim(&state, subject, "message.sent", fields);
+    }
+    assert_series_privacy_counts(&state, "kind=message.sent", &[1, 0]).await;
+}
+
+#[tokio::test]
+async fn series_count_objective_hides_private_thread_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    series_privacy_thread(&state);
+    let intent = parse_intent(r#"version 2
+objective "privacy/messages" {
+  about "Ordinary messages"
+  indicator "count" {
+    subject-prefix "message/"
+    event "message.sent" at="content"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, "node").unwrap();
+    state.store.apply_internal(&intent, "series-private-messages").unwrap();
+    for (subject, fields) in [
+        ("message/private-series", json!({"at": 1000, "thread_id": "thread/series-private"})),
+        ("message/public-series", json!({"at": 1000})),
+    ] {
+        series_privacy_claim(&state, subject, "message.sent", fields);
+    }
+    assert_series_privacy_counts(&state, "objective=privacy%2Fmessages", &[1, 0]).await;
+}
+
+#[tokio::test]
+async fn series_count_objectives_hide_reserved_thread_and_notice_records() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    series_privacy_thread(&state);
+    for (name, prefix, kind) in [
+        ("threads", "thread/", "custom.acme.series-event"),
+        ("notice-subjects", "custom/", "custom.acme.series-event"),
+        ("notice-kinds", "custom/", "custom.attention.notice-created"),
+    ] {
+        let intent = parse_intent(&format!(r#"version 2
+objective "privacy/{name}" {{
+  about "Only public events"
+  indicator "count" {{
+    subject-prefix "{prefix}"
+    event "{kind}" at="at"
+  }}
+  window "1h"
+  target "per-hour" min=1
+}}
+"#), "node").unwrap();
+        state.store.apply_internal(&intent, &format!("series-private-{name}")).unwrap();
+    }
+    for (subject, kind) in [
+        ("thread/series-private", "custom.acme.series-event"),
+        ("custom/attention/source/series-private", "custom.acme.series-event"),
+        ("custom/acme/series-notice", "custom.attention.notice-created"),
+        ("custom/acme/series-public", "custom.acme.series-event"),
+    ] {
+        series_privacy_claim(&state, subject, kind, json!({"at": 1000}));
+    }
+    assert_series_privacy_counts(&state, "objective=privacy%2Fthreads", &[0, 0]).await;
+    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-subjects", &[1, 0]).await;
+    assert_series_privacy_counts(&state, "objective=privacy%2Fnotice-kinds", &[0, 0]).await;
+}
+
+#[tokio::test]
+async fn series_interval_objective_does_not_complete_on_private_thread_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    series_privacy_thread(&state);
+    let intent = parse_intent(r#"version 2
+objective "privacy/interval" {
+  about "Public message completion"
+  indicator "interval" {
+    subject-prefix "message/"
+    start "custom.acme.series-started" at="at"
+    stop "message.sent"
+  }
+  window "1h"
+  target "p50" within="5m"
+}
+"#, "node").unwrap();
+    state.store.apply_internal(&intent, "series-private-interval").unwrap();
+    // Both starts are public. Only the second stop is public.
+    for subject in ["message/private-series", "message/public-series"] {
+        series_privacy_claim(&state, subject, "custom.acme.series-started", json!({"at": 1000}));
+    }
+    series_privacy_claim(&state, "message/private-series", "message.sent",
+        json!({"at": 1500, "thread_id": "thread/series-private"}));
+    series_privacy_claim(&state, "message/public-series", "message.sent", json!({"at": 2500}));
+    assert_series_privacy_counts(&state, "objective=privacy%2Finterval", &[0, 1]).await;
+}
+
 #[tokio::test]
 async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
     let root = tempfile::tempdir().unwrap();
