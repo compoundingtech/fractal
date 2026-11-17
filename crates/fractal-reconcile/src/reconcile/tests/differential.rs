@@ -753,7 +753,7 @@ fn review_decision_reuse(verdict: &str) -> BTreeSet<String> {
             }).collect::<Vec<_>>();
         assert_eq!(decisions.len(), 1, "reuse must not fabricate a second human decision");
         let (decision, decision_body) = &decisions[0];
-        assert_eq!(decision.actor.as_deref(), Some("person/example"));
+        assert_eq!(decision.actor.as_deref(), request.body["fields"]["reviewer"].as_str());
         assert_eq!(decision.subject, request.subject);
         assert_eq!(decision_body["fields"]["request"], request.id);
         assert_eq!(decision_body["fields"]["verdict"], verdict);
