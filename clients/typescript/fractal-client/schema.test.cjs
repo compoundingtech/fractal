@@ -59,6 +59,39 @@ test('human-gate attention read schema accepts the source step-run Id, never its
     assert.throws(() => decode({ ...wire, step_run_id: 'approve' }));
 });
 
+test('thread start context and Attention share the emitted recipient proof schema', async () => {
+    const read = await import('./ReadSchema.generated.ts');
+    const decode = schema => read.decodeUnknownSync(schema, 'strict');
+    const attention = {
+        id: 'attention/example', kind: 'attention', attention_kind: 'human-gate',
+        source_id: 'step-run/example/approve', person_id: 'person/alex',
+        revision: 'request-1', updated_at: '2026-11-14T00:00:00Z',
+        requested_at: '2026-11-14T00:00:00Z', title: 'Approve', detail: 'Ready?',
+        priority: 'normal', state: 'open', actions: ['review.approve'],
+    };
+    assert.equal(decode(read.Attention)(attention).start_recipient, undefined);
+    const bases = [
+        { _tag: 'original' },
+        { _tag: 'configured' },
+        { _tag: 'fallback', original_agent_id: 'agent/original',
+          retirement: { claim_id: 'claim/retired', kind: 'agent.retired', state: 'retired' } },
+    ];
+    for (const basis of bases) {
+        const recipient = { agent_id: 'agent/recipient', basis };
+        const context = { kind: 'thread-start-context', source_id: attention.source_id,
+            episode: 'opening-1', start_recipient: recipient };
+        assert.deepEqual(decode(read.ThreadStartRecipient)(recipient), recipient);
+        assert.deepEqual(decode(read.ThreadStartContext)(context).start_recipient, recipient);
+        assert.deepEqual(decode(read.Attention)({ ...attention, start_recipient: recipient }).start_recipient, recipient);
+    }
+    for (const basis of [{ _tag: 'fallback' }, { _tag: 'fallback', original_agent_id: 'agent/original',
+        retirement: { claim_id: 'claim/retired', kind: 'agent.stopped', state: 'retired' } }]) {
+        assert.throws(() => decode(read.ThreadStartRecipient)({ agent_id: 'agent/recipient', basis }));
+    }
+    assert.throws(() => decode(read.ThreadStartContext)({
+        kind: 'thread-start-context', source_id: attention.source_id, episode: 'opening-1' }));
+});
+
 test('mission supersession lineage is optional nonnullable and preserves retry lineage', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = {

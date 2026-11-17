@@ -48,6 +48,79 @@ and show its full history without reopening it. An explicit predecessor and reas
 a future decision-history view. Existing mission step gates own dependency trees and
 conditional activation.
 
+The typed daemon start/send boundary also accepts retained episodes after resolution.
+One shared, privately constructed `QualifiedDiscussionSource` proves an existing canonical
+opening, its original recipient, and the current recipient. Supported retained sources are
+runtime asks (`work.person-asked`), manifest-defined custom items (creation claim and
+`recipient_field`), human gate reviews (`gate.requested`), and reserved notices with the
+pinned notice creation, registration and owner chain. The notice episode is its source
+creation claim ID, not a snapshot ID. Labels, `about` links and arbitrary
+`custom.attention.*` kinds confer no authority. Reassignment removes retained discussion
+rights. Enrollment, browser/device admission, message scope, rollout and responsible-agent
+checks still apply; a retained source never grants an otherwise refused write.
+Current and retained starts preserve the original source agent unless native authoritative
+`agent.retired` lifecycle evidence proves terminal retirement/removal. Only that terminal
+proof selects the configured `inbox_fallback_agent`; offline or unknown runtime, a missing
+declaration, reversible stop and other admission refusals never select a replacement.
+There is no inferred role or default agent. Existing threads retain their frozen audience;
+they are never retargeted and the retired agent is never revived.
+
+Before first send, read the current Inbox row's optional `start_recipient`, or request
+`GET /v1/client/threads/start-context?source_id=...&episode=...` for an exact opening key
+already known from an Inbox card, a bounded existing history read or source context.
+This is not a retained-source discovery list. Successful preview returns that same
+`start_recipient` union: `original`, `configured` for a source without an original agent,
+or `fallback` with the original agent and authoritative terminal retirement claim reference.
+On current rows, `conversation_id` equals its `agent_id`. Denied/missing openings share
+the unknown-source 404; an unconfigured fallback after terminal retirement returns the
+already-declared `recipient-retired` conflict. Source and pairing authority are rechecked.
+The Start request still carries its displayed `agent_id` and optional signature; a recipient
+mismatch refuses without rewriting the signed packet. Refresh the preview before confirming
+a changed recipient. The scoped MCP thread-read family mirrors this metadata-only preview
+under its existing exact conversation binding; MCP remains read-only.
+
+Authored human steps require an exact retained READY opening, a hash-verified
+generation-pinned mission revision, and the immutable `mission-run.created` inputs,
+requester, root/parent/workspace and initial default selector. The opening recipient is
+reconstructed with the native selector materialization and canonically ordered assignment
+mutations before the opening; today's assignee or generation is never opening proof.
+Native recipient-bearing `work.released` and `work.handoff-returned` READY receipts
+also open exact episodes; no synthetic second `step-run.state` receipt is required.
+The shared proof passes bounded immutable materialization variables to the missions
+reader, which interpolates historical title/goals with the existing template engine.
+An unchanged title keeps its generation-creation attempt; retry goals are already
+materialized and are never interpolated again.
+Carried openings recover their epoch from the canonically prior actual READY write,
+following the exact source-generation chain and matching attempts. Literal/inherited and
+retained-input selectors qualify; missing admission/definition/interpolation/READY facts,
+unrecoverable carried epochs or a different current recipient fail closed.
+Before hydrating opening/source/manifest bodies, metadata-only admission bounds each
+proof's complete read set (including repaired history) to 512 entries and 256 KiB.
+Oversized/unprovable proofs are unavailable, never exempted from the bound. Notice
+disposition reads select an exact canonical latest claim, not complete snapshot history.
+Harness prompts, seat login, planning, revision proposals and operational faults have no
+supported retained proof. An unknown, fabricated or unsupported retained episode receives
+the same unavailable error. Phase A history uses this same qualifier, so a syntax-valid
+but never-opened authored key exposes no historical row content.
+
+Start never coalesces by origin, for current or retained sources. Every new operation
+key creates an independent thread and persists that request's first message, even if
+another discussion already links the exact source episode and recipient. Same-key
+replay recovers its original result; changed intent under that key conflicts. Recovery
+keeps its existing current-principal checks and works after source changes or retirement.
+A fallback Start creates its own discussion without retargeting existing participants.
+Open/list is navigation, not Start deduplication. Starting or replying to a retained
+discussion does not reactivate its resolved Inbox source or settle its original work.
+
+Unread Inbox-position lookup batch-qualifies the selected exact episodes through that
+same source qualifier before inspecting owned thread replies. Opening/current-policy
+discovery is one keyed SQL lookup for the full input, with indexed batched notice snapshot
+discovery. Reserved notices additionally reuse the native per-notice keyed
+source/registration/member-chain security validation; there is no per-row source
+qualifier call or live Inbox refold for supported retained sources. Live-only families
+keep their existing current-source qualification. This separate unread integration is
+owned by the shared writer, under FPL's backend contract.
+
 The native CLI convenience `fractal alerts discuss ITEM --body TEXT --as PERSON`
 starts the same durable thread through `thread.start`. It uses the exact current source and
 episode and the daemon-assigned responsible agent. It offers no recipient override. Use
