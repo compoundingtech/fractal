@@ -3,6 +3,23 @@
 Run the commands below from the repository root after a frozen workspace install.
 The [development guide](development.md) covers shared build and contribution tools.
 
+## Private unread reminder preview
+
+The `Fractal/App/Threads/Unread walkthrough` Storybook story uses demo data:
+nothing is sent to Fractal. Its guide names conversations and threads rather than
+internal identifiers; raw action details remain in a collapsed Technical details
+disclosure. The Marked unread sidebar uses a bell with an accessible Private
+reminder label, distinct from the natural-unread dot. At narrow panel widths the
+existing header grid uses a smaller gap and no forced age minimum so open and
+closed thread titles keep usable space.
+
+Every readable timeline message can anchor Mark unread, including another person's
+message and the viewer's own message. Rendering, visible-message capture and both
+jump paths share the exported `threadAnchorAttribute` contract. Natural read
+history remains separate: only live incoming agent replies qualify for the
+500 ms meaningful-body dwell and captured-reminder clearing. A message anchor
+alone does not make a message eligible for a read receipt.
+
 ## fractal-web Content Security Policy
 
 The app server and Vite's development/preview servers set an enforcing
@@ -616,6 +633,140 @@ agent/example/atlas and a paired full-control device whose bearer it keeps in a 
 headless Chromium, checks with Fractal that each step finished with that answer, and prints the
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
+
+## First-Start recipient preview
+
+Before a first send on any exact Inbox source item — a current or resolved ask,
+an authored step, a typed or system notice, with or without a listed agent — the
+web reads `ThreadSource.startContext(source_id, episode)`. The gateway source
+calls the generated `FractalClient.threadStartContext` for
+`/v1/client/threads/start-context` and decodes the answer with the generated
+`ThreadStartContext` schema; there is no hand-written DTO or adapter. Start is
+offered only once that preview returns `start_recipient`, and the first send
+carries exactly its `agent_id`. Nothing else names a recipient: neither the
+item's `conversation_id` nor its `requester_id` is read for it, and a source
+without the preview reader shows a note and no Start.
+
+The Start row and the draft show the recipient's name, its exact agent id and
+its basis: `Original recipient` for a source agent or an agent-run requester;
+`Configured recipient` when no original agent exists, such as a person-requested
+run or a person-owned notice. A terminal-retirement fallback is labelled
+`New recipient`; the retired original agent and its exact id appear separately.
+Runtime offline status never selects a fallback. A `recipient-retired` refusal
+identifies terminal retirement and offers no target, Start or Retry. An ordinary
+GET `409 stale-fence` fails closed with the server's refusal and no recipient.
+The generated `recipient-unassigned` preview refusal shows a distinct blocked
+setup state: no responsible agent is configured. It offers no recipient,
+Start or Retry and does not loop refreshing the preview. No message matching
+or internal store error code determines this state. Other failed reads offer Retry.
+
+A signed Start is definitive only with explicit `applied: none` under the shared
+application-certainty interpreter; absent metadata is NOT proof. Unknown in either
+metadata location dominates none. A definitive `409 stale-fence`, `recipient-retired`,
+`recipient-unassigned` or recipient-mismatch 404 visibly re-reads the exact preview.
+The draft stays; a changed recipient needs a NEW explicit Send and a refused preview
+stays refused. The canonical unassigned golden carries none in both metadata locations.
+Without positive evidence (including bare golden stale-fence), retain the original signed packet, recipient, identities and retry key
+for explicit receipt recovery, even if the displayed preview changes. Never
+silently resend or retarget. Replies use the existing thread's stored
+participants, regardless of later routing policy. Storybook's
+`Fractal/App/Threads/Start recipient` covers every state.
+
+While a first send is pending, the draft remains visible and read-only with a
+`Sending…` status. Send is focusable but announced as disabled using
+`aria-disabled`; pointer and keyboard activation cannot submit another request.
+This preserves the composer's existing focusable, explained blocked-control
+convention rather than removing the control from the keyboard sequence.
+
+## Independent resolved Inbox discussions
+
+Resolved Inbox asks, authored steps and typed notices retain the same Start
+affordance when their exact source episode is available; auto-resolved rows open
+their resolved detail without overriding the default. A selected card retains
+its exact opening when it leaves the live list. This is not a new completed-source
+inventory. Every successful Start creates an independent discussion, even when
+other threads share that source episode; two Starts create two threads. Opening
+an existing discussion remains navigation, never Start coalescing. The daemon
+revalidates source authority and the recipient on each first send; neither the
+original discussion nor its participants are changed.
+
+## Related requests
+
+An open thread shows a small "Related requests" section above its conversation,
+read through the optional `ThreadSource.requestHistory` reader over
+`/v1/client/threads/:id/request-history` (`RequestHistoryPage`); a source without
+that reader, or a Fractal that cannot serve it, shows no section. The section
+renders only what the reader returned: each request's original title and text and
+its own status and standing answers. "Requested after “…”" explains why one
+request followed another, with Fractal's reason, and moves focus to that request;
+it never marks one request a prerequisite of, or an answer to, another, and a
+completed predecessor never changes a later request's status. Visible episodes of
+the same source stay together, each with its own status. Boundary predecessors
+from another page are shown in order, not counted. A relation whose predecessor
+was not returned draws nothing, so hidden requests leave no identifier, reason or
+count.
+
+Missing original wording is labelled "Original request unavailable" with the
+payload reason; today's source text is never substituted. A missing status reads
+"Status unknown", and an incomplete page says requests may be missing. References
+stay references: a pinned revision is named, and a live target is labelled as
+possibly changed. An authorized source of another kind says Fractal keeps no
+request history for it. A lone complete request, which is the thread's own origin,
+shows no section. Loading, paused (with Retry), refused and failed (with Retry)
+reads use the shared system notices. The section never changes unread receipts,
+the timeline's anchors or any action. The component lives in
+`apps/fractal-web/src/threads/RelatedRequests.tsx`; Storybook's
+`Fractal/App/Threads/Related requests` covers every state and a walkthrough.
+## Fractal web threads connected preview
+
+`node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,
+isolated daemon for reviewing Threads; Storybook's `Fractal/App/Inbox threads` stories stay local
+fixtures. `serve` makes a throwaway instance (`PREVIEW_INSTANCE`, default `threadspreview`) under
+its own HOME in `PREVIEW_ROOT` (default `/var/tmp/fractal-${PREVIEW_INSTANCE}`), with
+`thread_writes = true` and agent/example/manager as the
+explicit `inbox_fallback_agent`, person/avery, program seats agent/example/atlas and
+agent/example/manager, and one full-control owner device paired through the client gateway. The
+browser's own credential comes from Fractal's browser pairing (`browser_pairing_login` is set for
+the instance): the owner device asks, the script approves the "Pair browser" ask from that device as
+avery would from the Inbox, and the browser redeems its one-use key, so the daemon grants it
+`thread-browser-send`. It seeds two atlas asks (one with an earlier thread, one with no thread) and
+the human gate of mission `example/release-notes`, whose discussion falls back to the Manager, with
+one thread so the Missions view lists it. Vite then serves the app on `127.0.0.1:5317` through
+`WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`, with the browser's credential.
+
+`PREVIEW_INSTANCE` follows `crates/fractal-kernel/src/instance.rs`: 1–24 lowercase ASCII letters,
+digits or hyphens, with no leading, trailing or repeated hyphen. Its daemon unit is
+`${PREVIEW_INSTANCE}-fractal-up`. For independent previews on one host, use
+`PREVIEW_INSTANCE=threadsweb PREVIEW_PORT=5317` and
+`PREVIEW_INSTANCE=threadsios PREVIEW_PORT=5318`; their default roots and daemon units are disjoint.
+Use the same instance setting for subsequent `offline`, `online`, `status` and `down` commands.
+An explicit `PREVIEW_ROOT` overrides the default; keep overrides distinct between instances and
+name them `fractal-${PREVIEW_INSTANCE}*` so the guarded `down` command can remove them.
+
+The asks name Atlas as their requester through `work ask --as agent/example/atlas`; the seeded
+thread messages are all person-authored, and the program seats never write on their own. The
+fixture's login shell disables Unix peer ancestry binding, so `ST_AGENT`, `FRACTAL_AGENT` or `--as`
+do not establish the bound-agent authority that agent replies and linking an ask require.
+`agent-reply` (Atlas answers the checklist thread, the Manager the mission thread) and `link-ask`
+(Atlas links a new follow-up ask to the checklist thread) act as those declared agents through the
+local identity header on the daemon's own socket; the client socket serves paired devices only. Only
+a fixture executable with declared-agent attribution binds that header; any other build refuses it
+and writes nothing. Do not read person replies as agent evidence.
+
+`up` seeds without serving. `agent-reply` and `link-ask` write as agents while the app is open, so
+the unread and linked-ask states arrive live. `offline` and `online` stop and restart the daemon for the paused and
+reconnect states, `revoke` revokes the browser pairing as the app's own revoke does (the refused
+state), and `down` removes the instance.
+The script needs a systemd user manager, `pty`, and `FRACTAL_BINARY` set to the test-support
+`fractal-fixture` built from this checkout
+(`cargo build --locked -p fractal --features test-support --bin fractal-fixture`).
+
+The preview is connected, not production: the app, its SDK, the paired gateway and the daemon are
+real, but the daemon is the fixture executable, which turns off host process-ancestry binding and uses
+its own login shell. Each Fractal command runs in a transient user unit, and on hosts where the user
+service manager's environment cannot be read, the release binary refuses those callers as
+`foreign-agent-actor`. Read the preview's results as connected-fixture results, never as results of
+the installed runtime.
 
 ## Sidebar migration
 

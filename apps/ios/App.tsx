@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useState, useSyncExternalStore, type ComponentProps } from 'react';
 import { Button, Linking, ScrollView, Text, View } from 'react-native';
 import { DarkTheme, DefaultTheme, ThemeProvider, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@react-navigation/native-stack';
@@ -18,6 +18,7 @@ import { lightTheme, systemColors, theme, type Theme } from './theme';
 import { useScheme } from './ui';
 import { AgentsScreen, HistoryScreen } from './screens/Agents';
 import { ConversationScreen } from './screens/Conversation';
+import { ThreadScreen } from './screens/Threads';
 import { FleetScreen, PairScreen } from './screens/Fleet';
 import { UsageDetailScreen, UsageScreen } from './screens/Usage';
 import { AttentionScreen, NowScreen } from './screens/Now';
@@ -32,6 +33,7 @@ import { quality } from './qualityNative';
 import { qualityVisibility } from './qualityView';
 import { parseFabricProofLink, type FabricProofInput } from './fabricProof';
 import { DiagnosticsBoundary } from './DiagnosticsBoundary';
+import { ownedPresentations } from './ownedPresentation';
 
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
 // @react-navigation/bottom-tabs' native navigator) holding a UINavigationController per tab
@@ -61,6 +63,12 @@ const stackOptions: NativeStackNavigationOptions = {
   statusBarStyle: 'light',
   headerBackButtonDisplayMode: 'default',
 };
+
+// Native-stack owns dismissal and unmount; keep its sheet's barrier until then.
+function NewMissionModal(props: ComponentProps<typeof NewMissionScreen>) {
+  useLayoutEffect(() => ownedPresentations.acquire(), []);
+  return <NewMissionScreen {...props} />;
+}
 
 function TabStack({ tab }: { tab: Tab }) {
   const scheme = useScheme();
@@ -97,12 +105,13 @@ function TabStack({ tab }: { tab: Tab }) {
     <Stack.Screen name="Document" component={DocumentScreen} options={{ title: 'Document' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ ...schemeOptions, title: 'Conversation' }} />
+    <Stack.Screen name="Thread" component={ThreadScreen} options={({ route }) => ({ ...systemOptions, title: route.params.title ?? 'Thread' })} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
     <Stack.Screen name="Mission" component={MissionScreen} options={{ title: 'Mission' }} />
     <Stack.Screen name="Attention" component={AttentionScreen} options={{ ...systemOptions, title: 'Alert' }} />
     <Stack.Screen name="Launch" component={LaunchScreen} options={{ title: 'Launch' }} />
     <Stack.Screen name="History" component={HistoryScreen} options={{ title: 'Past sessions' }} />
-    <Stack.Screen name="NewMission" component={NewMissionScreen} options={{ title: 'New mission', presentation: 'modal' }} />
+    <Stack.Screen name="NewMission" component={NewMissionModal} options={{ title: 'New mission', presentation: 'modal' }} />
     <Stack.Screen name="Usage" component={UsageScreen} options={{ title: 'Usage' }} />
     <Stack.Screen name="UsageDetail" component={UsageDetailScreen} options={{ title: 'Usage' }} />
   </Stack.Navigator>;
