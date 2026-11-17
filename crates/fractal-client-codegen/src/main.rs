@@ -337,6 +337,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {{ self.get(\"/v1/client/auto-resolved\").await }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    pub async fn availability_history(&self, person: Option<&str>, from: &str, to: &str, bucket_seconds: u64) -> Result<Envelope<AvailabilityHistory>, ClientError> {{ let person = person.map(|person| format!(\"&person={{}}\", percent_encode(person))).unwrap_or_default(); self.get(&format!(\"/v1/client/availability/history?from={{}}&to={{}}&bucket_seconds={{bucket_seconds}}{{person}}\", percent_encode(from), percent_encode(to))).await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -577,6 +579,8 @@ fn swift_operation_methods(
             writeln!(out, "    public func autoResolvedList() async throws -> Envelope<AutoResolvedAsks> {{ try await get(\"v1/client/auto-resolved\") }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    public func availabilityHistory(person: String? = nil, from: String, to: String, bucketSeconds: Int) async throws -> Envelope<AvailabilityHistory> {{ var query = [URLQueryItem(name: \"from\", value: from), URLQueryItem(name: \"to\", value: to), URLQueryItem(name: \"bucket_seconds\", value: String(bucketSeconds))]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; return try await get(\"v1/client/availability/history\", query: query) }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -739,7 +743,9 @@ fn rust_field(name: &str) -> String {
         "loop" => "loop_spec".into(),
         "ref" => "reference".into(),
         "kdlLines" => "kdl_lines".into(),
-        other => other.into(),
+        "override" => "r#override".into(),
+        // A wire word used as a key, such as `hold-routine`.
+        other => other.replace('-', "_"),
     }
 }
 
@@ -911,6 +917,13 @@ fn validate_surfaces(
         "AvailabilitySet",
         "PresenceReport",
         "PresenceReportResult",
+        "AvailabilityHistory",
+        "AvailabilityHistoryBucket",
+        "AvailabilityStatusDurations",
+        "AvailabilityStatusSourceDurations",
+        "AvailabilityPresenceDurations",
+        "AvailabilityInterruptionsDurations",
+        "AvailabilityDeadlineClockDurations",
         "DirectiveNoteSet",
         "DirectiveNoteSetResult",
         "ResourceObservation",
@@ -1560,6 +1573,7 @@ fn ts_object(value: &Value) -> Result<String> {
             } else {
                 "?"
             };
+            // A wire word used as a key, such as `hold-routine`, is no identifier: quote it.
             let identifier = name.chars().enumerate().all(|(index, character)| {
                 character.is_ascii_alphabetic() || matches!(character, '_' | '$')
                     || (index > 0 && character.is_ascii_digit())
@@ -1832,6 +1846,8 @@ fn typescript_operation_methods(
             writeln!(out, "    async autoResolvedList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AutoResolvedAsks>> {{ return this.get('/v1/client/auto-resolved', undefined, requestOptions); }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    async availabilityHistory(options: {{ from: string; to: string; bucket_seconds: number; person?: string }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AvailabilityHistory>> {{ return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
