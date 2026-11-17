@@ -247,6 +247,7 @@ function useAppStore(proof?: FabricProfile) {
   const conversationCache = useRef(new Map<string, Conversation<TimelineEntry>>()), draftCache = useRef(new Map<string, string>());
   const [draftsReady, setDraftsReady] = useState(0);
   const draftsOwner = useRef('');
+  const draftGeneration = useRef(0);
   useEffect(() => {
     const owner = caps?.session_actor;
     if (proof || !owner || draftsOwner.current === owner) return;
@@ -599,6 +600,7 @@ function useAppStore(proof?: FabricProfile) {
   }, [proof?.url, proof?.credential]);
 
   function clearCaches() {
+    draftGeneration.current++;
     sidebarSeen.current.clear(); sidebarCreation.current = null; sidebarRemoved.current = false;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
@@ -1678,7 +1680,7 @@ function useAppStore(proof?: FabricProfile) {
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
-    error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, draftsOwner, draftGeneration, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, threadEdits, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,
     unreadClient, unreadEnabled: capsClient.current === client && unreadSupported(caps),

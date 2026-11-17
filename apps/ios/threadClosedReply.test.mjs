@@ -37,6 +37,11 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
     useUnreadVisitEntry: nativeVisitPorts().useUnreadVisitEntry,
     renderedLineEvidence: (...args) => (lineEvidence ??= compile('renderedLineEvidence', 'function threadTextIssue', {}))(...args),
     useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(), ...dependencies };
+  if (dependencies.useStore) {
+    const useStore = dependencies.useStore;
+    const ownership = { draftsOwner: { current: 'person/one' }, draftGeneration: { current: 0 } };
+    dependencies.useStore = () => ({ ...ownership, ...useStore() });
+  }
   new Function('exports', 'React', ...Object.keys(dependencies), outputText)(exports, React, ...Object.values(dependencies));
   return exports.component;
 }
@@ -1596,16 +1601,19 @@ test('a nonempty Start draft transfers intact to its own recovery across remount
   assert.equal(store.draftCache.current.has(attemptKey), false);
 });
 
-for (const divergence of ['before invocation', 'while pending']) test(`a Start preserves its rendered submission and concurrent cache typing diverged ${divergence}`, async () => {
+for (const divergence of ['before invocation', 'while pending', 'owner switched', 'generation reset'])
+for (const outcome of divergence === 'owner switched' || divergence === 'generation reset' ? ['unconfirmed', 'sent'] : ['unconfirmed'])
+test(`a Start fences its ${outcome} draft result when ${divergence}`, async () => {
   const origin = { sourceId: 'notice/delayed', episode: 'episode/one' }, client = {};
   const originKey = 'thread-draft/["notice/delayed","episode/one"]';
   const original = JSON.stringify({ text: 'Submitted original', quote: { id: 'message/quote', from: 'Agent', text: 'Original quote' } });
   const later = JSON.stringify({ text: 'Typed after navigating back' });
-  const pending = Promise.withResolvers(), calls = [];
+  const pending = Promise.withResolvers(), calls = [], saves = [];
   const store = {
     status: 'online', threadRefresh: 0, draftsReady: true,
+    draftsOwner: { current: 'person/first' }, draftGeneration: { current: 0 },
     draftCache: { current: new Map([[originKey, original]]) }, threadDeliveries: new Map(),
-    saveDrafts() {},
+    saveDrafts() { saves.push([...store.draftCache.current]); },
     actions: { startThread: async (...args) => { calls.push(args); return pending.promise; } },
   };
   const props = { client, origin, agentId: 'agent/one', initialTitle: 'Notice', canStart: true, onOpen() {} };
@@ -1629,10 +1637,25 @@ for (const divergence of ['before invocation', 'while pending']) test(`a Start p
   assert.equal(calls[0][3], 'Submitted original');
   // Remounting while the network is pending can legitimately create later typing.
   if (divergence === 'while pending') store.draftCache.current.set(originKey, later);
+  const ownershipChanged = divergence === 'owner switched' || divergence === 'generation reset';
+  if (ownershipChanged) {
+    // clearCaches resets this same Map in place, then the next owner can type
+    // even the exact same text. Neither compare-delete nor persistence is safe.
+    store.draftCache.current.clear();
+    store.draftCache.current.set(originKey, original);
+    if (divergence === 'owner switched') store.draftsOwner.current = 'person/second';
+    else store.draftGeneration.current++;
+  }
   const remounted = find(createPanel()(props), 'InlineThread').props.start;
   assert.equal(remounted.target, undefined);
-  pending.resolve({ how: 'unconfirmed', retry: async () => ({ how: 'sent' }) });
+  pending.resolve({ how: outcome, retry: async () => ({ how: 'sent' }) });
   await new Promise(resolve => setImmediate(resolve));
+  if (ownershipChanged) {
+    assert.deepEqual([...store.draftCache.current], [[originKey, original]], 'no old-owner draft, metadata or cleanup touches the reset cache');
+    assert.deepEqual(saves, [], 'the old completion cannot persist into the new owner');
+    assert.equal(calls.length, 1, 'no reconstruction or resend');
+    return;
+  }
   assert.equal(store.draftCache.current.get('thread-draft/start/thread/first'), original);
   assert.equal(store.draftCache.current.get(originKey), later);
   assert.deepEqual(savedThreadStarts(store.draftCache.current), [{

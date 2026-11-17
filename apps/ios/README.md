@@ -70,6 +70,9 @@ Before releasing an unconfirmed first composer, the rendered draft used to build
 its submitted content and quote is serialized into the attempt's own durable key.
 Only a matching origin snapshot is removed: shared-cache edits before invocation
 or while the send is pending remain independent.
+Start completion captures the draft owner and cache generation at dispatch. If
+either changes while pending, it skips draft handoff, persistence and cleanup, even
+when the reset shared map contains identical text for the next owner.
 Minimal target/origin/title discovery metadata is saved beside the draft, never a
 bound action, operation key or signature. Inbox discovers these drafts after restart.
 With the live ledger, recovery retries the original signed request. Without it, the
