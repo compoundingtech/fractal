@@ -28,6 +28,8 @@ const ROOT_NODES: &[&str] = &[
     "planning-session",
     "message",
     "objective",
+    "github-source",
+    "github-scope",
     "notice-owner",
     "repair",
     "schedule",
@@ -6650,5 +6652,31 @@ mission "example/work" state="ready" { goal "Work."; declared-budgets { cpu-seco
             assert_eq!(error.details["field"], "declared_budgets.attention");
             assert!(error.details["subject"].is_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod github_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_effective_scope_are_root_declarations() {
+        let intent = parse_intent(r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    authority-grant "admitted-grant"
+    repository "example/public"
+    enabled #false
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+github-scope "public-example" {
+    revision "authored-one"
+    repository "R_example" from-ms=100
+}
+"#, "member-one").unwrap();
+        assert_eq!(intent.subjects["github-source/public-example"].kind, "github-source");
+        assert_eq!(intent.subjects["github-scope/public-example"].kind, "github-scope");
     }
 }
