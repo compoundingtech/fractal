@@ -63,6 +63,9 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
         ...actions.map(id => ({ id, version: 0, state: 'granted' })),
       ] },
     })
+    if (url.pathname.endsWith('/request-history')) return Response.json({ ...base, value: {
+      items: [], boundary_items: [], relations: [], source_episodes: [], complete: true, next_cursor: null, source_support: null,
+    } })
     return reply(url, init)
   } })
   const registry = AtomRegistry.make()

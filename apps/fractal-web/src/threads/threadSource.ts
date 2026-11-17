@@ -212,6 +212,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       readonly onFailure?: (error: unknown) => void
       /** How a failed read reads; one thread's own reads name that thread when it is refused. */
       readonly refused?: (error: unknown) => Feed<never>
+      /** History reauthorizes every open/refresh; discard its previous cut before requesting a new one. */
+      readonly resetOnReload?: boolean
       readonly updates?: (update: (change: (value: T) => T) => void) => () => void
     },
   ): Atom.Atom<Feed<T>> {
@@ -219,6 +221,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     return Atom.make(get => {
       const demand = get(access)
       get(revision)
+      if (settings?.resetOnReload) previous = waiting
       if (!demand.read) return previous = waiting
       // A new read of a refused projection is loading again, not still refused.
       if (previous._tag === 'Unavailable') previous = waiting

@@ -85,11 +85,14 @@ it.each([
       return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id,
         operation_id: 'operation/start', status: 'completed', affected_ids: [createdId, 'message/first'], snapshot_id: base.snapshot.id } })
     }
+    if (url.pathname.endsWith('/request-history')) return Response.json({ ...base, value: {
+      items: [], boundary_items: [], relations: [], source_episodes: [], complete: true, next_cursor: null, source_support: null,
+    } })
     if (url.pathname.endsWith('/timeline')) return Response.json({ ...base, value: { items: [{
       kind: 'message', id: 'message/first', actor_id: base.value.session_actor,
       content: 'Discuss this review before answering.', accepted_at_unix_ms: 1, thread_quote_id: null,
     }], next_cursor: null } })
-    if (url.pathname.startsWith('/v1/client/threads/')) return Response.json({ ...base, value: summary(decodeURIComponent(url.pathname.split('/').at(-1)!)) })
+    if (url.pathname.startsWith('/v1/client/threads/')) return Response.json({ ...base, value: summary(`thread/${decodeURIComponent(url.pathname.split('/').at(-1)!)}`) })
     return Response.json({ ...base, value: { items: url.searchParams.get('recently_closed') === 'true' ? [] :
       [...(resolved ? [summary('thread/original')] : []), ...createdIds.map(summary)], next_cursor: null } })
   } })

@@ -33,15 +33,25 @@ export type RelatedRequestUnit =
 /**
  * Orders the returned requests so a predecessor comes before the requests asked after it; unrelated requests keep
  * Fractal's order. Relations name only requests on this page or its boundary, so an arrow to anything else is dropped
- * rather than drawn to a placeholder. Same-source episodes stay together, at the place of their earliest member.
+ * rather than drawn to a placeholder. Same-source episodes are one unit in that order: the group comes after every
+ * predecessor of any of its members, and its episodes keep Fractal's order (Fractal never links a source to itself).
  */
 export function relatedRequests(page: RequestHistoryPage): readonly RelatedRequestUnit[] {
   const visible = new Map<string, RequestHistoryItem>()
   for (const item of [...page.items, ...page.boundary_items]) if (!visible.has(keyOf(item.key))) visible.set(keyOf(item.key), item)
-  const serverOrder = [...visible.keys()]
+  const group = new Map<string, string>()
+  for (const each of page.source_episodes) {
+    const members = each.episodes.map(keyOf).filter(key => visible.has(key))
+    if (members.length > 1) for (const key of members) group.set(key, each.source_id)
+  }
+  // One unit per lone request or same-source group, in order of first appearance in Fractal's order.
+  const unitOf = (key: string) => { const sourceId = group.get(key); return sourceId === undefined ? `request:${key}` : `source:${sourceId}` }
+  const members = new Map<string, string[]>()
+  for (const key of visible.keys()) members.set(unitOf(key), [...members.get(unitOf(key)) ?? [], key])
+  const unitOrder = [...members.keys()]
   const after = new Map<string, { readonly predecessor: RequestHistoryItem; readonly reason: string }[]>()
   const successors = new Map<string, string[]>()
-  const indegree = new Map(serverOrder.map(key => [key, 0]))
+  const indegree = new Map(unitOrder.map(unit => [unit, 0]))
   const edges = new Set<string>()
   const reasons = new Set<string>()
   for (const relation of page.relations) {
@@ -53,34 +63,23 @@ export function relatedRequests(page: RequestHistoryPage): readonly RelatedReque
       reasons.add(JSON.stringify([from, to, relation.reason]))
       after.set(to, [...after.get(to) ?? [], { predecessor, reason: relation.reason }])
     }
-    if (edges.has(JSON.stringify([from, to]))) continue
-    edges.add(JSON.stringify([from, to]))
-    successors.set(from, [...successors.get(from) ?? [], to])
-    indegree.set(to, (indegree.get(to) ?? 0) + 1)
-  }
-  // Kahn's order, always taking the earliest ready request in Fractal's order; a cycle keeps Fractal's order.
-  const ordered: string[] = []
-  const placed = new Set<string>()
-  while (ordered.length < serverOrder.length) {
-    const next = serverOrder.find(key => !placed.has(key) && indegree.get(key) === 0) ?? serverOrder.find(key => !placed.has(key))!
-    placed.add(next)
-    ordered.push(next)
-    for (const successor of successors.get(next) ?? []) indegree.set(successor, (indegree.get(successor) ?? 0) - 1)
-  }
-  const group = new Map<string, string>()
-  for (const each of page.source_episodes) {
-    const members = each.episodes.map(keyOf).filter(key => visible.has(key))
-    if (members.length > 1) for (const key of members) group.set(key, each.source_id)
+    const [fromUnit, toUnit] = [unitOf(from), unitOf(to)]
+    if (fromUnit === toUnit || edges.has(JSON.stringify([fromUnit, toUnit]))) continue
+    edges.add(JSON.stringify([fromUnit, toUnit]))
+    successors.set(fromUnit, [...successors.get(fromUnit) ?? [], toUnit])
+    indegree.set(toUnit, (indegree.get(toUnit) ?? 0) + 1)
   }
   const request = (key: string): RelatedRequest => ({ item: visible.get(key)!, after: after.get(key) ?? [] })
+  // Kahn's order, always taking the earliest ready unit in Fractal's order; a cycle keeps Fractal's order.
   const units: RelatedRequestUnit[] = []
-  const emitted = new Set<string>()
-  for (const key of ordered) {
-    const sourceId = group.get(key)
-    if (sourceId === undefined) { units.push({ _tag: 'Request', request: request(key) }); continue }
-    if (emitted.has(sourceId)) continue
-    emitted.add(sourceId)
-    units.push({ _tag: 'SameSource', sourceId, requests: ordered.filter(member => group.get(member) === sourceId).map(request) })
+  const placed = new Set<string>()
+  while (placed.size < unitOrder.length) {
+    const next = unitOrder.find(unit => !placed.has(unit) && indegree.get(unit) === 0) ?? unitOrder.find(unit => !placed.has(unit))!
+    placed.add(next)
+    for (const successor of successors.get(next) ?? []) indegree.set(successor, (indegree.get(successor) ?? 0) - 1)
+    const keys = members.get(next)!
+    const sourceId = group.get(keys[0]!)
+    units.push(sourceId === undefined ? { _tag: 'Request', request: request(keys[0]!) } : { _tag: 'SameSource', sourceId, requests: keys.map(request) })
   }
   return units
 }
