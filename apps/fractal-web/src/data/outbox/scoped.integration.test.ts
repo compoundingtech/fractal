@@ -1,16 +1,23 @@
 import 'fake-indexeddb/auto'
-import { createOutboxRecord, FractalClient, outboxDeploymentId, prepareMessageSendPacket, prepareOutboxRecord, type EnvelopeOf } from '@fractal/client'
+import { createOutboxRecord, FractalClient, outboxDeploymentId, prepareMessageSendPacket, prepareOutboxRecord, type Capabilities, type EnvelopeOf } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import { IDBFactory } from 'fake-indexeddb'
+import { Schema } from 'effect'
 import { afterEach, describe, expect, it } from 'vitest'
 import fixture from '../subjectReadPort.gateway.fixtures.json'
 import { gatewayMessageSend } from '../attachmentPort.ts'
 import { createScopedChatOutbox, scopeFromCapabilities, type ScopedChatOutbox } from './scoped.ts'
 
-const base = { ...fixture.capabilities, api_version: 'st3.client.v0' as const, snapshot: Native.decodeUnknownSync(Native.Snapshot)(fixture.capabilities.snapshot), value: { ...Native.decodeUnknownSync(Native.Capabilities)(fixture.capabilities.value), issuer: 'person/example', issuer_key: 'issuer-key/a' } }
+const wireCapabilities = Schema.encodeSync(Native.Capabilities)(Native.decodeUnknownSync(Native.Capabilities)(fixture.capabilities.value))
+const base = {
+  ...fixture.capabilities,
+  api_version: 'st3.client.v0',
+  snapshot: { ...fixture.capabilities.snapshot, projection_version: 'client-projection.v0' },
+  value: { ...wireCapabilities, capabilities: [...wireCapabilities.capabilities], issuer: 'person/example', issuer_key: 'issuer-key/a' },
+} satisfies EnvelopeOf<Capabilities>
 const owners: ScopedChatOutbox[] = []
 const setup = () => {
-  let response: EnvelopeOf<typeof Native.Capabilities.Type> = base
+  let response: EnvelopeOf<Capabilities> = base
   let fail = false
   const calls: string[] = []
   const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input) => {
@@ -20,7 +27,7 @@ const setup = () => {
   } })
   const owner = createScopedChatOutbox(client, { indexedDB: new IDBFactory() })
   owners.push(owner)
-  return { client, owner, calls, respond: (next: EnvelopeOf<typeof Native.Capabilities.Type>) => { response = next }, offline: () => { fail = true } }
+  return { client, owner, calls, respond: (next: EnvelopeOf<Capabilities>) => { response = next }, offline: () => { fail = true } }
 }
 afterEach(() => { for (const owner of owners.splice(0)) owner.close() })
 
