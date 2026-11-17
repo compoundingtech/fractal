@@ -95,6 +95,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn ensure_resource_authority(&self) -> Result<()> {
         let initialized = self.resource_authority.get_or_init(|| {
             (|| -> Result<()> {
+                // Preserve released shell outcomes before generic predecessor recovery can
+                // remove their cgroups or turn their memberships into admission refusals.
+                self.prepare_shell_resource_recovery()?;
                 self.store.start_resource_authority(&self.host, &uuid::Uuid::now_v7().to_string())?;
                 self.runtime.recover_resource_lanes(&self.store, &self.host, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
                 Ok(())
