@@ -267,6 +267,13 @@ fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, 
     let held: u32 = connection.query_row("SELECT count(*) FROM resource_memberships_v1
         WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')",
         rusqlite::params![request.host,request.name], |row| row.get(0))?;
+    let unprofiled_held: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1
+        WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')
+        AND json_extract(body,'$.request.capacity') IS NULL)",
+        rusqlite::params![request.host,request.name], |row| row.get(0))?;
+    if unprofiled_held {
+        return Ok(Some((BlockedBy::Holder, "existing unprofiled custody must retire before profiled admission".into())));
+    }
     if held >= request.max_members { return Ok(Some((BlockedBy::Holder, "lane occupied".into()))); }
     let finite_held: u64 = connection.query_row("SELECT coalesce(sum(memory),0) FROM resource_memberships_v1
         WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')",
@@ -492,7 +499,15 @@ impl Store {
                 rusqlite::params![request.host,request.name,policy])?;
             let installed: String = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                 rusqlite::params![request.host,request.name], |row| row.get(0))?;
-            anyhow::ensure!(installed == policy, "resource lane policy differs from host-installed policy");
+            if installed != policy {
+                let previous: (u32, Option<Capacity>, Coverage) = serde_json::from_str(&installed)?;
+                anyhow::ensure!(previous == (request.max_members, None, request.coverage),
+                    "resource lane policy differs from host-installed policy");
+                // Earlier writers installed profile-less policies. Define the missing profile
+                // without changing their custody; resource_blocking drains those holders first.
+                transaction.execute("UPDATE resource_lane_policies_v1 SET policy=?3 WHERE host=?1 AND lane=?2",
+                    rusqlite::params![request.host,request.name,policy])?;
+            }
         }
         let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1 WHERE id=?1)", [&request.id], |r| r.get(0))?;
         let mut member = if exists {
@@ -996,7 +1011,40 @@ mod tests {
     }
 
     #[test]
-    fn host_classes_are_strict_and_fifo_across_different_lanes() {
+    fn profile_less_installed_policy_upgrades_after_reopen_without_releasing_old_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.sqlite");
+        let mut historical = request("historical");
+        historical.max_members = 2;
+        let historical_grant;
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch-a").unwrap();
+            historical_grant = grant(&store, &historical, 1);
+            let mut legacy = store.resource_membership_record(&historical.id, &historical.owner).unwrap();
+            legacy.request.capacity = None;
+            historical.capacity = None;
+            // Seed bytes written by the earlier profile-optional authority.
+            let connection = store.connection.write();
+            connection.execute("UPDATE resource_lane_policies_v1 SET policy=?1",
+                [serde_json::to_string(&(2_u32, None::<Capacity>, Coverage::Logical)).unwrap()]).unwrap();
+            connection.execute("UPDATE resource_memberships_v1 SET memory=0,body=?1 WHERE id=?2",
+                rusqlite::params![serde_json::to_string(&legacy).unwrap(),historical.id]).unwrap();
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        assert!(matches!(store.request_resource_membership(&historical, test_fit(), 2).unwrap(), Admission::Admitted(_)),
+            "an existing grant retains custody despite the new admission requirement");
+        let mut profiled = request("profiled");
+        profiled.max_members = 2;
+        assert!(matches!(store.request_resource_membership(&profiled, test_fit(), 3).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&profiled.id, &profiled.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
+        assert_eq!(store.resource_membership_record(&historical.id, &historical.owner).unwrap().grant, Some(historical_grant.clone()));
+        assert!(store.retire_resource_membership(&historical_grant, &historical.owner, &runtime(root.path()), 4).unwrap());
+        assert!(matches!(store.request_resource_membership(&profiled, test_fit(), 5).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn host_classes_are_strict_and_fitting_predecessors_keep_fifo_across_lanes() {
         let store = fixture();
         let mut requests: Vec<_> = [
             ("agent", RequestClass::Agent), ("check-first", RequestClass::Check),
@@ -1020,6 +1068,8 @@ mod tests {
         let partial = Fit { room: blocked.room, outside_bytes: 50, ..test_fit() };
         assert!(matches!(store.request_resource_membership(&requests[2], partial.clone(), 2).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&requests[2].id, &requests[2].owner).unwrap().blocked_by, Some(BlockedBy::Outside));
+        assert!(matches!(store.request_resource_membership(&requests[1], partial.clone(), 2).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&requests[1].id, &requests[1].owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
         assert!(matches!(store.request_resource_membership(&requests[0], partial, 2).unwrap(), Admission::Queued { .. }));
         let fits = Fit { room: blocked.room, ..test_fit() };
         assert_eq!(store.resource_membership_record(&requests[0].id, &requests[0].owner).unwrap().blocked_by, Some(BlockedBy::Fifo));

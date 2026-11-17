@@ -31,6 +31,11 @@ bypasses a higher-class head. Membership binds the lane, authority epoch, owner 
 generation. Independent roots consume room once in the accountant shared with seats and their
 raises/bursts, including CI and shell work. A child run without an OS process reserves no memory.
 
+An earlier profile-less installed policy can acquire its first explicit profile while preserving
+the same member limit and coverage. Already granted profile-less custody remains valid through
+retirement; profiled admission on that lane waits for those holders to drain. This transition
+does not permit changing an already explicit profile or silently rewriting a request.
+
 A durable **host hold** closes admission without occupying a membership. Its authenticated owner,
 revision, reason, affected operations and receipt persist independently of the initiating run.
 Resolving an ask, terminating a run, or restarting a daemon does not clear a hold. Resolution checks
