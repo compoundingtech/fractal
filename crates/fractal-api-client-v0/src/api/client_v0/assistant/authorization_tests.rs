@@ -912,7 +912,7 @@ agent "start-context.other" { workspace "/tmp"; command "true"; restart always; 
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     for denied in [
-        fixture_principal(&["read.assistant.summary"], true, MCP_PRINCIPAL).await,
+        fixture_principal(&SCOPES[..4], true, MCP_PRINCIPAL).await,
         fixture_principal(SCOPES, true, PRINCIPAL).await,
     ] {
         let payload = denied.payload("thread-start-context", &query);
