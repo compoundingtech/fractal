@@ -114,7 +114,7 @@ private struct MenuBarGlyph: View {
   // Decode each vector once, not on every count change or freshness poll.
   private static let images: [String: NSImage] = Dictionary(
     uniqueKeysWithValues: ["idle", "urgent", "offline", "unconfigured"].map { state in
-      guard let url = Bundle.module.url(forResource: "fractal-menubar-\(state)", withExtension: "pdf"),
+      guard let url = FractalMacResources.bundle.url(forResource: "fractal-menubar-\(state)", withExtension: "pdf"),
         let image = NSImage(contentsOf: url)
       else { preconditionFailure("Missing Fractal menu-bar asset: \(state)") }
       image.isTemplate = true

@@ -52,19 +52,16 @@ import FractalMacUI
       await source.hold("availability")
       let model = model(source, speech: FixtureSpeech().coordinator())
       let host = NSHostingView(rootView: TrayPanel(model: model, build: GalleryBuild.identity)
-        .environment(\.panelAvailableHeight, limit)
-        .background(PanelWindowFrame()))
+        .environment(\.panelAvailableHeight, limit))
       let uncapped = NSHostingView(rootView: TrayPanel(model: model, build: GalleryBuild.identity))
       let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: 360, height: limit),
         styleMask: [.borderless], backing: .buffered, defer: false)
       window.contentView = host
-      // MenuBarExtra mounts its closed hierarchy before AppKit positions it below the
-      // status item. Reproduce that initial placement once, after the accessor mounts;
-      // never repin from the harness while content or navigation changes.
+      // Offscreen layout fixture only. Native status-item presentation and painted content
+      // attachment are exercised by the app's DEBUG native-panel probe.
       try? await Task.sleep(for: .milliseconds(100))
       host.layoutSubtreeIfNeeded()
       window.setFrameTopLeftPoint(CGPoint(x: -20000, y: -20000 + limit))
-      var anchor = window.frame.maxY
       let prefix = "height=\(limit)"
 
       func require(_ condition: Bool, _ message: String) {
@@ -76,12 +73,10 @@ import FractalMacUI
         require(height.isFinite && height > 0 && height <= limit + 1,
           "\(phase): invalid ideal height \(height), cap \(limit)")
         let size = CGSize(width: 360, height: min(limit, max(1, height)))
-        // Only production's shared frame policy owns the origin; the harness changes size.
+        // This harness controls an offscreen window; it does not model MenuBarExtra sizing.
         window.setContentSize(size)
         host.setFrameSize(size)
         host.layoutSubtreeIfNeeded()
-        require(abs(window.frame.maxY - anchor) < 1,
-          "\(phase): detached from menu-bar anchor \(anchor) -> \(window.frame.maxY), height \(window.frame.height)")
         let scrolls = visibleScrolls(in: host)
         for scroll in scrolls {
           let rect = host.convert(scroll.contentView.bounds, from: scroll.contentView)
@@ -268,11 +263,10 @@ import FractalMacUI
             "19-row fitting home must hug min(content=\(natural), budget=\(limit)), got \(window.frame.height)")
         }
         await edges("19-row home")
-        print("navigation-probe 19-row home \(prefix): rows=\(rowCount) more=\(ids.contains("inbox-more")) document=\(document.bounds.height) viewport=\(scroll.contentView.bounds.height) extent=\(extent) top=\(window.frame.maxY) anchor=\(anchor)")
+        print("navigation-probe 19-row home \(prefix): rows=\(rowCount) more=\(ids.contains("inbox-more")) document=\(document.bounds.height) viewport=\(scroll.contentView.bounds.height) extent=\(extent)")
       }
-      // A new AppKit placement establishes a new anchor, rather than pinning to the old screen.
+      // Layout and retained scroll state must not depend on the offscreen window's origin.
       window.setFrameOrigin(CGPoint(x: window.frame.minX - 400, y: window.frame.minY + 100))
-      anchor += 100
       await settle("AppKit repositions panel")
       await source.replaceRecords(Array(fixture.asks.prefix(3)))
       await model.refresh()
@@ -294,6 +288,6 @@ import FractalMacUI
       for failure in Array(Set(failures)).sorted() { print("navigation-probe FAIL: \(failure)") }
       fail("navigation-probe: \(failures.count) failed assertions", code: 1)
     }
-    print("navigation-probe PASS: 3 height budgets; pinned window top and compact min(content,budget) height; first-open/async/row mutations; all signals, speech, ask/update routes; restore-on-back; stable refresh; InboxCap 3/3/19; fitting content and edge wheel offsets stable; AppKit reposition establishes new anchor")
+    print("navigation-probe PASS: 3 height budgets; compact min(content,budget) height; first-open/async/row mutations; all signals, speech, ask/update routes; restore-on-back; stable refresh; InboxCap 3/3/19; fitting content and edge wheel offsets stable; offscreen reposition preserves layout")
   }
 }
