@@ -728,8 +728,13 @@ pub(crate) mod retained_discussion {
     #[tokio::test]
     async fn offline_and_unknown_originals_are_not_terminal_retirements() {
         for resolved in [false, true] {
-            for availability in ["unknown-runtime", "stopped", "undeclared"] {
+            for availability in ["unknown-runtime", "stopped", "unreachable", "undeclared"] {
                 let (_root, state, origin) = fixture(resolved);
+                let intent = crate::graph::parse_intent(
+                    "version 2\nagent \"garden/fallback\" { workspace \"/work/garden\"; harness \"omp\" {} }",
+                    state.store.origin(),
+                ).unwrap();
+                state.store.apply_internal(&intent, "availability-fallback-declare").unwrap();
                 state.store.configure_inbox_fallback_agent(Some("agent/garden/fallback")).unwrap();
                 let origin = if availability == "undeclared" {
                     let opening = state.store.append_claim(&ClaimInput {
@@ -759,6 +764,14 @@ pub(crate) mod retained_discussion {
                             })).unwrap(),
                             evidence:vec![], expected_subject:None, idempotency_key:None,
                         }).unwrap();
+                    } else if availability == "unreachable" {
+                        state.store.append_claim(&ClaimInput {
+                            subject:AGENT.into(), kind:"agent.presence".into(), actor:Some(AGENT.into()),
+                            fields:serde_json::from_value(json!({
+                                "presence":"offline", "reachability":"unreachable",
+                            })).unwrap(),
+                            evidence:vec![], expected_subject:None, idempotency_key:None,
+                        }).unwrap();
                     }
                     origin
                 };
@@ -771,6 +784,13 @@ pub(crate) mod retained_discussion {
                 if availability == "undeclared" {
                     assert_eq!(start(&state, &owner, original).await.unwrap_err().status, StatusCode::NOT_FOUND);
                 } else {
+                    let before = state.store.read_snapshot(Ok).unwrap();
+                    let (status, preview) = opening_preview(&state, PERSON, &origin).await;
+                    assert_eq!(status, StatusCode::OK, "{availability}: {preview}");
+                    assert_eq!(preview["value"]["start_recipient"],
+                        json!({"agent_id":original_agent,"basis":{"_tag":"original"}}));
+                    assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+                    original.parameters["agent_id"] = preview["value"]["start_recipient"]["agent_id"].clone();
                     let result = start(&state, &owner, original).await.unwrap();
                     assert_eq!(result["affected_ids"][0], "thread/availability-original");
                     assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/availability-original").unwrap().agent_id,
@@ -918,6 +938,109 @@ pub(crate) mod retained_discussion {
         let (status, refused) = post(fresh).await;
         assert_start_refusal_fixture(status, refused, "recipient-unassigned");
         assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn thread_start_context_signed_retry_recovers_original_receipt_after_terminal_retirement() {
+        use crate::api::{ThreadMessageDraft, ThreadMessageOrigin, prepare_inline_thread_message};
+        use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, fields_signing_bytes};
+        use tower::ServiceExt;
+
+        for resolved in [false, true] {
+            let (_root, state, origin) = fixture(resolved);
+            state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+            let (device, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+            let chain = state.store.enroll_device_key(PERSON, device.public(), "Retirement phone").unwrap();
+            let credential = "fixture-signed-retirement-bearer";
+            state.store.append_client_operation_claim(&ClaimInput {
+                subject:"custom/client/pairing-signed-retirement".into(),
+                kind:"custom.client.pairing-completed".into(), actor:Some(PERSON.into()),
+                fields:serde_json::from_value(json!({
+                    "person_id":PERSON,"session_actor":"client/paired/signed-retirement",
+                    "device_public_key":device.public(),"credential_hash":credential_digest(credential),
+                    "expires_at_unix_ms":client_now_ms()+60_000,"scopes":["control.messages","read.projections"],
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
+            }).unwrap();
+            let signed_packet = |thread: &str, key: &str, agent: &str| {
+                let mut packet = request(&state, &origin, thread, key);
+                packet.parameters["agent_id"] = json!(agent);
+                let input = prepare_inline_thread_message(&state, ThreadMessageDraft {
+                    key:&packet.idempotency_key, thread, from:PERSON, to:agent,
+                    content:"Explain the decision.", title:Some("Discuss retained review"),
+                    quote:None, origin:Some(ThreadMessageOrigin::Inbox(&origin.source_id, &origin.episode)),
+                }, None).unwrap();
+                let mut signature = ClaimSignature::sign(&device, "", PERSON, None, chain.clone(), client_now_ms() as u64);
+                signature.format = Some(FIELDS_FORMAT.into());
+                signature.signed_fields = input.fields.keys().filter(|field| field.as_str() != "status").cloned().collect();
+                signature.signature = device.sign(&fields_signing_bytes(
+                    &input.subject, &input.kind, input.actor.as_deref(), &json!(input.fields),
+                    &signature.signed_fields, &signature.signer, None, &signature.key,
+                    &signature.chain, &signature.nonce, signature.signed_at_unix_ms,
+                ));
+                packet.parameters["signature"] = serde_json::to_value(signature).unwrap();
+                serde_json::to_vec(&packet).unwrap()
+            };
+            let accepted = signed_packet("thread/signed-before-retirement", "signed-before-retirement", AGENT);
+            for _ in 0..20 {
+                let report = state.store.advance_signature_migration().unwrap();
+                if report.done() { break; }
+                if report.phase == "judging" { state.store.advance_signature_judgment().unwrap(); }
+            }
+            let post = |bytes: Vec<u8>| {
+                let app = crate::api::router(state.clone());
+                async move {
+                    let response = app.oneshot(axum::http::Request::builder()
+                        .method("POST").uri("/v1/client/actions")
+                        .header(AUTHORIZATION, format!("Bearer {credential}"))
+                        .header("Content-Type", "application/json")
+                        .body(axum::body::Body::from(bytes)).unwrap(),
+                    ).await.unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                    (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+                }
+            };
+            let (status, first) = post(accepted.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{first}");
+            let original = thread_metadata::summary(&state.store, PERSON, "thread/signed-before-retirement").unwrap();
+            assert_eq!(original.agent_id, AGENT);
+            assert_eq!(original.message_count, 1);
+            retire_original_with_fallback(&state);
+            let before = state.store.read_snapshot(Ok).unwrap();
+            // Reuse the serialized body, including the signature and original fence.
+            let (status, retry) = post(accepted).await;
+            assert_eq!(status, StatusCode::OK, "{retry}");
+            assert_first_result(&retry["value"], &first["value"]);
+            assert_eq!(retry["value"]["affected_ids"][0], "thread/signed-before-retirement");
+            assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+            let frozen = thread_metadata::summary(&state.store, PERSON, "thread/signed-before-retirement").unwrap();
+            assert_eq!(frozen.agent_id, AGENT);
+            assert_eq!(frozen.revision, original.revision);
+            assert_eq!(frozen.message_count, 1);
+            assert_first_message(&state, &retry["value"], "Explain the decision.");
+            let message = retry["value"]["affected_ids"][1].as_str().unwrap();
+            assert_eq!(state.store.claims_for(message, Some("message.sent")).unwrap()[0].body["fields"]["to"], AGENT);
+
+            let fresh_original = signed_packet("thread/signed-retired-refused", "signed-retired-refused", AGENT);
+            let (status, refused) = post(fresh_original).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+            assert!(state.store.claims_for("thread/signed-retired-refused", None).unwrap().is_empty());
+            assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
+            let fresh_fallback = signed_packet("thread/signed-after-retirement", "signed-after-retirement",
+                "agent/garden/fallback");
+            let (status, fallback) = post(fresh_fallback).await;
+            assert_eq!(status, StatusCode::OK, "{fallback}");
+            assert_eq!(fallback["value"]["affected_ids"][0], "thread/signed-after-retirement");
+            assert_ne!(fallback["value"]["affected_ids"], first["value"]["affected_ids"]);
+            assert_ne!(fallback["value"]["operation_id"], first["value"]["operation_id"]);
+            let created = thread_metadata::summary(&state.store, PERSON, "thread/signed-after-retirement").unwrap();
+            assert_eq!(created.agent_id, "agent/garden/fallback");
+            assert_eq!(created.message_count, 1);
+            assert_first_message(&state, &fallback["value"], "Explain the decision.");
+            assert_eq!(thread_metadata::list_context(&state.store, PERSON,
+                ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap().items.len(), 2);
+            if resolved { assert_not_in_attention(&state); }
+        }
     }
 
     #[tokio::test]
