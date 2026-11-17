@@ -11,7 +11,7 @@ pub const RUN_CREDENTIAL_KIND: &str = "program-run";
 pub const RUN_CREDENTIAL_ENV: &str = "ST_RUN_CREDENTIAL";
 
 /// The step statuses in which a program attempt runs, including one waiting on a person's answer.
-const LIVE_STEP_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
+pub(super) const LIVE_STEP_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
 
 /// The actor a run credential binds: `run` is `mission-run/RUN`.
 #[derive(Clone, Debug, Eq, PartialEq)]
