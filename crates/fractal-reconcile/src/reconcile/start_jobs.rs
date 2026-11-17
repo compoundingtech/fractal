@@ -192,6 +192,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
+        if let Some(freeze) = self.store.launch_freeze()? {
+            self.arm_deadline_at("launch-freeze", u128::from(freeze.expires_at_unix_ms),
+                crate::reconcile_telemetry::WakeCause::Deadline);
+            return Ok(());
+        }
+        let Some(launch_permit) = self.store.admit_launch()? else {
+            return Ok(());
+        };
         let Some(lock) = self.store.try_runtime_start_lock(&operation.subject)? else {
             return Ok(());
         };
@@ -217,6 +225,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .insert(id.clone());
         let spawned = std::thread::Builder::new().name("st3-runtime-start".into()).spawn(move || crate::task_cpu::blocking("runtime.start", || {
             let _lock = lock;
+            let _launch_permit = launch_permit;
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
                 anyhow::ensure!(store.runtime_start_intent_current(&id)?,

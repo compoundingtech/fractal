@@ -319,6 +319,33 @@ use super::*;
         .unwrap()
 }
 
+#[tokio::test]
+async fn launch_freeze_defers_a_durable_operation_then_launches_it_once() {
+    let (_directory, store, runtime, reconciler, _release, _entered) = fixture(false, true);
+    apply_source(&store,
+        "version 2\nagent \"example/queued\" { workspace \"/tmp\"; command \"true\" }",
+        "freeze-queue");
+    let writer = store.clone();
+    tokio::task::spawn_blocking(move || writer.set_launch_freeze(
+        "person/operator", "activation", "replace daemon", 60_000)).await.unwrap().unwrap();
+    assert!(launch(&reconciler, "agent/example/queued"));
+    let operation = store.runtime_start_for("agent/example/queued").unwrap().unwrap();
+    assert!(!operation.dispatched);
+    assert!(runtime.inner.starts.lock().unwrap().is_empty());
+    reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(store.runtime_start_for("agent/example/queued").unwrap().unwrap().id, operation.id);
+    let writer = store.clone();
+    tokio::task::spawn_blocking(move || writer.clear_launch_freeze(
+        "person/operator", "activation")).await.unwrap().unwrap();
+    reconciler.reconcile_start_jobs().unwrap();
+    workers_done(&reconciler).await;
+    reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
+    assert!(store.runtime_start_for("agent/example/queued").unwrap().is_none());
+    reconciler.reconcile_start_jobs().unwrap();
+    assert_eq!(runtime.inner.starts.lock().unwrap().len(), 1);
+}
+
     #[test]
 fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() {
     let directory = tempfile::tempdir().unwrap();

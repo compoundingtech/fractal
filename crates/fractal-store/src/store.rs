@@ -20,6 +20,7 @@ pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
+pub mod launch_freeze;
 pub mod resource_membership;
 mod device_renewal;
 pub mod evidence;
@@ -2425,6 +2426,7 @@ pub struct Store {
     usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
+    pub launch_admission: Arc<tokio::sync::RwLock<()>>,
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
@@ -2918,6 +2920,7 @@ impl Store {
     fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
@@ -2931,6 +2934,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2948,6 +2952,7 @@ impl Store {
         let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
@@ -2960,6 +2965,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2983,6 +2989,7 @@ impl Store {
         let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
@@ -2990,6 +2997,7 @@ impl Store {
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),

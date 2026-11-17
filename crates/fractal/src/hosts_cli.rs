@@ -6,6 +6,11 @@ use fractal_daemon::cli_println as println;
 pub(super) enum HostsCommand {
     /// List active holds on the connected execution host.
     Ls,
+    /// Inspect or reversibly defer all new launches on the connected daemon.
+    LaunchFreeze {
+        #[command(subcommand)]
+        command: LaunchFreezeCommand,
+    },
     /// Close admission for affected operations until the authenticated owner resolves it.
     Hold {
         host: String,
@@ -45,9 +50,42 @@ pub(super) enum HostsCommand {
     },
 }
 
+#[derive(Subcommand)]
+pub(super) enum LaunchFreezeCommand {
+    Show,
+    Set {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        reason: String,
+        /// Bounded lease, at most 1800000 milliseconds.
+        #[arg(long)]
+        duration_ms: u64,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
+        actor: Option<String>,
+    },
+    Clear {
+        #[arg(long)]
+        id: String,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
+        actor: Option<String>,
+    },
+}
+
 pub(super) async fn run(client: &Client, person: Option<&str>, command: HostsCommand, json_output: bool) -> Result<()> {
     let value: Value = match command {
         HostsCommand::Ls => client.get("/v1/hosts/holds").await?,
+        HostsCommand::LaunchFreeze { command } => match command {
+            LaunchFreezeCommand::Show => client.get("/v1/hosts/launch-freeze").await?,
+            LaunchFreezeCommand::Set { id, reason, duration_ms, actor } => {
+                let actor = actor.as_deref().or(person).context("launch-freeze set requires an authenticated actor")?;
+                client.post("/v1/hosts/launch-freeze", &json!({"actor":actor,"id":id,"reason":reason,"duration_ms":duration_ms})).await?
+            }
+            LaunchFreezeCommand::Clear { id, actor } => {
+                let actor = actor.as_deref().or(person).context("launch-freeze clear requires an authenticated actor")?;
+                client.post("/v1/hosts/launch-freeze/clear", &json!({"actor":actor,"id":id})).await?
+            }
+        },
         HostsCommand::Hold { host, reason, operations, actor, originating_run, receipt } => {
             let actor = actor.as_deref().or(person).context("hosts hold requires --as, ST_AGENT, or a configured person")?;
             client.post("/v1/hosts/holds", &json!({"host":host,"reason":reason,"operations":operations,"actor":actor,"originating_run":originating_run,"receipt":receipt})).await?

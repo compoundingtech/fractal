@@ -40,6 +40,54 @@ pub async fn recover(State(state): State<AppState>, bound: Option<BoundActor>, J
     Ok(Json(hold))
 }
 
+#[derive(Deserialize)]
+pub struct FreezeRequest {
+    pub actor: String,
+    pub id: String,
+    pub reason: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Deserialize)]
+pub struct ClearFreezeRequest {
+    pub actor: String,
+    pub id: String,
+}
+
+pub async fn launch_freeze(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || {
+        let freeze = store.launch_freeze()?;
+        let deferred = store.pending_runtime_starts()?.into_iter()
+            .filter(|operation| !operation.dispatched && !operation.finished && operation.revoked_by.is_none())
+            .map(|operation| json!({"id": operation.id, "subject": operation.subject}))
+            .collect::<Vec<_>>();
+        Ok(json!({"freeze": freeze, "deferred": deferred}))
+    }).await.map(Json)
+}
+
+pub async fn set_launch_freeze(State(state): State<AppState>, bound: Option<BoundActor>, Json(request): Json<FreezeRequest>) -> Result<Json<Value>, ApiError> {
+    let actor = owner(&state, bound.as_ref())?;
+    if actor != request.actor {
+        return Err(ApiError::bad(FractalError::new("launch-freeze-owner", "payload actor does not match authenticated owner")));
+    }
+    let store = state.store.clone();
+    let freeze = blocking_store(move || Ok(store.set_launch_freeze(&actor, &request.id, &request.reason, request.duration_ms)?)).await?;
+    signal_changed(&state);
+    Ok(Json(json!(freeze)))
+}
+
+pub async fn clear_launch_freeze(State(state): State<AppState>, bound: Option<BoundActor>, Json(request): Json<ClearFreezeRequest>) -> Result<Json<Value>, ApiError> {
+    let actor = owner(&state, bound.as_ref())?;
+    if actor != request.actor {
+        return Err(ApiError::bad(FractalError::new("launch-freeze-owner", "payload actor does not match authenticated owner")));
+    }
+    let store = state.store.clone();
+    blocking_store(move || Ok(store.clear_launch_freeze(&actor, &request.id)?)).await?;
+    signal_changed(&state);
+    Ok(Json(json!({"cleared": true})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
