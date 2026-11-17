@@ -29,7 +29,7 @@ describe('reference memory outbox repository', () => {
     const dispatched = markOutboxDispatched(ready)!;
     expect(await repository.compareAndSwap(1, dispatched)).toBe(true);
     expect(await repository.compareAndSwap(1, dispatched)).toBe(false);
-    expect(await repository.list()).toEqual([dispatched]);
+    expect(await repository.list()).toEqual([{ _tag: 'record', record: dispatched }]);
   });
 
   it('rejects caller-crafted certainty, packet and intent changes inside CAS', async () => {
@@ -63,7 +63,9 @@ describe('reference memory outbox repository', () => {
     const snapshot = await repository.read('attempt/original');
     expect(snapshot?.intent.text).toBe('Original text');
     expect(snapshot).not.toBe(await repository.read('attempt/original'));
-    expect((await repository.list())[0]).not.toBe(snapshot);
+    const entries = await repository.list();
+    expect(entries[0]?._tag).toBe('record');
+    if (entries[0]?._tag === 'record') expect(entries[0].record).not.toBe(snapshot);
     expect(await other.list()).toEqual([]);
     expect(await other.compareAndSwap(0, prepared())).toBe(false);
   });

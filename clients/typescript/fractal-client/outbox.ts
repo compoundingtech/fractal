@@ -52,6 +52,22 @@ export type OutboxPreparedRecord<TPacket> = OutboxHistory & {
 
 export type OutboxRecord<TPacket> = OutboxPreparingRecord | OutboxPreparedRecord<TPacket>;
 
+/** A damaged stored value has no trustworthy packet or content and remains unknown. */
+export type OutboxEntry<TPacket> =
+  | { readonly _tag: 'record'; readonly record: OutboxRecord<TPacket> }
+  | { readonly _tag: 'corrupt'; readonly id: string; readonly revision?: number };
+
+export type OutboxCorruptRecovery = Extract<OutboxEntry<never>, { _tag: 'corrupt' }> & {
+  readonly state: 'unknown';
+  readonly status: 'storage damaged; delivery unknown';
+  readonly actions: readonly ['discard'];
+  readonly expires: false;
+};
+
+export type OutboxRestoredEntry<TPacket> =
+  | { readonly _tag: 'record'; readonly record: OutboxRecord<TPacket> }
+  | OutboxCorruptRecovery;
+
 /** Stable trusted identities, never a display name, reusable URL/port, or current client. */
 export type OutboxScope = {
   readonly principalId: string;
@@ -80,7 +96,7 @@ export interface OutboxRepository<TPacket> {
   readonly scope: OutboxScope;
   commit(record: OutboxPreparingRecord): Promise<boolean>;
   compareAndSwap(expectedRevision: number, record: OutboxRecord<TPacket>): Promise<boolean>;
-  list(): Promise<readonly OutboxRecord<TPacket>[]>;
+  list(): Promise<readonly OutboxEntry<TPacket>[]>;
   read(id: string): Promise<OutboxRecord<TPacket> | undefined>;
 }
 
@@ -189,6 +205,20 @@ export const restoreOutboxRecord = <TPacket>(record: OutboxRecord<TPacket>): Out
     mayHaveDispatched: record.mayHaveDispatched, ambiguous: true, state: 'unknown',
   };
 };
+
+/** Restore repository entries without dropping damage or manufacturing sendable records.
+ * Corrupt entries have no Copy/Send/Retry action and no expiry; only explicit Discard.
+ */
+export const restoreOutboxEntries = <TPacket>(
+  entries: readonly OutboxEntry<TPacket>[],
+): readonly OutboxRestoredEntry<TPacket>[] => entries.map<OutboxRestoredEntry<TPacket>>(entry => entry._tag === 'record'
+  ? { _tag: 'record', record: restoreOutboxRecord(entry.record) }
+  : {
+    _tag: 'corrupt', id: entry.id,
+    ...(entry.revision === undefined ? {} : { revision: entry.revision }),
+    state: 'unknown', status: 'storage damaged; delivery unknown',
+    actions: ['discard'], expires: false,
+  });
 
 const isJsonObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);

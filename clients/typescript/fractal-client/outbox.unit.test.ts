@@ -2,8 +2,8 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ClientError } from './Client.generated.ts';
 import { appliedAnswer } from './errors.ts';
 import {
-  createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, restoreOutboxRecord, isAllowedOutboxTransition, outboxDeploymentId,
-  type OutboxIntent, type OutboxObservation, type OutboxPreparedRecord, type OutboxReceipt, type OutboxRecord,
+  createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox, restoreOutboxRecord, restoreOutboxEntries, isAllowedOutboxTransition, outboxDeploymentId,
+  type OutboxEntry, type OutboxIntent, type OutboxObservation, type OutboxPreparedRecord, type OutboxReceipt, type OutboxRecord,
 } from './outbox.ts';
 
 it('deployment IDs encode issuer tuples without comma or quote collisions', () => {
@@ -451,5 +451,51 @@ describe('outbox CAS transition authorization', () => {
       // JSON boundary permits malformed proposals that cannot be constructed through the typed API.
       expect(isAllowedOutboxTransition(previous, JSON.parse(JSON.stringify(next)))).toBe(false);
     }
+  });
+});
+
+describe('mixed outbox entry restoration', () => {
+  it('preserves valid record semantics and retains every corrupt entry as persistent unknown recovery', () => {
+    const records = [
+      preparing(), pending(), dispatched(),
+      observeOutbox(dispatched(), failure('none')),
+      observeOutbox(dispatched(), delivered),
+    ];
+    const entries: readonly OutboxEntry<typeof packet>[] = [
+      { _tag: 'corrupt', id: 'attempt/damaged-before-preparation' },
+      ...records.map(record => ({ _tag: 'record' as const, record })),
+      { _tag: 'corrupt', id: 'attempt/damaged-after-dispatch', revision: 7 },
+    ];
+    const restored = restoreOutboxEntries(entries);
+    expect(restored).toHaveLength(entries.length);
+    expect(restored.slice(1, -1)).toEqual(records.map(record => ({
+      _tag: 'record', record: restoreOutboxRecord(record),
+    })));
+    expect(restored[0]).toEqual({
+      _tag: 'corrupt', id: 'attempt/damaged-before-preparation',
+      state: 'unknown', status: 'storage damaged; delivery unknown',
+      actions: ['discard'], expires: false,
+    });
+    expect(restored.at(-1)).toEqual({
+      _tag: 'corrupt', id: 'attempt/damaged-after-dispatch', revision: 7,
+      state: 'unknown', status: 'storage damaged; delivery unknown',
+      actions: ['discard'], expires: false,
+    });
+    for (const entry of restored.filter(entry => entry._tag === 'corrupt')) {
+      expect('record' in entry).toBe(false);
+      expect('packet' in entry).toBe(false);
+      expect('intent' in entry).toBe(false);
+      expect(entry.actions).not.toContain('copy');
+      expect(entry.actions).not.toContain('send');
+      expect(entry.actions).not.toContain('retry');
+    }
+    expect(restoreOutboxEntries(restored)).toEqual(restored);
+  });
+
+  it('does not require a readable valid record to recover damage', () => {
+    expect(restoreOutboxEntries([])).toEqual([]);
+    expect(restoreOutboxEntries([{ _tag: 'corrupt', id: 'attempt/only-damage' }])).toMatchObject([
+      { _tag: 'corrupt', id: 'attempt/only-damage', state: 'unknown', actions: ['discard'], expires: false },
+    ]);
   });
 });
