@@ -33,6 +33,8 @@ struct InboxActivityLabel: View {
         if let activity = model.inboxActivity[.days]?.value {
           InboxActivityBars(activity: activity).frame(width: 84, height: 22)
             .accessibilityLabel("Inbox activity, last 14 days")
+        } else {
+          Text("Activity unavailable").font(.caption2).foregroundStyle(.tertiary)
         }
         Spacer(minLength: 4)
         Text("\(count)").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
@@ -53,8 +55,7 @@ struct InboxActivityHistogram: View {
   @State private var hovered: Int?
 
   var body: some View {
-    if model.inboxActivity.values.contains(where: { $0.value != nil }) {
-      VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: 8) {
         HStack {
           Text("Activity").font(.subheadline.weight(.semibold))
           Spacer()
@@ -99,14 +100,17 @@ struct InboxActivityHistogram: View {
             Text("Offline · showing last activity").font(.caption).foregroundStyle(.secondary)
           }
         } else {
-          Text("Activity unavailable for this period")
-            .font(.caption).foregroundStyle(.secondary)
-            .frame(height: 158)
+          VStack(alignment: .leading, spacing: 6) {
+            Text("Activity unavailable").font(.caption.weight(.medium))
+            Text("Fractal has not supplied arrival and resolution history for asks and updates.")
+              .font(.caption)
+          }
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, minHeight: 158, alignment: .leading)
         }
       }
       .padding(12)
       .onChange(of: period) { hovered = nil }
-    }
   }
 
   private func detail(_ activity: InboxActivity) -> String {

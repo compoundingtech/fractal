@@ -41,3 +41,20 @@ let inboxActivityScenarios: [Scenario] = [false, true].flatMap { quiet in
     }
   }
 }
+
+let inboxActivityUnavailableScenarios: [Scenario] = [false, true].map { page in
+  Scenario(
+    id: "inbox-activity-unavailable-\(page ? "page" : "home")",
+    title: "Inbox activity · unavailable · \(page ? "page" : "home")",
+    description: "Missing lifecycle history stays visible without claiming zero activity."
+  ) { now in
+    let content = Content(now: now)
+    let fractal = FixtureFractal(
+      page: AttentionPage(records: [], canAnswer: true, canControl: true),
+      slo: content.calmSlo, histories: content.calmHistories, availability: content.present)
+    let result = model(fractal)
+    await result.refresh(now: now)
+    if page { result.open(.inbox) }
+    return result
+  }
+}

@@ -81,7 +81,7 @@ let out = URL(fileURLWithPath: outArgument, isDirectory: true)
 try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-let panels = scenarios + glanceScenarios + pageScenarios + historyScenarios + speechScenarios + inboxActivityScenarios
+let panels = scenarios + glanceScenarios + pageScenarios + historyScenarios + speechScenarios + inboxActivityScenarios + inboxActivityUnavailableScenarios
 
 if arguments.first == "--capture" {
   // Captures put a backdrop and the panel on the real screen: only with the person's consent,

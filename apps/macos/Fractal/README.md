@@ -28,9 +28,14 @@ collection, but `FractalClient` has no typed attention or availability stream.
   series response, grouped by ask/update type. Arrivals stack above the axis and
   resolutions below, with asks in the stronger tone. The home label carries a
   fixed-height 14-day strip; the full inbox adds a 14-day daily / 24-hour hourly
-  picker and per-bucket hover values. Missing activity data draws no chart; failed
-  reads retain the last chart with an offline notice. Gallery scenarios
-  `inbox-activity-{busy,quiet}-{home,page}` exercise both appearances at 360 pt.
+  picker and per-bucket hover values. Missing activity data keeps the home label
+  and full inbox Activity section visible with an explicit unavailable notice,
+  never a fabricated zero chart. Failed reads retain the last chart with an offline
+  notice. Live history requires Fractal's typed arrival and resolution events for
+  every inbox row source, carrying ask/update type and person on both directions;
+  the live adapter intentionally waits for that complete contract rather than
+  substituting fleet-wide person-work counts. Gallery scenarios
+  `inbox-activity-{busy,quiet,unavailable}-{home,page}` exercise both appearances at 360 pt.
 - **Asks** are classified by the wire kind and offered actions. Person steps
   are answered on their page: a decision's or
   choice's named answers (recommended first; request-changes takes words), a
