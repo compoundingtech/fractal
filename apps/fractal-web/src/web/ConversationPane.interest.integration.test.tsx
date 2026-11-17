@@ -766,13 +766,14 @@ describe('ConversationPane composer/send binding', () => {
     expect(userRows().find(row => row.getAttribute('data-item-id') === rowId)?.getAttribute('data-send-state')).toBe('unconfirmed')
   })
 
-  it('keeps an explicitly unapplied server refusal on its row and retries it with the original key', async () => {
+  it('keeps exactly one optimistic row when a proven-unapplied retry gets a new message identity', async () => {
     await prepareSendPane()
     gateway!.failSend = true
     await submitDraft()
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
     const firstAction = gateway!.actions[0]!
     const firstKey = firstAction.idempotency_key
+    const originalRow = userRows()[0]!
     const failure = container.querySelector('[data-testid="send-failure"]')!
     flushSync(() => failure.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click())
     expect(failure.textContent).toContain('The message could not be sent. Check your connection and retry.')
@@ -781,8 +782,19 @@ describe('ConversationPane composer/send binding', () => {
     const retry = [...failure.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Retry')!
     flushSync(() => retry.click())
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
-    expect(gateway!.actions.map(action => action.idempotency_key)).toEqual([firstKey, firstKey])
-    expect(gateway!.actions[1]).toMatchObject({ id: firstAction.id, parameters: firstAction.parameters })
+    expect(gateway!.actions).toHaveLength(2)
+    expect(gateway!.actions[1]!.idempotency_key).not.toBe(firstKey)
+    expect(gateway!.actions[1]!.id).not.toBe(firstAction.id)
+    expect(gateway!.actions[1]!.parameters).toEqual(firstAction.parameters)
+    expect(userRows()[0]).toBe(originalRow)
+    const echoId = gateway!.echoId
+    if (echoId === undefined) throw new TypeError('Expected retried message identity')
+    gateway!.conversationFrame(scratchSeat, [
+      { ...entry(1, ''), id: 'timeline-entry/retry/message', type: 'message', role: 'user', body: { message_id: echoId, from: 'person/operator', to: scratchSeat } },
+      { ...entry(2, 'Retried hello'), id: 'timeline-entry/retry/content', type: 'content', role: 'user', body: { text: markdownBlock('Retried hello'), media_type: 'text/plain' } },
+    ])
+    await until(() => userRows()[0]?.textContent === 'Retried hello')
+    expect(userRows()[0]).toBe(originalRow)
     expect(userRows()).toHaveLength(1)
   })
 

@@ -18,7 +18,7 @@ export type ThreadOutboxOutcome =
   | { readonly how: 'failed'; readonly error: unknown }
   | { readonly how: 'not-applied'; readonly error: unknown }
 export interface ThreadOutboxSendOptions {
-  readonly beforeFirstDispatch?: () => Promise<void>
+  readonly revalidate?: () => Promise<void>
   readonly expectedActor?: string | undefined
 }
 export interface ThreadOutboxSender {
@@ -30,12 +30,13 @@ const loadThreadSchema = retryableImport<typeof ThreadSchema>(() => import('@fra
 const sha256 = async (bytes: Uint8Array): Promise<Uint8Array> => new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes)))
 const unconfirmed = { how: 'unconfirmed' } as const
 
-/** Full intent is committed before fence discovery; retries retain the original complete packet. */
+/** Full intent is committed before fence discovery; explicit-none retries prepare a fresh attempt. */
 export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutbox): ThreadOutboxSender => {
   const session = new Map<string, { packet: ThreadPacket; actor: string; state: 'sending' | 'none' | 'unknown' | 'sent' }>()
   const protectedRepositories = new Map<string, IndexedDbOutbox>()
   return { send: async (input, options) => {
     let dispatched = false
+    let retryRevalidation = false
     try {
       input = structuredClone(input)
       let discovered: EnvelopeOf<Capabilities> | undefined
@@ -81,12 +82,28 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
         let retained = session.get(input.key)
         if (retained !== undefined && retained.actor !== value.session_actor) throw new Error('Return to the original account to retry this action.')
         if (retained !== undefined && retained.state !== 'none') return retained.state === 'sent' ? { how: 'sent' } : unconfirmed
-        if (retained === undefined) {
+        if (retained !== undefined) {
+          const previous = retained
+          previous.state = 'sending'
+          try {
+            if (options?.revalidate === undefined) throw new Error('Revalidate the original thread target before retrying.')
+            await options.revalidate()
+            const fresh = await capabilities()
+            if (fresh.value.session_actor !== previous.actor) throw new Error('Return to the original account to retry this action.')
+            const intent = Schema.decodeUnknownSync(intentSchema)(JSON.stringify({
+              key: `${previous.packet.idempotency_key}/retry`, type: previous.packet.type, parameters: previous.packet.parameters,
+            }))
+            retained = { packet: prepare(intent, fresh.response.snapshot.id), actor: previous.actor, state: 'sending' }
+            session.set(input.key, retained)
+          } catch (error) {
+            previous.state = 'none'
+            return { how: 'not-applied', error }
+          }
+        } else {
           const intent = Schema.decodeUnknownSync(intentSchema)(JSON.stringify(input))
           retained = { packet: prepare(intent, response.snapshot.id), actor: value.session_actor, state: 'sending' }
           session.set(input.key, retained)
         }
-        retained.state = 'sending'
         dispatched = true
         try {
           const packet = retained.packet
@@ -116,11 +133,11 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
       }
       let intent: typeof intentSchema.Type
       if (record === undefined || record.state === 'not-applied') {
-        intent = Schema.decodeUnknownSync(intentSchema)(JSON.stringify(retryPacket === undefined ? input : {
-          key: retryPacket.idempotency_key, type: retryPacket.type, parameters: retryPacket.parameters,
-        }))
         const id = record === undefined ? input.key : `${record.id}/retry`
-        const fresh = createOutboxRecord(id, { text: retryPacket?.parameters.content ?? intent.parameters.content, attachments: [] })
+        intent = Schema.decodeUnknownSync(intentSchema)(JSON.stringify(retryPacket === undefined ? input : {
+          key: id, type: retryPacket.type, parameters: retryPacket.parameters,
+        }))
+        const fresh = createOutboxRecord(id, { text: intent.parameters.content, attachments: [] })
         const predecessor = record?.state === 'not-applied' ? { id: record.id, revision: record.revision } : undefined
         if (!await repo.accept(fresh, [], new TextEncoder().encode(Schema.encodeSync(intentSchema)(intent)), predecessor)) return unconfirmed
         record = fresh
@@ -130,29 +147,34 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
         intent = Schema.decodeUnknownSync(intentSchema)(new TextDecoder().decode(bytes))
       }
       if (intent.type !== input.type) throw new Error('The saved action has a different thread action type.')
+      if (retryPacket !== undefined || (restored && intent.type === 'thread.start')) {
+        retryRevalidation = retryPacket !== undefined
+        if (options?.revalidate === undefined) throw new Error(retryRevalidation
+          ? 'Revalidate the original thread target before retrying.'
+          : 'Revalidate the saved Start recipient before sending.')
+        await options.revalidate()
+        retryRevalidation = false
+        discovered = undefined
+      }
       const { response, value } = await capabilities()
       const preparingScope = scopeFromCapabilities(response)
       if (preparingScope === undefined || !sameScope(repo.scope, preparingScope)) {
         throw new Error('Return to the original account and deployment to send this action.')
       }
       if (record.state === 'pending' && record.phase === 'preparing') {
-        const packet = retryPacket ?? prepare(intent, response.snapshot.id)
+        const packet = prepare(intent, response.snapshot.id)
         const expected = await expectedPreparedPacketIdentities(packet, repo.scope.principalId, sha256)
         const prepared = prepareOutboxRecord<PreparedPacket>(record, packet, expected)
         if (prepared === undefined || !await repo.compareAndSwap(record.revision, prepared)) return unconfirmed
         record = prepared
       }
       if (record === undefined || !('packet' in record) || record.packet.type === 'message.send') return unconfirmed
-      if (restored && retryPacket === undefined && record.packet.type === 'thread.start') {
-        if (options?.beforeFirstDispatch === undefined) throw new Error('Revalidate the saved Start recipient before sending.')
-        await options.beforeFirstDispatch()
-      }
       // Keep the actor from the real capabilities answer bound to preparation and dispatch.
       if (value.session_actor !== repo.scope.principalId) throw new Error('Return to the original account to send this action.')
       const result = await dispatchOutbox(client, repo, record, {
         kind: 'message', actionId: record.packet.id, targetId: record.packet.parameters.target_id,
       }, Native.decodeUnknownSync(schema.ActionResult))
       return result.how === 'sent' ? { how: 'sent' } : result
-    } catch (error) { return dispatched ? unconfirmed : { how: 'failed', error } }
+    } catch (error) { return dispatched ? unconfirmed : { how: retryRevalidation ? 'not-applied' : 'failed', error } }
   } }
 }

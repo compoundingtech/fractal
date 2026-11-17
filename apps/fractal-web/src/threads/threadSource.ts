@@ -548,15 +548,28 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       try {
         const outcome = await sendThread(input, {
           expectedActor: attempt.actor,
-          ...(input.type === 'thread.start' ? {
-            beforeFirstDispatch: async () => {
+          revalidate: async () => {
+            if (input.type === 'thread.start') {
               await reloadStartContext(input.parameters.origin.source_id, input.parameters.origin.episode)
               const preview = registry.get(readStartContext(input.parameters.origin.source_id)(input.parameters.origin.episode))
               if (preview._tag !== 'Observed' || preview.value.start_recipient.agent_id !== input.parameters.agent_id) {
                 throw new Error('Review the current recipient before sending this saved thread. Nothing was sent.')
               }
-            },
-          } : {}),
+            } else {
+              try {
+                const { value } = await client.threadGet(input.parameters.target_id)
+                const current = Native.decodeUnknownSync(Native.ThreadSummary)(value)
+                if (current.id !== input.parameters.target_id) throw new Error('The original thread could not be verified. Nothing was sent.')
+                if (current.state === 'closed') throw new Error('This thread is closed. Nothing was sent.')
+              } catch (error) {
+                if (error instanceof ClientError) {
+                  throw new Error(error.response.code === 'not-found' ? 'Fractal no longer has this thread. Nothing was sent.'
+                    : 'The original thread could not be verified. Nothing was sent.')
+                }
+                throw error
+              }
+            }
+          },
         })
         if (outcome.how === 'sent') {
           attempts.delete(destination)

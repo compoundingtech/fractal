@@ -815,7 +815,7 @@ export const liveSource = ({
       ),
   })
   const attention = attentionRetained.atom
-  const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
+  const messageSnapshot = (fresh = false): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
         const loaded = yield* loadMutations.pipe(Effect.result)
@@ -836,7 +836,7 @@ export const liveSource = ({
           if (Option.isSome(decoded) && (freshest === undefined || decoded.value.store_index > freshest.store_index))
             freshest = decoded.value
         }
-        if (freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
+        if (!fresh && freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
         return yield* makeMutations({ ...options, fetch }).snapshot.pipe(
           Effect.map((value): ConversationPortResult<string> => ({ _tag: 'Success', value })),
           Effect.catch((failure) => Effect.succeed<ConversationPortResult<string>>({
@@ -989,25 +989,20 @@ export const liveSource = ({
           streaming: false, at: pending.get(id)?.item.at ?? new Date().toISOString(), sendState: { _tag: 'Pending' },
         },
       }
-      // A first send paints immediately: Enter must not wait for any await. An explicit
-      // Resend names mail the stream may already show, so its authoritative identity is
-      // reconciled before any optimistic row can duplicate it.
+      // A first send paints immediately. Packet preparation supplies the actual message
+      // identity before POST, including a new identity for a proven-unapplied retry.
       if (request._tag === 'Send') {
         lastSendId = id
         pending.set(id, local)
         publishPending()
       }
       try {
-        // The public device-signing contract names mail from the first 16 SHA-256 hex digits.
-        // Resolve this before POST so an echo that wins the HTTP race still replaces its outbox item.
-        const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(idempotencyKey)))
-        const messageIds = [`message/${[...hash.slice(0, 8)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`]
-        if (request._tag === 'Send') timeline.keepOwnSendId(messageIds, id)
-        const submit = () => submitMessage(request, idempotencyKey)
-        if (request._tag === 'Resend' && timeline.shownMessageIds().has(messageIds[0]!)) return submit()
+        const submit = () => submitMessage(request, idempotencyKey, messageIds => {
+          timeline.keepOwnSendId(messageIds, id)
+          publishPending()
+        })
         if (request._tag === 'Resend') {
           pending.set(id, local)
-          timeline.keepOwnSendId(messageIds, id)
           publishPending()
         }
         const result = await submit()

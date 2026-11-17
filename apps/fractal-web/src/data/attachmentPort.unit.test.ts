@@ -5,7 +5,7 @@ import * as Native from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { gatewayAttachments } from './attachmentPort.ts'
+import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import type * as LazySdk from './lazySdk.ts'
 import type { AttachmentSendRequest } from './source.ts'
 import recording from './subjectReadPort.gateway.fixtures.json' with { type: 'json' }
@@ -295,8 +295,45 @@ describe('native attachment port', () => {
       request_id: 'request/native-refusal', details: { scope: 'control.messages' },
     }
     const { port, calls } = attachmentClient({ reply: () => Response.json(error, { status: 403 }) })
-    expect(await port.send(request)).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    const first = await port.send(request)
+    expect(first).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    const body = JSON.parse(String(calls[1]?.init?.body))
+    expect(await port.send({ ...request, _tag: 'Resend', idempotencyKey: body.idempotency_key }))
+      .toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
     expect(calls).toHaveLength(2)
+  })
+
+  it('reprepares an unprotected proven-unapplied intent with new identities and a fresh snapshot', async () => {
+    const actions: (typeof Native.ActionRequest.Type)[] = []
+    let snapshots = 0
+    const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/capabilities')) return Response.json(recording.capabilities)
+      if (String(input).endsWith('/blobs')) return Response.json({
+        api_version: 'st3.client.v0', snapshot: {}, value: upload,
+      })
+      const action = Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(init?.body)))
+      actions.push(action)
+      return actions.length === 1 ? Response.json({
+        api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'stale-fence',
+        message: 'Snapshot expired', retryable: true, request_id: 'request/stale', applied: 'none',
+      }, { status: 409 }) : Response.json({
+        api_version: 'st3.client.v0', snapshot: {}, value: acknowledgement(init),
+      })
+    } })
+    const send = gatewayMessageSend(client, async () => ({ _tag: 'Success', value: `snapshot/attempt-${++snapshots}` }))
+    expect(await send({ ...request, images: [{ bytes: new Uint8Array([7, 8, 9]), mediaType: 'image/webp', name: 'original.webp' }] },
+      'original-key')).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: 'original-key',
+      parameters: { ...request.parameters, to: 'agent/other', content: 'Changed', attachments: [], tags: [] },
+    })).toMatchObject({ _tag: 'Success' })
+    expect(actions).toHaveLength(2)
+    expect(actions[1]?.id).not.toBe(actions[0]?.id)
+    expect(actions[1]?.idempotency_key).not.toBe(actions[0]?.idempotency_key)
+    expect(actions[1]?.fence.snapshot_id).toBe('snapshot/attempt-2')
+    expect(actions[1]?.parameters).toEqual(actions[0]?.parameters)
+    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: 'original-key' }))
+      .toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    expect(actions).toHaveLength(2)
   })
 
   it('never retries an uncertain send or claims it was delivered', async () => {

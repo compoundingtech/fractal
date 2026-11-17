@@ -696,16 +696,26 @@ it('keeps the connection sentence, without Fractal\'s words, when it refuses the
   } finally { view.dispose() }
 })
 
-it.each(['thread.start', 'thread.reply'] as const)('retries the exact %s packet only after explicit applied:none', async kind => {
+it.each([
+  ['thread.start', false], ['thread.reply', false], ['thread.start', true], ['thread.reply', true],
+] as const)('revalidates and reprepares %s after explicit applied:none (refuse revalidation: %s)', async (kind, refuseRevalidation) => {
   const bodies: string[] = []
   const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
-    if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: {
+    if (String(input).endsWith('/capabilities')) return Response.json({ ...base,
+      snapshot: bodies.length === 0 ? base.snapshot : { ...base.snapshot, id: 'snapshot/retry-fresh', store_index: 2 }, value: {
       ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 3, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: kind, version: 0, state: 'granted' },
       ],
+    } })
+    if (String(input).includes('/start-context')) return Response.json({ ...base, value: {
+      kind: 'thread-start-context', source_id: 'source/retry', episode: 'episode/original',
+      start_recipient: { agent_id: refuseRevalidation ? 'agent/changed' : agent, basis: { _tag: 'original' } },
+    } })
+    if (!String(input).endsWith('/actions')) return Response.json({ ...base, value: {
+      ...summary, state: refuseRevalidation ? 'closed' : 'open',
     } })
     const body = String(init?.body)
     bodies.push(body)
@@ -725,15 +735,31 @@ it.each(['thread.start', 'thread.reply'] as const)('retries the exact %s packet 
   const stop = registry.mount(source.access)
   const parameters = { agent_id: agent, origin: { source_id: 'source/retry', episode: 'episode/original' }, title: 'Original title', content: 'Original content' }
   try {
+    const destination = kind === 'thread.start' ? 'draft/retry' : id
+    const draft = { content: parameters.content }
+    registry.set(source.draft(destination), draft)
     await vi.waitFor(() => expect(registry.get(source.access).actions.has(kind)).toBe(true))
     const send = () => kind === 'thread.start' ? source.start('draft/retry', parameters) : source.reply({ target_id: id, content: parameters.content })
     expect(await send()).toMatchObject({ _tag: 'Refused', explanation: 'Nothing applied.' })
-    if (kind === 'thread.start') {
-      expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
-      expect(await source.retryStart!('draft/retry')).toMatchObject({ _tag: 'Sent' })
-    } else expect(await send()).toMatchObject({ _tag: 'Sent' })
-    expect(bodies).toHaveLength(2)
-    expect(bodies[1]).toBe(bodies[0])
-    expect(registry.get(source.pendingStarts!())).toEqual([])
+    if (kind === 'thread.start') expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
+    const retried = await (kind === 'thread.start' ? source.retryStart!('draft/retry') : send())
+    if (refuseRevalidation) {
+      expect(retried).toMatchObject({ _tag: 'Refused', detail: kind === 'thread.start'
+        ? 'Review the current recipient before sending this saved thread. Nothing was sent.'
+        : 'This thread is closed. Nothing was sent.' })
+      expect(bodies).toHaveLength(1)
+      expect(registry.get(source.draft(destination))).toBe(draft)
+      if (kind === 'thread.start') expect(registry.get(source.pendingStarts!())).toMatchObject([{ state: 'not-applied', parameters }])
+    } else {
+      expect(retried).toMatchObject({ _tag: 'Sent' })
+      expect(bodies).toHaveLength(2)
+      const first = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(bodies[0]!))
+      const next = Write.decodeUnknownSync(Write.ActionRequest)(JSON.parse(bodies[1]!))
+      expect(next.id).not.toBe(first.id)
+      expect(next.idempotency_key).not.toBe(first.idempotency_key)
+      expect(next.fence.snapshot_id).toBe('snapshot/retry-fresh')
+      expect(next.parameters).toEqual(first.parameters)
+      expect(registry.get(source.pendingStarts!())).toEqual([])
+    }
   } finally { stop(); registry.dispose() }
 })

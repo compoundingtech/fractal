@@ -909,7 +909,7 @@ export class LiveTimeline {
     return { bodies, headerOf, paired }
   }
 
-  /** Register only a send that painted an outbox row; an already-shown Resend keeps its server id. */
+  /** Bind each prepared attempt's message identities to its already-painted optimistic row. */
   keepOwnSendId(messageIds: readonly string[], itemId: string): void {
     for (const messageId of messageIds) {
       if (this.ownSendIds.get(messageId) === itemId) continue

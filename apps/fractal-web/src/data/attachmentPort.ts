@@ -24,7 +24,7 @@ export interface ChatOutbox {
 /** Upload, chunk reads and sending use the same gateway client, never a synthetic delivery. */
 export const gatewayAttachments = (
   client: FractalClient,
-  snapshot: () => Promise<ConversationPortResult<string>>,
+  snapshot: (fresh?: boolean) => Promise<ConversationPortResult<string>>,
   outbox: ChatOutbox = { repository: async () => undefined },
 ): AttachmentPort => {
   const send = gatewayMessageSend(client, snapshot, outbox)
@@ -96,82 +96,88 @@ const text = new TextDecoder()
 
 /** Explicit legacy mode for capability answers without a complete issuer pair. Never selected on failure. */
 const sendUnprotected = async (
-  client: FractalClient, snapshot: () => Promise<ConversationPortResult<string>>,
-  input: AttachmentSendRequest, key: string, unappliedPackets: Map<string, PreparedMessageSendPacket>,
+  client: FractalClient, snapshot: (fresh?: boolean) => Promise<ConversationPortResult<string>>,
+  input: AttachmentSendRequest, key: string, unappliedIntents: Map<string, PreparedMessageSendPacket['parameters']>,
+  principals: Map<string, string>,
   discovered?: EnvelopeOf<Capabilities>,
+  onPrepared?: (messageIds: readonly string[]) => void,
 ): Promise<ConversationPortResult<ActionResult>> => {
-  let packet = input._tag === 'Resend' ? unappliedPackets.get(key) : undefined
-  if (input._tag === 'Resend' && packet === undefined) return unconfirmed()
+  const retained = input._tag === 'Resend' ? unappliedIntents.get(key) : undefined
+  if (input._tag === 'Resend' && retained === undefined) return unconfirmed()
+  // Consume the retry permission synchronously, before preparation can yield.
+  unappliedIntents.delete(key)
+  let packet: PreparedMessageSendPacket | undefined
   let dispatched = false
   try {
     const schema = await Effect.runPromise(loadAttachmentSchema)
-    if (packet !== undefined) {
-      const capabilities = Native.decodeUnknownSync(Native.Capabilities)((discovered ?? await client.capabilities()).value)
-      if (!hasConversationCapability(capabilities, 'message.send')) return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted message send.' }
-      const identities = await expectedPreparedPacketIdentities(packet, capabilities.session_actor,
-        async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))))
-      unappliedPackets.delete(key)
-      dispatched = true
-      const retained = packet
-      const response = await actionReceiptCheck({ kind: 'message', actionId: retained.id, messageId: identities[0] })(() => client.submitAction(retained))
-      return { _tag: 'Success', value: Native.decodeUnknownSync(schema.ActionResult)(response.value) }
-    }
     const decodeParameters = Native.decodeUnknownSync(Schema.Struct({
       content: Schema.String,
       attachments: Schema.Array(schema.AttachmentInput).check(Schema.isMaxLength(4)),
     }))
     let parameters
     try {
-      const decoded = decodeParameters(input.parameters)
-      parameters = { ...input.parameters, tags: [...input.parameters.tags], attachments: [...decoded.attachments ?? []] }
+      const decoded = decodeParameters(retained ?? input.parameters)
+      const source = retained ?? input.parameters
+      parameters = { ...source, tags: [...source.tags], attachments: [...decoded.attachments ?? []] }
     }
     catch { return { _tag: 'Refused', reason: 'invalid', detail: 'The message does not match the supported send format.' } }
-    if ((parameters.attachments?.length ?? 0) + (input.images?.length ?? 0) > 4) return { _tag: 'Refused', reason: 'invalid', detail: 'A message supports at most four images.' }
+    const images = retained === undefined ? input.images ?? [] : []
+    if ((parameters.attachments?.length ?? 0) + images.length > 4) return { _tag: 'Refused', reason: 'invalid', detail: 'A message supports at most four images.' }
     // Text acquires its fence first; images acquire it only after their uploads.
-    const textSnapshot = (input.images?.length ?? 0) === 0 ? await snapshot() : undefined
+    const textSnapshot = images.length === 0 ? await snapshot(input._tag === 'Resend') : undefined
     if (textSnapshot?._tag === 'Refused') return textSnapshot
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)((discovered ?? await client.capabilities()).value)
+    const principal = principals.get(key)
+    if (principal !== undefined && principal !== capabilities.session_actor) return {
+      _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account to send this message.',
+    }
+    principals.set(key, capabilities.session_actor)
     if (!hasConversationCapability(capabilities, 'message.send')) return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted message send.' }
     const attachments = [...parameters.attachments ?? []]
-    for (const image of input.images ?? []) {
+    for (const image of images) {
       if (!hasConversationCapability(capabilities, 'control.messages')) return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted attachment upload.' }
       const uploaded = Native.decodeUnknownSync(schema.BlobUpload)((await client.uploadBlob(image.bytes, image.mediaType)).value)
       attachments.push({ blob: uploaded.blob, media_type: uploaded.media_type, name: image.name })
     }
-    const current = textSnapshot ?? await snapshot()
+    const current = textSnapshot ?? await snapshot(input._tag === 'Resend')
     if (current._tag === 'Refused') return current
-    packet = prepareMessageSendPacket({ id: input.id, idempotency_key: key,
+    packet = prepareMessageSendPacket({ id: retained === undefined ? input.id : `action/${crypto.randomUUID()}`,
+      idempotency_key: retained === undefined ? key : crypto.randomUUID(),
       fence: { snapshot_id: current.value, subject_revisions: {} }, parameters: { ...parameters, attachments } })
     try { Native.decodeUnknownSync(schema.ActionRequest)(packet) }
     catch { return { _tag: 'Refused', reason: 'invalid', detail: 'The message could not be prepared in the supported send format.' } }
     const identities = await expectedPreparedPacketIdentities(packet, capabilities.session_actor,
       async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))))
-    unappliedPackets.delete(key)
+    onPrepared?.(identities)
     dispatched = true
-    const retained = packet
-    const response = await actionReceiptCheck({ kind: 'message', actionId: retained.id, messageId: identities[0] })(() => client.submitAction(retained))
+    const prepared = packet
+    const response = await actionReceiptCheck({ kind: 'message', actionId: prepared.id, messageId: identities[0] })(() => client.submitAction(prepared))
     return { _tag: 'Success', value: Native.decodeUnknownSync(schema.ActionResult)(response.value) }
   } catch (cause) {
     if (dispatched && appliedAnswer(cause) !== 'none') return cause instanceof ClientError
       ? { _tag: 'Refused', reason: 'unconfirmed', detail: 'Fractal has not confirmed this message. Do not send it again.', error: cause.response }
       : unconfirmed()
-    if (dispatched && packet !== undefined && appliedAnswer(cause) === 'none') unappliedPackets.set(key, packet)
+    if (dispatched && packet !== undefined && appliedAnswer(cause) === 'none') unappliedIntents.set(key, packet.parameters)
     return cause instanceof ClientError && cause.response.code === 'stale-fence'
       ? { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
       : conversationPortFailure(cause)
+  } finally {
+    if (!dispatched && retained !== undefined) unappliedIntents.set(key, retained)
   }
 }
 
 /** Both entry paths share acceptance, preparation, dispatch permit and durable outcomes. */
 export const gatewayMessageSend = (
   client: FractalClient,
-  snapshot: () => Promise<ConversationPortResult<string>>,
+  snapshot: (fresh?: boolean) => Promise<ConversationPortResult<string>>,
   outbox: ChatOutbox = { repository: async () => undefined },
 ) => {
-  // Explicitly unprotected, in-session retries retain ONLY proven-unapplied exact packets.
-  const unappliedPackets = new Map<string, PreparedMessageSendPacket>()
-  return async (input: AttachmentSendRequest, chosenKey?: string): Promise<ConversationPortResult<ActionResult>> => {
-  const key = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
+  // Only proven-unapplied immutable intent grants a deliberate new attempt.
+  const unappliedIntents = new Map<string, PreparedMessageSendPacket['parameters']>()
+  const scopes = new Map<string, IndexedDbOutbox['scope'] | 'unprotected'>()
+  const principals = new Map<string, string>()
+  return async (input: AttachmentSendRequest, chosenKey?: string, onPrepared?: (messageIds: readonly string[]) => void): Promise<ConversationPortResult<ActionResult>> => {
+  let key = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
   let repo: IndexedDbOutbox | undefined
   let discoveredIdentity: EnvelopeOf<Capabilities> | undefined
   try { repo = await outbox.repository(response => { discoveredIdentity = response }) } catch (cause) {
@@ -179,7 +185,15 @@ export const gatewayMessageSend = (
       ? { _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.' }
       : storageRefusal()
   }
-  if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedPackets, discoveredIdentity)
+  const selectedScope = repo?.scope ?? 'unprotected'
+  const originalScope = scopes.get(key)
+  if (originalScope !== undefined && (originalScope === 'unprotected'
+    ? selectedScope !== 'unprotected'
+    : selectedScope === 'unprotected' || !sameScope(originalScope, selectedScope))) {
+    return { _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and deployment to send this message.' }
+  }
+  scopes.set(key, selectedScope)
+  if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedIntents, principals, discoveredIdentity, onPrepared)
   let record: OutboxRecord<PreparedPacket> | undefined
   try { record = await repo.read(key) } catch { return storageRefusal() }
   if (record !== undefined) {
@@ -190,8 +204,19 @@ export const gatewayMessageSend = (
       }
     } catch { return { _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.' } }
   }
+  if (input._tag === 'Resend') {
+    try {
+      while (record?.state === 'not-applied') {
+        const child = await repo.read(`${key}/retry`)
+        if (child === undefined) break
+        key = child.id
+        record = child
+      }
+    } catch { return storageRefusal() }
+  }
+  if (record?.state === 'not-applied' && input._tag !== 'Resend') return unconfirmed()
   // A retained result is authoritative. No retry map and no replay of dispatched bytes.
-  if (record !== undefined && (record.mayHaveDispatched || record.state !== 'pending')) {
+  if (record !== undefined && record.state !== 'not-applied' && (record.mayHaveDispatched || record.state !== 'pending')) {
     if (record.state === 'delivered' && record.evidence.kind === 'receipt') {
       const schema = await Effect.runPromise(loadAttachmentSchema)
       return { _tag: 'Success', value: Native.decodeUnknownSync(schema.ActionResult)(record.evidence.receipt) }
@@ -244,6 +269,36 @@ export const gatewayMessageSend = (
       const bytes = await repo.readIntentBytes(key)
       if (bytes === undefined) return preparationBlocked
       original = Schema.decodeUnknownSync(intentSchema)(text.decode(bytes))
+      if (input._tag === 'Resend' && record.state === 'not-applied') {
+        const predecessor = record
+        const childKey = `${key}/retry`
+        const spool: SpoolInput[] = []
+        for (const image of predecessor.intent.attachments) {
+          if (spool.some(item => item.hash === image.contentHash)) continue
+          const bytes = await repo.readSpool(key, image.contentHash)
+          if (bytes === undefined) return preparationBlocked
+          spool.push({ hash: image.contentHash, bytes })
+        }
+        const child = createOutboxRecord(childKey, {
+          ...predecessor.intent,
+          attachments: predecessor.intent.attachments.map(image => ({ ...image, reference: `${childKey}/${image.contentHash}` })),
+        })
+        const childOriginal = { ...original, id: `action/${crypto.randomUUID()}` }
+        try {
+          if (await repo.accept(child, spool, utf8.encode(Schema.encodeSync(intentSchema)(childOriginal)),
+            { id: predecessor.id, revision: predecessor.revision })) {
+            record = child
+            original = childOriginal
+          } else {
+            record = await repo.read(childKey)
+            const acceptedBytes = await repo.readIntentBytes(childKey)
+            if (record === undefined || acceptedBytes === undefined) return unconfirmed()
+            original = Schema.decodeUnknownSync(intentSchema)(text.decode(acceptedBytes))
+          }
+        } catch { return storageRefusal() }
+        key = childKey
+        if (record.state !== 'pending' || record.mayHaveDispatched) return unconfirmed()
+      }
     }
   } catch { return { _tag: 'Refused', reason: 'invalid', detail: 'The message does not match the supported send format.' } }
   if (record === undefined) return storageRefusal()
@@ -252,7 +307,7 @@ export const gatewayMessageSend = (
     // No send-work request occurs until acceptance and its attachment spool commit above.
     const preparingText = currentRecord.state === 'pending' && currentRecord.phase === 'preparing'
       && currentRecord.intent.attachments.length === 0
-    const textSnapshot = preparingText ? await snapshot() : undefined
+    const textSnapshot = preparingText ? await snapshot(input._tag === 'Resend') : undefined
     if (textSnapshot?._tag === 'Refused') return textSnapshot
     const discovered = discoveredIdentity ?? await client.capabilities()
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)(discovered.value)
@@ -273,7 +328,7 @@ export const gatewayMessageSend = (
         const uploaded = Native.decodeUnknownSync(schema.BlobUpload)((await client.uploadBlob(bytes, mediaType)).value)
         attachments.push({ blob: uploaded.blob, media_type: uploaded.media_type, ...(image.name === undefined ? {} : { name: image.name }) })
       }
-      const current = textSnapshot ?? await snapshot()
+      const current = textSnapshot ?? await snapshot(input._tag === 'Resend')
       if (current._tag === 'Refused') return current
       const packet = prepareMessageSendPacket({
         id: original.id, idempotency_key: key, fence: { snapshot_id: current.value, subject_revisions: {} },
@@ -290,6 +345,7 @@ export const gatewayMessageSend = (
       currentRecord = prepared
     }
     if (!('packet' in currentRecord) || currentRecord.packet.type !== 'message.send') return unconfirmed()
+    onPrepared?.(currentRecord.expectedIdentities)
     const outcome = await dispatchOutbox(client, repo, currentRecord, {
       kind: 'message', actionId: currentRecord.packet.id, messageId: currentRecord.expectedIdentities[0],
     }, Native.decodeUnknownSync(schema.ActionResult))

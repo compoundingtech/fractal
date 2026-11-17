@@ -266,7 +266,82 @@ describe('chat durable gateway delivery', () => {
     expect(await repo.read(key)).toMatchObject({ state })
     const count = calls.length
     expect(await send({ ...request, _tag: 'Resend', idempotencyKey: key })).toMatchObject({ _tag: 'Refused' })
-    expect(calls.slice(count).map(call => call.path)).toEqual(['/v1/client/capabilities'])
+    if (state === 'unknown') expect(calls.slice(count).map(call => call.path)).toEqual(['/v1/client/capabilities'])
+    else {
+      expect(calls.slice(count).filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
+      expect(await repo.read(`${key}/retry`)).toMatchObject({ state: 'not-applied' })
+    }
+  })
+
+  it('reprepares stale-fence nonapplication with a fresh fence and identities while preserving original text and images', async () => {
+    const repo = await open()
+    let posts = 0
+    const { client, calls } = transport(body => ++posts === 1
+      ? Response.json({ ...bare, applied: 'none' }, { status: 409 })
+      : Response.json(receipt(body)))
+    let snapshots = 0
+    const prepared: string[][] = []
+    const send = gatewayMessageSend(client, async fresh => {
+      expect(fresh).toBe(snapshots > 0)
+      return { _tag: 'Success', value: `snapshot/retry-${++snapshots}` }
+    }, { repository: async () => repo })
+    const original = { ...request, images: [{ bytes: new Uint8Array([1, 2, 3]), mediaType: 'image/png' as const, name: 'original.png' }] }
+    expect(await send(original, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    const first = Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(calls.find(call => call.path.endsWith('/actions'))?.body)))
+    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: key,
+      parameters: { ...request.parameters, to: 'agent/changed', content: 'Changed', tags: [] }, images: [],
+    }, undefined, ids => { prepared.push([...ids]) })).toMatchObject({ _tag: 'Success' })
+    const actions = calls.filter(call => call.path.endsWith('/actions'))
+    const second = Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(actions[1]?.body)))
+    expect(second.id).not.toBe(first.id)
+    expect(second.idempotency_key).toBe(`${key}/retry`)
+    expect(second.fence.snapshot_id).toBe('snapshot/retry-2')
+    expect(second.parameters).toEqual(first.parameters)
+    expect(await repo.read(key)).toMatchObject({ state: 'not-applied' })
+    expect(await repo.read(`${key}/retry`)).toMatchObject({ state: 'delivered' })
+    const parent = await repo.read(key)
+    const hash = parent?.intent.attachments[0]?.contentHash
+    expect(hash).toBeDefined()
+    expect(await repo.readSpool(`${key}/retry`, hash!)).toEqual(new Uint8Array([1, 2, 3]))
+    expect(prepared).toEqual([receipt(String(actions[1]?.body)).value.affected_ids])
+  })
+
+  it('converges concurrent retries on one child and one dispatch permit', async () => {
+    const repo = await open()
+    let posts = 0
+    const started = Promise.withResolvers<void>()
+    const held = Promise.withResolvers<Response>()
+    const { client, calls } = transport(() => {
+      if (++posts === 1) return Response.json({ ...bare, applied: 'none' }, { status: 409 })
+      started.resolve()
+      return held.promise
+    })
+    const send = bind(client, repo)
+    expect(await send(request, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    const resend: AttachmentSendRequest = { ...request, _tag: 'Resend', idempotencyKey: key }
+    const attempts = [send(resend), send(resend)]
+    await started.promise
+    const actions = calls.filter(call => call.path.endsWith('/actions'))
+    held.resolve(Response.json(receipt(String(actions[1]?.body))))
+    const outcomes = await Promise.all(attempts)
+    expect(outcomes.filter(result => result._tag === 'Success')).toHaveLength(1)
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(2)
+    expect(await repo.read(`${key}/retry`)).toMatchObject({ state: 'delivered' })
+    expect(await repo.read(`${key}/retry/retry`)).toBeUndefined()
+  })
+
+  it('keeps protected retries in their original scope instead of falling back to unprotected mode', async () => {
+    const repo = await open()
+    const { client, calls } = transport(() => Response.json({ ...bare, applied: 'none' }, { status: 409 }))
+    let selected: IndexedDbOutbox | undefined = repo
+    const send = gatewayMessageSend(client, snapshot, { repository: async () => selected })
+    expect(await send(request, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    selected = undefined
+    const count = calls.length
+    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: key }))
+      .toMatchObject({ _tag: 'Refused', reason: 'ungranted' })
+    expect(calls).toHaveLength(count)
+    expect(await repo.read(`${key}/retry`)).toBeUndefined()
   })
 
   it.each(['rejected', 'accepted', 'wrong-action', 'wrong-message', 'malformed'] as const)(

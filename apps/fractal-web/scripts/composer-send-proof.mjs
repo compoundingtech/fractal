@@ -87,7 +87,7 @@ try {
         failNext = false
         await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({
           api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unavailable',
-          message: 'Forced scratch-seat send failure', retryable: true, request_id: 'request/forced-proof', details: {},
+          message: 'Forced scratch-seat send failure', retryable: true, request_id: 'request/forced-proof', applied: 'none', details: { applied: 'none' },
         }) }); return
       }
       await postGate
@@ -128,10 +128,11 @@ try {
     const failedKey = actions[1].idempotency_key
     await failed.getByRole('button', { name: 'Retry', exact: true }).click()
     await page.locator('[data-send-state="sent"]').filter({ hasText: failureText }).waitFor({ timeout: 60000 }); mark('resend')
-    if (actions.length !== 3 || actions[2].idempotency_key !== failedKey) throw new Error('Retry changed the key or issued extra actions')
+    if (actions.length !== 3 || actions[2].idempotency_key === failedKey || actions[2].id === actions[1].id) throw new Error('Retry reused an attempt identity or issued extra actions')
     holdEcho = false; queuedEchoes.splice(0).forEach(release => release())
     await page.waitForFunction(text => [...document.querySelectorAll('[data-testid="user-message"]')].some(row => row.textContent.includes(text) && !row.dataset.itemId.startsWith('pending/')), failureText, { timeout: 60000 }); mark('resendEcho')
-    return 'RECEIPT ' + JSON.stringify({ status: 'pass', timings, sends: actions.length, sameRetryKey: true })
+    if (await page.locator('[data-testid="user-message"]').filter({ hasText: failureText }).count() !== 1) throw new Error('Retry left a duplicate or ghost row')
+    return 'RECEIPT ' + JSON.stringify({ status: 'pass', timings, sends: actions.length, freshRetryIdentity: true })
   }`], true)
   const line = result.split('\n').find(line => line.includes('RECEIPT '))
   if (line === undefined) throw new Error('Missing browser receipt: ' + result)

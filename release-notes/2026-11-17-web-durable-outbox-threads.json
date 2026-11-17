@@ -1,7 +1,7 @@
 {
   "version": 1,
   "summary": "Persist browser thread Start and reply intents before dispatch without replaying unknown delivery",
-  "replay": {"status": "changed", "detail": "Thread Start and reply use the core outbox dispatch permit and delivery observations. Unknown outcomes cannot be retried. Only explicit applied:none permits an explicit retry of the exact original packet; terminal attempts are preserved."},
+  "replay": {"status": "changed", "detail": "Thread Start and reply use the core outbox dispatch permit and delivery observations. Unknown outcomes cannot be retried. Only explicit applied:none permits a deliberate new attempt of the same immutable intent, revalidated and prepared with a fresh snapshot and new action identity; terminal attempts are preserved."},
   "schema": {"status": "none", "detail": "Reuses the browser-local fractal-web-outbox-v1 database introduced for chat; no new browser schema version, server schema changes or authoritative data migration."},
   "rules": {"status": "none", "detail": "No checkpoint rules or coordinated member upgrades change."},
   "compatibility": {"status": "changed", "detail": "Browser thread sends use the same issuer-scoped durability and visible unprotected mode as chat. Full Start parameters and reply intent are retained before send work. Existing metadata, read and unread thread actions keep their existing contracts."},

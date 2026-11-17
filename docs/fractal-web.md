@@ -626,9 +626,12 @@ offer status and explicit Discard only; enumeration never recovers their state, 
 to the current identity, or makes them dispatchable. Discard resolves the original persisted
 scope even when that scope has never been opened in the current page.
 Storage refusal in protected mode makes no message request and restores text and images.
-In unprotected mode only an explicit `applied: none` retains the exact original packet for
-an in-session retry; ambiguous outcomes are never replayed. This transient exception does
-not provide crash recovery or replace the protected IndexedDB repository.
+Only explicit `applied: none` allows a deliberate Retry. It creates a new attempt from
+the same immutable intent with a fresh snapshot, action ID and idempotency key, rather
+than replaying the old packet. Protected retries atomically require an undismissed
+not-applied predecessor and converge on one deterministic child permit across tabs.
+Unprotected retry intent is retained only in-session and provides no crash recovery.
+Unknown outcomes never offer Retry and are never replayed.
 After identity discovery, both modes preserve send preparation order: text acquires its snapshot
 before permission checks; local images check capabilities and upload before acquiring their snapshot.
 Snapshot-acquisition failures retain their distinct `snapshot-unavailable` classification.
@@ -677,7 +680,7 @@ The live proof requires a send-granted gateway through the existing `WF_ST_GATEW
 `WF_ST_AUTHORIZATION` environment variables and a disposable seat in `WF_E2E_SCRATCH_SEAT`. It
 starts its own loopback server on an ephemeral port and permits message actions only to that seat.
 It gates real HTTP/echo delivery to observe Pending→Sent→echo, injects one explicit refusal,
-checks Retry reuses the key, and prints build revision, seat and timings. The negative control
+checks Retry uses a fresh action identity without a duplicate row, and prints build revision, seat and timings. The negative control
 removes the submit binding and proves the send criterion rejects it without issuing mail.
 Both commands skip all live activity when the one-minute `/proc/loadavg` value is 32 or higher.
 
@@ -724,9 +727,12 @@ in either metadata location dominates none. A definitive `409 stale-fence`,
 `recipient-retired`, `recipient-unassigned` or recipient-mismatch 404 visibly re-reads
 the exact preview. The draft stays; a changed recipient needs a NEW explicit Send and
 a refused preview stays refused. The canonical unassigned golden carries none in both
-metadata locations. Other proven-unapplied sends allow an explicit Retry of the exact
-original prepared packet, never a fresh target or fence. Unknown retains its original
-packet, recipient and identities without a Retry or automatic replay.
+metadata locations. Other proven-unapplied sends allow an explicit Retry of the same
+immutable intent, prepared as a new attempt with a fresh snapshot and action identity.
+Before Retry, Start revalidates the exact original recipient and reply rechecks that the
+original thread exists and is open. Failed revalidation keeps the draft and card with
+the refusal reason; no recipient or thread is silently changed. Unknown retains its
+original packet, recipient and identities without a Retry or automatic replay.
 
 Start and reply share chat's issuer-scoped IndexedDB owner, dispatch permit and
 outcome-retention path. The immutable intent includes every Start parameter (including

@@ -81,6 +81,7 @@ class Gateway {
   rejectSend = false
   currentSnapshot: Snapshot | undefined = snapshot
   staleSendFence = false
+  staleSendAppliedNone = false
   /** Take the send, then answer Fractal's 503 `message-send-unconfirmed` instead of its result. */
   unconfirmSend = false
   capabilityReads = 0
@@ -194,7 +195,8 @@ class Gateway {
         if (this.staleSendFence) return Response.json({
           api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
           code: 'stale-fence', message: 'The observed snapshot belongs to an old gateway store.',
-          retryable: false, request_id: 'request/stale-send', details: {},
+          retryable: false, request_id: 'request/stale-send',
+          ...(this.staleSendAppliedNone ? { applied: 'none', details: { applied: 'none' } } : { details: {} }),
         }, { status: 409 })
         if (this.messageGrant !== 'granted') {
           return new Response(
@@ -1668,6 +1670,35 @@ describe('optimistic conversation sends', () => {
         expect(gateway.messageActions[0]?.fence).toEqual({ snapshot_id: current.id, subject_revisions: {} })
         // Only the send permission read, not an unnecessary HTTP snapshot acquisition.
         expect(gateway.capabilityReads - reads).toBe(1)
+      }),
+    ),
+  )
+
+  it.live('reprepares a proven stale-fence retry from a fresh HTTP snapshot instead of held window evidence', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.agents)
+        live.registry.mount(live.source.conversationInterest!(agent.id))
+        const conversation = live.source.conversation(agent.id)
+        live.registry.mount(conversation)
+        yield* settle
+        gateway.staleSendFence = true
+        gateway.staleSendAppliedNone = true
+        expect(yield* Effect.promise(() => live.source.attachments!.send(request))).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+        const first = gateway.messageActions[0]!
+        gateway.staleSendFence = false
+        gateway.currentSnapshot = { ...snapshot, id: 'snapshot/retry-current', store_index: 8 }
+        expect(yield* Effect.promise(() => live.source.attachments!.send({
+          ...request, _tag: 'Resend', idempotencyKey: first.idempotency_key,
+        }))).toMatchObject({ _tag: 'Success' })
+        const next = gateway.messageActions[1]!
+        expect(next.fence.snapshot_id).toBe(gateway.currentSnapshot.id)
+        expect(next.id).not.toBe(first.id)
+        expect(next.idempotency_key).not.toBe(first.idempotency_key)
+        expect(next.parameters).toEqual(first.parameters)
+        expect(live.registry.get(conversation)).toMatchObject({
+          _tag: 'Observed', value: { items: [{ _tag: 'Text', text: 'hello', sendState: { _tag: 'Sent' } }] },
+        })
       }),
     ),
   )
