@@ -304,7 +304,9 @@ export const gatewayMessageSend = (
         if (identity === undefined || !sameScope(repo.scope, identity)) return undefined
         const outcome = observeOutbox(current, observation)
         if (outcome === current) return current
-        if (await repo.compareAndSwap(current.revision, outcome)) return outcome
+        const written = await repo.compareAndSwapWritable(current.revision, outcome)
+        if (written._tag === 'written') return written.record
+        if (written._tag === 'not-writable') return undefined
         current = await repo.read(key)
       }
       return undefined

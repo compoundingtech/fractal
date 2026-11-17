@@ -27,10 +27,15 @@ export const spoolAttachment = Effect.fn('Outbox.spoolAttachment')(function* (by
   const digest = yield* Effect.tryPromise({ try: () => globalThis.crypto.subtle.digest('SHA-256', owned), catch: (cause) => error(cause, 'hashAttachment') })
   return { hash: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''), bytes: owned }
 })
+export type OutboxWriteResult =
+  | { readonly _tag: 'written'; readonly record: OutboxRecord<PreparedPacket> }
+  | { readonly _tag: 'revision-conflict'; readonly actualRevision: number }
+  | { readonly _tag: 'not-writable' }
 export interface IndexedDbOutbox extends OutboxRepository<PreparedPacket> {
   readonly persistence: 'granted' | 'denied' | 'unsupported'
   readonly accept: (record: OutboxPreparingRecord, spool?: readonly SpoolInput[], intentBytes?: Uint8Array) => Promise<boolean>
   readonly acquireDispatchPermit: (id: string, revision: number) => Promise<OutboxRecord<PreparedPacket>>
+  readonly compareAndSwapWritable: (revision: number, record: OutboxRecord<PreparedPacket>) => Promise<OutboxWriteResult>
   readonly readSpool: (id: string, hash: string) => Promise<Uint8Array | undefined>
   readonly readPacketBytes: (id: string) => Promise<Uint8Array | undefined>
   readonly readIntentBytes: (id: string) => Promise<Uint8Array | undefined>
@@ -190,27 +195,23 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
       }
     })
   }
-  const change = (id: string, revision: number, update: (record: OutboxRecord<PreparedPacket>) => OutboxRecord<PreparedPacket> | undefined, metadata?: PacketMetadata, conflictThrows = false): Promise<OutboxRecord<PreparedPacket> | undefined> => run('readwrite', 'compareAndSwap', (tx, done, fail) => {
+  const change = (id: string, revision: number, update: (record: OutboxRecord<PreparedPacket>) => OutboxRecord<PreparedPacket> | undefined, metadata?: PacketMetadata): Promise<OutboxWriteResult> => run('readwrite', 'compareAndSwap', (tx, done, fail) => {
     get(tx, id, (envelope) => {
       try {
         const current = envelope?.record
-        const conflict = (): void => {
-          if (conflictThrows) throw new OutboxConflict({ localAttemptId: id, expectedRevision: revision, ...(current === undefined ? {} : { actualRevision: current.revision }) })
-          done(undefined)
-        }
-        if (envelope === undefined || current === undefined || current.revision !== revision || envelope.dismissed !== undefined) { conflict(); return }
+        if (envelope === undefined || current === undefined || envelope.dismissed !== undefined) { done({ _tag: 'not-writable' }); return }
+        if (current.revision !== revision) { done({ _tag: 'revision-conflict', actualRevision: current.revision }); return }
         const proposal = update(current)
-        if (proposal === undefined) { conflict(); return }
+        if (proposal === undefined) { done({ _tag: 'not-writable' }); return }
         const next = decodeRecord(proposal)
         // Revision and ALL policy authorization occur under this same write transaction.
         if (next.id !== id || !isAllowedOutboxTransition(current, next)) {
-          if (conflictThrows) { conflict(); return }
           throw invalid('Replacement is not an authorized core outbox transition.')
         }
         const firstPacket = !('packet' in current) && 'packet' in next
         if (firstPacket && metadata === undefined) throw invalid('Prepared packet bytes must be persisted before dispatch.')
         tx.objectStore(attemptsStore).put({ ...envelope, record: next, updatedAt: now(), ...(firstPacket ? metadata : {}), ...(terminal(next) ? { terminalAt: envelope.terminalAt ?? now(), timelineObserved: next.state === 'not-applied' || (next.state === 'delivered' && next.evidence.kind === 'timeline') || envelope.timelineObserved } : {}) })
-        done(next)
+        done({ _tag: 'written', record: next })
       } catch (cause) { fail(cause) }
     }, fail)
   })
@@ -244,12 +245,16 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
       const owned = decodeRecord(Schema.decodeUnknownSync(json)(encodeJson(record)))
       const metadata = owned.state === 'pending' && owned.phase === 'ready' && !owned.mayHaveDispatched
         ? await packetMetadata(owned) : undefined
-      return (await change(owned.id, revision, () => owned, metadata)) !== undefined
+      return (await change(owned.id, revision, () => owned, metadata))._tag === 'written'
+    },
+    compareAndSwapWritable: (revision, record) => {
+      const owned = decodeRecord(Schema.decodeUnknownSync(json)(encodeJson(record)))
+      return change(owned.id, revision, () => owned)
     },
     acquireDispatchPermit: async (id, revision) => {
-      const record = await change(id, revision, markOutboxDispatched, undefined, true)
-      if (record === undefined) throw new OutboxConflict({ localAttemptId: id, expectedRevision: revision })
-      return record
+      const result = await change(id, revision, markOutboxDispatched)
+      if (result._tag !== 'written') throw new OutboxConflict({ localAttemptId: id, expectedRevision: revision, ...(result._tag === 'revision-conflict' ? { actualRevision: result.actualRevision } : {}) })
+      return result.record
     },
     read: (id) => run('readonly', 'read', (tx, done, fail) => get(tx, id, (envelope) => done(envelope?.record), fail)),
     list: () => run('readonly', 'list', (tx, done, fail) => {

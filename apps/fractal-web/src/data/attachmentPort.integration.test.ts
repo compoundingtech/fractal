@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { FractalClient, outboxDeploymentId } from '@fractal/client'
 import * as Native from '@fractal/client/schema'
 import { Effect } from 'effect'
-import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
+import { IDBDatabase, IDBFactory, IDBObjectStore } from 'fake-indexeddb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import certainty from '../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json'
 import fixture from './subjectReadPort.gateway.fixtures.json'
@@ -71,6 +71,34 @@ describe('chat durable gateway delivery', () => {
     held.resolve(Response.json(receipt(String(body))))
     expect(await pending).toMatchObject({ _tag: 'Success' })
     expect(await second.read(key)).toMatchObject({ state: 'delivered', evidence: { kind: 'receipt' } })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
+  })
+
+  it.each(['same tab', 'another tab after recovery'] as const)('settles an in-flight receipt as unconfirmed after discard in %s with bounded work', async mode => {
+    const factory = new IDBFactory()
+    const repo = await open(factory)
+    const started = Promise.withResolvers<void>()
+    const held = Promise.withResolvers<Response>()
+    const { client, calls } = transport(() => { started.resolve(); return held.promise })
+    const pending = bind(client, repo)(request, key)
+    await started.promise
+    const discarder = mode === 'same tab' ? repo : await open(factory)
+    if (mode !== 'same tab') expect(await discarder.read(key)).toMatchObject({ state: 'unknown' })
+    await discarder.dismiss(key)
+    const before = await discarder.read(key)
+    const reads = vi.spyOn(repo, 'read')
+    const writes = vi.spyOn(repo, 'compareAndSwapWritable')
+    const transactions = vi.spyOn(IDBDatabase.prototype, 'transaction')
+    const capabilityReads = calls.filter(call => call.path.endsWith('/capabilities')).length
+    const body = calls.find(call => call.path.endsWith('/actions'))?.body
+    held.resolve(Response.json(receipt(String(body))))
+    expect(await pending).toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
+    expect(calls.filter(call => call.path.endsWith('/capabilities')).length - capabilityReads).toBe(1)
+    expect(transactions).toHaveBeenCalledTimes(1)
+    expect(writes).toHaveBeenCalledTimes(1)
+    await expect(writes.mock.results[0]?.value).resolves.toEqual({ _tag: 'not-writable' })
+    expect(reads).not.toHaveBeenCalled()
+    expect(await discarder.read(key)).toEqual(before)
     expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
   })
 
