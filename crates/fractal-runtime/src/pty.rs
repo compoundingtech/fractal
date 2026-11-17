@@ -814,6 +814,10 @@ impl PtyRuntime {
                 }
             };
             self.acknowledge_launcher(&mut producer, true)?;
+            // A completed scope launcher cannot still have a pending join.
+            // Keep its freshness boundary even if the detached server migrates
+            // before the first manager snapshot observes the original scope.
+            crate::isolate::finish_scope_join(&unit);
             if output.status.success() {
                 let published = self.wait_for_publication(id, previous_incarnation.as_deref())?;
                 std::fs::remove_file(&fence)

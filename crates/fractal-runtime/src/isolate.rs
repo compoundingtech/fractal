@@ -561,6 +561,13 @@ fn control_group(unit: &str) -> Result<Option<PathBuf>> {
         verify_scope_absence(unit, snapshot.captured_at)?;
         return Ok(None);
     };
+    if observed.load == "not-found" {
+        anyhow::ensure!(observed.active == "inactive" && observed.sub == "dead"
+            && observed.control_group.is_none() && observed.main_pid == 0,
+            "unloaded work scope is not verified inactive");
+        verify_scope_absence(unit, snapshot.captured_at)?;
+        return Ok(None);
+    }
     anyhow::ensure!(observed.load == "loaded", "work scope load state is unverified");
     let cgroup = observed.control_group.as_ref()
         .context("loaded work scope has no verified control group")?;

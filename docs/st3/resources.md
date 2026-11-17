@@ -234,6 +234,12 @@ subprocess. This is admission synchronization, not a retry of a failed manager c
 Transport failures and manager backoff remain prompt errors, and stale or incomplete observations
 never prove that a scope has retired.
 
+If a listed unit is collected before its properties are read, a complete `not-found` property
+record is retained as its current state, rather than marking the manager unresponsive. Scope
+absence still requires an inactive unit with no cgroup and a snapshot newer than its completed
+join. PTY launcher acknowledgement and observed pre-migration process membership complete that
+join boundary before the old scope can disappear.
+
 Darwin offers host-local logical exclusivity and scoped cancellation, not Linux-equivalent
 whole-tree CPU/memory enforcement. Required `enforced` coverage returns `UnsupportedCoverage`.
 Logical-only execution does not imply an enforced resource cap. Detached process groups cannot
