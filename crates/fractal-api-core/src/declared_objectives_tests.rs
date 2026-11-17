@@ -1053,3 +1053,28 @@ objective "example/transactions" {
     let remaining = rows(&store, *NOW, &native[..2]).unwrap();
     assert_eq!(check(&store, &remaining).unwrap().recovered, 1);
 }
+
+#[test]
+fn native_source_outage_preserves_all_child_episode_identities() {
+    let store = store_with(r#"version 2
+objective "example/transactions" {
+  about "Transaction owner"
+  indicator "native" { objective "transaction"; }
+  on-breach "fault" owner="agent/other.ops" condition="transaction-burn"
+}
+"#);
+    with_owner(&store, "other");
+    let native: Vec<Value> = ["transaction/read", "transaction/write"].into_iter().map(|id| json!({
+        "id": id, "kind": "objective", "about": "Native source",
+        "target": "1% bad events", "current": "paired burn", "window": "30d",
+        "remaining_percent": 75.0, "status": "burning", "explain": "Native evidence",
+    })).collect();
+    let burning = rows(&store, *NOW, &native).unwrap();
+    assert_eq!(check(&store, &burning).unwrap().opened, 2);
+    let unavailable = rows(&store, *NOW, &[]).unwrap();
+    assert_eq!(unavailable.iter().map(|row| row["id"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["example/transactions/read", "example/transactions/write"]));
+    assert!(unavailable.iter().all(|row| row["status"] == "no-data"));
+    assert_eq!(check(&store, &unavailable).unwrap().recovered, 0);
+    assert_eq!(check(&store, &unavailable).unwrap().opened, 0);
+}

@@ -297,12 +297,16 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                     produced.push(row);
                 }
                 if produced.is_empty() {
-                    produced.push(json!({
-                        "id": objective.name, "kind": "objective", "about": objective.about,
-                        "target": "native objective", "current": "native source unavailable", "window": "now",
-                        "remaining_percent": null, "status": "no-data",
-                        "explain": format!("Native objective {source} has no source row on this member. {response}"),
-                    }));
+                    // A wholly missing source is unknown, not proof its previously burning children ended.
+                    let ids = if entry.ids.is_empty() { BTreeSet::from([objective.name.clone()]) } else { entry.ids.clone() };
+                    for id in ids {
+                        produced.push(json!({
+                            "id": id, "kind": "objective", "about": objective.about,
+                            "target": "native objective", "current": "native source unavailable", "window": "now",
+                            "remaining_percent": null, "status": "no-data",
+                            "explain": format!("Native objective {source} has no source row on this member. {response}"),
+                        }));
+                    }
                 }
                 entry.ids = produced.iter().filter_map(|row| row["id"].as_str().map(str::to_owned)).collect();
                 rows.extend(produced);
