@@ -1979,9 +1979,17 @@ impl Ui {
             .cloned()
     }
 
+    fn home_selection(&self) -> Option<String> {
+        self.threads.inbox_detail().map(str::to_owned)
+            .or_else(|| self.list_selection(0))
+    }
+
     /// What the keys act on: the focused pane's own subject, or the selection in the list that
     /// has the keys (Now's, over the space).
     fn selected_id(&self) -> Option<String> {
+        if matches!(self.focused_pane(), Some(Pane::List(0))) && !self.usage_open() {
+            return self.home_selection();
+        }
         if !self.home_open()
             && let Some((_, Some(subject))) =
                 self.focused_pane().as_ref().and_then(glass::pane_subject)
@@ -2684,7 +2692,7 @@ impl Ui {
             return if self.usage_open() { Pane::Usage(id) } else { Pane::Home(id) };
         }
         match self.focused_pane() {
-            Some(Pane::List(0)) => Pane::Home(self.list_selection(0)),
+            Some(Pane::List(0)) => Pane::Home(self.home_selection()),
             // A mission's k swaps its card and its whole declaration in the same tab.
             Some(Pane::Mission(id)) if self.kdl => Pane::Declaration(id),
             Some(Pane::Declaration(id)) if !self.kdl => Pane::Mission(id),
@@ -4539,6 +4547,9 @@ impl Ui {
             return;
         }
         self.selected[self.tab()] = index.min(count - 1);
+        if self.tab() == 0 {
+            self.threads.select_inbox_detail(self.list_selection(0));
+        }
         self.editing = false;
         self.confirm = None;
         self.conversation_state.selection = None;

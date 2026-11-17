@@ -57,6 +57,9 @@ Moving a thread between an embedded panel and its tab does not start a new visit
 that arrive after an unknown entry stay sticky until a later visit. Both mark actions also
 appear in `Ctrl+K`. Inbox's **Marked unread** section uses a distinct private reminder marker,
 not the natural unread badge or count. Opening a marked row seeks its return anchor.
+The open Inbox thread stays keyed by its identity when a reminder clears and the marked row
+leaves the list. Its body, composer and scroll remain until explicit navigation or collapse;
+connection/owner changes and read revocation still clear protected thread state.
 Read-only connections show neither action. Pending or refused anchor seeks show no message
 body or unread badge; unavailable anchors get a neutral note rather than invented content.
 
