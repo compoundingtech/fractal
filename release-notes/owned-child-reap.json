@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Reap owned execution children independently of cancelled run observations and preserve their exit receipts",
+  "summary": "Reap owned execution children independently of cancelled run observations and preserve their exit receipts; keep receipt persistence free of Clippy borrow warnings",
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "Execution receipt format is unchanged."},
   "rules": {"status": "none", "detail": "Cancellation and containment authority are unchanged. Group completion does not imply that an owning parent has consumed its child's wait status."},

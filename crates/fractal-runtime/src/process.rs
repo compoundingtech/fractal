@@ -1208,7 +1208,7 @@ impl ExecRuntime {
         serde_json::to_writer(&mut file, generation)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        fs::rename(&temporary, &path)?;
+        fs::rename(&temporary, path)?;
         Ok(())
     }
 }
