@@ -8,6 +8,7 @@ pub(super) fn mission_run_revision_pinned(
     source: &MissionRunView,
 ) -> Result<bool, FractalError> {
     let pinned: Option<bool> = connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-hebd6bd79955a owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */
         &canonical_sql(
             "SELECT json_extract(body,'$.revision_pinned') FROM claims
              WHERE subject=?1 AND kind='mission-run.created'
