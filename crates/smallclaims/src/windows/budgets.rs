@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, ensure};
@@ -23,7 +23,7 @@ struct Counts { eligible: u64, bad: u64 }
 
 struct Ledger {
     db: Connection,
-    streams: Vec<String>,
+    streams: Arc<[String]>,
     pending: BTreeMap<(usize, u64), Counts>,
     started_ms: u64,
     last_ms: u64,
@@ -32,6 +32,32 @@ struct Ledger {
 }
 
 static LEDGER: Mutex<Option<Ledger>> = Mutex::new(None);
+static RECORDER: OnceLock<Recorder> = OnceLock::new();
+
+/// The completion path shares only this in-memory buffer, never the ledger's I/O mutex.
+struct Recorder {
+    streams: Arc<[String]>,
+    pending: Mutex<BTreeMap<(u64, usize), Counts>>,
+}
+
+impl Recorder {
+    fn record(&self, stream: &str, bad: bool) {
+        let Some(index) = self.streams.iter().position(|s| s == stream) else { return; };
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = unix_ms();
+        let key = (now / MINUTE, index);
+        if !pending.contains_key(&key) {
+            // Each expired bucket is removed once, rather than scanning retained history.
+            while pending.first_key_value().is_some_and(|((slot, _), _)|
+                slot.saturating_mul(MINUTE) < now.saturating_sub(HORIZON)) {
+                pending.pop_first();
+            }
+        }
+        let counts = pending.entry(key).or_default();
+        counts.eligible = counts.eligible.saturating_add(1);
+        counts.bad = counts.bad.saturating_add(u64::from(bad));
+    }
+}
 
 pub fn unix_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
@@ -49,6 +75,10 @@ pub fn install(path: &Path, node: &str, streams: Vec<String>) -> Result<()> {
     let now = unix_ms();
     db.execute(/* sqlite-large-value: allow-for-now lv-h1600ef705393 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_minutes_v1 WHERE slot >= ?1", [now / MINUTE])?;
     db.execute(/* sqlite-large-value: allow-for-now lv-h0a7bcaadb3af owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_gauges_v1 WHERE at_ms > ?1", [now])?;
+    let streams: Arc<[String]> = streams.into();
+    ensure!(RECORDER.set(Recorder {
+        streams: Arc::clone(&streams), pending: Mutex::new(BTreeMap::new()),
+    }).is_ok(), "native SLO recorder is already installed");
     *guard = Some(Ledger { db, streams, pending: BTreeMap::new(), started_ms: now,
         last_ms: now, last_instant: Instant::now(), committed_through_ms: now / MINUTE * MINUTE });
     Ok(())
@@ -85,26 +115,31 @@ fn open(path: &Path, node: &str) -> Result<Connection> {
 
 /// No disk I/O on the measurement path. Only commissioned stream names are accepted.
 pub fn record(stream: &str, bad: bool) {
-    let mut guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(ledger) = guard.as_mut() else { return; };
-    let now = unix_ms();
-    let Some(index) = ledger.streams.iter().position(|s| s == stream) else { return; };
-    let slot = now / MINUTE;
-    if !ledger.pending.contains_key(&(index, slot)) {
-        // Prune only on a new minute, never scan retained slots for every request.
-        ledger.pending.retain(|(_, slot), _| slot.saturating_mul(MINUTE) >= now.saturating_sub(HORIZON));
-    }
-    let counts = ledger.pending.entry((index, slot)).or_default();
-    counts.eligible = counts.eligible.saturating_add(1);
-    counts.bad = counts.bad.saturating_add(u64::from(bad));
+    if let Some(recorder) = RECORDER.get() { recorder.record(stream, bad); }
 }
 
 /// Persist only a fully observed preceding minute. A late checkpoint, clock discontinuity,
 /// or restart leaves a gap. Repeated checkpoints within a minute never duplicate counts.
 pub fn checkpoint() -> Result<()> {
-    let mut guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(recorder) = RECORDER.get() else { return Ok(()); };
+    checkpoint_with(recorder, &LEDGER)
+}
+
+fn checkpoint_with(recorder: &Recorder, ledger: &Mutex<Option<Ledger>>) -> Result<()> {
+    let mut guard = ledger.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(ledger) = guard.as_mut() else { return Ok(()); };
-    ledger.checkpoint_at(unix_ms(), Instant::now())
+    let (pending, now, instant) = {
+        let mut buffer = recorder.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        (std::mem::take(&mut *buffer), unix_ms(), Instant::now())
+    };
+    // Merge outside the recorder lock. A failed write retains its snapshot for the next
+    // checkpoint, while completions append independently to the new live buffer.
+    for ((slot, index), delta) in pending {
+        let counts = ledger.pending.entry((index, slot)).or_default();
+        counts.eligible = counts.eligible.saturating_add(delta.eligible);
+        counts.bad = counts.bad.saturating_add(delta.bad);
+    }
+    ledger.checkpoint_at(now, instant)
 }
 
 impl Ledger {
@@ -258,7 +293,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("native.sqlite");
         let instant = Instant::now();
-        let mut ledger = Ledger { db: open(&path, "node-a")?, streams: vec!["read/300".into()],
+        let mut ledger = Ledger { db: open(&path, "node-a")?, streams: vec!["read/300".into()].into(),
             pending: BTreeMap::new(), started_ms: 0, last_ms: 0, last_instant: instant, committed_through_ms: 0 };
         ledger.pending.insert((0, 0), Counts { eligible: 100, bad: 5 });
         ledger.checkpoint_at(MINUTE, instant + std::time::Duration::from_secs(60))?;
@@ -267,7 +302,7 @@ mod tests {
         let count: u64 = db.query_row("SELECT eligible FROM native_slo_minutes_v1", [], |r| r.get(0))?;
         assert_eq!(count, 100);
         assert!(open(&path, "node-b").is_err());
-        let mut restarted = Ledger { db, streams: vec!["read/300".into()], pending: BTreeMap::new(),
+        let mut restarted = Ledger { db, streams: vec!["read/300".into()].into(), pending: BTreeMap::new(),
             started_ms: MINUTE + 10_000, last_ms: MINUTE + 10_000, last_instant: instant,
             committed_through_ms: MINUTE };
         restarted.checkpoint_at(2 * MINUTE, instant + std::time::Duration::from_secs(50))?;
@@ -279,7 +314,7 @@ mod tests {
     #[test]
     fn late_checkpoint_does_not_invent_quiet_coverage() -> Result<()> {
         let instant = Instant::now();
-        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()],
+        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()].into(),
             pending: BTreeMap::new(), started_ms: 0, last_ms: 0, last_instant: instant, committed_through_ms: 0 };
         ledger.checkpoint_at(3 * MINUTE, instant + std::time::Duration::from_secs(180))?;
         let count: u64 = ledger.db.query_row("SELECT count(*) FROM native_slo_minutes_v1", [], |r| r.get(0))?;
@@ -291,7 +326,7 @@ mod tests {
     fn thirty_day_retention_keeps_the_real_oldest_in_window_receipt() -> Result<()> {
         let instant = Instant::now();
         let now = HORIZON + MINUTE;
-        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()],
+        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()].into(),
             pending: BTreeMap::new(), started_ms: 0, last_ms: now - MINUTE, last_instant: instant,
             committed_through_ms: now - MINUTE };
         for (slot, count) in [(0, 999), (1, 20), (100, 30)] {
@@ -310,7 +345,7 @@ mod tests {
     #[test]
     fn regular_checkpoint_jitter_preserves_complete_minutes_and_failures_age_out() -> Result<()> {
         let instant = Instant::now();
-        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()],
+        let mut ledger = Ledger { db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()].into(),
             pending: BTreeMap::new(), started_ms: 5, last_ms: 5, last_instant: instant,
             committed_through_ms: 0 };
         for tick in 1..=7 {
@@ -335,6 +370,84 @@ mod tests {
         let db = open(Path::new(":memory:"), "node")?;
         assert!(db.execute("INSERT INTO native_slo_minutes_v1 VALUES(?1,0,0,0)", [&"x".repeat(257)]).is_err());
         assert!(db.execute("INSERT INTO native_slo_gauges_v1 VALUES(?1,0,1)", [&"é".repeat(129)]).is_err());
+        Ok(())
+    }
+    #[test]
+    fn completion_recording_never_waits_for_blocked_checkpoint_io() -> Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        std::thread_local! {
+            static BLOCKED: std::cell::RefCell<Option<mpsc::Sender<()>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("blocked.sqlite");
+        let streams: Arc<[String]> = vec!["latency/300".into()].into();
+        let recorder = Arc::new(Recorder { streams: Arc::clone(&streams), pending: Mutex::new(BTreeMap::new()) });
+        let now = unix_ms();
+        let ledger = Arc::new(Mutex::new(Some(Ledger {
+            db: open(&path, "node")?, streams, pending: BTreeMap::new(),
+            started_ms: now.saturating_sub(2 * MINUTE), last_ms: now.saturating_sub(MINUTE),
+            last_instant: Instant::now() - Duration::from_secs(60),
+            committed_through_ms: (now / MINUTE * MINUTE).saturating_sub(MINUTE),
+        })));
+        recorder.record("latency/300", false);
+        let blocker = Connection::open(&path)?;
+        blocker.execute_batch("BEGIN EXCLUSIVE")?;
+        let (entered, blocked) = mpsc::channel();
+        let checkpoint = std::thread::spawn({
+            let recorder = Arc::clone(&recorder);
+            let ledger = Arc::clone(&ledger);
+            move || -> Result<()> {
+                BLOCKED.with(|sender| *sender.borrow_mut() = Some(entered));
+                ledger.lock().unwrap().as_mut().unwrap().db.busy_handler(Some(|attempt| {
+                    if attempt == 0 {
+                        BLOCKED.with(|sender| { let _ = sender.borrow().as_ref().unwrap().send(()); });
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                    true
+                }))?;
+                checkpoint_with(&recorder, &ledger)
+            }
+        });
+        // SQLite itself acknowledges the blocked checkpoint; no scheduling guess or fake I/O.
+        let entered_io = blocked.recv_timeout(Duration::from_secs(5));
+        let (sent, received) = mpsc::channel();
+        let recording = std::thread::spawn({
+            let recorder = Arc::clone(&recorder);
+            move || { recorder.record("latency/300", true); sent.send(()).unwrap(); }
+        });
+        let recorded_while_blocked = received.recv_timeout(Duration::from_secs(1));
+        blocker.execute_batch("ROLLBACK")?;
+        checkpoint.join().unwrap()?;
+        recording.join().unwrap();
+        assert!(entered_io.is_ok(), "checkpoint never reached its real SQLite wait: {entered_io:?}");
+        assert!(recorded_while_blocked.is_ok(), "completion waited for checkpoint I/O");
+        let pending = recorder.pending.lock().unwrap();
+        assert_eq!(pending.values().map(|counts| counts.eligible).sum::<u64>(), 1);
+        assert_eq!(pending.values().map(|counts| counts.bad).sum::<u64>(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_checkpoint_snapshots_merge_without_losing_new_completions() -> Result<()> {
+        let streams: Arc<[String]> = vec!["latency/300".into()].into();
+        let recorder = Recorder { streams: Arc::clone(&streams), pending: Mutex::new(BTreeMap::new()) };
+        let now = unix_ms();
+        let db = open(Path::new(":memory:"), "node")?;
+        db.execute_batch("PRAGMA query_only=ON")?;
+        let ledger = Mutex::new(Some(Ledger { db, streams, pending: BTreeMap::new(),
+            started_ms: now, last_ms: now, last_instant: Instant::now(),
+            committed_through_ms: now / MINUTE * MINUTE }));
+        recorder.record("latency/300", false);
+        assert!(checkpoint_with(&recorder, &ledger).is_err());
+        recorder.record("latency/300", true);
+        assert!(checkpoint_with(&recorder, &ledger).is_err());
+        let guard = ledger.lock().unwrap();
+        let retained = &guard.as_ref().unwrap().pending;
+        assert_eq!(retained.values().map(|counts| counts.eligible).sum::<u64>(), 2);
+        assert_eq!(retained.values().map(|counts| counts.bad).sum::<u64>(), 1);
+        assert!(recorder.pending.lock().unwrap().is_empty());
         Ok(())
     }
 }

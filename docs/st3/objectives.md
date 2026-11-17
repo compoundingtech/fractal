@@ -115,6 +115,11 @@ Native telemetry persists independent closed UTC-minute receipts for 30 days in
 `state_dir/slo-budgets.sqlite3`. The durable ledger preserves closed evidence across restarts;
 restart partial minutes and collection gaps are unknown rather than inferred good. This is
 local observation history, not a reconstruction from diagnostic percentiles.
+Request and SQL completions append only to an independent in-memory minute buffer. The
+checkpoint swaps that buffer under its short recorder lock, releases it, then merges and
+persists receipts under a separate ledger lock. Checkpoint, report and gauge SQLite work
+never hold the recorder lock; a blocked disk operation cannot delay completion recording.
+Failed checkpoint snapshots remain available for retry while new completions collect separately.
 
 Database capacity uses hourly readings with a two-hour maximum age. A violation of either
 capacity bound is known bad; known good requires both bounds to be readable and within limits.
