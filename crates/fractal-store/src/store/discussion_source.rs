@@ -8,11 +8,22 @@ pub struct QualifiedDiscussionSource {
     item: AttentionItemView,
     evidence: Vec<String>,
     current_notice: bool,
+    authored: Option<AuthoredEvidence>,
+}
+
+/// Retained coordinates, exposed only after the opening recipient has been proved.
+pub struct AuthoredEvidence {
+    pub generation: String,
+    pub revision: String,
+    pub opening_claim_id: String,
+    pub attempt: u64,
+    pub readiness_epoch: u64,
 }
 
 impl QualifiedDiscussionSource {
     pub fn item(&self) -> &AttentionItemView { &self.item }
     pub fn evidence(&self) -> &[String] { &self.evidence }
+    pub fn authored_evidence(&self) -> Option<&AuthoredEvidence> { self.authored.as_ref() }
     pub(super) fn is_current_notice(&self) -> bool { self.current_notice }
     pub(super) fn into_resolved(self) -> thread_metadata::inbox_source::ResolvedSource {
         thread_metadata::inbox_source::ResolvedSource { item: self.item, evidence: self.evidence }
@@ -39,12 +50,22 @@ pub fn qualify_batch(connection: &Connection, person: &str, keys: &[SourceEpisod
         Err(error) => return Err(error),
     };
     if !person.starts_with("person/") { return Ok(result); }
-    let input = serde_json::to_string(keys).map_err(internal)?;
+    // Admission reads only metadata/byte counts. Rejected entries remain null so the
+    // batched query retains the caller's indices without ever hydrating their bodies.
+    let mut admitted = Vec::with_capacity(keys.len());
+    for key in keys {
+        admitted.push(if inputs_preflight(connection, key)? {
+            serde_json::to_value(key).map_err(internal)?
+        } else { Value::Null });
+    }
+    let input = serde_json::to_string(&admitted).map_err(internal)?;
     let snapshots = if keys.iter().any(|key| key.source_id.starts_with(fractal_schema::notice::SOURCE_PREFIX)) {
         notice_snapshots(connection, &input)?
     } else { BTreeMap::new() };
+    let authored = authored_sources(connection, &person, keys, &input, at)?;
     let reviewer = human_review_reassignment::reviewer_sql("opening");
     let before = canonical::after_sql("opening", "earlier");
+    let candidate_order = canonical::order_sql("candidate", false);
     let sql = canonical_sql(&format!(
         "SELECT CAST(input.key AS INTEGER), opening.id,opening.store_index,opening.batch_id,
          opening.subject,opening.kind,opening.origin,opening.actor,opening.body,
@@ -65,7 +86,7 @@ pub fn qualify_batch(connection: &Connection, person: &str, keys: &[SourceEpisod
                AND candidate.kind=json_extract(registration.manifest,'$.creation_kind')
                AND json_extract(candidate.body,'$.fields._registration')=source.registration
                AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=candidate.id AND state='repaired')
-             ORDER BY CANONICAL_ASC(candidate) LIMIT 1)
+             ORDER BY {candidate_order} LIMIT 1)
            ELSE json_extract(input.value,'$.episode') END
          LEFT JOIN step_runs step ON step.subject=json_extract(input.value,'$.source_id')
          WHERE NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=opening.id AND state='repaired')"
@@ -137,7 +158,6 @@ pub fn qualify_batch(connection: &Connection, person: &str, keys: &[SourceEpisod
             }
             custom::attention_item(&body, opening_at).map_err(internal)?
         } else {
-            // Authored step-run.state openings do not retain the opening recipient.
             // Harness, login, planning, revisions and faults have no supported retained proof.
             continue;
         };
@@ -146,9 +166,240 @@ pub fn qualify_batch(connection: &Connection, person: &str, keys: &[SourceEpisod
         }
         item.actions.clear(); // Discussion qualification never grants answer/mutation authority.
         evidence.sort(); evidence.dedup();
-        result[index] = Some(QualifiedDiscussionSource { item, evidence, current_notice });
+        result[index] = Some(QualifiedDiscussionSource { item, evidence, current_notice, authored: None });
+    }
+    for (index, source) in authored { result[index] = Some(source); }
+    Ok(result)
+}
+
+/// Fold only the requested generation subjects, in the same order as durable projection.
+/// The definition is the generation's pinned revision, never today's assignment or revision.
+fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode], input: &str, at: u128)
+    -> Result<BTreeMap<usize, QualifiedDiscussionSource>, FractalError>
+{
+    struct State {
+        generation: String,
+        revision: String,
+        recipient: Option<String>,
+        current_recipient: Option<String>,
+        attempt: u64,
+        epoch: Option<u64>,
+        status: String,
+        evidence: Vec<String>,
+    }
+    let order = canonical::order_sql("claims", false);
+    let candidate_order = canonical::order_sql("candidate", false);
+    let accepted_rename = person_rename::accepted_reassignment_sql("claims", "previous_person", "person");
+    let sql = format!(
+        "SELECT CAST(input.key AS INTEGER), step.generation_id, generation.revision,
+         revision.body, revision.claim_id, step.step_path, step.definition_hash, step.assignee,
+         run.id, created.body, claims.id, claims.kind, claims.body, claims.accepted_at_unix_ms,
+         CASE WHEN claims.kind='work.person-reassigned' THEN {accepted_rename} ELSE 0 END,
+         created.id, generation_claim.id, generation.predecessor_id
+         FROM json_each(?1) input
+         JOIN step_runs step ON step.subject=json_extract(input.value,'$.source_id')
+         JOIN run_generations generation ON generation.id=step.generation_id AND generation.run_id=step.run_id
+         JOIN mission_runs run ON run.id=step.run_id
+         JOIN mission_revisions revision ON revision.mission_id=run.mission_id AND revision.revision=generation.revision
+         JOIN claims created ON created.id=(
+           SELECT candidate.id FROM claims candidate
+           WHERE candidate.subject='mission-run/' || run.id AND candidate.kind='mission-run.created'
+             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=candidate.id AND state='repaired')
+           ORDER BY {candidate_order} LIMIT 1)
+         JOIN claims generation_claim ON generation_claim.id=(
+           SELECT candidate.id FROM claims candidate
+           WHERE candidate.subject='run-generation/' || generation.id AND candidate.kind='run-generation.created'
+             AND json_extract(candidate.body,'$.fields.revision')=generation.revision
+             AND json_extract(candidate.body,'$.fields.run')='mission-run/' || run.id
+             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=candidate.id AND state='repaired')
+           ORDER BY {candidate_order} LIMIT 1)
+         JOIN claims ON claims.subject=step.subject
+         WHERE claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+             'work.released','work.handoff-returned','work.person-reassigned',
+             'work.claimed','work.progress','work.submitted','work.failed',
+             'work.person-done','work.person-cancelled','work.person-override')
+           AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+         ORDER BY CAST(input.key AS INTEGER), {order}"
+    );
+    let mut statement = connection.prepare(&sql).map_err(internal)?;
+    let mut rows = statement.query([input]).map_err(internal)?;
+    let mut states = BTreeMap::<usize, State>::new();
+    let mut result = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    while let Some(row) = rows.next().map_err(internal)? {
+        let index: usize = row.get(0).map_err(internal)?;
+        let key = &keys[index];
+        if !key.episode.starts_with("run-generation/") || result.contains_key(&index) { continue; }
+        if !states.contains_key(&index) {
+            let generation: String = row.get(1).map_err(internal)?;
+            let revision: String = row.get(2).map_err(internal)?;
+            let body: String = row.get(3).map_err(internal)?;
+            let Ok(mission) = serde_json::from_str::<MissionSpec>(&body) else { continue };
+            let mut unhashed = mission.clone();
+            unhashed.revision.clear();
+            if mission.revision != revision || revision != hex::encode(Sha256::digest(
+                serde_json::to_vec(&unhashed).map_err(internal)?,
+            )) { continue; }
+            let created: String = row.get(9).map_err(internal)?;
+            let Ok(created) = serde_json::from_str::<Value>(&created) else { continue };
+            let fields = &created["fields"];
+            // Reconstruct solely from admission facts, never the current run view.
+            let run: String = row.get(8).map_err(internal)?;
+            let historical = json!({
+                "subject":format!("mission-run/{run}"), "id":run,
+                "mission":fields["mission"], "generation":format!("run-generation/{generation}"),
+                "initial_revision":fields["initial_revision"], "revision":revision,
+                "root_revision":fields["root_revision"], "root_mission_run":fields["root_mission_run"],
+                "parent_step_run":fields["parent_step_run"], "workspace":fields["workspace"],
+                "requester":fields["requester"], "inputs":fields["inputs"],
+                "mode":fields["mode"], "status":"running", "phase":"normal",
+                "created_at_unix_ms":0, "updated_at_unix_ms":0
+            });
+            let Ok(historical) = serde_json::from_value::<MissionRunView>(historical) else { continue };
+            let variables = mission_run_variables(&historical, &revision);
+            // Successor materialization does not inherit the initial default.
+            let predecessor: Option<String> = row.get(17).map_err(internal)?;
+            let default = if predecessor.is_none() {
+                match serde_json::from_value::<Option<WorkSelector>>(fields["default_selector"].clone()) {
+                    Ok(default) => default, Err(_) => continue,
+                }
+            } else { None };
+            let path: String = row.get(5).map_err(internal)?;
+            let hash: String = row.get(6).map_err(internal)?;
+            let mut flat = Vec::new();
+            flatten_steps(&mission, default, &[], &mut flat);
+            let recipient = flat.into_iter()
+                .find(|(step, _, _)| step.path == path && step.definition_hash == hash)
+                .and_then(|(_, selector, _)| interpolate_selector(&selector, &variables).ok())
+                .and_then(|(assignee, _, _)| assignee);
+            states.insert(index, State {
+                generation: format!("run-generation/{generation}"), revision, recipient,
+                current_recipient: row.get(7).map_err(internal)?, attempt: 1, epoch: None,
+                status: "pending".into(), evidence: vec![row.get(4).map_err(internal)?,
+                    row.get(15).map_err(internal)?, row.get(16).map_err(internal)?],
+            });
+        }
+        let state = states.get_mut(&index).expect("initialized authored fold");
+        let claim_id: String = row.get(10).map_err(internal)?;
+        let kind: String = row.get(11).map_err(internal)?;
+        let body: String = row.get(12).map_err(internal)?;
+        let body: Value = serde_json::from_str(&body).map_err(internal)?;
+        let fields = &body["fields"];
+        let opening_at: String = row.get(13).map_err(internal)?;
+        let opening_at: u128 = opening_at.parse().map_err(internal)?;
+        let claim_attempt = fields["attempt"].as_u64();
+        if matches!(kind.as_str(), "step-run.carried" | "step-run.retried") {
+            if let Some(attempt) = claim_attempt { state.attempt = attempt; }
+            // A carried ready state inherits its epoch from the exact source lifecycle
+            // before the carry, never the source's current projection.
+            state.epoch = if kind == "step-run.carried" && claim_attempt.is_some() {
+                carried_ready_epoch(connection, &claim_id, state.attempt, &mut state.evidence)?
+            } else { None };
+        }
+        if matches!(kind.as_str(), "work.released" | "work.handoff-returned")
+            && claim_attempt.unwrap_or(1) == state.attempt
+            && let Some(to) = fields["handoff_to"].as_str()
+        {
+            state.recipient = Some(to.into());
+            state.evidence.push(claim_id.clone());
+        }
+        if kind == "work.person-reassigned" && row.get::<_, bool>(14).map_err(internal)?
+            && matches!(state.status.as_str(), "pending" | "ready")
+            && state.recipient.as_deref() == fields["previous_person"].as_str()
+        {
+            state.recipient = fields["person"].as_str().map(str::to_owned);
+            state.evidence.push(claim_id.clone());
+        }
+        if let Some(status) = fields["status"].as_str() { state.status = status.into(); }
+        if kind == "step-run.state" {
+            state.epoch = fields["readiness_epoch"].as_u64();
+        }
+        if kind == "step-run.state" && let Some(attempt) = claim_attempt { state.attempt = attempt; }
+        let Some(epoch) = state.epoch else { continue };
+        if !matches!(kind.as_str(), "step-run.state" | "step-run.carried")
+            || fields["status"] != "ready"
+            || key.episode != format!("{}:{}:{epoch}", state.generation, state.attempt)
+            || opening_at > at
+            || !seen.insert(index)
+            || !matches_person(connection, person, state.recipient.as_deref())?
+            || !matches_person(connection, person, state.current_recipient.as_deref())?
+        { continue; }
+        let mut item = source_item(key, person, "person-step", fields, opening_at)?;
+        item.mission_run = Some(format!("mission-run/{}", row.get::<_, String>(8).map_err(internal)?));
+        state.evidence.push(claim_id.clone());
+        state.evidence.sort(); state.evidence.dedup();
+        result.insert(index, QualifiedDiscussionSource {
+            item, evidence: state.evidence.clone(), current_notice: false,
+            authored: Some(AuthoredEvidence {
+                generation: state.generation.clone(), revision: state.revision.clone(),
+                opening_claim_id: claim_id, attempt: state.attempt, readiness_epoch: epoch,
+            }),
+        });
     }
     Ok(result)
+}
+
+/// A carried claim does not record an epoch. Follow its exact predecessor chain
+/// until an actual READY write supplies one, folding retries before that boundary.
+/// All visited subjects were byte/cardinality-admitted by inputs_preflight.
+fn carried_ready_epoch(connection: &Connection, carry: &str, wanted_attempt: u64, evidence: &mut Vec<String>)
+    -> Result<Option<u64>, FractalError>
+{
+    let before = canonical::after_sql("carry", "prior");
+    let order = canonical::order_sql("prior", false);
+    let sql = format!(
+        "SELECT prior.id,prior.kind,json_extract(prior.body,'$.fields.status'),
+         json_extract(prior.body,'$.fields.attempt'),
+         json_extract(prior.body,'$.fields.readiness_epoch')
+         FROM claims carry JOIN claims prior
+           ON prior.subject=json_extract(carry.body,'$.fields.source_step_run')
+         WHERE carry.id=?1 AND carry.kind='step-run.carried' AND {before}
+           AND EXISTS(SELECT 1 FROM step_runs source WHERE source.subject=prior.subject
+             AND json_extract(carry.body,'$.fields.source_generation')='run-generation/' || source.generation_id)
+           AND prior.kind IN ('step-run.state','step-run.carried','step-run.retried',
+             'work.released','work.handoff-returned','work.person-done','work.person-cancelled',
+             'work.person-override','work.claimed','work.progress','work.submitted','work.failed')
+           AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=prior.id AND state='repaired')
+         ORDER BY {order}"
+    );
+    let mut carry = carry.to_owned();
+    let mut seen = BTreeSet::new();
+    for _ in 0..MAX_PROOF_CLAIMS {
+        if !seen.insert(carry.clone()) { return Ok(None); }
+        let mut statement = connection.prepare(&sql).map_err(internal)?;
+        let mut rows = statement.query([&carry]).map_err(internal)?;
+        let mut attempt = 1;
+        let mut status = String::from("pending");
+        let mut ready = None;
+        let mut inherited = None;
+        while let Some(row) = rows.next().map_err(internal)? {
+            let kind: String = row.get(1).map_err(internal)?;
+            if matches!(kind.as_str(), "step-run.carried" | "step-run.retried") {
+                let Some(recorded) = row.get::<_, Option<u64>>(3).map_err(internal)? else { return Ok(None) };
+                attempt = recorded;
+                ready = None;
+                inherited = None;
+            }
+            if let Some(next) = row.get::<_, Option<String>>(2).map_err(internal)? { status = next; }
+            if kind == "step-run.state" && status == "ready" {
+                ready = row.get::<_, Option<u64>>(4).map_err(internal)?
+                    .map(|epoch| row.get::<_, String>(0).map(|id| (epoch, id))).transpose()
+                    .map_err(internal)?;
+                inherited = None;
+            } else if kind == "step-run.carried" && status == "ready" {
+                inherited = Some(row.get::<_, String>(0).map_err(internal)?);
+            }
+        }
+        if attempt != wanted_attempt || status != "ready" { return Ok(None); }
+        if let Some((epoch, opening)) = ready {
+            evidence.extend(seen);
+            evidence.push(opening);
+            return Ok(Some(epoch));
+        }
+        let Some(previous) = inherited else { return Ok(None) };
+        carry = previous;
+    }
+    Ok(None)
 }
 
 fn matches_person(connection: &Connection, person: &str, recipient: Option<&str>)
@@ -173,6 +424,57 @@ fn source_item(key: &SourceEpisode, person: &str, kind: &str, fields: &Value, at
         "step":key.source_id.starts_with("step-run/").then_some(&key.source_id),
         "mission_run":fields["run"].as_str().or_else(|| fields["mission_run"].as_str())
     })).map_err(internal)
+}
+
+const MAX_PROOF_CLAIMS: usize = 512;
+const MAX_PROOF_BYTES: u64 = 256 * 1024;
+
+/// Bound the complete proof read set, including repaired history, before selecting
+/// any body. JSON extracts here return exact references only, never source prose.
+fn inputs_preflight(connection: &Connection, key: &SourceEpisode) -> Result<bool, FractalError> {
+    if key.source_id.is_empty() || key.source_id.len() > 512
+        || key.episode.is_empty() || key.episode.len() > 512 { return Ok(false); }
+    let mut statement = connection.prepare(
+        "WITH RECURSIVE subjects(subject) AS (
+           SELECT ?1 UNION SELECT subject FROM claims WHERE id=?2
+           UNION SELECT 'mission-run/' || step.run_id FROM step_runs step WHERE step.subject=?1
+           UNION SELECT 'run-generation/' || step.generation_id FROM step_runs step WHERE step.subject=?1
+           UNION SELECT dependency.source FROM custom_dependencies dependency
+             WHERE dependency.dependency=?2
+           UNION SELECT ?3 WHERE substr(?1,1,?4)=?5
+           UNION SELECT json_extract(c.body,'$.fields.source_step_run')
+             FROM subjects JOIN claims c ON c.subject=subjects.subject
+             WHERE c.kind='step-run.carried'
+           LIMIT ?6
+         ), sizes(bytes) AS (
+           SELECT 0 FROM subjects
+           UNION ALL SELECT length(CAST(body AS BLOB))+length(CAST(predecessors AS BLOB))
+             FROM claims WHERE subject IN subjects
+           UNION ALL SELECT length(CAST(source.body AS BLOB)) FROM custom_sources source
+             WHERE source.subject IN subjects
+           UNION ALL SELECT length(CAST(registration.manifest AS BLOB))
+             FROM custom_registrations registration
+             WHERE EXISTS(SELECT 1 FROM subjects WHERE
+               substr(subject,1,length(registration.prefix))=registration.prefix)
+           UNION ALL SELECT length(CAST(revision.body AS BLOB)) FROM mission_revisions revision
+             JOIN mission_runs run ON run.mission_id=revision.mission_id
+             JOIN step_runs step ON step.run_id=run.id
+             JOIN run_generations generation ON generation.id=step.generation_id
+               AND generation.revision=revision.revision
+             WHERE step.subject=?1
+         ) SELECT bytes FROM sizes LIMIT ?6"
+    ).map_err(internal)?;
+    let mut rows = statement.query(params![key.source_id, key.episode,
+        crate::notice_owner::SUBJECT, fractal_schema::notice::SOURCE_PREFIX.len(),
+        fractal_schema::notice::SOURCE_PREFIX, MAX_PROOF_CLAIMS + 1]).map_err(internal)?;
+    let mut count = 0;
+    let mut bytes = 0_u64;
+    while let Some(row) = rows.next().map_err(internal)? {
+        count += 1;
+        bytes = bytes.saturating_add(row.get::<_, Option<u64>>(0).map_err(internal)?.unwrap_or(0));
+        if count > MAX_PROOF_CLAIMS || bytes > MAX_PROOF_BYTES { return Ok(false); }
+    }
+    Ok(true)
 }
 
 fn notice_snapshots(connection: &Connection, input: &str)
@@ -234,11 +536,21 @@ fn notice_source(connection: &Connection, key: &SourceEpisode, person: &str,
         let owner = current_desired_row_tx(connection, crate::notice_owner::SUBJECT).map_err(internal)?;
         let mut evidence = vec![key.episode.clone(), snapshot.id.clone(), registration];
         evidence.extend(owner.map(|owner| owner.claim_id));
-        let history = custom::claims(connection, &snapshot.subject).map_err(internal)?;
-        let latest = history.iter().rev().find(|claim| claim.accepted_at_unix_ms <= at
-            && claim.body["fields"]["_registration"] == hash
-            && matches!(claim.kind.as_str(), "custom.attention.snapshot-created" | "custom.attention.snapshot-updated"));
-        let current = latest.is_some_and(|claim| claim.body["fields"]["policy"]["disposition"] == "deliver");
+        // The snapshot history was metadata-admitted before hydration. Resolve one
+        // canonical exact reference rather than materializing every historical body.
+        let latest: Option<String> = connection.query_row(&canonical_sql(
+            "SELECT claims.id FROM claims WHERE claims.subject=?1
+             AND claims.kind IN ('custom.attention.snapshot-created','custom.attention.snapshot-updated')
+             AND json_extract(claims.body,'$.fields._registration')=?2
+             AND CAST(claims.accepted_at_unix_ms AS INTEGER)<=?3
+             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+            params![snapshot.subject, hash, at.to_string()], |row| row.get(0),
+        ).optional().map_err(internal)?;
+        let current = if let Some(latest) = latest {
+            claim_by_id_tx(connection, &latest).map_err(internal)?
+                .is_some_and(|claim| claim.body["fields"]["policy"]["disposition"] == "deliver")
+        } else { false };
         return Ok(Some((item, evidence, current)));
     }
     Ok(None)
@@ -391,5 +703,111 @@ mod manifest_episode_tests {
         assert!(proof.evidence().contains(&opening.id));
         assert!(!proof.evidence().contains(&key.episode));
         assert!(qualify(&conn, "person/reader", &wrong, now_ms()).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod authored_tests {
+    use super::*;
+
+    pub(super) fn fixture(recipient: &str) -> (Store, SourceEpisode) {
+        let store = Store::open_memory("authored-qualifier").unwrap();
+        let source = format!("version 2\nmission \"proof\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to {recipient:?}; goal \"Retained question\"; }} }}");
+        let intent = crate::graph::parse_internal_intent(&source, store.origin()).unwrap();
+        store.apply_internal(&intent, "proof-definition").unwrap();
+        let run = store.create_mission_run_inner(&MissionRunRequest {
+            mission: "proof".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/reader".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "proof-run".into(),
+        }, None, None, None).unwrap();
+        let key = SourceEpisode {
+            source_id: run.steps[0].subject.clone(),
+            episode: format!("{}:1:1", run.generation),
+        };
+        (store, key)
+    }
+
+    pub(super) fn claim(store: &Store, key: &SourceEpisode, kind: &str, fields: Value) -> String {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        let claim = append_claim_tx(&tx, store.origin(), &key.source_id, kind,
+            Some("person/reader"), &json!({"fields":fields}), &[], None).unwrap();
+        tx.commit().unwrap();
+        claim.id
+    }
+
+    #[test]
+    fn literal_requires_exact_opening_and_keeps_completed_history() {
+        let (store, key) = fixture("person/reader");
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
+        let opening = claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
+        claim(&store, &key, "step-run.state", json!({"status":"completed"}));
+        let conn = store.readers.get();
+        let proof = qualify(&conn, "person/reader", &key, now_ms()).unwrap().unwrap();
+        assert_eq!(proof.authored_evidence().unwrap().opening_claim_id, opening);
+        let never_opened = SourceEpisode { episode: key.episode.replace(":1:1", ":1:99"), ..key };
+        assert!(qualify(&conn, "person/reader", &never_opened, now_ms()).unwrap().is_none());
+    }
+
+    #[test]
+    fn current_assignment_cannot_replace_wrong_original_recipient() {
+        let (store, key) = fixture("person/other");
+        claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
+        store.connection.write().execute("UPDATE step_runs SET assignee='person/reader' WHERE subject=?1", [&key.source_id]).unwrap();
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
+    }
+
+    #[test]
+    fn canonical_assignment_mutations_before_opening_are_authority() {
+        let (store, key) = fixture("person/other");
+        let transfer = claim(&store, &key, "work.released",
+            json!({"status":"ready","attempt":1,"handoff_to":"person/reader","readiness_epoch":1}));
+        claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
+        store.connection.write().execute("UPDATE step_runs SET assignee='person/reader' WHERE subject=?1", [&key.source_id]).unwrap();
+        let proof = qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().unwrap();
+        assert!(proof.evidence().contains(&transfer));
+        store.connection.write().execute("UPDATE step_runs SET assignee='person/other' WHERE subject=?1", [&key.source_id]).unwrap();
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
+
+        let (store, key) = fixture("person/reader");
+        claim(&store, &key, "work.handoff-returned",
+            json!({"status":"ready","attempt":1,"handoff_to":"person/other","readiness_epoch":1}));
+        claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod bounded_authored_tests {
+    use super::authored_tests::{fixture, claim};
+    use super::*;
+
+    #[test]
+    fn admission_requester_is_historical_and_missing_ready_epoch_is_not_inferred() {
+        let (store, key) = fixture("${ST_REQUESTER}");
+        claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
+        store.connection.write().execute(
+            "UPDATE mission_runs SET requester='person/other',current_generation_id='current-poison'", [],
+        ).unwrap();
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_some());
+        let (store, key) = fixture("person/reader");
+        claim(&store, &key, "work.released",
+            json!({"attempt":1,"handoff_to":"person/reader","readiness_epoch":1}));
+        claim(&store, &key, "step-run.state", json!({"status":"ready"}));
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
+    }
+
+    #[test]
+    fn oversized_opening_and_cardinality_fail_before_proof_hydration() {
+        let (store, key) = fixture("person/reader");
+        claim(&store, &key, "step-run.state",
+            json!({"status":"ready","readiness_epoch":1,"reason":"x".repeat(MAX_PROOF_BYTES as usize + 1)}));
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
+        let (store, key) = fixture("person/reader");
+        claim(&store, &key, "step-run.state", json!({"status":"ready","readiness_epoch":1}));
+        for _ in 0..MAX_PROOF_CLAIMS {
+            claim(&store, &key, "work.progress", json!({"attempt":1,"summary":"progress"}));
+        }
+        assert!(qualify(&store.readers.get(), "person/reader", &key, now_ms()).unwrap().is_none());
     }
 }
