@@ -6077,15 +6077,26 @@ fn native_driver_binds_the_local_pty_incarnation_instead_of_a_stale_graph_value(
         pid: Some(42),
         created_at: Some("2026-09-22T12:00:00.000Z".into()),
         display_name: None,
-        tags: BTreeMap::from([("st3.subject".into(), "agent/run/worker".into())]),
+        tags: BTreeMap::from([
+            ("st3.subject".into(), "agent/run/worker".into()),
+            ("st3.start-operation".into(), "exact-start".into()),
+        ]),
     }];
 
     assert_eq!(
-        pty_observation_incarnation("agent/run/worker", &observations).as_deref(),
+        pty_observation_incarnation("agent/run/worker", &observations, None).as_deref(),
         Some("42:2026-09-22T12:00:00.000Z")
     );
     assert_eq!(
-        pty_observation_incarnation("agent/run/other", &observations),
+        pty_observation_incarnation("agent/run/other", &observations, None),
+        None
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("exact-start")).as_deref(),
+        Some("42:2026-09-22T12:00:00.000Z")
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("predecessor")),
         None
     );
 }

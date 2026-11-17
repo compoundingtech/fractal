@@ -193,7 +193,9 @@ async fn custom_shell_claim_cases(applied: bool) {
         }
     }
     for mismatch in ["none", "dead", "incarnation", "operation", "subject", "pid-token",
-        "missing", "unbound", "refused-work", "revoked", "incomplete", "observation", "prior-observation"] {
+        "missing", "unbound", "refused-work", "revoked", "incomplete", "observation",
+        "prior-observation", "request-retracted", "request-repaired"] {
+        if applied && mismatch.starts_with("request-") { continue; }
         let root = tempfile::tempdir().unwrap();
         let state = super::tests::state(root.path());
         state.store.apply_internal(&parse_intent(r#"version 2
@@ -213,7 +215,7 @@ mission "catalog" state="ready" {
         let desired = state.store.desired_subject_with_writer(SEAT).unwrap().unwrap().0;
         let member = desired.member.as_ref().unwrap();
         assert!(member.driver.is_none());
-        let selected = state.store.selected_desired_token(SEAT).unwrap();
+        let selected = state.store.selected_desired_token(SEAT).unwrap().unwrap();
         let mut process = Process(Command::new("sleep").arg("60").stdin(Stdio::null())
             .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let pid = process.0.id();
@@ -234,9 +236,18 @@ mission "catalog" state="ready" {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap().id
         });
+        let start_request = state.store.append_claim(&ClaimInput {
+            subject: SEAT.into(), kind: "runtime.action.requested".into(), actor: None,
+            fields: serde_json::from_value(json!({
+                "action":"start", "operation":operation, "runtime_id":member.runtime_id,
+                "terminal":member.terminal,
+            })).unwrap(),
+            evidence: vec![selected.clone()], expected_subject: None, idempotency_key: None,
+        }).unwrap();
         let body = json!({
             "subject": desired, "member": member, "selected_token": selected,
             "desired_token": selected,
+            "start_request":start_request.id, "start_request_receipt":start_request,
         });
         let mut result = json!({
             "operation_id": if mismatch == "operation" { "other-start" } else { operation },
@@ -311,6 +322,18 @@ mission "catalog" state="ready" {
                 })).unwrap(),
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
+        }
+        if mismatch == "request-retracted" {
+            state.store.connection.write().execute(
+                "DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.requested'",
+                [SEAT],
+            ).unwrap();
+        }
+        if mismatch == "request-repaired" {
+            state.store.connection.write().execute(
+                "UPDATE local_observations SET body=json_set(body,'$.fields.reason','repaired')
+                 WHERE subject=?1 AND kind='runtime.action.requested'", [SEAT],
+            ).unwrap();
         }
         let request = WorkRequest {
             actor: Some(SEAT.into()),

@@ -27,6 +27,14 @@ finishes. Admission checks that exact current subject/runtime operation and fres
 checks the process generation. Until reconcile applies completion, the latest runtime
 observation must still be the one captured before spawn, or already name this starting
 incarnation. A newer unrelated observation cannot be overwritten.
+The original start and control requests must also remain retained and unchanged;
+repairing or retracting them before application refuses the bootstrap claim.
+
+The custom shell need not supply `--incarnation`: inside a native PTY, the work CLI
+uses `PTY_SESSION`, `PTY_ROOT` and the launch-exported start operation to resolve
+its exact subject/operation incarnation from the local registry before consulting
+the possibly stale status projection. A missing exact local match does not borrow
+the predecessor's status incarnation.
 
 Running authority and the work claim commit in one writer savepoint; a refused claim
 publishes neither. Later reconciliation cannot regress that incarnation to `starting`.

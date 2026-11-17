@@ -87,6 +87,8 @@ pub fn admit_starting_work_claim_tx(
         })
         || !recovery_intent_current(tx, store.origin(), &operation)?
         || !mission_publication_current(store, tx, &operation)?
+        || (!operation.applied
+            && !runtime_start_requests_retained(tx, store.origin(), &operation.body)?)
     {
         return Ok(false);
     }

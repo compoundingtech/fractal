@@ -16160,6 +16160,19 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
     } else {
         format!("agent/{actor}")
     };
+    // Custom shells have no driver to export an incarnation. Their launch does
+    // export the operation: resolve its exact local PTY before consulting a
+    // runtime projection that may still describe the predecessor.
+    if let Some(operation) = fractal_drivers::contracts::env("ST3_START_OPERATION")
+        && let Ok(session) = std::env::var("PTY_SESSION")
+        && let Some(root) = std::env::var_os("PTY_ROOT").filter(|value| !value.is_empty())
+    {
+        let observations = fractal_runtime::PtyRuntime::new(PathBuf::from(root)).snapshot()?;
+        return Ok(observations.iter().find(|observation| observation.name == session)
+            .and_then(|observation| pty_observation_incarnation(
+                &subject, std::slice::from_ref(observation), Some(&operation),
+            )));
+    }
     let status: StatusResponse = client
         .get(&format!(
             "/v1/status?subject={}&summary=true",
@@ -16178,6 +16191,7 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
 fn pty_observation_incarnation(
     actor: &str,
     observations: &[fractal_runtime::PtyObservation],
+    operation: Option<&str>,
 ) -> Option<String> {
     let subject = if actor.starts_with("agent/") {
         actor
@@ -16187,6 +16201,9 @@ fn pty_observation_incarnation(
     let observation = observations.iter().find(|observation| {
         observation.status == "running"
             && observation.tags.get("st3.subject").map(String::as_str) == Some(subject)
+            && operation.is_none_or(|operation| {
+                observation.tags.get("st3.start-operation").map(String::as_str) == Some(operation)
+            })
     })?;
     Some(format!(
         "{}:{}",
@@ -16202,7 +16219,7 @@ fn current_local_pty_incarnation(actor: &str) -> Result<Option<String>> {
     let observations = fractal_runtime::PtyRuntime::new(PathBuf::from(root))
         .snapshot()
         .context("reading the local PTY registry for the native driver incarnation")?;
-    Ok(pty_observation_incarnation(actor, &observations))
+    Ok(pty_observation_incarnation(actor, &observations, None))
 }
 
 async fn current_local_agent_incarnation(client: &Client, actor: &str) -> Result<Option<String>> {
