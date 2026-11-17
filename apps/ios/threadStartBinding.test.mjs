@@ -6,8 +6,9 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadStartContextReader } from './threadStartContext.ts';
-import { appliedAnswer, ClientError, resendBoundAction } from '../../clients/typescript/fractal-client/index.ts';
+import { appliedAnswer, ClientError, FractalClient, resendBoundAction } from '../../clients/typescript/fractal-client/index.ts';
 import { sendStart } from './startDelivery.ts';
+import { agentName } from './agentsView.ts';
 
 const React = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() }) };
 const source = readFileSync(new URL('./screens/Threads.tsx', import.meta.url), 'utf8');
@@ -160,6 +161,116 @@ test('a typed notice with no Inbox agent or roster entry shows and signs exactly
   ready.onSend();
   await settle();
   assert.deepEqual(h.signed, [['thread/uuid-1', { ...origin, agentId: 'agent/unlisted-system-recipient' }, 'Typed notice', 'Hello']]);
+});
+
+/** Render the production preview against existing roster metadata; no recipient selection here. */
+function visiblePreview(h, panel) {
+  const previewSource = readFileSync(new URL('./screens/StartRecipientPreview.tsx', import.meta.url), 'utf8');
+  const start = previewSource.indexOf('export function StartRecipientPreview(');
+  const { outputText } = ts.transpileModule(`${previewSource.slice(start)}\nexports.preview = StartRecipientPreview;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React },
+  });
+  const exports = {};
+  new Function('exports', 'React', 'View', 'T', 'theme', 'agentName', 'useStore', outputText)(
+    exports, React, 'View', 'T', {}, agentName, () => h.store);
+  return exports.preview(find(panel, 'StartRecipientPreview').props);
+}
+
+/** Production startThread signing fields and generated HTTP serialization over test ports. */
+function signedStartTransport(h) {
+  const signed = [], posts = [];
+  // Same canonical capabilities response used by fractal-client/contract.test.cjs.
+  const capabilities = JSON.parse(readFileSync(new URL('../../docs/st3/client-v0/fixtures/capabilities.json', import.meta.url), 'utf8'));
+  const client = new FractalClient({ baseUrl: 'https://fixture.example', fetchImpl: async (url, init) => {
+    if (String(url).endsWith('/capabilities')) {
+      return new Response(JSON.stringify(capabilities), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    const body = JSON.parse(init.body);
+    posts.push({ url: String(url), method: init.method, body });
+    /** @type {import('../../clients/typescript/fractal-client').EnvelopeOf<import('../../clients/typescript/fractal-client').ActionResult>} */
+    const receipt = {
+      api_version: 'fractal.client.v0', request_id: 'request/unit',
+      snapshot: { id: 'snapshot/unit', host_id: 'host/unit', created_at: '2026-11-17T00:00:00Z', projection_version: 'client-projection.v0', store_index: 1 },
+      value: { kind: 'action-result', action_id: body.id, affected_ids: [body.parameters.target_id, 'message/first'], operation_id: 'operation/unit', snapshot_id: 'snapshot/unit', status: 'completed' },
+    };
+    return new Response(JSON.stringify(receipt), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  } });
+  const text = storeSource.text;
+  const a = text.indexOf('    startThread(thread: string,');
+  const b = text.indexOf('    replyToThread(', a);
+  const { outputText } = ts.transpileModule(`exports.action = { ${text.slice(a, b)} }.startThread;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  const ports = {
+    signingKeyRef: { current: 'profile/exact' }, threadStartAttemptScope: attemptScope,
+    trackThreadDelivery: (_scope, _target, send) => send(),
+    readPhoneSigning: async () => ({ person: 'person/avery' }),
+    signThreadMessage: async (_key, _signing, fields) => { signed.push(fields); return { signature: 'exact-signature', messageId: 'message/first' }; },
+    submitThreadAction: async (_target, _kind, _revisions, prepare) => {
+      const prepared = await prepare(client, 'action/key');
+      await prepared.send({ id: 'action/key', idempotency_key: 'action/key', fence: { snapshot_id: 'snapshot/unit' } });
+      return { how: 'sent' };
+    },
+  };
+  const exports = {};
+  new Function('exports', ...Object.keys(ports), outputText)(exports, ...Object.values(ports));
+  h.store.actions.startThread = exports.action;
+  return { signed, posts };
+}
+
+test('offline or stopped original stays visibly named and signed despite a plausible upstream; only canonical retired fallback changes the recipient', async () => {
+  for (const state of ['down', 'stopped', 'retired']) {
+    const originalId = 'agent/original-reviewer', fallbackId = 'agent/dotfiles/manager';
+    const selected = state === 'retired' ? fallback(fallbackId, originalId) : context(originalId, { _tag: 'original' });
+    const h = harness({ contexts: [selected] });
+    /** @type {import('../../clients/typescript/fractal-client').Agent[]} */
+    const agents = [
+      { id: originalId, name: 'original-reviewer', kind: 'agent', revision: 'roster/one', updated_at: '2026-11-17T00:00:00Z', state, reachability: 'unreachable', harness_state: 'stopped', runtime_ids: [] },
+      { id: fallbackId, name: 'Chief of Staff', kind: 'agent', revision: 'roster/two', updated_at: '2026-11-17T00:00:00Z', state: 'running', reachability: 'reachable', harness_state: 'idle', runtime_ids: [] },
+    ];
+    h.store.data = { agents };
+    const transport = signedStartTransport(h);
+    h.panel();
+    await settle();
+    const panel = h.panel();
+    const preview = visiblePreview(h, panel);
+    const heading = find(preview, 'T').children.join('');
+    assert.equal(heading, state === 'retired' ? 'New discussion with Chief of Staff' : 'To Original Reviewer');
+    assert.equal(transport.signed.length, 0, 'the visible recipient precedes Send');
+    assert.equal(transport.posts.length, 0);
+    field(h.composer(startOf(panel))).onSend();
+    await settle();
+    const expected = state === 'retired' ? fallbackId : originalId;
+    assert.equal(transport.signed.length, 1);
+    assert.equal(transport.signed[0].to, expected);
+    assert.equal(transport.posts.length, 1);
+    assert.equal(transport.posts[0].method, 'POST');
+    assert.equal(transport.posts[0].body.type, 'thread.start');
+    assert.equal(transport.posts[0].body.parameters.agent_id, expected);
+    assert.equal(transport.posts[0].body.parameters.signature, 'exact-signature');
+  }
+});
+
+test('fallback agentName is display-only: Chief of Staff is shown while signing and POST use its canonical agent_id', async () => {
+  const id = 'agent/dotfiles/manager';
+  const h = harness({ contexts: [fallback(id, 'agent/retired-reviewer')] });
+  /** @type {import('../../clients/typescript/fractal-client').Agent[]} */
+  const agents = [{ id, name: 'Chief of Staff', kind: 'agent', revision: 'roster/one', updated_at: '2026-11-17T00:00:00Z', state: 'running', reachability: 'reachable', harness_state: 'idle', runtime_ids: [] }];
+  h.store.data = { agents };
+  const transport = signedStartTransport(h);
+  h.panel();
+  await settle();
+  const panel = h.panel();
+  const preview = visiblePreview(h, panel);
+  assert.equal(find(preview, 'T').children.join(''), 'New discussion with Chief of Staff');
+  assert.match(preview.props.accessibilityLabel, /Chief of Staff \(agent\/dotfiles\/manager\)/);
+  assert.equal(transport.signed.length, 0);
+  assert.equal(transport.posts.length, 0);
+  field(h.composer(startOf(panel))).onSend();
+  await settle();
+  assert.equal(transport.signed[0].to, id);
+  assert.equal(transport.posts[0].method, 'POST');
+  assert.equal(transport.posts[0].body.parameters.agent_id, id);
 });
 
 test('a retired-origin fallback shows the original source agent separately and signs only the fallback', async () => {
