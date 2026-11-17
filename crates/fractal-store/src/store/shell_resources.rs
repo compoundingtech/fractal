@@ -40,6 +40,8 @@ pub struct Execution {
     pub stdout: String,
     pub stderr: String,
     pub cancel: bool,
+    #[serde(default)]
+    pub cancellation_started_at: Option<u64>,
     pub timed_out: bool,
     pub head_start: Option<String>,
     pub clean_start: Option<bool>,
@@ -58,7 +60,7 @@ impl Store {
         anyhow::ensure!(command.cwd.starts_with('/'), "shell execution cwd must be absolute");
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
-            stdout: String::new(), stderr: String::new(), cancel: false, timed_out: false, head_start: None, clean_start: None, result: None };
+            stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None };
         // One row per command does not bound its serialized argv/environment/result bytes.
         self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
@@ -87,6 +89,11 @@ impl Store {
         let transaction = connection.transaction()?;
         let body: String = transaction.query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [&execution.command.id], |row| row.get(0))?;
         let previous: Execution = serde_json::from_str(&body)?;
+        // Terminal commands and their durable observations are immutable. The claim
+        // is appended in this same transaction, so recovery cannot lose or duplicate it.
+        if matches!(previous.state.as_str(), "completed" | "refused" | "cancelled") {
+            return Ok(false);
+        }
         let mut next = execution.clone();
         next.cancel |= previous.cancel;
         next.revision = previous.revision;
@@ -95,6 +102,11 @@ impl Store {
         // Primary-key selection bounds rows, not replacement body bytes or retained rows.
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h0b67351b90df owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET state=?2,body=?3 WHERE id=?1",
             rusqlite::params![next.command.id,next.state,serde_json::to_string(&next)?])?;
+        if matches!(next.state.as_str(), "completed" | "refused" | "cancelled")
+            && next.command.parent.is_none()
+        {
+            resource_exec_receipts::append_tx(&transaction, &self.origin, &next)?;
+        }
         transaction.commit()?;
         if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") {
             self.finish_resource_admission_clock(&format!("shell-wait:{}", next.command.id));

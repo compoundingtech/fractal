@@ -20,6 +20,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }.into();
             }
             if matches!(execution.state.as_str(), "completed" | "refused" | "cancelled") {
+                let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+                execution.ended_at.get_or_insert(now);
+                if execution.started_at.is_none() {
+                    execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(&execution, now);
+                }
                 self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != execution.command.lane.id);
                 self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
                 execution.command.environment.clear();
@@ -43,6 +48,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(true);
         }
+        // Nested executions share this charged membership. Let each helper publish and
+        // commit its outcome before removing the scope that also contains its cgroup.
+        let children: Vec<_> = self.store.shell_resources(&self.host, true)?.into_iter()
+            .filter(|child| child.command.parent.is_some() && child.command.lane.id == request.id).collect();
+        if !children.is_empty() {
+            for child in children {
+                if !child.cancel {
+                    self.store.cancel_shell_resource(&child.command.id)?;
+                    self.signal_changed();
+                }
+            }
+            return Ok(false);
+        }
         let retired = self.runtime.retire_resource_lane(&self.store, request)?;
         if retired {
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
@@ -52,16 +70,45 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(retired)
     }
 
+    fn shell_payload_observation(&self, execution: &Execution, generation: &str, now: u64) -> Result<PayloadResult> {
+        let cwd = &execution.command.cwd;
+        let head_end = std::process::Command::new("git").current_dir(cwd).args(["rev-parse", "HEAD"]).output()
+            .ok().filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok()).map(|head| head.trim().to_owned());
+        let clean_end = std::process::Command::new("git").current_dir(cwd)
+            .args(["status", "--porcelain", "--untracked-files=normal"]).output()
+            .ok().filter(|output| output.status.success()).map(|output| output.stdout.is_empty());
+        let memory_peak_bytes = if execution.command.lane.coverage == crate::store::resource_membership::Coverage::Enforced {
+            self.runtime.resource_exec_memory_peak(&execution.command.id, generation)?
+        } else { None };
+        Ok(PayloadResult {
+            head_start: execution.head_start.clone(), clean_start: execution.clean_start,
+            head_end, clean_end, exit_code: execution.exit_code, exit_signal: execution.exit_signal,
+            wall_duration_ms: self.store.resource_execution_elapsed(&execution.command.lane.id,
+                &execution.command.lane.owner, &execution.command.id, now)?.context("shell release clock missing")?,
+            memory_peak_bytes,
+        })
+    }
+
     fn drive_shell_resource(&self, execution: &mut Execution) -> Result<()> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
         if execution.state == "finishing" {
             if self.retire_shell_resource(execution)? {
-                execution.state = "completed".into();
+                execution.state = if execution.cancel { "cancelled" } else { "completed" }.into();
                 execution.ended_at = Some(now);
             }
             return Ok(());
         }
-        if execution.cancel || execution.state == "retiring" {
+        let request = execution.command.lane.clone();
+        let cancelling_grant = if execution.cancel {
+            let member = self.store.resource_memberships_for_host(&self.host)?.into_iter()
+                .find(|member| member.request.id == request.id);
+            match member.filter(|member| member.roots.iter().any(|root| root.runtime_id == execution.command.id)) {
+                Some(member) => Some(member.grant.context("cancelled execution has no grant")?),
+                None => None,
+            }
+        } else { None };
+        if (execution.cancel && cancelling_grant.is_none()) || execution.state == "retiring" {
             if self.retire_shell_resource(execution)? {
                 execution.state = if execution.cancel { "cancelled" } else { "refused" }.into();
                 execution.ended_at = Some(now);
@@ -69,9 +116,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(());
         }
-        let request = execution.command.lane.clone();
-        self.store.shell_resource_owner_live(&request.owner)?;
-        let grant: Grant = if let Some(parent) = &execution.command.parent {
+        if !execution.cancel { self.store.shell_resource_owner_live(&request.owner)?; }
+        let grant: Grant = if let Some(grant) = cancelling_grant {
+            grant
+        } else if let Some(parent) = &execution.command.parent {
             let record = self.store.resource_membership_for_grant(parent)?;
             anyhow::ensure!(record.request == request && matches!(record.state.as_str(), "admitted" | "launched"), "nested parent membership is no longer live");
             parent.clone()
@@ -131,6 +179,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let generation = root.execution.as_ref().context("shell preparation is uncertain; custody retained")?;
         execution.started_at = Some(root.payload_released_at.context("shell payload release has no durable timestamp")?);
         execution.command.environment.clear();
+        match fs::read(result_path.with_extension("started")) {
+            Ok(bytes) => {
+                let (head, clean): (Option<String>, Option<bool>) = serde_json::from_slice(&bytes)?;
+                execution.head_start = head; execution.clean_start = clean;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
         let mut watches = self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner);
         if !watches.contains(&execution.command.id) {
             let notify = self.notify.clone(); let event_notify = self.event_notify.clone();
@@ -143,14 +199,37 @@ impl<R: RuntimeControl> Reconciler<R> {
         if observation.status == "running" {
             // Keep the admitted transition visible until the next native wake.
             if !newly_started { execution.state = "running".into(); }
+            let elapsed = self.store.resource_execution_elapsed(&request.id, &request.owner, &execution.command.id, now)?.context("shell release clock missing")?;
             if let Some(timeout) = execution.command.timeout_ms.filter(|_| !execution.timed_out) {
-                let elapsed = self.store.resource_execution_elapsed(&request.id, &request.owner, &execution.command.id, now)?.context("shell release clock missing")?;
-                if elapsed >= timeout {
+                if elapsed >= timeout { execution.timed_out = true; }
+                else {
+                    self.arm_restart(&format!("shell-timeout:{}", execution.command.id), now_ms().saturating_add(u128::from(timeout - elapsed)));
+                }
+            }
+            if execution.cancel || execution.timed_out {
+                // This is an elapsed execution-clock offset, not wall time; the host clock
+                // remains monotonic while live and is reconstructed conservatively on recovery.
+                let began = *execution.cancellation_started_at.get_or_insert(elapsed);
+                let remaining = 5_000_u64.saturating_sub(elapsed.saturating_sub(began));
+                if remaining == 0 {
+                    // Preserve observations while the cgroup still exists, even if the helper
+                    // is stuck or never installed its SIGTERM handler.
+                    execution.result = Some(self.shell_payload_observation(execution, &generation.generation_id, now)?);
+                    if self.store.update_shell_resource(execution)? { self.signal_changed(); }
+                    let killing = std::time::Instant::now();
                     self.runtime.retire_resource_exec(&self.store, &request, &execution.command.id)?;
-                    execution.timed_out = true;
+                    if let Some(result) = &mut execution.result {
+                        result.wall_duration_ms = result.wall_duration_ms.saturating_add(
+                            u64::try_from(killing.elapsed().as_millis()).unwrap_or(u64::MAX));
+                    }
                     return self.drive_shell_resource(execution);
                 }
-                self.arm_restart(&format!("shell-timeout:{}", execution.command.id), now_ms().saturating_add(u128::from(timeout.saturating_sub(elapsed))));
+                if execution.cancellation_started_at == Some(elapsed) {
+                    // Commit the deadline before signalling so recovery cannot restart grace.
+                    if self.store.update_shell_resource(execution)? { self.signal_changed(); }
+                    self.runtime.cancel_resource_exec(&execution.command.id, &generation.generation_id)?;
+                }
+                self.arm_restart(&format!("shell-cancel:{}", execution.command.id), now_ms().saturating_add(u128::from(remaining)));
             }
             return Ok(());
         }
@@ -166,15 +245,26 @@ impl<R: RuntimeControl> Reconciler<R> {
                 execution.head_start.clone_from(&result.head_start); execution.clean_start = result.clean_start;
                 execution.result = Some(result);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut result = self.shell_payload_observation(execution, &generation.generation_id, now)?;
+                if let Some(previous) = &execution.result {
+                    result.memory_peak_bytes = result.memory_peak_bytes.or(previous.memory_peak_bytes);
+                    result.wall_duration_ms = previous.wall_duration_ms;
+                }
+                execution.result = Some(result);
+            },
             Err(error) => return Err(error.into()),
         }
-        if execution.timed_out { execution.exit_code = Some(124); execution.exit_signal = None; }
         self.store.end_resource_execution(&grant, &execution.command.id, now)?;
         execution.state = "finishing".into();
+        execution.reason = if execution.cancel { "cancelled by the shell caller" }
+            else if execution.timed_out { "payload execution timeout; custody retired" }
+            else { "payload exited and execution custody retired" }.into();
+        // Commit the result before retirement can destroy the cgroup or a daemon crash
+        // can turn a completed payload into an observation-less cancellation.
+        if self.store.update_shell_resource(execution)? { self.signal_changed(); }
         if !self.retire_shell_resource(execution)? { return Ok(()); }
-        execution.state = "completed".into();
-        execution.reason = if execution.timed_out { "payload execution timeout; custody retired" } else { "payload exited and execution custody retired" }.into();
+        execution.state = if execution.cancel { "cancelled" } else { "completed" }.into();
         execution.ended_at = Some(now);
         self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
         Ok(())

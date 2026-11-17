@@ -220,6 +220,52 @@ terminal ownership state before freeing the membership. Unknown preparation, fai
 old-authority survivors and unknown remote effects retain custody and block conflicting work.
 Positive nonlaunch evidence can remove an exact rejected preparation; absence of a record cannot.
 
+## Durable execution receipts
+
+Every terminal top-level resource execution (`parent` absent) records one immutable
+`resource.exec-receipt` claim in the existing replicated claims log, atomically with its terminal
+execution update. Nested executions do not append another receipt. The claim is system-only,
+once per resource subject, with durable retention; it observes execution, not admission authority
+or proof that a process tree has retired. `state` is `completed`, `refused` or `cancelled`, including
+terminal refusal or cancellation before payload launch.
+
+Fields carry `exec_id`, executing `host`, `class` (`landing`, `check`, `agent`), `owner` and
+`coverage` (`logical`, `enforced`). Declared profile fields are optional `memory_bytes`,
+`disk_reserved_bytes` (the declared reservation, zero when none was requested), and optional
+`io` (`heavy`). `wall_duration_ms` and `queue_wait_ms` are elapsed durations.
+Optional observations are `head_start`, `head_end`, `clean_start`, `clean_end`, `exit_code`,
+`exit_signal` and `memory_peak_bytes`. The memory peak is measured usage, not the declared
+memory limit; disk reservation is not measured disk usage. Missing observations remain absent,
+not invented zeroes, false clean flags, empty heads or successful exit codes. In particular,
+pre-launch refusal/cancellation may have no exit status or worktree observations, and logical
+coverage does not imply a measured memory peak.
+
+Subjects use this layout, where `hex` is lowercase hexadecimal encoding of the exact UTF-8 bytes:
+
+```text
+resource/exec/{hex(head_start or empty)}/{hex(host)}/{class}/{hex(exec_id)}
+```
+
+The head comes first so the existing claims subject-prefix query can find a head across all
+hosts and classes. An unobserved start head has an empty segment (`resource/exec//`), not an
+invented revision. For a known head, `resource/exec/{hex(head)}/` selects every receipt for that
+head; appending `{hex(host)}/` and then `{class}/` narrows the same prefix by host and class.
+
+For example, read a page for a head and select a host/class using the ordinary claims response:
+
+```sh
+head_hex=$(printf '%s' "$head" | od -An -v -tx1 | tr -d ' \n')
+fractal --json claims ls --kind resource.exec-receipt \
+  --subject-prefix "resource/exec/$head_hex/" --limit 500 |
+  jq --arg host "$host" --arg class "$class" \
+    '.claims[] | select(.body.fields.host == $host and .body.fields.class == $class)'
+```
+
+To select a host/class across all heads, omit `--subject-prefix` and use the same field filter.
+There is no independent indexed host/class filter in `claims ls`. These examples select only
+one page: continue an ascending query with `--after-index` set to the response's `next_cursor`
+until it is absent. Filter every page, including pages with no matching host/class rows.
+
 ## Coverage and boundaries
 
 Linux uses systemd user scopes in named slices with process placement/readback before the payload
