@@ -6,6 +6,7 @@ import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Button, Input, Label, TextField } from 'react-aria-components'
 import type { ThreadListQuery } from '@fractal/client'
 import type { Attention, ThreadMessageEvent, ThreadStartContext, ThreadStartRecipient, ThreadSummary } from '@fractal/client/schema/read'
+import type { ErrorEnvelope } from '@fractal/client/schema'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -207,6 +208,7 @@ function AgentName({ id }: { readonly id: string }) {
  * recipient: a source without a preview reader offers no first send.
  */
 type StartRecipientView =
+  | { readonly _tag: 'Unassigned'; readonly explanation?: string | undefined }
   | { readonly _tag: 'Ready'; readonly recipient: ThreadStartRecipient }
   | { readonly _tag: 'Loading' }
   /** The generated recipient-retired error is terminal: no target and no default to offer. */
@@ -215,10 +217,13 @@ type StartRecipientView =
   | { readonly _tag: 'NoPreview' }
   | { readonly _tag: 'Unavailable'; readonly feed: Extract<Feed<never>, { readonly _tag: 'Unavailable' }> }
 
+// This literal must remain a registered generated error-envelope arm, not an open-ended wire string.
+const unassignedCode: Extract<ErrorEnvelope, { readonly code: 'recipient-unassigned' }>['code'] = 'recipient-unassigned'
 const startRecipientView = (feed: Feed<ThreadStartContext> | undefined): StartRecipientView => {
   if (feed === undefined) return { _tag: 'NoPreview' }
   if (feed._tag === 'Waiting') return { _tag: 'Loading' }
   if (feed._tag === 'Observed') return { _tag: 'Ready', recipient: feed.value.start_recipient }
+  if (feed.code === unassignedCode) return { _tag: 'Unassigned', explanation: feed.explanation }
   if (feed.code === 'recipient-retired') return { _tag: 'NoRecipient', explanation: feed.explanation }
   return { _tag: 'Unavailable', feed }
 }
@@ -366,6 +371,8 @@ function StartRecipient({ recipient, lead }: { readonly recipient: ThreadStartRe
 function StartRecipientStatus({ recipient, onRetry }: { readonly recipient: Exclude<StartRecipientView, { readonly _tag: 'Ready' }>; readonly onRetry: () => void }) {
   switch (recipient._tag) {
     case 'Loading': return <SystemNotice kind="loading" scope="inline" title="Loading the recipient" />
+    case 'Unassigned': return <SystemNotice kind="error" scope="inline" title="No recipient is configured. Set up a responsible agent before starting a thread." data-start-recipient="unassigned"
+      {...(recipient.explanation === undefined ? {} : { explanation: recipient.explanation })} />
     case 'NoRecipient': return <SystemNotice kind="error" scope="inline" title={retiredNote} data-start-recipient="retired"
       {...(recipient.explanation === undefined ? {} : { explanation: recipient.explanation })} />
     case 'NoPreview': return <p data-start-recipient="none" {...stylex.props(styles.note)}>{noPreviewNote}</p>

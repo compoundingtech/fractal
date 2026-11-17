@@ -648,19 +648,20 @@ run or a person-owned notice. A terminal-retirement fallback is labelled
 Runtime offline status never selects a fallback. A `recipient-retired` refusal
 identifies terminal retirement and offers no target, Start or Retry. An ordinary
 GET `409 stale-fence` fails closed with the server's refusal and no recipient.
-Neutral "no recipient configured" classification is NOT DONE: it requires a
-future API-authored typed `details.reason` discriminator, not message matching
-or an internal store error code.
-While the preview loads or after it fails there is no Start either, and a
-failed read offers Retry.
+The generated `recipient-unassigned` preview refusal shows a distinct blocked
+setup state: no responsible agent is configured. It offers no recipient,
+Start or Retry and does not loop refreshing the preview. No message matching
+or internal store error code determines this state. Other failed reads offer Retry.
 
-If Start definitively returns `409 stale-fence` or a recipient-mismatch 404,
-the source invalidates the visible recipient, visibly re-reads that exact
-preview, and returns the refusal. The draft stays; a changed recipient needs a
-NEW explicit Send and a refused preview remains refused. Nothing is resent
-silently. An unknown transport outcome retains the original signed intent,
-action/target identities and retry key for explicit receipt recovery. Replies
-continue to use the existing thread's stored
+A signed Start is definitive only with explicit `applied: none` under the shared
+application-certainty interpreter; absent metadata is NOT proof. Unknown in either
+metadata location dominates none. A definitive `409 stale-fence`, `recipient-retired`
+or recipient-mismatch 404 visibly re-reads the exact preview. The draft stays;
+a changed recipient needs a NEW explicit Send and a refused preview stays refused.
+Without that positive evidence (including bare golden stale-fence or unassigned
+refusals), retain the original signed packet, recipient, identities and retry key
+for explicit receipt recovery, even if the displayed preview changes. Never
+silently resend or retarget. Replies use the existing thread's stored
 participants, regardless of later routing policy. Storybook's
 `Fractal/App/Threads/Start recipient` covers every state.
 

@@ -1,4 +1,4 @@
-import { actionReceiptCheck, sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
+import { actionReceiptCheck, appliedAnswer, sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import type { RequestHistoryPage, ThreadStartContext, ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { FollowEvent, ThreadWindow } from '@fractal/sdk/read'
@@ -479,15 +479,27 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           return { snapshot_id: snapshot.id, subject_revisions: prepared.revisions ?? {} }
         }
         const confirm = actionReceiptCheck(prepared.expected)
+        let signedRequest: Request | undefined
+        const ports = {
+          build: async (): Promise<Request> => {
+            signedRequest = { id: `action/${attempt.key}`, idempotency_key: attempt.key, fence: await fence() }
+            return signedRequest
+          },
+          fence,
+          send: (request: Request) => confirm(() => prepared.send(request)),
+          retry: false as const,
+          wait: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+        }
         const outcome = attempt.retry === undefined
-          ? await sendBoundAction(attempt.actor ?? 'local', {
-            build: async () => ({ id: `action/${attempt.key}`, idempotency_key: attempt.key, fence: await fence() }),
-            fence,
-            send: request => confirm(() => prepared.send(request)),
-            retry: false,
-            wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
-          })
+          ? await sendBoundAction(attempt.actor ?? 'local', ports)
           : await resendBoundAction(attempt.retry)
+        // A signed Start needs positive nonapplication evidence. A refusal code (even stale-fence)
+        // or retryable:false cannot authorize discarding its packet and choosing a new recipient.
+        if (kind === 'thread.start' && signedRequest !== undefined && outcome.how === 'failed'
+          && outcome.error instanceof ClientError && appliedAnswer(outcome.error) !== 'none') {
+          attempt.retry = { member: attempt.actor ?? 'local', request: signedRequest, ports }
+          return reject('Fractal has not confirmed this action. Retry to check the same action.')
+        }
         if (outcome.how === 'unconfirmed') {
           attempt.retry = outcome.request
           return reject('Fractal has not confirmed this action. Retry to check the same action.')
@@ -498,7 +510,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         // refused action, with Fractal's own reason under it.
         const error = outcome.error
         if (error instanceof ClientError && error.status < 500) {
-          if (kind === 'thread.start' && start !== undefined && (
+          if (kind === 'thread.start' && start !== undefined && appliedAnswer(error) === 'none' && (
             (error.status === 404 && error.response.code === 'not-found')
             || (error.status === 409 && (error.response.code === 'stale-fence' || error.response.code === 'recipient-retired'))
           )) {

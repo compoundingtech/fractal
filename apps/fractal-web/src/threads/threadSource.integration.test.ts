@@ -641,7 +641,9 @@ it.each(refusedActions.flatMap(([action, title]) => [403, 422].map(status => [ac
     try {
       await vi.waitFor(() => expect(view.registry.get(view.source.access).actions.size).toBe(5))
       const refusal = await perform(view.source, action)
-      expect(refusal).toStrictEqual({ detail: title, explanation: 'The thread owner stopped accepting changes.' })
+      expect(refusal).toStrictEqual(action === 'start'
+        ? { detail: 'Fractal has not confirmed this action. Retry to check the same action.' }
+        : { detail: title, explanation: 'The thread owner stopped accepting changes.' })
       expect(JSON.stringify(refusal)).not.toContain('no access to threads')
       expect(view.writes).toHaveLength(1)
     } finally { view.dispose() }
@@ -652,7 +654,8 @@ it.each(refusedActions)('names a refused %s with its title alone when Fractal gi
   const view = actionSource(() => actionReply(422, '   '))
   try {
     await vi.waitFor(() => expect(view.registry.get(view.source.access).actions.size).toBe(5))
-    expect(await perform(view.source, action)).toStrictEqual({ detail: title })
+    expect(await perform(view.source, action)).toStrictEqual({ detail: action === 'start'
+      ? 'Fractal has not confirmed this action. Retry to check the same action.' : title })
   } finally { view.dispose() }
 })
 
