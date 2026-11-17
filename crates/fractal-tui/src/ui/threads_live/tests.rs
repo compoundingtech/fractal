@@ -5284,7 +5284,7 @@ fn terminal_start_preview_refusals_are_visible_and_never_send_or_loop() {
             "Keep this message until there is a recipient.".into(),
         );
         for _ in 0..3 {
-            threads.submit(&pane.key(), input.clone(), &mut texts);
+            threads.submit(&pane.key(), input.clone(), &texts);
             assert!(threads.writes().is_empty());
             assert!(
                 threads.take_start_context_reads().is_empty(),
