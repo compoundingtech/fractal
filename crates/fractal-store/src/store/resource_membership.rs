@@ -497,10 +497,10 @@ impl Store {
                 for body in bodies {
                     let holder: Membership = serde_json::from_str(&body?)?;
                     if holder.request.io == Some(IoClass::Heavy) { io_held = io_held.saturating_add(1); }
-                    if let (Some(disk), Some(mount)) = (&holder.request.disk, fit.disk) {
-                        if holder.disk_filesystem == Some(mount.filesystem) {
-                            disk_held = disk_held.saturating_add(disk.bytes);
-                        }
+                    if let (Some(disk), Some(mount)) = (&holder.request.disk, fit.disk)
+                        && holder.disk_filesystem == Some(mount.filesystem)
+                    {
+                        disk_held = disk_held.saturating_add(disk.bytes);
                     }
                 }
             }
