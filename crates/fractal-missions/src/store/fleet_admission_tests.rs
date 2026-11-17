@@ -68,10 +68,8 @@ fn declaration_restart_old_registry_long_lag_does_not_replay_heals() {
     }
 }
 
-/// A member one build behind keeps a newer member's unknown claims, and only an unknown claim
-/// that could bear on runtime authority makes a subject indeterminate. Seen live: a newer
-/// member's `harness.limits` made every seat on it unreachable for terminal attach from an
-/// older member, though its runtime observations were valid.
+/// An older member retains an unknown observer kind without making the observer's
+/// valid runtime indeterminate; only unknown authority-family claims block routing.
 #[test]
 fn an_unknown_non_authority_claim_leaves_runtime_routing_alone() {
     let anchor_key = key();
@@ -81,7 +79,7 @@ fn an_unknown_non_authority_claim_leaves_runtime_routing_alone() {
     admit(&current, "older", &older_key, "invite", None);
     let older = node("older", Some(&older_key), Some(&anchor_key));
     let mut registry = fractal_schema::registry().clone();
-    for kind in ["harness.limits", "runtime.restart-window-reset"] {
+    for kind in ["usage.limits.observed", "runtime.restart-window-reset"] {
         registry.claims.remove(kind).unwrap();
     }
     older.set_claim_registry(registry);
@@ -95,13 +93,18 @@ fn an_unknown_non_authority_claim_leaves_runtime_routing_alone() {
         json!({"status": "running", "runtime_id": "agent.example.worker",
                "incarnation_id": "worker-one"}),
     );
-    append(
-        &current,
-        "harness.limits",
-        subject,
-        json!({"driver": "claude", "incarnation_id": "worker-one",
-               "five_hour_percent": 12.5, "measured_at_unix_ms": 1_790_000_000_000_u64}),
-    );
+    current.set_usage_limits_writers(vec![subject.into()]).unwrap();
+    current.append_claim(&ClaimInput {
+        subject:subject.into(), actor:Some(subject.into()), kind:"usage.limits.observed".into(),
+        fields:serde_json::from_value(json!({
+            "readings":[{
+                "provider":"anthropic", "account":"claude/example", "account_ref":"avery/one", "window":"5h",
+                "used_percent":12.5, "measured_at":"2026-09-21T14:13:20Z",
+                "resets_at":null, "coverage":"reported", "source":"omp-usage", "host":"current"
+            }], "credit_readings":[]
+        })).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None,
+    }).unwrap();
     let admission = sync(&current, &older);
     assert_eq!(admission.unknown, 1, "the newer kind is kept, not dropped");
     let status = older.status(Some(subject)).unwrap();

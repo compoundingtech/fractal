@@ -51,7 +51,6 @@ fn append_projects_each_claim_kind_in_order() {
         ("mission.renamed", &["identities", "custom", "resource-preparation", "ordered-membership-flush"]),
         ("person.directive-note-set", &["custom", "resource-preparation", "directive-notes", "ordered-membership-flush"]),
         ("message.sent", &["custom", "resource-preparation", "agent-messages", "ordered-membership-flush"]),
-        ("harness.limits", &["custom", "resource-preparation", "limits", "ordered-membership-flush"]),
         ("usage.limits.observed", &["custom", "resource-preparation", "limits", "usage-credits", "ordered-membership-flush"]),
         ("arrangement.edited", &["custom", "resource-preparation", "arrangements", "ordered-membership-flush"]),
         ("read-position.advanced", &["custom", "resource-preparation", "read-positions", "ordered-membership-flush"]),
@@ -98,7 +97,7 @@ fn replicated_claims_project_credits_arrangements_read_positions_and_ordered_mem
         taking(projectors::REPLICATED, "ordered-membership.edited"),
         ["ordered-membership-project"]
     );
-    for kind in ["intent.desired", "glass.upserted", "message.sent", "harness.limits"] {
+    for kind in ["intent.desired", "glass.upserted", "message.sent"] {
         assert!(taking(projectors::REPLICATED, kind).is_empty(), "{kind}");
     }
 }

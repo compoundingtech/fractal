@@ -1075,10 +1075,13 @@ async fn an_owner_restart_never_replays_a_pending_launch_and_controls_bypass_its
 
     #[tokio::test]
 async fn account_limit_enforcement_physically_stops_a_blocked_start() {
-    let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, true);
+    let (directory, store, runtime, reconciler, release, mut entered) = fixture(true, true);
     apply_source(
         &store,
-        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        &format!(
+            "version 2\naccount \"example/quota\" {{ provider \"openai\"; login {login:?}; }}\nagent \"example/worker\" {{ workspace \"/tmp\"; harness \"codex\" {{ account \"example/quota\"; }}; }}",
+            login = directory.path().display().to_string(),
+        ),
         "limit",
     );
     assert!(launch(&reconciler, "agent/example/worker"));
@@ -1087,22 +1090,30 @@ async fn account_limit_enforcement_physically_stops_a_blocked_start() {
         .unwrap()
         .unwrap();
     let now = now_ms();
+    let writer = "agent/example/usage-producer";
+    store.set_usage_limits_writers(vec![writer.into()]).unwrap();
     store
         .append_claim(&ClaimInput {
-            subject: "agent/example/worker".into(),
-            kind: "harness.limits".into(),
-            actor: Some("agent/example/worker".into()),
-            fields: BTreeMap::from([
-                ("driver".into(), Value::from("claude")),
-                ("account".into(), Value::from("claude/example")),
-                (
-                    "incarnation_id".into(),
-                    Value::from("blocked-start-incarnation"),
-                ),
-                ("weekly_percent".into(), Value::from(96)),
-                ("five_hour_percent".into(), Value::from(40)),
-                ("measured_at_unix_ms".into(), Value::from(now as u64)),
-            ]),
+            subject: writer.into(),
+            kind: "usage.limits.observed".into(),
+            actor: Some(writer.into()),
+            fields: serde_json::from_value(serde_json::json!({
+                "readings": [{
+                    "account": fractal_drivers::account::account_label(
+                        "codex", "declared:example/quota"
+                    ),
+                    "account_ref": "example/quota",
+                    "provider": "openai-codex",
+                    "window": "weekly",
+                    "used_percent": 96.0,
+                    "measured_at": chrono::DateTime::from_timestamp_millis(now as i64).unwrap().to_rfc3339(),
+                    "resets_at": chrono::DateTime::from_timestamp_millis((now + 7 * 24 * 3_600_000) as i64).unwrap().to_rfc3339(),
+                    "coverage": "reported",
+                    "source": "omp-usage",
+                    "host": "node"
+                }],
+                "credit_readings": []
+            })).unwrap(),
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,

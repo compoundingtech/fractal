@@ -11630,7 +11630,7 @@ async fn finish_claim_publication(
                 state.notify.notify_one();
             }
             signal_local_change(state);
-        } else if matches!(kind, "harness.usage" | "harness.limits" | "subagent.renewed") {
+        } else if matches!(kind, "harness.usage" | "usage.limits.observed" | "subagent.renewed") {
             // The reconciler reads none of these. The limits policy runs on its own two-minute
             // timer, so a limits claim woke a full reconcile pass for nothing, every few seconds.
             signal_visible_change(state);

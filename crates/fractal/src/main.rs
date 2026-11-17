@@ -11800,15 +11800,17 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                     dollars(&credits["budget_microusd"])
                 )
             } else if let Some(limit) = limit {
-                let weekly = limit["weekly_percent"]
-                    .as_f64()
-                    .map_or_else(|| "?".to_owned(), |value| format!("{value:.0}%"));
-                let reset = limit["weekly_resets_at_unix_ms"]
-                    .as_u64()
-                    .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
-                    .map_or_else(String::new, |at| format!(" resets {}", at.format("%Y-%m-%d %H:%M UTC")));
+                let windows = limit["windows"].as_array().into_iter().flatten().map(|window| {
+                    let name = window["window"].as_str().unwrap_or("unknown");
+                    let percent = window["used_percent"].as_f64()
+                        .map_or_else(|| "?".to_owned(), |value| format!("{value:.0}%"));
+                    let reset = window["resets_at_unix_ms"].as_u64()
+                        .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+                        .map_or_else(String::new, |at| format!(" resets {}", at.format("%Y-%m-%d %H:%M UTC")));
+                    format!("{name} {percent}{reset}")
+                }).collect::<Vec<_>>().join("; ");
                 let stale = if limit["stale"].as_bool() == Some(true) { "  stale" } else { "" };
-                format!("weekly {weekly}{reset}{stale}")
+                format!("{windows}{stale}")
             } else {
                 "no limits reported".to_owned()
             };
@@ -11833,28 +11835,23 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         output.push('\n');
         let _ = writeln!(
             output,
-            "LIMITS  {} · the highest recent weekly reading of each account",
+            "LIMITS  {} · omp-usage provider windows for each account",
             limits.len()
         );
-        let _ = writeln!(output, "WEEKLY  5-HOUR  WEEKLY RESET  MEASURED  account");
+        let _ = writeln!(output, "WINDOW  USED  RESET  MEASURED  account");
         for limit in limits {
-            let _ = writeln!(
-                output,
-                "{}  {}  {}  {}  {}{}",
-                percent(&limit["weekly_percent"]),
-                percent(&limit["five_hour_percent"]),
-                time(&limit["weekly_resets_at_unix_ms"]),
-                time(&limit["measured_at_unix_ms"]),
-                account_name(&limit["account"], &limit["account_ref"]),
-                if limit["exempt"].as_bool() == Some(true) {
-                    "  exempt"
-                } else {
-                    ""
-                },
-            );
-            if limit["stale"].as_bool() == Some(true) {
-                output.truncate(output.trim_end().len());
-                output.push_str("  stale\n");
+            for window in limit["windows"].as_array().into_iter().flatten() {
+                let _ = writeln!(
+                    output,
+                    "{}  {}  {}  {}  {}{}{}",
+                    window["window"].as_str().unwrap_or("unknown"),
+                    percent(&window["used_percent"]),
+                    time(&window["resets_at_unix_ms"]),
+                    time(&window["measured_at_unix_ms"]),
+                    account_name(&limit["account"], &limit["account_ref"]),
+                    if limit["exempt"].as_bool() == Some(true) { "  exempt" } else { "" },
+                    if limit["stale"].as_bool() == Some(true) { "  stale" } else { "" },
+                );
             }
         }
         let names = |key: &str| {
@@ -17800,15 +17797,6 @@ impl NativeObservations {
                         &mut None,
                     )
                     .await?;
-                    publish_harness_limits(
-                        &publisher,
-                        subject,
-                        source_driver,
-                        &event.runtime_incarnation,
-                        &observed,
-                        &mut None,
-                    )
-                    .await?;
                 }
                 "harness-inventory" => {
                     let mut fields: BTreeMap<String, Value> =
@@ -17960,9 +17948,6 @@ impl ObservationClient<'_> {
 /// Bound accounts have their own accounting identity even when a provider reports only a
 /// generic API-key label or no identity. Unbound seats retain the provider's existing identity.
 fn bind_observation_account(claim: &mut ClaimInput, account: Option<&str>) {
-    if claim.kind == "harness.limits" {
-        claim.fields.remove("account_ref");
-    }
     let Some(account) = account.filter(|name| !name.is_empty()) else {
         return;
     };
@@ -17971,12 +17956,6 @@ fn bind_observation_account(claim: &mut ClaimInput, account: Option<&str>) {
     };
     let label = fractal_drivers::account::account_label(driver, &format!("declared:{account}"));
     match claim.kind.as_str() {
-        "harness.limits" => {
-            claim
-                .fields
-                .insert("account_ref".into(), Value::String(account.into()));
-            claim.fields.insert("account".into(), Value::String(label));
-        }
         "harness.usage" => {
             claim.fields.insert("account".into(), Value::String(label));
         }
@@ -18098,72 +18077,6 @@ async fn publish_harness_activity(
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(format!("native-activity:{subject}:{fingerprint}")),
-            },
-        )
-        .await?;
-    *last_fingerprint = Some(fingerprint);
-    Ok(())
-}
-
-/// Publish the harness's latest reading of its paying account's limits when any of it changed.
-/// Readers take the freshest reading per account across the fleet, so the reading keeps the time
-/// the harness measured it, not when st published it.
-async fn publish_harness_limits(
-    client: &ObservationClient<'_>,
-    subject: &str,
-    driver: &str,
-    incarnation: &str,
-    observed: &fractal_drivers::harness_context::Observed,
-    last_fingerprint: &mut Option<String>,
-) -> Result<()> {
-    let limits = observed.rate_limits;
-    if limits.five_hour.is_none() && limits.seven_day.is_none() {
-        return Ok(());
-    }
-    let mut fields = BTreeMap::from([
-        ("driver".into(), Value::String(driver.into())),
-        ("incarnation_id".into(), Value::String(incarnation.into())),
-        (
-            "measured_at_unix_ms".into(),
-            Value::from(limits.observed_at_ms.unwrap_or(observed.observed_at_ms)),
-        ),
-    ]);
-    for (name, value) in [("account", &observed.account), ("plan", &observed.plan)] {
-        if let Some(value) = value {
-            fields.insert(name.into(), Value::String(value.clone()));
-        }
-    }
-    for (name, value) in [
-        ("five_hour_percent", limits.five_hour),
-        ("weekly_percent", limits.seven_day),
-    ] {
-        if let Some(value) = value.filter(|value| value.is_finite()) {
-            fields.insert(name.into(), Value::from(value));
-        }
-    }
-    for (name, value) in [
-        ("five_hour_resets_at_unix_ms", limits.five_hour_resets_at_ms),
-        ("weekly_resets_at_unix_ms", limits.seven_day_resets_at_ms),
-    ] {
-        if let Some(value) = value {
-            fields.insert(name.into(), Value::from(value));
-        }
-    }
-    let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
-    if last_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-        return Ok(());
-    }
-    let _: ClaimRecord = client
-        .post(
-            "/v1/claims",
-            &ClaimInput {
-                subject: subject.into(),
-                kind: "harness.limits".into(),
-                actor: Some(subject.into()),
-                fields,
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!("harness-limits:{subject}:{fingerprint}")),
             },
         )
         .await?;
@@ -21207,8 +21120,8 @@ fn idempotency(kdl: &str, tokens: &BTreeMap<String, Vec<String>>) -> String {
 
 /// Trim the local observation log at startup and then once an hour. Local observations
 /// never replicate, so this never changes what any peer holds.
-/// Apply this node's `[limits]` policy every two minutes: stop the seats it hosts on an account
-/// past its weekly limit, and notify operations once per weekly window.
+/// Apply this node's `[limits]` policy every two minutes using omp-usage weekly windows:
+/// stop seats on an exhausted account, and notify operations once per weekly window.
 async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon::config::LimitsConfig, reconciler: Arc<Reconciler>) {
     const LIMITS_INTERVAL: Duration = Duration::from_secs(2 * 60);
     let mut limits = started_with;

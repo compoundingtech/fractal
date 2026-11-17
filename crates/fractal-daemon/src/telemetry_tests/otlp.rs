@@ -443,12 +443,11 @@ fn hook_metric_labels_are_bounded_and_a_non_application_has_no_counter_or_span()
     );
 }
 
-/// Every native harness reading reaches the collector as a log record, while the graph keeps
-/// only the readings that change a current value; account limits also go out as a bounded
-/// gauge. Exporting writes nothing to the graph.
+/// Native harness state readings reach the collector even when the graph keeps them local.
+/// Independently observed account quota exports as a bounded gauge without graph writes.
 #[tokio::test]
 async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
-    use crate::store::{append_latest_observation_publication, append_limits_publication};
+    use crate::store::append_latest_observation_publication;
     let (collector, endpoint) = start_collector().await;
     let store = Arc::new(Store::open_memory("node-a").unwrap());
     let (ada, bea) = ("agent/node.ada", "agent/node.bea");
@@ -477,16 +476,19 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
         )
         .unwrap();
     };
+    store.set_usage_limits_writers(vec![ada.into(), bea.into()]).unwrap();
     let limits = |subject: &str, five_hour: f64, at: u128| {
-        append_limits_publication(
-            &store.graph,
-            &reading(subject, "harness.limits", json!({"driver": "claude", "account": "claude/example",
-                "incarnation_id": "inc-1", "five_hour_percent": five_hour, "weekly_percent": 40.0,
-                "measured_at_unix_ms": at as u64})),
-            at,
-            Some("inc-1"),
-        )
-        .unwrap();
+        let measured = chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
+        store.append_claim(&reading(subject, "usage.limits.observed", json!({
+            "readings": [
+                {"provider":"anthropic", "account":"claude/example", "account_ref":"avery/one", "window":"5h",
+                 "used_percent":five_hour, "measured_at":measured,
+                 "resets_at":"2099-01-01T00:00:00Z", "coverage":"reported", "source":"omp-usage", "host":"node-a"},
+                {"provider":"anthropic", "account":"claude/example", "account_ref":"avery/one", "window":"weekly",
+                 "used_percent":40.0, "measured_at":measured,
+                 "resets_at":"2099-01-01T00:00:00Z", "coverage":"reported", "source":"omp-usage", "host":"node-a"}
+            ], "credit_readings":[]
+        }))).unwrap();
     };
     state("idle", start);
     state("idle", start + 20_000);
@@ -499,21 +501,21 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
     let graph = || {
         [ada, bea]
             .iter()
-            .flat_map(|subject| ["harness.observed", "harness.limits"].map(|kind| (subject, kind)))
+            .flat_map(|subject| ["harness.observed", "usage.limits.observed"].map(|kind| (subject, kind)))
             .map(|(subject, kind)| store.claims_for(subject, Some(kind)).unwrap().len())
             .sum::<usize>()
     };
-    assert_eq!(graph(), 6, "three state changes, each seat's first limits reading and the account's one change");
+    assert_eq!(graph(), 7, "three state changes and four independent observer claims");
     // Once every member hears this node's seats, a working re-stamp past the five-minute
     // fallback stays local too, and still exports.
     store.set_fleet_hears_seats(true).unwrap();
     state("working", start + 60_000);
     state("working", start + 420_000);
-    assert_eq!(graph(), 7, "the transition replicates; the re-stamp the fleet hears through its host stays local");
+    assert_eq!(graph(), 8, "the state transition replicates; the repeated state stays local");
 
     let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None, ui_url: None }, "node-a").unwrap();
     exporter.export_once(&store).await.unwrap();
-    assert_eq!(graph(), 7, "exporting writes nothing to the graph");
+    assert_eq!(graph(), 8, "exporting writes nothing to the graph");
     let requests = collector.requests.lock().unwrap();
     let logs = requests
         .iter()
@@ -521,7 +523,7 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
         .flat_map(|(_, body)| records(body))
         .filter(|record| record["eventName"].as_str().is_some_and(|kind| kind.starts_with("harness.")))
         .count();
-    assert_eq!(logs, 10, "the full series: every reading, including those the graph kept local");
+    assert_eq!(logs, 6, "every native harness state reading, including local repetitions");
     let metrics = requests
         .iter()
         .filter_map(|(_, body)| body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array())
@@ -546,7 +548,7 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
         .iter()
         .map(|point| (labels(point)[2].1.clone(), point["asDouble"].as_f64().unwrap()))
         .collect::<Vec<_>>();
-    assert_eq!(limit, [("five_hour".to_owned(), 12.0), ("weekly".to_owned(), 40.0)], "the newest reading of each window");
+    assert_eq!(limit, [("5h".to_owned(), 12.0), ("weekly".to_owned(), 40.0)], "the newest reading of each window");
     let limit_point = &points("st_account_limit_used_percent")[0];
     assert_eq!(
         labels(limit_point).iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
@@ -619,39 +621,24 @@ async fn stored_claims_are_counted_when_stored_even_if_deleted_before_export() {
 /// is appended after a newer one, in the same export or a later one.
 #[tokio::test]
 async fn the_limits_gauge_keeps_the_newest_measured_reading() {
-    use crate::store::append_limits_publication;
     let (collector, endpoint) = start_collector().await;
     let store = Arc::new(Store::open_memory("node-a").unwrap());
-    let start = smallclaims::store::now_ms();
+    let start = smallclaims::store::now_ms() - 120_000;
+    let writers = ["agent/node.ada", "agent/node.bea", "agent/node.cara", "agent/node.dan"];
+    store.set_usage_limits_writers(writers.map(str::to_owned).to_vec()).unwrap();
     let reading = |subject: &str, percent: f64, measured: u128| {
-        store
-            .append_claim(&ClaimInput {
-                subject: subject.into(),
-                kind: "runtime.observed".into(),
-                actor: Some(subject.into()),
-                fields: serde_json::from_value(json!({"status": "running", "incarnation_id": "inc-1"})).unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        append_limits_publication(
-            &store.graph,
-            &ClaimInput {
-                subject: subject.into(),
-                kind: "harness.limits".into(),
-                actor: Some(subject.into()),
-                fields: serde_json::from_value(json!({"driver": "claude", "account": "claude/example",
-                    "incarnation_id": "inc-1", "five_hour_percent": percent, "measured_at_unix_ms": measured as u64}))
-                .unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            },
-            start + 120_000,
-            Some("inc-1"),
-        )
-        .unwrap();
+        let measured = chrono::DateTime::from_timestamp_millis(measured as i64).unwrap().to_rfc3339();
+        store.append_claim(&ClaimInput {
+            subject:subject.into(), actor:Some(subject.into()), kind:"usage.limits.observed".into(),
+            fields:serde_json::from_value(json!({
+                "readings":[{
+                    "provider":"anthropic", "account":"claude/example", "account_ref":"avery/one", "window":"5h",
+                    "used_percent":percent, "measured_at":measured, "resets_at":"2099-01-01T00:00:00Z",
+                    "coverage":"reported", "source":"omp-usage", "host":"node-a"
+                }], "credit_readings":[]
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
     };
     let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None, ui_url: None }, "node-a").unwrap();
     let gauges = || {

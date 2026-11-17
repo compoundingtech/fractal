@@ -30,10 +30,7 @@ pub use staged::plan_staged;
 /// Version 12 ages out the sekrets claims written before they became local observations.
 /// Version 13 retains status transitions selected by the reader after filtering stamped heartbeats.
 /// Version 14 retains the predecessor of each incarnation's first visible status transition.
-/// Version 15 drops `harness.limits` readings the account fold can no longer read: those more
-/// than an hour older than their account group's newest, other than each seat's newest. The
-/// proof compares the account fold across every seat. It also keeps only the newest
-/// `runtime.reconcile-decision` of each decision key.
+/// Version 15 keeps only the newest `runtime.reconcile-decision` of each decision key.
 /// Version 16 preserves exact review binding, withdrawal and author-attempt references.
 /// It ships in the reader release before review-at-head activation.
 /// Version 17 included selected rollup costs and complete, single-currency legacy costs in usage proofs (#1473).
@@ -54,7 +51,8 @@ pub use staged::plan_staged;
 /// readers of a seat's last turn ask for.
 /// Version 26 includes winner-preserving legacy placement migration and its authority marker
 /// in the existing arrangement/membership witnesses; it adds no claim-drop rule.
-pub const RULES_VERSION: u32 = 26;
+/// Version 27 removes harness quota retention; omp-usage snapshots remain durable.
+pub const RULES_VERSION: u32 = 27;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -87,9 +85,6 @@ pub const REQUEST_CLOSERS: [&str; 3] = [
 
 /// The kinds a seat's status history is read from, as [`status_source`] reads them.
 pub const STATUS_SOURCE_KINDS: [&str; 3] = ["harness.observed", "runtime.observed", "harness.diagnostic"];
-
-/// The kind of an account's limit readings, whose rule reads every seat's readings.
-pub const LIMITS_KIND: &str = "harness.limits";
 
 /// What the rule engine does beyond the policy's rules. The rules digest hashes it after them.
 const ENGINE_DESCRIPTION: &str = "\
@@ -132,7 +127,6 @@ pub enum Rule {
     Deferral,
     UsageSeries,
     UsageCumulative,
-    AccountLimits,
     SloEventFences,
     /// Keep pending history; after a day keep the newest observation indefinitely.
     QuestionLifecycle,
@@ -203,9 +197,6 @@ fn planner_rule(rule: &fractal_schema::retention::RulePolicy) -> Option<Rule> {
         }
         "newest,largest-total_tokens" => Rule::UsageCumulative,
         "episode-event-fences-and-conflicts-after-recovery-7d" => Rule::SloEventFences,
-        "newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at" => {
-            Rule::AccountLimits
-        }
         "all-while-pending,newest-once-resolved-1d-before-cut" => Rule::QuestionLifecycle,
         "newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts" => {
             Rule::ResourceObserved
@@ -472,52 +463,6 @@ pub fn usage_cumulative_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     keep
 }
 
-/// The account group of a `harness.limits` reading, as the account fold groups it, and when it
-/// was measured. `None` for a claim the fold skips.
-pub fn limits_reading(claim: &ClaimRecord) -> Option<((String, String, String, bool), u64)> {
-    let (limit, _) = super::limits::reading(&claim.origin, &claim.body)?;
-    let group = (
-        limit.driver,
-        limit.account,
-        limit.account_ref.unwrap_or_default(),
-        limit.weekly_percent.is_some(),
-    );
-    Some((group, limit.measured_at_unix_ms))
-}
-
-/// A seat's `harness.limits` claims to keep: its newest; its newest reading the fold accepts, and
-/// any accepted at the same time, since the fold breaks that tie by arrival; and every reading
-/// measured within an hour of the newest in its account group (`newest_measured`, across every
-/// seat). A group's newest only moves forward, so a reading below that floor is never read again.
-pub fn limits_keep(
-    claims: &[&ClaimRecord],
-    newest_measured: &BTreeMap<(String, String, String, bool), u64>,
-) -> BTreeSet<usize> {
-    let mut keep = BTreeSet::from_iter(claims.len().checked_sub(1));
-    let readings = claims.iter().map(|claim| limits_reading(claim)).collect::<Vec<_>>();
-    if let Some(newest) = claims
-        .iter()
-        .zip(&readings)
-        .filter(|(_, reading)| reading.is_some())
-        .map(|(claim, _)| claim.accepted_at_unix_ms)
-        .max()
-    {
-        keep.extend(
-            claims.iter().zip(&readings).enumerate()
-                .filter(|(_, (claim, reading))| reading.is_some() && claim.accepted_at_unix_ms == newest)
-                .map(|(position, _)| position),
-        );
-    }
-    for (position, reading) in readings.iter().enumerate() {
-        if let Some((group, measured)) = reading
-            && *measured >= newest_measured[group].saturating_sub(super::limits::ACCOUNT_READING_WINDOW_MS)
-        {
-            keep.insert(position);
-        }
-    }
-    keep
-}
-
 pub fn loop_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     let run_key = |claim: &ClaimRecord| (field_text(claim, "status"), field_text(claim, "round"));
     let mut keep = BTreeSet::new();
@@ -572,7 +517,6 @@ impl Rule {
         match self {
             Rule::Deferral => &REQUEST_CLOSERS,
             Rule::QuestionLifecycle => &[fractal_schema::harness_questions::RESOLVED],
-            Rule::AccountLimits => &[LIMITS_KIND],
             _ => &[],
         }
     }
@@ -584,7 +528,6 @@ impl Rule {
             Rule::HarnessObserved
                 | Rule::UsageSeries
                 | Rule::UsageCumulative
-                | Rule::AccountLimits
                 | Rule::LoopState
                 | Rule::SloEventFences
                 | Rule::ResourceObserved
@@ -614,7 +557,6 @@ impl Rule {
             Rule::Deferral => "deferral".into(),
             Rule::UsageSeries => "usage-series".into(),
             Rule::UsageCumulative => "usage-cumulative".into(),
-            Rule::AccountLimits => "account-limits".into(),
             Rule::SloEventFences => "slo-event-fences".into(),
             Rule::QuestionLifecycle => "question-lifecycle".into(),
             Rule::ResourceObserved => "resource-observed".into(),
@@ -629,7 +571,6 @@ impl Rule {
             "deferral" => Rule::Deferral,
             "usage-series" => Rule::UsageSeries,
             "usage-cumulative" => Rule::UsageCumulative,
-            "account-limits" => Rule::AccountLimits,
             "slo-event-fences" => Rule::SloEventFences,
             "question-lifecycle" => Rule::QuestionLifecycle,
             "resource-observed" => Rule::ResourceObserved,
@@ -656,7 +597,6 @@ pub fn rule_keep(
     len: usize,
     claims: &[&ClaimRecord],
     closed: bool,
-    limits_newest: &BTreeMap<(String, String, String, bool), u64>,
     cut: u128,
 ) -> BTreeSet<usize> {
     let newest = BTreeSet::from([len - 1]);
@@ -665,7 +605,6 @@ pub fn rule_keep(
         Rule::HarnessObserved => harness_keep(claims),
         Rule::UsageSeries => usage_series_keep(claims, cut),
         Rule::UsageCumulative => usage_cumulative_keep(claims),
-        Rule::AccountLimits => limits_keep(claims, limits_newest),
         Rule::LoopState => loop_keep(claims),
         Rule::SloEventFences => slo_fences_keep(claims, cut),
         Rule::Deferral if closed => newest,
@@ -870,10 +809,6 @@ pub fn claim_facts(claim: &ClaimRecord) -> smallclaims::store::checkpoint_stagin
             .contains(&claim.kind.as_str())
             .then(|| field_str(claim, "request").map(str::to_owned))
             .flatten(),
-        limits: (claim.kind == LIMITS_KIND)
-            .then(|| limits_reading(claim))
-            .flatten()
-            .map(|(group, measured)| (serde_json::to_string(&group).expect("text serializes"), measured)),
     }
 }
 
@@ -918,17 +853,6 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
         let sources = members.iter().map(|index| &claims[*index].claim).collect::<Vec<_>>();
         status_keep.extend(status_keep_positions(&sources, cut).into_iter().map(|position| members[position]));
     }
-    // The newest measurement of each account group, across every seat, for the limits rule.
-    let mut limits_newest = BTreeMap::new();
-    for index in first.iter().copied() {
-        let claim = &claims[index].claim;
-        if claim.kind == LIMITS_KIND
-            && let Some((group, measured)) = limits_reading(claim)
-        {
-            let newest = limits_newest.entry(group).or_insert(measured);
-            *newest = (*newest).max(measured);
-        }
-    }
     let closed_requests = claims
         .iter()
         .filter(|sealed_claim| REQUEST_CLOSERS.contains(&sealed_claim.claim.kind.as_str()))
@@ -958,7 +882,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
             Rule::QuestionLifecycle => expired_questions.contains(slot[0].as_str()),
             _ => false,
         };
-        let mut keep = rule_keep(*rule, members.len(), &slot_claims, closed, &limits_newest, cut);
+        let mut keep = rule_keep(*rule, members.len(), &slot_claims, closed, cut);
         if rule.keeps_field_carriers() {
             keep.extend(field_carriers(&slot_claims));
         }
@@ -1205,8 +1129,7 @@ pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The answers no one subject holds: the account limits, which fold every seat's readings. The
-/// proof's copy refolds them from its claims, as a node that never trimmed would.
+/// Fleet-wide account limits refolded from durable omp-usage snapshots.
 pub fn global_answers(transaction: &Transaction<'_>) -> Result<Value> {
     super::limits::refold_limits_tx(transaction)?;
     Ok(json!({"account_limits": super::limits::account_limits_at(transaction)?}))

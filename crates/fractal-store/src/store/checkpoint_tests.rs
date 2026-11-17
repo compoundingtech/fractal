@@ -332,16 +332,24 @@ fn usage_rollups_keep_hourly_ends_in_the_window_and_one_baseline_before_it() {
 }
 
 #[test]
-fn limits_keep_source_observations_even_when_the_same_seat_publishes_again() {
+fn usage_limits_keep_source_snapshots_even_when_the_same_writer_publishes_again() {
     let mut sealed = Sealed::default();
     let reading = |sealed: &mut Sealed, subject, at: u128| {
         sealed.add(
             "alder",
             at,
             draft(
-                "harness.limits",
+                "usage.limits.observed",
                 subject,
-                json!({"driver": "claude", "account": "claude/aaaa", "weekly_percent": 50, "measured_at_unix_ms": at as u64}),
+                json!({
+                    "readings": [{
+                        "account":"claude/aaaa", "provider":"anthropic", "window":"weekly",
+                        "used_percent":50.0, "coverage":"reported", "source":"omp-usage", "host":"alder",
+                        "measured_at":chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64).unwrap().to_rfc3339(),
+                        "resets_at":"2027-01-15T08:00:00Z"
+                    }],
+                    "credit_readings": []
+                }),
             ),
         )
     };
@@ -2550,7 +2558,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 26);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 27);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2560,9 +2568,8 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                 "slot=subject,incarnation_id,model,account,owner_run,owner_step,host,execution_id keep=",
             )
             .replace(
-                "harness.limits keep=all-source-observations",
-                "harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at\n\
-                 runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field",
+                "harness.limits keep=all-source-observations\n",
+                "runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field\n",
             )
             .replace(
                 "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n",
@@ -2800,7 +2807,6 @@ fn legacy_slot_of(claim: &ClaimRecord) -> Option<(&'static str, Vec<String>)> {
         "sekret.called" | "sekret.exited" | "sekret.refused" | "sekret.changed" => {
             Some(("aged", slot(&[])))
         }
-        "harness.limits" => None,
         "harness.todo.observed" => Some(("newest", slot(&[]))),
         "resource.observed"
             if claim.actor.is_none()
@@ -2835,7 +2841,6 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         Rule::Deferral => "deferral",
         Rule::UsageSeries => "series",
         Rule::UsageCumulative => "cumulative",
-        Rule::AccountLimits => "limits",
         Rule::QuestionLifecycle => "question",
         Rule::SloEventFences => "slo",
         Rule::ResourceObserved => "resource",
@@ -2895,13 +2900,6 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         if claim.kind == fractal_schema::harness_questions::OBSERVED {
             let slot = vec![claim.subject.clone(), claim.kind.clone()];
             assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("question", slot)));
-            continue;
-        }
-        // Rules version 15 added rules for `harness.limits` and `runtime.reconcile-decision`;
-        // every other kind is unchanged.
-        if claim.kind == "harness.limits" {
-            let slot = vec![claim.subject.clone(), claim.kind.clone()];
-            assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("limits", slot)));
             continue;
         }
         if claim.kind == "slo.breach-transition" {

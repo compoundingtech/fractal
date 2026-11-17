@@ -45,16 +45,32 @@ assert.equal(periodName(168), 'the last 7 days');
 
 // Accounts: every account that spent or reported limits, spend with no account last.
 const now = 1_800_000_000_000;
-const limits = [{ account: 'anthropic', driver: 'claude', weekly_percent: 92, weekly_resets_at_unix_ms: now + 3 * 86_400_000, five_hour_percent: 41, measured_at_unix_ms: now - 180_000, measured_by: 'agent/example/atlas/builder', host: 'lark', seats: [] },
-  { account: 'zeta', driver: 'codex', weekly_percent: 6, measured_at_unix_ms: now - 3_600_000, measured_by: 'agent/example/release/captain', host: 'wren', seats: [] }];
+const window = (name, used, measured = now - 180_000, resets = null, coverage = 'reported') => ({
+  window: name, used_percent: used, measured_at_unix_ms: measured, resets_at_unix_ms: resets,
+  coverage, source: 'omp-usage', host: 'lark',
+});
+const limits = [{ account: 'anthropic', driver: 'claude',
+  windows: [window('weekly', 92, now - 180_000, now + 3 * 86_400_000), window('5h', 41)],
+  measured_at_unix_ms: now - 180_000, measured_by: 'agent/example/atlas/builder', host: 'lark', seats: [] },
+  { account: 'zeta', driver: 'codex', windows: [window('weekly', 6, now - 3_600_000)],
+    measured_at_unix_ms: now - 3_600_000, measured_by: 'agent/example/release/captain', host: 'wren', seats: [] }];
 const listed = accounts(rows, limits);
 assert.deepEqual(listed.map(entry => entry.id), ['account/anthropic', 'account/openai', 'account/zeta', 'usage/no-account']);
 assert.equal(listed[0].limit?.account, 'anthropic');
 const line = limitLine(limits[0], now);
-assert.deepEqual(line.weekly, { text: '92%', tone: 'fault' });
-assert.equal(line.resets, 'resets in 3d');
-assert.equal(line.measured, 'measured 3m ago');
-assert.deepEqual(limitLine(limits[1], now).fiveHour, { text: '?', tone: 'quiet' });
+assert.equal(line[0].text, '92%');
+assert.equal(line[0].tone, 'fault');
+assert.equal(line[0].resets, 'resets in 3d');
+assert.equal(line[0].measured, 'measured 3m ago');
+assert.equal(limitLine(limits[1], now).find(window => window.window === '5h'), undefined);
+const missing = limitLine({ ...limits[0], windows: [
+  window('weekly', null, now, null, 'unreported'),
+  window('5h', null, now, null, 'unsupported'),
+  window('daily', 80, now - 3_600_001),
+] }, now);
+assert.deepEqual(missing.map(({ text, tone }) => ({ text, tone })), [
+  { text: 'not reported', tone: 'quiet' }, { text: 'unsupported', tone: 'quiet' }, { text: '?', tone: 'quiet' },
+]);
 
 // Declared accounts: the same five on every panel, named, in name order, with nothing left out.
 const declared = [
@@ -69,13 +85,13 @@ const declaredRows = [
   row('agent/example/b', undefined, undefined, 'gpt-5.5', 'wren', 'codex/cccccccccccccccc', 1_000_000, 1000, 3_000_000),
   row('agent/example/c', undefined, undefined, 'claude-opus-5-5', 'wren', 'claude/ffffffffffffffff', 1_000_000, 1000, 1_000_000),
 ];
-const declaredLimits = [{ account: 'claude/aaaaaaaaaaaaaaaa', account_ref: 'ada/claude-1', driver: 'claude', weekly_percent: 24, measured_at_unix_ms: now, measured_by: 'agent/example/a', host: 'lark', seats: [] }];
+const declaredLimits = [{ account: 'claude/aaaaaaaaaaaaaaaa', account_ref: 'ada/claude-1', driver: 'claude', windows: [window('weekly', 24, now)], measured_at_unix_ms: now, measured_by: 'agent/example/a', host: 'lark', seats: [] }];
 const five = accounts(declaredRows, declaredLimits, declared);
 assert.deepEqual(five.map(entry => entry.id), [
   'account/claude/aaaaaaaaaaaaaaaa', 'account/claude/bbbbbbbbbbbbbbbb', 'account/codex/cccccccccccccccc', 'account/omp/dddddddddddddddd',
   'account/claude/ffffffffffffffff',
 ], 'declared accounts first, even with no spend; an undeclared account is still listed after them');
-assert.equal(five[0].limit?.weekly_percent, 24);
+assert.equal(five[0].limit?.windows[0].used_percent, 24);
 assert.equal(five[1].total.tokens, 0);
 assert.equal(label(five[0].id, names, declaredRows, declared), 'ada/claude-1');
 assert.equal(label(five[4].id, names, declaredRows, declared), 'claude · ffffffff');

@@ -34,12 +34,6 @@ pub fn event(kind: &str) -> Publication {
             ("driver".into(), json!("claude")),
             ("incarnation_id".into(), json!("runtime-a")),
         ]),
-        "harness.limits" => BTreeMap::from([
-            ("driver".into(), json!("claude")),
-            ("measured_at_unix_ms".into(), json!(1)),
-            ("incarnation_id".into(), json!("runtime-a")),
-            ("five_hour_percent".into(), json!(5.0)),
-        ]),
         "harness.timeline" => BTreeMap::from([
             ("operation".into(), json!("append")),
             ("entry_id".into(), json!("entry-a")),

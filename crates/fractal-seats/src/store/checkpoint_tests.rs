@@ -436,32 +436,23 @@ fn native_auth_history_survives_checkpoint_trimming_and_runtime_reset() {
 }
 
 #[test]
-fn account_limits_keep_each_seats_newest_and_the_last_hour_of_each_account() {
+fn account_limits_keep_every_durable_omp_usage_snapshot() {
     let store = Store::open_memory("alder").unwrap();
     let (one, two_old, two_new, three) = limits_history(&store);
     let before = store.account_limits().unwrap();
-    assert_eq!(before.iter().find(|limit| limit.account == "claude/a").unwrap().weekly_percent, Some(95.0));
+    let account = before.iter().find(|limit| limit.account == "claude/a").unwrap();
+    assert_eq!(account.windows.iter().find(|window| window.window == "weekly").unwrap().used_percent, Some(59.0));
     let cut = 11 * DAY_MS;
     let scratch = tempfile::tempdir().unwrap();
     let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
     assert!(proof.passed, "{proof:?}");
     let gone = dropped(&plan);
-    // Account a's newest reading was measured at 180 minutes, so readings before 120 go.
-    for (step, claim) in one.iter().enumerate() {
-        assert_eq!(gone.contains(&claim.id), step < 6, "seat one, step {step}");
+    for claim in one.iter().chain([&two_old, &two_new, &three]) {
+        assert!(!gone.contains(&claim.id), "durable quota snapshot {}", claim.id);
     }
-    assert!(gone.contains(&two_old.id), "below the floor and not the seat's newest");
-    assert!(!gone.contains(&two_new.id), "the seat's newest");
-    assert!(!gone.contains(&three.id), "the newest of its own group and of its seat");
 
-    // A node that trims and folds its kept claims again answers the same.
+    // Trimming unrelated claims leaves the durable quota projection unchanged.
     store.apply_checkpoint_drop("checkpoint/1970-01-11", &plan.envelopes, &plan.claims).unwrap();
-    {
-        let mut connection = store.connection.write();
-        let transaction = connection.transaction().unwrap();
-        super::limits::refold_limits_tx(&transaction).unwrap();
-        transaction.commit().unwrap();
-    }
     assert_eq!(store.account_limits().unwrap(), before);
 }
 

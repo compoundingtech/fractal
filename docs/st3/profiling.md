@@ -385,15 +385,15 @@ the part not yet used and a reset time. `fractal slo explain ID` says one row in
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
-Quota windows merge `harness.limits` and `usage.limits.observed` by provider account digest and
-window, selecting the newest provider observation time across hosts (canonical claim order
-breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
-A harness partial refresh emits only explicitly present windows: a 5h-only reading neither
+Quota windows come solely from `usage.limits.observed` written by the configured
+`omp-usage` agent writers. They group by provider account digest and window, selecting
+the newest provider observation time across hosts (canonical claim order breaks ties).
+Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
+A partial batch replaces only explicitly present windows: a 5h-only reading neither
 replaces weekly evidence nor advances weekly freshness.
-`reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
-explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
-Scheduling, quota diagnostics and enforcement read harness-only evidence; producer clocks and
-display labels cannot alter those decisions. The producer-inclusive fold is observational.
+`reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is
+shown explicitly. Scheduling, quota diagnostics and enforcement use this same fold.
+Weekly policy evidence must be reported, fresh and have a future reset.
 Producer batches contain `readings` and `credit_readings`. Daemon configuration
 `[usage_limits] writers = ["agent/sample/usage-producer"]` admits local agent appends,
 each writing as itself, and filters quota and credit folds at read time. Absent or empty
@@ -402,8 +402,8 @@ restore retain every schema-valid observation regardless of local writers. Confi
 and restart fold the already stored evidence without re-replication or digest changes.
 Quota retention is writer-local: a newer observation from an excluded producer cannot reclaim
 another writer's latest account/window evidence, including after a projection rebuild.
-Internal window metadata does not extend the public `/usage` wire contract; SLO rows expose
-its provenance.
+The public `/usage` account limits expose the same `windows`, including their coverage,
+measurement time, reset and provenance; there are no parallel weekly/five-hour fields.
 Older members retain this non-authority unknown kind for replay after upgrade without changing
 terminal/runtime routing.
 

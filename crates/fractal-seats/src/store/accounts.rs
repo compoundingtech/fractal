@@ -50,36 +50,11 @@ fn unbound_login_account(connection: &Connection, seat: &str, body: &str) -> Res
     .map(|account| account.name.clone()))
 }
 
-/// The newest durable or local observation, within the caller's snapshot or write transaction.
-fn observation_at(
-    connection: &Connection,
-    origin: &str,
-    seat: &str,
-    kind: &str,
-) -> Result<Option<ClaimRecord>> {
-    let claim = connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-he6d1d9f14a2c owner=fractal_seats::store::accounts TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
-            claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
-            FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-        params![seat, kind], claim_from_row,
-    ).optional()?;
-    let local = connection
-        .query_row(
-            /* sqlite-large-value: allow-for-now lv-h353bb76d16ca owner=fractal_seats::store::accounts TODO=trace-statement-and-value-representation */ &format!(
-                "{LOCAL_OBSERVATION_COLUMNS} WHERE subject=?1 AND kind=?2 ORDER BY id DESC LIMIT 1"
-            ),
-            params![seat, kind],
-            |row| local_observation_from_row(origin, row),
-        )
-        .optional()?;
-    Ok(claim.into_iter().chain(local).max_by_key(claim_log_order))
-}
-
 /// Quota belongs to an account, not an incarnation. A new binding cannot use the previous
 /// login's reading; a relaunch on the same declared account can use its account's evidence.
 pub fn limit_binding_is_current(
     connection: &Connection,
-    origin: &str,
+    _origin: &str,
     seat: &str,
     limit: &AccountLimit,
 ) -> Result<bool> {
@@ -98,10 +73,8 @@ pub fn limit_binding_is_current(
     }
     let Some(binding) = harness_binding(&serde_json::from_str::<Value>(&body)?) else {
         // Unbound: the default login, or a declared account's login directory the seat sets itself.
-        return Ok(match limit.account_ref.as_deref() {
-            None => true,
-            Some(named) => unbound_login_account(connection, seat, &body)?.as_deref() == Some(named),
-        });
+        let named = unbound_login_account(connection, seat, &body)?;
+        return Ok(limit.account_ref.is_some() && limit.account_ref == named);
     };
     let Some(leaving) = limit.account_ref.as_deref() else {
         return Ok(false);
@@ -140,45 +113,20 @@ pub fn limit_binding_is_current(
                 return Ok(false);
             }
             if choice.is_some() {
-                // The durable local pool choice survives member restarts. Without a choice,
-                // retain the legacy source/incarnation fence rather than guessing a login.
                 return Ok(true);
             }
         }
     }
-    let Some(source) = observation_at(connection, origin, seat, "harness.limits")? else {
-        return Ok(false);
-    };
-    if source
-        .body
-        .pointer("/fields/account_ref")
-        .and_then(Value::as_str)
-        != Some(leaving)
-    {
-        return Ok(false);
-    }
-    if let Some(runtime) = observation_at(connection, origin, seat, "runtime.observed")? {
-        let current = runtime
-            .body
-            .pointer("/fields/incarnation_id")
-            .and_then(Value::as_str);
-        let reported = source
-            .body
-            .pointer("/fields/incarnation_id")
-            .and_then(Value::as_str);
-        if current.is_some() && current != reported {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    // A pool without a durable chosen login has no account attribution yet.
+    Ok(false)
 }
 
 pub trait AccountsStore {
     /// Every declared account, in name order.
     fn declared_accounts(&self) -> Result<Vec<AccountDecl>>;
     fn choose_seat_account(&self, seat: &str, account: &str, now: u128) -> Result<()>;
-    /// What each account in `accounts` has left, from the shared account limits selection. A weekly
-    /// window that has reset since the reading counts as unused.
+    /// What each account has left in current omp-usage windows. Missing, stale and expired
+    /// observations remain unknown rather than becoming unused capacity.
     fn candidates(&self, accounts: &[&AccountDecl], now: u128) -> Result<Vec<Candidate>>;
     /// The accounts a bound seat could run on here: one named account, or every account its pool's
     /// owner declares for the harness whose login this host holds.
@@ -242,7 +190,7 @@ impl AccountsStore for Store {
     }
 
     fn candidates(&self, accounts: &[&AccountDecl], now: u128) -> Result<Vec<Candidate>> {
-        let limits = self.harness_account_limits()?;
+        let limits = self.account_limits()?;
         Ok(accounts
             .iter()
             .map(|account| {
@@ -250,17 +198,17 @@ impl AccountsStore for Store {
                     .iter()
                     .filter(|limit| limit.account_ref.as_deref() == Some(account.name.as_str()))
                     .max_by_key(|limit| limit.measured_at_unix_ms);
-                let current = |percent: Option<f64>, resets: Option<u64>| {
-                    percent.filter(|_| resets.is_none_or(|at| u128::from(at) > now))
-                };
+                let current = |names: &[&str]| reading.and_then(|limit| {
+                    limit.windows.iter()
+                        .filter(|window| names.contains(&window.window.as_str()))
+                        .filter(|window| window.available(now, super::limits::ACCOUNT_READING_WINDOW_MS))
+                        .max_by_key(|window| window.measured_at_unix_ms)
+                        .and_then(|window| window.used_percent)
+                });
                 Candidate {
                     name: account.name.clone(),
-                    weekly_percent: reading.and_then(|limit| {
-                        current(limit.weekly_percent, limit.weekly_resets_at_unix_ms)
-                    }),
-                    five_hour_percent: reading.and_then(|limit| {
-                        current(limit.five_hour_percent, limit.five_hour_resets_at_unix_ms)
-                    }),
+                    weekly_percent: current(&["weekly", "7d"]),
+                    five_hour_percent: current(&["5h"]),
                 }
             })
             .collect())
@@ -340,7 +288,7 @@ impl AccountsStore for Store {
                         .map(|candidate| candidate.name.clone())
                         .ok_or_else(|| {
                             format!(
-                                "the seat's pool `{owner}` has no {} account with a login on host `{host}`",
+                                "the seat's pool `{owner}` has no {} account with a login on host `{host}` and current weekly quota evidence",
                                 binding.driver
                             )
                         })?;
@@ -386,7 +334,7 @@ impl AccountsStore for Store {
             .filter(|candidate| {
                 candidate
                     .weekly_percent
-                    .is_none_or(|used| used < limit_percent)
+                    .is_some_and(|used| used < limit_percent)
             })
             .collect::<Vec<_>>();
         let mut ordered = Vec::new();

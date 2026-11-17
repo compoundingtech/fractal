@@ -220,6 +220,7 @@ impl Fixture {
                 kind: kind.into(),
                 actor: fields.get("person_id").and_then(Value::as_str)
                     .or((kind == "custom.client.pairing-revoked").then_some("person/ada"))
+                    .or((kind == "usage.limits.observed").then_some(subject))
                     .map(str::to_owned),
                 fields: serde_json::from_value(fields).unwrap(),
                 evidence: vec![],
@@ -793,6 +794,7 @@ async fn usage_inventory_open_period_uses_wall_time_on_an_empty_graph() {
 async fn usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::test_state_named(root.path(), "usage-inventory-fixture");
+    state.store.set_usage_limits_writers(vec!["agent/usage-example".into()]).unwrap();
     let session = ClientSession::local(None).unwrap();
     let request = json!({"kind":"subscribe","id":"usage","collection":"usage","limit":1,"since_ms":0,"until_ms":100});
     let mut fixture = Fixture::open(state.clone(), true, None, &[]).await;
@@ -816,15 +818,28 @@ async fn usage_inventory_follows_rollups_limits_and_reconnect_for_selected_perio
     assert_eq!(changed["upserts"][0]["value"]["until_ms"], 100);
     fixture.claim(
         "agent/usage-example",
-        "harness.limits",
-        json!({"driver":"codex", "account":"codex/example",
-        "measured_at_unix_ms":50,"incarnation_id":"example-one","weekly_percent":25.0}),
+        "usage.limits.observed",
+        json!({"readings": [
+            {"account":"codex/example", "account_ref":"example", "provider":"openai-codex",
+                "window":"weekly", "used_percent":25.0, "resets_at":null,
+                "measured_at":"1970-01-01T00:00:00.050Z", "coverage":"reported",
+                "source":"omp-usage", "host":"usage-inventory-fixture"},
+            {"account":"codex/example", "account_ref":"example", "provider":"openai-codex",
+                "window":"5h", "used_percent":null, "resets_at":null,
+                "measured_at":"1970-01-01T00:00:00.040Z", "coverage":"unreported",
+                "source":"omp-usage", "host":"usage-inventory-fixture"}],
+            "credit_readings":[]}),
     );
     let changed = fixture.frame().await;
-    assert_eq!(
-        changed["upserts"][0]["value"]["limits"][0]["weekly_percent"], 25.0,
-        "{changed}"
-    );
+    let windows = changed["upserts"][0]["value"]["limits"][0]["windows"].as_array().unwrap();
+    let weekly = windows.iter().find(|window| window["window"] == "weekly").unwrap();
+    assert_eq!(weekly["used_percent"], 25.0, "{changed}");
+    assert_eq!(weekly["coverage"], "reported", "{changed}");
+    assert_eq!(weekly["measured_at_unix_ms"], 50, "{changed}");
+    let five = windows.iter().find(|window| window["window"] == "5h").unwrap();
+    assert_eq!(five["used_percent"], Value::Null, "{changed}");
+    assert_eq!(five["coverage"], "unreported", "{changed}");
+    assert_eq!(five["measured_at_unix_ms"], 40, "{changed}");
     inventory_schema(&changed);
     inventory_reconnect(state, session, request, &changed["order"]).await;
 }

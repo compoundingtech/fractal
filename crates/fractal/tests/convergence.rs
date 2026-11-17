@@ -205,7 +205,6 @@ const RULE_KINDS: &[&str] = &[
     "daemon.diagnostic",
     "harness-question.observed",
     "harness.diagnostic",
-    "harness.limits",
     "harness.observed",
     "harness.timeline",
     "harness.todo.observed",
@@ -1089,7 +1088,18 @@ impl World {
                 kind: spec.kind.clone(),
                 actor: Some("agent/sample/usage-producer".into()),
                 fields: BTreeMap::from([
-                    ("readings".into(), json!([])),
+                    ("readings".into(), json!([{
+                        "account": "digest",
+                        "account_ref": "account/example-0",
+                        "provider": "anthropic",
+                        "window": "weekly",
+                        "used_percent": 25.0,
+                        "resets_at": "2100-01-08T12:30:00Z",
+                        "measured_at": "2100-01-01T12:30:00Z",
+                        "coverage": "reported",
+                        "source": "omp-usage",
+                        "host": self.nodes[index].name
+                    }])),
                     ("credit_readings".into(), json!([{
                         "account": "digest",
                         "account_ref": "account/example-0",

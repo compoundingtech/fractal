@@ -6,85 +6,40 @@ use crate::store::limits::*;
 
 pub const HOUR: u128 = 60 * 60 * 1000;
 
-pub fn read(store: &Store, seat: &str, account: Option<&str>, weekly: f64, measured_at: u128) {
-        let mut fields = BTreeMap::from([
-            ("driver".into(), json!("claude")),
-            ("incarnation_id".into(), json!("inc-1")),
-            ("weekly_percent".into(), json!(weekly)),
-            ("five_hour_percent".into(), json!(40.0)),
-            (
-                "weekly_resets_at_unix_ms".into(),
-                json!(1_800_000_000_000_u64),
-            ),
-            ("measured_at_unix_ms".into(), json!(measured_at as u64)),
-        ]);
-        if let Some(account) = account {
-            fields.insert("account".into(), json!(account));
-        }
-        store
-            .append_claim(&ClaimInput {
-                subject: seat.into(),
-                kind: "harness.limits".into(),
-                actor: Some(seat.into()),
-                fields,
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!("limits-{seat}-{weekly}-{measured_at}")),
-            })
-            .unwrap();
-    }
+fn observed_reading(
+    store: &Store, writer: &str, provider: &str, account: &str,
+    account_ref: Option<&str>, weekly: f64, measured_at: u128,
+) {
+    let mut writers = store.usage_limits_writers();
+    writers.insert(writer.into());
+    store.set_usage_limits_writers(writers.into_iter().collect()).unwrap();
+    let measured = chrono::DateTime::from_timestamp_millis(measured_at as i64)
+        .unwrap().to_rfc3339();
+    store.append_claim(&ClaimInput {
+        subject: writer.into(), actor: Some(writer.into()), kind: "usage.limits.observed".into(),
+        fields: serde_json::from_value(json!({
+            "readings": [{
+                "provider": provider, "account": account, "account_ref": account_ref.unwrap_or(account),
+                "window": "weekly", "used_percent": weekly,
+                "measured_at": measured, "resets_at": "2027-01-15T08:00:00Z",
+                "coverage": "reported", "source": "omp-usage", "host": store.origin(),
+            }], "credit_readings": [],
+        })).unwrap(),
+        evidence: vec![], expected_subject: None,
+        idempotency_key: Some(format!("limits-{writer}-{account}-{weekly}-{measured_at}")),
+    }).unwrap();
+}
+
+pub fn read(store: &Store, writer: &str, account: Option<&str>, weekly: f64, measured_at: u128) {
+    observed_reading(store, writer, "anthropic", account.expect("observer fixtures require an account"), None, weekly, measured_at);
+}
 
 pub fn read_account(
-        store: &Store,
-        seat: &str,
-        account: &str,
-        label: &str,
-        weekly: f64,
-        measured_at: u128,
-    ) {
-        store
-            .append_claim(&ClaimInput {
-                subject: seat.into(),
-                kind: "harness.limits".into(),
-                actor: Some(seat.into()),
-                fields: BTreeMap::from([
-                    ("driver".into(), json!("codex")),
-                    ("incarnation_id".into(), json!("inc-1")),
-                    ("account".into(), json!(label)),
-                    ("account_ref".into(), json!(account)),
-                    ("weekly_percent".into(), json!(weekly)),
-                    (
-                        "weekly_resets_at_unix_ms".into(),
-                        json!(1_800_000_000_000_u64),
-                    ),
-                    ("measured_at_unix_ms".into(), json!(measured_at as u64)),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!("limits-{seat}-{account}-{weekly}-{measured_at}")),
-            })
-            .unwrap();
-    }
+    store: &Store, writer: &str, account: &str, label: &str, weekly: f64, measured_at: u128,
+) {
+    observed_reading(store, writer, "openai-codex", label, Some(account), weekly, measured_at);
+}
 
-pub fn read_unnamed(store: &Store, seat: &str, label: &str, weekly: f64, measured_at: u128) {
-        store
-            .append_claim(&ClaimInput {
-                subject: seat.into(),
-                kind: "harness.limits".into(),
-                actor: Some(seat.into()),
-                fields: BTreeMap::from([
-                    ("driver".into(), json!("codex")),
-                    ("account".into(), json!(label)),
-                    ("weekly_percent".into(), json!(weekly)),
-                    (
-                        "weekly_resets_at_unix_ms".into(),
-                        json!(1_800_000_000_000_u64),
-                    ),
-                    ("measured_at_unix_ms".into(), json!(measured_at as u64)),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!("unnamed-{seat}-{label}-{measured_at}")),
-            })
-            .unwrap();
-    }
+pub fn read_unnamed(store: &Store, writer: &str, label: &str, weekly: f64, measured_at: u128) {
+    observed_reading(store, writer, "openai-codex", label, None, weekly, measured_at);
+}

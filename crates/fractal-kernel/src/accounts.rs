@@ -313,12 +313,11 @@ pub struct Candidate {
     pub five_hour_percent: Option<f64>,
 }
 
-/// The candidate with the most usage left: the lowest weekly percentage, then the lowest 5-hour
-/// one, then the name. An account with no reading counts as unused, which is what a window that
-/// has reset or an account no seat has used yet is.
+/// Prefer the lowest reported weekly usage, then five-hour usage, then name.
+/// Unknown quota is unavailable, not unused capacity.
 pub fn most_usage_left(candidates: &[Candidate]) -> Option<&Candidate> {
-    let used = |value: Option<f64>| value.filter(|value| value.is_finite()).unwrap_or(0.0);
-    candidates.iter().min_by(|left, right| {
+    let used = |value: Option<f64>| value.filter(|value| value.is_finite()).unwrap_or(f64::INFINITY);
+    candidates.iter().filter(|candidate| candidate.weekly_percent.is_some_and(f64::is_finite)).min_by(|left, right| {
         used(left.weekly_percent)
             .total_cmp(&used(right.weekly_percent))
             .then_with(|| used(left.five_hour_percent).total_cmp(&used(right.five_hour_percent)))
@@ -508,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_prefers_the_most_usage_left_and_treats_no_reading_as_unused() {
+    fn the_pool_prefers_reported_capacity_and_never_treats_unknown_as_unused() {
         let candidate = |name: &str, weekly: Option<f64>, five: Option<f64>| Candidate {
             name: name.into(),
             weekly_percent: weekly,
@@ -521,7 +520,8 @@ mod tests {
         ];
         assert_eq!(most_usage_left(&pool).unwrap().name, "ada/c");
         let with_unread = [pool[0].clone(), candidate("ada/z", None, None)];
-        assert_eq!(most_usage_left(&with_unread).unwrap().name, "ada/z");
+        assert_eq!(most_usage_left(&with_unread).unwrap().name, "ada/a");
+        assert!(most_usage_left(&[candidate("ada/z", None, None)]).is_none());
         assert!(most_usage_left(&[]).is_none());
     }
 }

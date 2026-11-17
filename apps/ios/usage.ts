@@ -154,12 +154,22 @@ export function span(ms: number): string {
   return `${Math.floor(seconds / 86_400)}d`;
 }
 
-/** An account's limits as the Fractal terminal UI words them: weekly first, since that is the one that stops seats. */
+/** Every observed quota window keeps its own coverage and measurement clock. */
 export function limitLine(limit: UsageLimit, now: number) {
-  return {
-    weekly: share(limit.weekly_percent),
-    fiveHour: share(limit.five_hour_percent),
-    resets: limit.weekly_resets_at_unix_ms ? `resets in ${span(limit.weekly_resets_at_unix_ms - now)}` : '',
-    measured: `measured ${span(now - limit.measured_at_unix_ms)} ago`,
-  };
+  return limit.windows.map(window => {
+    const fresh = window.measured_at_unix_ms <= now &&
+      now - window.measured_at_unix_ms <= 3_600_000 &&
+      (window.resets_at_unix_ms == null || window.resets_at_unix_ms > now);
+    const value = window.coverage === 'reported'
+      ? share(fresh ? window.used_percent : null)
+      : { text: window.coverage === 'unsupported' ? 'unsupported' : 'not reported', tone: 'quiet' as const };
+    return {
+      window: window.window,
+      label: window.window === '5h' ? '5-hour' : window.window,
+      ...value,
+      resets: window.resets_at_unix_ms != null ? `resets in ${span(window.resets_at_unix_ms - now)}` : '',
+      measured: `measured ${span(now - window.measured_at_unix_ms)} ago`,
+      host: window.host,
+    };
+  });
 }

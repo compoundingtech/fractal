@@ -1984,19 +1984,29 @@
         "follows": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "UsageLimitWindow": {
+      "type": "object", "additionalProperties": false,
+      "required": ["window", "used_percent", "resets_at_unix_ms", "measured_at_unix_ms", "coverage", "source", "host"],
+      "properties": {
+        "window": { "type": "string" },
+        "used_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "coverage": { "enum": ["reported", "unreported", "unsupported"] },
+        "source": { "const": "omp-usage" },
+        "host": { "type": "string" }
+      }
+    },
     "UsageLimit": {
       "type": "object", "additionalProperties": false,
-      "required": ["account", "driver", "measured_at_unix_ms", "measured_by", "host", "seats"],
+      "required": ["account", "driver", "measured_at_unix_ms", "measured_by", "host", "seats", "windows"],
       "properties": {
         "account": { "type": "string" },
         "account_ref": { "type": "string" },
         "identified": { "type": "boolean", "description": "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." },
         "driver": { "type": "string" },
         "plan": { "type": "string" },
-        "five_hour_percent": { "type": "number", "minimum": 0 },
-        "five_hour_resets_at_unix_ms": { "type": "integer", "minimum": 0 },
-        "weekly_percent": { "type": "number", "minimum": 0 },
-        "weekly_resets_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "windows": { "type": "array", "items": { "$ref": "#/$defs/UsageLimitWindow" } },
         "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
         "measured_by": { "type": "string" },
         "host": { "type": "string" },

@@ -261,7 +261,7 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
     }
     match collection {
         "machines" if kind == "transport.observed" => return false,
-        "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
+        "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "usage.limits.observed" | "message.sent" | "message.staged" | "message.delivered"),
         "clients" | "devices" => return !kind.starts_with("custom.client.pairing-"),
         // Terminal declarations and imported session ownership
         // use the same graph inputs as the existing windows. Keep their conservative coverage.

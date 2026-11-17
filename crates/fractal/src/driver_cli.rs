@@ -865,7 +865,6 @@ async fn drive_st2_native_loop(
     let mut control_retry = fractal_daemon::client::DriverRetry::default();
     let mut last_activity_fingerprint = None;
     let mut last_usage_fingerprint = None;
-    let mut last_limits_fingerprint = None;
     let mut last_control_warning = None;
     let mut last_admission_fingerprint = None;
     let mut last_capacity_fingerprint = None;
@@ -1261,15 +1260,6 @@ async fn drive_st2_native_loop(
                                 &incarnation,
                                 &context,
                                 &mut last_usage_fingerprint,
-                            )
-                            .await?;
-                            publish_harness_limits(
-                                &ObservationClient { client, event: None },
-                                subject,
-                                driver,
-                                &incarnation,
-                                &context,
-                                &mut last_limits_fingerprint,
                             )
                             .await?;
                             }
@@ -2605,7 +2595,6 @@ async fn drive_codex_native_loop(
     let mut control_retry = fractal_daemon::client::DriverRetry::default();
     let mut last_activity_fingerprint = None;
     let mut last_usage_fingerprint = None;
-    let mut last_limits_fingerprint = None;
     let mut last_control_warning = None;
     let mut last_capacity_fingerprint = None;
     let mut delivery = NativeDeliverySupervisor::resumed(loop_state.delivery_episode);
@@ -2899,15 +2888,6 @@ async fn drive_codex_native_loop(
                         &incarnation,
                         &context,
                         &mut last_usage_fingerprint,
-                    )
-                    .await?;
-                    publish_harness_limits(
-                        &ObservationClient { client, event: None },
-                        subject,
-                        "codex",
-                        &incarnation,
-                        &context,
-                        &mut last_limits_fingerprint,
                     )
                     .await?;
                     }

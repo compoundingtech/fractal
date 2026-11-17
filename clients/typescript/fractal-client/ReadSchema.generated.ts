@@ -3091,12 +3091,22 @@ export const UsageAccount = /*#__PURE__*/ (() => Schema.Struct({
 export type UsageAccount = typeof UsageAccount.Type
 export type UsageAccountEncoded = typeof UsageAccount.Encoded
 
+export const UsageLimitWindow = /*#__PURE__*/ (() => Schema.Struct({
+  "coverage": Schema.Literals(["reported","unreported","unsupported"]),
+  "host": Schema.String,
+  "measured_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "resets_at_unix_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "source": Schema.Literal("omp-usage"),
+  "used_percent": Schema.OptionFromNullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(100))),
+  "window": Schema.String
+}).annotate({ identifier: "UsageLimitWindow" }))()
+export type UsageLimitWindow = typeof UsageLimitWindow.Type
+export type UsageLimitWindowEncoded = typeof UsageLimitWindow.Encoded
+
 export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
   "account": Schema.String,
   "account_ref": optionalKey(Schema.String),
   "driver": Schema.String,
-  "five_hour_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "five_hour_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "host": Schema.String,
   /** The source named a provider identity or declared account; independent of quota freshness. Absent on older servers. */
   "identified": optionalKey(Schema.Boolean).annotate({ description: "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." }),
@@ -3104,8 +3114,7 @@ export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
   "measured_by": Schema.String,
   "plan": optionalKey(Schema.String),
   "seats": Schema.Array(Schema.String),
-  "weekly_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "weekly_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+  "windows": Schema.Array(UsageLimitWindow)
 }).annotate({ identifier: "UsageLimit" }))()
 export type UsageLimit = typeof UsageLimit.Type
 export type UsageLimitEncoded = typeof UsageLimit.Encoded

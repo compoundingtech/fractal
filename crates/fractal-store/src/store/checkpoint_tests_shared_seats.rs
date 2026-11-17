@@ -41,19 +41,24 @@ pub const AGENT: &str = "agent/alder.worker";
 
 pub const LIMITS_HOUR: u128 = 60 * 60 * 1000;
 
-/// A `harness.limits` reading by `seat` of `account`, accepted at `at`.
-pub fn limits_reading(store: &Store, seat: &str, account: &str, weekly: Option<f64>, measured: u128, at: u128) -> ClaimRecord {
+/// An omp-usage snapshot published by `writer` for `account`, accepted at `at`.
+pub fn limits_reading(store: &Store, writer: &str, account: &str, weekly: Option<f64>, measured: u128, at: u128) -> ClaimRecord {
     store.set_write_clock_at(at).unwrap();
-    let mut fields = json!({
-        "driver": "claude", "account": account, "incarnation_id": "inc-1",
-        "five_hour_percent": 40.0, "five_hour_resets_at_unix_ms": 1_790_000_000_000_u64,
-        "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": measured as u64,
+    let timestamp = |ms: u128| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
+        .unwrap().to_rfc3339();
+    let fields = json!({
+        "readings": [{
+            "account": account, "provider": "anthropic",
+            "window": if weekly.is_some() { "weekly" } else { "5h" },
+            "used_percent": weekly.unwrap_or(40.0),
+            "resets_at": timestamp(1_800_000_000_000),
+            "measured_at": timestamp(measured),
+            "coverage": "reported", "source": "omp-usage", "host": "alder"
+        }],
+        "credit_readings": []
     });
-    if let Some(weekly) = weekly {
-        fields["weekly_percent"] = json!(weekly);
-    }
     let claim = store
-        .append_claim(&input(seat, "harness.limits", Some(seat), fields, &format!("limits-{seat}-{at}")))
+        .append_claim(&input(writer, "usage.limits.observed", Some(writer), fields, &format!("limits-{writer}-{at}")))
         .unwrap();
     store.seal_local_batches().unwrap();
     claim
@@ -63,6 +68,9 @@ pub fn limits_reading(store: &Store, seat: &str, account: &str, weekly: Option<f
 /// in the last hour but is not its newest. Seat two read account a long ago and then switched to
 /// account b. Seat three's only reading of account a is a five-hour-only one, long ago.
 pub fn limits_history(store: &Store) -> (Vec<ClaimRecord>, ClaimRecord, ClaimRecord, ClaimRecord) {
+    store.set_usage_limits_writers(vec![
+        "agent/alder.one".into(), "agent/alder.two".into(), "agent/alder.three".into()
+    ]).unwrap();
     let base = 10 * DAY_MS;
     // A writer never dates a claim before its own newest, so they are written in time order.
     let two_old = limits_reading(store, "agent/alder.two", "claude/a", Some(99.0), base, base);

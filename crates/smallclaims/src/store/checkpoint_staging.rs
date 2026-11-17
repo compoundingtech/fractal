@@ -21,7 +21,7 @@ use super::*;
 
 /// Bump on any change to the tables below or to what a phase writes, so a newer build never
 /// resumes a file an older one staged.
-const STAGING_FORMAT: i64 = 1;
+const STAGING_FORMAT: i64 = 2;
 /// Rows each page reads from the store.
 pub const STAGING_PAGE: i64 = 64;
 /// SQLite's page cache for the staging file, in KiB. Its sorter spills past it to disk.
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS claims(
     subject TEXT NOT NULL, kind TEXT NOT NULL, actor TEXT, operation_id TEXT,
     request_digest TEXT, predecessors TEXT NOT NULL, accepted_at INTEGER NOT NULL,
     valid INTEGER NOT NULL, first INTEGER NOT NULL, protected INTEGER NOT NULL DEFAULT 0,
-    slot TEXT, seat TEXT, fields TEXT NOT NULL, limits_group TEXT, limits_measured INTEGER,
+    slot TEXT, seat TEXT, fields TEXT NOT NULL,
     status_keep INTEGER NOT NULL DEFAULT 0, dropped INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS claims_id ON claims(id);
 CREATE INDEX IF NOT EXISTS claims_slot ON claims(slot, pos) WHERE slot IS NOT NULL;
@@ -122,8 +122,6 @@ pub struct CheckpointClaimFacts {
     pub cites: Vec<String>,
     /// The request it closes on its subject.
     pub closes: Option<String>,
-    /// Its limits account group, encoded by the runtime, and when it was measured.
-    pub limits: Option<(String, u64)>,
 }
 
 /// The counts and digests of a staged plan. Its tombstones stay in the staging file.
@@ -773,9 +771,9 @@ impl StagedSet {
             let mut insert = transaction.prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h23eb0955c6c7 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO claims(pos, id, writer, sequence, envelope_hash, subject, kind, actor,
                      operation_id, request_digest, predecessors, accepted_at, valid, first, slot,
-                     seat, fields, limits_group, limits_measured)
+                     seat, fields)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     NOT EXISTS(SELECT 1 FROM claims WHERE id=?2), ?14, ?15, ?16, ?17, ?18)",
+                     NOT EXISTS(SELECT 1 FROM claims WHERE id=?2), ?14, ?15, ?16)",
             )?;
             let mut first = transaction.prepare_cached("SELECT first FROM claims WHERE pos=?1")?;
             let mut cite = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h43acfbf85a46 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO cited(id) VALUES (?1)")?;
@@ -802,8 +800,6 @@ impl StagedSet {
                     facts.slot,
                     facts.status_source.then_some(&claim.subject),
                     serde_json::to_string(&facts.fields)?,
-                    facts.limits.as_ref().map(|(group, _)| group),
-                    facts.limits.as_ref().map(|(_, measured)| i64::try_from(*measured)).transpose()?,
                 ])?;
                 // A rule decides each claim once, by its first occurrence.
                 if !first.query_row(/* sqlite-large-value: allow-for-now lv-h3842f574db4a owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ [pos], |row| row.get::<_, bool>(0))? {

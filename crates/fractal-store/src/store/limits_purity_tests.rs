@@ -1,7 +1,5 @@
-// Account limits fold replicated `harness.limits` claims, so every node must reach the same
-// answer whatever order, batching or repetition the claims arrive in. These claims tie on
-// accepted time, measured time and weekly reading: only the canonical claim order may break
-// those ties, never the order a node happened to admit them in.
+// Account windows fold replicated observer claims independently of delivery order,
+// batching and repetition. Canonical claim order breaks equal measurement times.
 
 const READING_SEAT: &str = "agent/alder.worker";
 const BINDING_SEAT: &str = "agent/birch.worker";
@@ -11,20 +9,21 @@ fn write_limits(store: &Store, origin: &str, seat: &str, account: &str, five_hou
     store.set_write_clock_at(1_700_000_000_000).unwrap();
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
-    let body = json!({"fields": {
-        "driver": "claude",
-        "incarnation_id": "inc-1",
-        "account": account,
-        "weekly_percent": 50.0,
-        "five_hour_percent": five_hour,
-        "weekly_resets_at_unix_ms": 1_800_000_000_000_u64,
-        "measured_at_unix_ms": 1_700_000_000_000_u64,
-    }});
+    let body = json!({"fields": {"readings": [
+        {"provider":"anthropic", "account":account, "account_ref":account, "window":"weekly",
+         "used_percent":50.0, "measured_at":"2023-11-14T22:13:20Z",
+         "resets_at":"2027-01-15T08:00:00Z", "coverage":"reported",
+         "source":"omp-usage", "host":origin},
+        {"provider":"anthropic", "account":account, "account_ref":account, "window":"5h",
+         "used_percent":five_hour, "measured_at":"2023-11-14T22:13:20Z",
+         "resets_at":"2027-01-15T08:00:00Z", "coverage":"reported",
+         "source":"omp-usage", "host":origin}
+    ], "credit_readings":[]}});
     append_claim_tx(
         &tx,
         origin,
         seat,
-        "harness.limits",
+        "usage.limits.observed",
         Some(seat),
         &body,
         &[],
@@ -40,11 +39,10 @@ fn limits_fixture() -> &'static ReplicationExchange {
         let alder = Store::open_memory("alder").unwrap();
         let birch = Store::open_memory("birch").unwrap();
         let relay = Store::open_memory("cedar").unwrap();
-        // One seat's readings of one account tie on everything the reading selection compares,
-        // but differ in host and five-hour level.
+        // Equal-time observations compete independently for each account window.
         write_limits(&alder, "alder", READING_SEAT, "claude/one", 10.0);
         write_limits(&birch, "birch", READING_SEAT, "claude/one", 30.0);
-        // Another seat's binding ties between two accounts that nothing else decides.
+        // Independent provider accounts remain visible without a seat binding.
         write_limits(&alder, "alder", BINDING_SEAT, "claude/two", 20.0);
         write_limits(&birch, "birch", BINDING_SEAT, "claude/three", 20.0);
         for (name, source) in [("alder", &alder), ("birch", &birch)] {
@@ -56,7 +54,11 @@ fn limits_fixture() -> &'static ReplicationExchange {
 }
 
 fn limits_snapshot(store: &Store) -> Value {
-    json!(super::limits::account_limits_at(&store.readers.get()).unwrap())
+    json!(super::limits::account_limits_for_writers(
+        &store.readers.get(), &std::collections::BTreeSet::from([
+            READING_SEAT.into(), BINDING_SEAT.into(),
+        ]),
+    ).unwrap())
 }
 
 fn deliver(target: &Store, order: &[usize], width: usize, copies: usize) {
@@ -88,22 +90,11 @@ fn limits_reference() -> &'static Value {
 #[test]
 fn every_tie_in_the_limits_fixture_is_present() {
     let accounts = limits_reference().as_array().unwrap();
-    let seats = |account: &str| {
-        accounts
-            .iter()
-            .find(|limit| limit["account"] == account)
-            .unwrap()["seats"]
-            .clone()
-    };
-    // Both readings of the first account compete; one binding wins.
-    assert_eq!(seats("claude/one"), json!([READING_SEAT]));
-    assert_eq!(
-        [seats("claude/two"), seats("claude/three")]
-            .iter()
-            .filter(|seats| *seats == &json!([BINDING_SEAT]))
-            .count(),
-        1
-    );
+    for account in ["claude/one", "claude/two", "claude/three"] {
+        let limit = accounts.iter().find(|limit| limit["account"] == account).unwrap();
+        assert_eq!(limit["windows"].as_array().unwrap().len(), 2);
+        assert!(limit["seats"].as_array().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -152,32 +143,3 @@ proptest! {
     }
 }
 
-#[test]
-fn a_version_one_build_still_folds_into_these_tables() {
-    // A version 1 build that opens this store empties the tables (its version differs) and folds
-    // into them with its own statements, which name only version 1's columns.
-    let store = Store::open_memory("alder").unwrap();
-    let connection = store.connection.write();
-    connection
-        .execute(
-            /* sqlite-large-value: allow-for-now lv-h216d67c8ab86 owner=fractal_store::store::limits_purity_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
-             (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body)
-             VALUES ('claude','claude/one','',1,1,?1,1,'alder','{}')",
-            [READING_SEAT],
-        )
-        .unwrap();
-    connection
-        .execute(
-            /* sqlite-large-value: allow-for-now lv-hd38e7cfc3d89 owner=fractal_store::store::limits_purity_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
-             (subject, driver, account, account_ref, accepted_at_unix_ms, store_index)
-             VALUES (?1,'claude','claude/one','',1,1)
-             ON CONFLICT(subject) DO UPDATE SET driver=excluded.driver,
-                account=excluded.account, account_ref=excluded.account_ref,
-                accepted_at_unix_ms=excluded.accepted_at_unix_ms,
-                store_index=excluded.store_index
-             WHERE (excluded.accepted_at_unix_ms, excluded.store_index)
-                >= (accepted_at_unix_ms, store_index)",
-            [READING_SEAT],
-        )
-        .unwrap();
-}

@@ -311,7 +311,7 @@ fn checkpoint_proof_trim_and_canonical_renumber_preserve_episode_fences() {
     let cut = latest + 8*86_400_000;
     let references = rows.iter().collect::<Vec<_>>();
     assert_eq!(checkpoint_rules::rule_keep(checkpoint_rules::Rule::SloEventFences, rows.len(), &references,
-        false, &BTreeMap::new(), young).len(), rows.len());
+        false, young).len(), rows.len());
     let scratch = tempfile::tempdir().unwrap();
     let (_, _, proof) = source.plan_checkpoint_through(cut, None, scratch.path()).unwrap();
     assert!(proof.passed, "canonical proof/renumber: {:?}", proof.mismatches);

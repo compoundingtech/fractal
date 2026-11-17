@@ -95,15 +95,12 @@ fn utc(unix_ms: u64) -> String {
 }
 
 pub trait LimitsStore {
-    /// Observational display/SLO evidence, including currently configured producer windows.
+    /// Configured omp-usage evidence, associated with seats by their current login binding.
     /// Returns nothing until the projection has caught up after an upgrade.
     fn account_limits(&self) -> Result<Vec<AccountLimit>>;
-    /// Harness-only evidence for scheduling and enforcement, never affected by producer clocks.
-    fn harness_account_limits(&self) -> Result<Vec<AccountLimit>>;
-    /// Whether the account limits projection has caught up with the `harness.limits` claims at
-    /// least once. False only on the first start after an upgrade, until the catch-up finishes.
+    /// Whether the observed quota projection has caught up at least once.
     fn account_limits_ready(&self) -> Result<bool>;
-    /// Fold one page of `harness.limits` claims into the projection, in its own short writer
+    /// Fold one page of `usage.limits.observed` claims into the projection, in its own short writer
     /// transaction, and say whether more remain. The daemon calls this until it returns false;
     /// the cursor is stored, so a restart resumes where it stopped.
     fn catch_up_account_limits(&self, page: usize) -> Result<bool>;
@@ -148,14 +145,19 @@ impl LimitsStore for Store {
         if !self.account_limits_ready()? {
             return Ok(Vec::new());
         }
-        account_limits_for_writers(&self.readers.get(), &self.usage_limits_writers())
-    }
-
-    fn harness_account_limits(&self) -> Result<Vec<AccountLimit>> {
-        if !self.account_limits_ready()? {
-            return Ok(Vec::new());
+        let connection = self.readers.get();
+        let mut limits = account_limits_for_writers(&connection, &self.usage_limits_writers())?;
+        let mut statement = connection.prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?;
+        let seats = statement.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for limit in &mut limits {
+            for seat in &seats {
+                if limit_binding_is_current(&connection, &self.origin, seat, limit)? {
+                    limit.seats.push(seat.clone());
+                }
+            }
         }
-        account_limits_at(&self.readers.get())
+        Ok(limits)
     }
 
     fn account_limits_ready(&self) -> Result<bool> {
@@ -183,7 +185,7 @@ impl LimitsStore for Store {
                 message: "the account limits projection is catching up after an upgrade; no limits decision is made until it has".into(),
             });
         }
-        let limits = self.harness_account_limits()?;
+        let limits = self.account_limits()?;
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject, body FROM desired WHERE kind='agent' ORDER BY subject",
@@ -239,19 +241,8 @@ impl LimitsStore for Store {
             {
                 continue;
             }
-            let reason = if limit.weekly_percent.is_none() {
-                Some("no weekly reading")
-            } else if u128::from(limit.measured_at_unix_ms) > now.saturating_add(60_000) {
-                Some("weekly observation is in the future")
-            } else if limit
-                .weekly_resets_at_unix_ms
-                .is_some_and(|at| u128::from(at) <= now)
-            {
-                Some("no weekly reading since the reset")
-            } else if now.saturating_sub(u128::from(limit.measured_at_unix_ms))
-                > u128::from(fresh_ms)
-            {
-                Some("weekly reading is stale")
+            let reason = if limit.weekly_window(now, fresh_ms).is_none() {
+                Some("weekly evidence is unavailable (missing, unreported, expired or stale)")
             } else {
                 None
             };
@@ -292,29 +283,16 @@ impl LimitsStore for Store {
         if !self.account_limits_ready().map_err(internal)? {
             return Ok(outcome);
         }
-        for limit in self.harness_account_limits().map_err(internal)? {
-            let Some(weekly) = limit.weekly_percent else {
+        for limit in self.account_limits().map_err(internal)? {
+            let Some(window) = limit.weekly_window(now, policy.fresh_ms) else {
                 continue;
             };
-            if policy.exempts(&limit) {
-                continue;
-            }
-            if weekly < f64::from(policy.stop_at_weekly_percent)
-                || limit
-                    .weekly_resets_at_unix_ms
-                    .is_some_and(|at| u128::from(at) <= now)
-                || now.saturating_sub(u128::from(limit.measured_at_unix_ms))
-                    > u128::from(policy.fresh_ms)
-                || u128::from(limit.measured_at_unix_ms) > now.saturating_add(60_000)
-            {
+            let weekly = window.used_percent.expect("available quota has a percentage");
+            if policy.exempts(&limit) || weekly < f64::from(policy.stop_at_weekly_percent) {
                 continue;
             }
             let episode_account = episode_account(&limit);
-            // One episode per weekly window. Without a reported reset, a UTC day stands in.
-            let episode = limit.weekly_resets_at_unix_ms.map_or_else(
-                || format!("day-{}", limit.measured_at_unix_ms / 86_400_000),
-                |at| at.to_string(),
-            );
+            let episode = window.resets_at_unix_ms.expect("available quota has a reset").to_string();
             // A pooled seat moves to another account in its pool, so the stop becomes a switch;
             // every other seat on the account stops.
             let mut targets = Vec::new();
@@ -424,7 +402,7 @@ impl LimitsStore for Store {
                 outcome.stopped.push(seat);
             }
             // The node that measured the reading notifies operations, so one node writes.
-            if targets.is_empty() || limit.host != self.origin {
+            if targets.is_empty() || window.host != self.origin {
                 continue;
             }
             let provider = limit.account.split('/').next().unwrap_or("").to_owned();
@@ -444,10 +422,7 @@ impl LimitsStore for Store {
                     policy.keep.iter().cloned().collect::<Vec<_>>().join(", ")
                 )
             };
-            let reset = limit.weekly_resets_at_unix_ms.map_or_else(
-                || "The harness does not report when the weekly limit resets.".to_owned(),
-                |at| format!("It resets {}.", utc(at)),
-            );
+            let reset = format!("It resets {}.", utc(window.resets_at_unix_ms.expect("available quota has a reset")));
             let title = format!(
                 "{provider} account {} is at {weekly:.0}% of its weekly limit: {} affected seat{plural}",
                 limit.account,
@@ -462,7 +437,7 @@ impl LimitsStore for Store {
                  structured request with your recommendation, reasons and proposed action.",
                 limit.account,
                 limit.measured_by,
-                utc(limit.measured_at_unix_ms),
+                utc(window.measured_at_unix_ms),
                 targets.join(", "),
                 if stopped_here.is_empty() {
                     "none".into()
@@ -512,490 +487,12 @@ impl LimitsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fractal_missions::store::limits_tests_shared_seats::*;
-    use fractal_missions::store::limits_tests_shared_seats::{HOUR, read, read_account, read_unnamed};
 
-    pub fn declare(store: &Store, seat: &str, host: &str) {
-        let name = seat.trim_start_matches("agent/");
-        let intent = crate::graph::parse_internal_intent(
-            &format!("version 2\nagent {name:?} {{ workspace \"/tmp\"; command \"true\"; }}"),
-            "alder",
-        )
-        .unwrap();
-        store
-            .apply_internal(&intent, &format!("declare-{seat}"))
-            .unwrap();
-        // The reconciler resolves where each seat runs; these seats run where the test says.
-        store
-            .connection
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE desired SET member=json_object('host', ?2) WHERE subject=?1",
-                params![seat, host],
-            )
-            .unwrap();
-    }
-
-    fn live(store: &Store, seat: &str) -> bool {
-        seat_host(&store.readers.get(), seat).unwrap().is_some()
-    }
-
-    #[test]
-    fn a_partial_report_after_restart_preserves_the_weekly_source_time() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("claims.sqlite3");
-        let now = now_ms();
-        {
-            let store = Store::open(&path, "alder").unwrap();
-            declare(&store, "agent/alder.worker", "alder");
-            read(
-                &store,
-                "agent/alder.worker",
-                Some("claude/example"),
-                95.0,
-                now,
-            );
-        }
-        let store = Store::open(&path, "alder").unwrap();
-        // A restarted harness knows its five-hour window before it knows its weekly window.
-        store
-            .append_claim(&ClaimInput {
-                subject: "agent/alder.worker".into(),
-                kind: "harness.limits".into(),
-                actor: Some("agent/alder.worker".into()),
-                fields: BTreeMap::from([
-                    ("driver".into(), json!("claude")),
-                    ("account".into(), json!("claude/example")),
-                    ("five_hour_percent".into(), json!(1.0)),
-                    ("measured_at_unix_ms".into(), json!((now + HOUR + 1) as u64)),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        let limit = &store.account_limits().unwrap()[0];
-        assert_eq!(limit.weekly_percent, Some(95.0));
-        assert_eq!(limit.measured_at_unix_ms, now as u64);
-        assert_eq!(
-            store
-                .enforce_account_limits(&policy(), now + HOUR + 1)
-                .unwrap(),
-            LimitsOutcome::default()
-        );
-        assert!(
-            store
-                .account_limits_check(now + HOUR + 1, HOUR as u64)
-                .unwrap()
-                .message
-                .contains("is stale")
-        );
-    }
-
-    #[test]
-    fn a_bound_seat_restarting_on_the_same_account_does_not_need_its_own_quota() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("claims.sqlite3");
-        let now = now_ms();
-        {
-            let store = Store::open(&path, "alder").unwrap();
-            declare_accounts(&store);
-            read_account(
-                &store,
-                "agent/alder.single",
-                "ada/one",
-                "codex/aaaa",
-                95.0,
-                now,
-            );
-        }
-        let store = Store::open(&path, "alder").unwrap();
-        store
-            .append_claim(&ClaimInput {
-                subject: "agent/alder.single".into(),
-                kind: "runtime.observed".into(),
-                actor: Some("daemon/alder".into()),
-                fields: BTreeMap::from([
-                    ("status".into(), json!("running")),
-                    ("runtime_id".into(), json!("alder.single")),
-                    ("incarnation_id".into(), json!("inc-2")),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        assert_eq!(
-            store
-                .enforce_account_limits(&policy(), now + 1)
-                .unwrap()
-                .stopped,
-            ["agent/alder.single"]
-        );
-    }
-
-    #[test]
-    fn recent_maximum_expires_and_does_not_cross_weekly_reset_windows() {
-        let store = Store::open_memory("alder").unwrap();
-        let now = now_ms();
-        let busy = "agent/alder.busy";
-        let stale = "agent/alder.stale";
-        read(&store, busy, Some("claude/aaaa"), 97.0, now);
-        read(&store, stale, Some("claude/aaaa"), 45.0, now + 1);
-        assert_eq!(store.account_limits().unwrap()[0].weekly_percent, Some(97.0));
-        // Arrival order cannot override source time, even outside the maximum's window.
-        read(&store, stale, Some("claude/aaaa"), 8.0, now - 2 * HOUR);
-        assert_eq!(store.account_limits().unwrap()[0].weekly_percent, Some(97.0));
-        read(&store, stale, Some("claude/aaaa"), 46.0, now + HOUR + 1);
-        assert_eq!(store.account_limits().unwrap()[0].weekly_percent, Some(46.0));
-
-        let mut next = store.latest_claim(busy, Some("harness.limits")).unwrap().unwrap();
-        next.body["fields"]["weekly_resets_at_unix_ms"] = json!(1_800_600_000_000_u64);
-        next.body["fields"]["weekly_percent"] = json!(2.0);
-        next.body["fields"]["measured_at_unix_ms"] = json!((now + HOUR + 2) as u64);
-        store.append_claim(&ClaimInput {
-            subject: busy.into(), kind: "harness.limits".into(), actor: Some(busy.into()),
-            fields: serde_json::from_value(next.body["fields"].clone()).unwrap(),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
-        }).unwrap();
-        // An old producer re-publishes the previous reset with an even newer timestamp.
-        read(&store, stale, Some("claude/aaaa"), 99.0, now + HOUR + 3);
-        let limit = &store.account_limits().unwrap()[0];
-        assert_eq!(limit.weekly_percent, Some(2.0));
-        assert_eq!(limit.measured_by, busy);
-    }
-
-    #[test]
-    fn account_limits_keep_only_what_the_newest_hour_can_still_decide() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("claims.sqlite3");
-        let now = now_ms();
-        let seat = "agent/alder.busy";
-        let count = |store: &Store| -> i64 {
-            store
-                .readers
-                .get()
-                .query_row("SELECT COUNT(*) FROM account_limit_readings", [], |row| row.get(0))
-                .unwrap()
-        };
-        {
-            let store = Store::open(&path, "alder").unwrap();
-            // A reading every two hours for a week: each makes the previous one irrelevant.
-            for beat in 0..84_u128 {
-                read(&store, seat, Some("claude/aaaa"), 40.0 + (beat % 50) as f64, now + beat * 2 * HOUR);
-            }
-            assert_eq!(count(&store), 1);
-            let limit = store.account_limits().unwrap().remove(0);
-            assert_eq!(limit.weekly_percent, Some(40.0 + (83 % 50) as f64));
-            assert_eq!(limit.seats, [seat]);
-            // Several inside the newest hour stay, so the highest of the hour still decides.
-            read(&store, seat, Some("claude/aaaa"), 90.0, now + 167 * HOUR + 10);
-            read(&store, seat, Some("claude/aaaa"), 60.0, now + 167 * HOUR + 20);
-            // The reading two hours earlier fell out of the newest's hour; the two inside stay.
-            assert_eq!(count(&store), 2);
-            assert_eq!(store.account_limits().unwrap()[0].weekly_percent, Some(90.0));
-        }
-        // A store opened again answers the same, and opening folds nothing.
-        let store = Store::open(&path, "alder").unwrap();
-        assert_eq!(store.account_limits().unwrap()[0].weekly_percent, Some(90.0));
-        drop(store);
-        // A store from before the projection existed has the claims and no tables. Opening it
-        // does not fold them: the answer is not yet known, and the policy decides nothing, until a
-        // bounded, resumable catch-up has gone through every claim.
-        {
-            let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute(
-                    "DELETE FROM meta WHERE key IN ('account_limits_version','account_limits_through_index','account_limits_ready')",
-                    [],
-                )
-                .unwrap();
-            connection.execute("DELETE FROM account_limit_readings", []).unwrap();
-            connection.execute("DELETE FROM account_limit_seats", []).unwrap();
-        }
-        let store = Store::open(&path, "alder").unwrap();
-        assert!(!store.account_limits_ready().unwrap());
-        assert!(store.account_limits().unwrap().is_empty());
-        assert!(store
-            .enforce_account_limits(&policy(), now + 168 * HOUR)
-            .unwrap()
-            .stopped
-            .is_empty());
-        assert_eq!(store.account_limits_check(now + 168 * HOUR, 3_600_000).unwrap().status, "pass");
-        // One page of ten of the 86 claims, then the daemon dies.
-        assert!(store.catch_up_account_limits(10).unwrap());
-        assert!(!store.account_limits_ready().unwrap());
-        drop(store);
-        // It resumes from the stored cursor and ends with the same answer and the same rows.
-        let store = Store::open(&path, "alder").unwrap();
-        assert!(!store.account_limits_ready().unwrap());
-        let mut pages = 1;
-        while store.catch_up_account_limits(10).unwrap() {
-            pages += 1;
-        }
-        assert_eq!(pages, 8, "86 claims, ten to a page, after the first page");
-        assert!(store.account_limits_ready().unwrap());
-        assert_eq!(count(&store), 2);
-        let limit = store.account_limits().unwrap().remove(0);
-        assert_eq!(limit.weekly_percent, Some(90.0));
-        assert_eq!(limit.seats, [seat]);
-    }
-
-    #[test]
-    fn a_pool_start_and_a_pool_move_wait_for_a_half_filled_projection() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("claims.sqlite3");
-        let now = now_ms();
-        let seat = "agent/alder.pooled";
-        {
-            let store = Store::open(&path, "alder").unwrap();
-            declare_accounts(&store);
-            read_account(&store, seat, "ada/one", "codex/aaaa", 97.0, now);
-            read_account(&store, seat, "ada/two", "codex/bbbb", 20.0, now + 1);
-        }
-        // The claims exist; the projection does not yet (the first start after an upgrade).
-        {
-            let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute(
-                    "DELETE FROM meta WHERE key IN ('account_limits_version','account_limits_through_index','account_limits_ready')",
-                    [],
-                )
-                .unwrap();
-            connection.execute("DELETE FROM account_limit_readings", []).unwrap();
-            connection.execute("DELETE FROM account_limit_seats", []).unwrap();
-        }
-        let store = Store::open(&path, "alder").unwrap();
-        assert!(!store.account_limits_ready().unwrap());
-        let binding = store.seat_binding(seat).unwrap().unwrap();
-        // Every account would read as unused, so a pool start chooses nothing and stores nothing.
-        let error = store.account_for_start(seat, &binding, "alder", now + 2, true).unwrap_err();
-        assert!(error.contains("catching up"), "{error}");
-        assert_eq!(store.seat_account_choice(seat).unwrap(), None);
-        assert!(store
-            .pool_alternatives(&binding, "alder", "ada/one", 95.0, now + 2)
-            .unwrap()
-            .is_empty());
-        // A single named account does not depend on the readings.
-        let single = store.seat_binding("agent/alder.single").unwrap().unwrap();
-        assert_eq!(
-            store.account_for_start("agent/alder.single", &single, "alder", now + 2, true).unwrap().account.name,
-            "ada/one"
-        );
-        // Once the projection has caught up the pool start picks the account with usage left.
-        while store.catch_up_account_limits(1).unwrap() {}
-        assert_eq!(store.account_for_start(seat, &binding, "alder", now + 2, false).unwrap().account.name, "ada/two");
-        assert_eq!(store.seat_account_choice(seat).unwrap(), None);
-        assert_eq!(
-            store.account_for_start(seat, &binding, "alder", now + 2, true).unwrap().account.name,
-            "ada/two"
-        );
-        assert_eq!(store.seat_account_choice(seat).unwrap().as_deref(), Some("ada/two"));
-    }
-
-    #[test]
-    fn an_account_past_its_weekly_limit_stops_its_local_seats_once_and_notifies_operations_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("claims.sqlite3");
-        let store = Store::open(&path, "alder").unwrap();
-        let [busy, idle, coordinator, remote, other] = [
-            "agent/alder.busy",
-            "agent/alder.idle",
-            "agent/alder.coordinator",
-            "agent/alder.remote",
-            "agent/alder.other",
-        ];
-        for seat in [busy, idle, coordinator, other] {
-            declare(&store, seat, "alder");
-        }
-        declare(&store, remote, "birch");
-        let now = now_ms();
-        // The idle seat still shows the account's old reading; the freshest one decides.
-        read(&store, idle, Some("claude/aaaa"), 80.0, now - HOUR / 2);
-        read(&store, busy, Some("claude/aaaa"), 96.0, now - 60_000);
-        read(
-            &store,
-            coordinator,
-            Some("claude/aaaa"),
-            95.0,
-            now - 120_000,
-        );
-        read(&store, remote, Some("claude/aaaa"), 90.0, now - HOUR / 4);
-        read(&store, other, None, 99.0, now - 4 * HOUR);
-
-        let limits = store.account_limits().unwrap();
-        assert_eq!(
-            limits
-                .iter()
-                .map(|limit| limit.account.as_str())
-                .collect::<Vec<_>>(),
-            ["claude/aaaa", "claude/unknown"]
-        );
-        let account = &limits[0];
-        assert_eq!(account.weekly_percent, Some(96.0));
-        assert_eq!(account.measured_by, busy);
-        assert_eq!(account.seats, [busy, coordinator, idle, remote]);
-
-        let policy = LimitsPolicy {
-            stop_at_weekly_percent: 95,
-            keep: BTreeSet::from([coordinator.to_owned()]),
-            exempt_accounts: BTreeSet::new(),
-            exempt_harnesses: BTreeSet::new(),
-            notify: "agent/alder.operations".into(),
-            fresh_ms: HOUR as u64,
-        };
-        let outcome = store.enforce_account_limits(&policy, now).unwrap();
-        assert_eq!(
-            outcome.stopped,
-            [busy, idle],
-            "this node's seats, never the kept one"
-        );
-        assert_eq!(outcome.notified.len(), 1);
-        assert!(!live(&store, busy) && !live(&store, idle));
-        assert!(live(&store, coordinator) && live(&store, remote));
-        assert!(live(&store, other), "a stale reading is not acted on");
-        assert!(
-            store
-                .attention_items(Some("person/avery"))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            store
-                .claims_for_kind_at("work.person-asked", None, false, 1)
-                .unwrap()
-                .claims
-                .is_empty()
-        );
-        let message = store.message(&outcome.notified[0]).unwrap().unwrap();
-        assert_eq!(message.to, "agent/alder.operations");
-        assert!(
-            message
-                .title
-                .as_deref()
-                .unwrap()
-                .contains("claude/aaaa is at 96% of its weekly limit: 3 affected seats")
-        );
-        assert!(message.content.contains("structured request"));
-        assert!(message.content.contains(busy) && message.content.contains(idle));
-        assert!(message.content.contains("It resets"));
-
-        // Restart the store, then start a stopped seat again. A newer percentage neither
-        // stops that seat again nor resends the notification in the same window.
-        drop(store);
-        let store = Store::open(&path, "alder").unwrap();
-        declare(&store, busy, "alder");
-        read(&store, busy, Some("claude/aaaa"), 97.0, now + 60_000);
-        let again = store.enforce_account_limits(&policy, now + 60_000).unwrap();
-        assert!(again.stopped.is_empty(), "{again:?}");
-        assert!(live(&store, busy));
-        assert_eq!(again.notified, outcome.notified);
-        let original = store
-            .claims_for(&outcome.notified[0], Some("message.sent"))
-            .unwrap();
-        assert_eq!(
-            original.len(),
-            1,
-            "a changed percentage must not resend the alert"
-        );
-        assert_eq!(
-            store
-                .message(&outcome.notified[0])
-                .unwrap()
-                .unwrap()
-                .content,
-            message.content
-        );
-
-        // A new window can notify operations again after the seats are started.
-        declare(&store, idle, "alder");
-        let mut next = store
-            .latest_claim(busy, Some("harness.limits"))
-            .unwrap()
-            .unwrap();
-        next.body["fields"]["weekly_resets_at_unix_ms"] = json!(1_800_600_000_000_u64);
-        store
-            .append_claim(&ClaimInput {
-                subject: busy.into(),
-                kind: "harness.limits".into(),
-                actor: Some(busy.into()),
-                fields: serde_json::from_value(next.body["fields"].clone()).unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some("next-window".into()),
-            })
-            .unwrap();
-        let next_window = store
-            .enforce_account_limits(&policy, now + 120_000)
-            .unwrap();
-        assert_eq!(next_window.stopped, [busy, idle]);
-        assert_eq!(next_window.notified.len(), 1);
-        assert_ne!(next_window.notified, outcome.notified);
-        assert!(
-            store
-                .claims_for_kind_at("work.person-asked", None, false, 1)
-                .unwrap()
-                .claims
-                .is_empty()
-        );
-    }
-
-    fn declare_accounts(store: &Store) {
-        let intent = crate::graph::parse_internal_intent(
-            r#"version 2
-account "ada/one" { provider "openai"; owner "person/ada"; login "/srv/logins/one"; }
-account "ada/two" { provider "openai"; owner "person/ada"; login "/srv/logins/two"; }
-agent "pooled" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }; }
-agent "single" { workspace "/tmp"; harness "codex" { account "ada/one"; }; }
-agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }; }
-"#,
-            "alder",
-        )
-        .unwrap();
-        store.apply_internal(&intent, "declare-accounts").unwrap();
-    }
-
-    #[test]
-    fn producer_clock_cannot_erase_harness_five_hour_scheduling_evidence() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let at = 1_000_000_u64;
-        let later = at + 2 * HOUR as u64;
-        let reset = later + HOUR as u64;
-        store.append_claim(&ClaimInput {
-            subject:"agent/alder.single".into(), actor:Some("agent/alder.single".into()),
-            kind:"harness.limits".into(),
-            fields:serde_json::from_value(json!({"driver":"codex", "account_ref":"ada/one",
-                "five_hour_percent":80.0, "five_hour_resets_at_unix_ms":reset,
-                "measured_at_unix_ms":at})).unwrap(),
-            evidence:vec![], expected_subject:None, idempotency_key:Some("harness-partial".into()),
-        }).unwrap();
-        let accounts = store.declared_accounts().unwrap();
-        let one = accounts.iter().find(|account| account.name == "ada/one").unwrap();
-        assert_eq!(store.candidates(&[one], u128::from(later)).unwrap()[0].five_hour_percent, Some(80.0));
-        let writer = "agent/sample/usage-producer";
-        store.set_usage_limits_writers(vec![writer.into()]).unwrap();
-        store.append_claim(&ClaimInput {
-            subject:writer.into(), actor:Some(writer.into()), kind:"usage.limits.observed".into(),
-            fields:serde_json::from_value(json!({"readings":[{
-                "account":fractal_drivers::account::account_label("codex", "declared:ada/one"),
-                "account_ref":"ada/one", "provider":"openai-codex", "window":"5h",
-                "used_percent":5.0, "resets_at":null, "coverage":"reported",
-                "measured_at":chrono::DateTime::from_timestamp_millis(later as i64).unwrap().to_rfc3339(),
-                "source":"omp-usage", "host":"cedar"
-            }], "credit_readings":[]})).unwrap(),
-            evidence:vec![], expected_subject:None, idempotency_key:Some("producer-later".into()),
-        }).unwrap();
-        assert_eq!(store.candidates(&[one], u128::from(later)).unwrap()[0].five_hour_percent, Some(80.0));
-        let harness = store.harness_account_limits().unwrap();
-        assert_eq!(harness[0].five_hour_percent, Some(80.0));
-        assert_eq!(harness[0].measured_at_unix_ms, at);
-        let display = store.account_limits().unwrap();
-        let five = display[0].windows.iter().find(|window| window.window == "5h").unwrap();
-        assert_eq!(five.used_percent, Some(5.0));
-        assert_eq!(five.measured_at_unix_ms, later);
-    }
+    const HOUR: u128 = 3_600_000;
+    const NOW: u128 = 1_800_000_000_000;
+    const WRITER: &str = "agent/alder.usage-producer";
+    const SINGLE: &str = "agent/alder.single";
+    const POOLED: &str = "agent/alder.pooled";
 
     fn policy() -> LimitsPolicy {
         LimitsPolicy {
@@ -1008,743 +505,429 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         }
     }
 
-    #[test]
-    fn legacy_unknowns_are_hidden_only_with_identified_evidence_and_no_active_seat() {
-        let store = Store::open_memory("alder").unwrap();
-        let now = now_ms();
-        let seat = "agent/alder.worker";
-        read(&store, seat, None, 99.0, now - 3 * 24 * HOUR);
-        let unknown = store.account_limits().unwrap();
-        assert_eq!(unknown.len(), 1);
-        assert!(!unknown[0].identified);
-        // With no identified evidence this remains unknown, even without a declaration.
-        assert_eq!(unknown[0].account, "claude/unknown");
-        read(&store, seat, Some("claude/one"), 100.0, now);
-        read(&store, seat, Some("claude/two"), 20.0, now + 1);
-        read(&store, "agent/alder.other", Some("claude/three"), 30.0, now);
-        let limits = store.account_limits().unwrap();
-        assert_eq!(limits.len(), 3);
-        assert!(limits.iter().all(|limit| limit.identified));
-        let exhausted = limits
-            .iter()
-            .find(|limit| limit.account == "claude/one")
-            .unwrap();
-        assert!(exhausted.seats.is_empty());
-        assert_eq!(exhausted.weekly_percent, Some(100.0));
-
-        // Missing identity from a currently declared seat remains visible regardless of age.
-        let active = "agent/alder.unknown";
-        declare(&store, active, "alder");
-        read(&store, active, None, 90.0, now - 3 * 24 * HOUR);
-        let limits = store.account_limits().unwrap();
-        let unknown = limits.iter().find(|limit| !limit.identified).unwrap();
-        assert_eq!(unknown.seats, [active]);
-        let stop =
-            crate::graph::parse_internal_intent(&format!("version 2\nstop {active:?}\n"), "alder")
-                .unwrap();
-        store.apply_internal(&stop, "retire-unknown").unwrap();
-        // A retired seat's last reading still has a seat string, but cannot keep a phantom alive.
-        assert!(
-            store
-                .account_limits()
-                .unwrap()
-                .iter()
-                .all(|limit| limit.identified)
-        );
+    fn declare_accounts(store: &Store) {
+        let intent = crate::graph::parse_internal_intent(
+            r#"version 2
+account "ada/one" { provider "openai"; owner "person/ada"; login "/srv/logins/one"; }
+account "ada/two" { provider "openai"; owner "person/ada"; login "/srv/logins/two"; }
+"#,
+            "alder",
+        )
+        .unwrap();
+        store.apply_internal(&intent, "declare-accounts").unwrap();
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
     }
 
-    #[test]
-    fn identified_evidence_and_grouping_are_scoped_to_the_driver() {
-        let store = Store::open_memory("alder").unwrap();
-        let now = now_ms() as u64;
-        for (seat, driver, account, weekly) in [
-            ("agent/example/claude", "claude", "shared-label", 95.0),
-            ("agent/example/claude-old", "claude", "", 99.0),
-            ("agent/example/codex", "codex", "", 20.0),
-        ] {
-            store
-                .append_claim(&ClaimInput {
-                    subject: seat.into(),
-                    kind: "harness.limits".into(),
-                    actor: Some(seat.into()),
-                    fields: serde_json::from_value(json!({
-                        "driver": driver, "account": account, "account_ref": "",
-                        "weekly_percent": weekly, "measured_at_unix_ms": now,
-                    }))
-                    .unwrap(),
-                    evidence: vec![],
-                    expected_subject: None,
-                    idempotency_key: None,
-                })
-                .unwrap();
-        }
-        let limits = store.account_limits().unwrap();
-        assert_eq!(limits.len(), 2);
-        assert_eq!(limits[0].account, "shared-label");
-        assert!(limits[0].identified);
-        assert_eq!(limits[1].account, "codex/unknown");
-        assert!(!limits[1].identified);
+    fn declare_seat(store: &Store, name: &str, binding: &str, host: &str) {
+        let intent = crate::graph::parse_internal_intent(
+            &format!(
+                "version 2\nagent {name:?} {{ workspace \"/tmp\"; harness \"codex\" {{ {binding}; }}; }}"
+            ),
+            "alder",
+        )
+        .unwrap();
+        store
+            .apply_internal(&intent, &format!("declare-{name}-{binding}"))
+            .unwrap();
+        store
+            .connection
+            .write()
+            .execute(
+                "UPDATE desired SET member=json_object('host', ?2) WHERE subject=?1",
+                params![format!("agent/alder.{name}"), host],
+            )
+            .unwrap();
+    }
+
+    fn live(store: &Store, seat: &str) -> bool {
+        seat_host(&store.readers.get(), seat).unwrap().is_some()
+    }
+
+    fn timestamp(at: u128) -> String {
+        chrono::DateTime::from_timestamp_millis(at as i64)
+            .unwrap()
+            .to_rfc3339()
+    }
+
+    fn quota(account: &str, window: &str, used: Option<f64>, measured: u128) -> Value {
+        json!({
+            "account": fractal_drivers::account::account_label(
+                "codex", &format!("declared:{account}")
+            ),
+            "account_ref": account,
+            "provider": "openai-codex",
+            "window": window,
+            "used_percent": used,
+            "resets_at": timestamp(NOW + 7 * 24 * HOUR),
+            "measured_at": timestamp(measured),
+            "coverage": "reported",
+            "source": "omp-usage",
+            "host": "alder"
+        })
+    }
+
+    fn observe_as(store: &Store, writer: &str, readings: Vec<Value>) {
         store
             .append_claim(&ClaimInput {
-                subject: "agent/example/codex".into(),
-                kind: "harness.limits".into(),
-                actor: Some("agent/example/codex".into()),
-                fields: serde_json::from_value(json!({
-                    "driver": "codex", "account": "shared-label", "weekly_percent": 10.0,
-                    "measured_at_unix_ms": now,
-                }))
-                .unwrap(),
+                subject: writer.into(),
+                actor: Some(writer.into()),
+                kind: "usage.limits.observed".into(),
+                fields: BTreeMap::from([
+                    ("readings".into(), json!(readings)),
+                    ("credit_readings".into(), json!([])),
+                ]),
                 evidence: vec![],
                 expected_subject: None,
                 idempotency_key: None,
             })
             .unwrap();
-        let limits = store.account_limits().unwrap();
-        assert_eq!(limits.len(), 2);
-        assert_eq!(limits[0].weekly_percent, Some(95.0));
-        assert_eq!(limits[1].weekly_percent, Some(10.0));
-        assert!(limits.iter().all(|limit| limit.identified));
+    }
+
+    fn observe(store: &Store, readings: Vec<Value>) {
+        observe_as(store, WRITER, readings);
+    }
+
+    fn single_store() -> Store {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        declare_seat(&store, "single", "account \"ada/one\"", "alder");
+        store
+    }
+
+    fn pooled_store() -> Store {
+        let store = single_store();
+        declare_seat(&store, "pooled", "account-pool \"person/ada\"", "alder");
+        store.choose_seat_account(POOLED, "ada/one", NOW).unwrap();
+        store
     }
 
     #[test]
-    fn bound_readings_with_different_provider_labels_do_not_split_or_merge_accounts() {
-        let store = Store::open_memory("alder").unwrap();
-        let now = now_ms();
-        read_account(&store, "agent/alder.first", "ada/one", "", 95.0, now);
-        read_account(
+    fn only_configured_omp_usage_writers_supply_enforcement_evidence() {
+        let store = single_store();
+        observe_as(
             &store,
-            "agent/alder.second",
-            "ada/one",
-            "codex/generic",
-            20.0,
-            now + 1,
+            "agent/alder.unconfigured",
+            vec![quota("ada/one", "weekly", Some(100.0), NOW)],
         );
-        read_account(
-            &store,
-            "agent/alder.third",
-            "ada/two",
-            "codex/generic",
-            30.0,
-            now,
-        );
-        let limits = store.account_limits().unwrap();
-        assert_eq!(limits.len(), 2);
-        let first = limits
-            .iter()
-            .find(|limit| limit.account_ref.as_deref() == Some("ada/one"))
-            .unwrap();
-        assert!(first.identified);
-        assert_eq!(first.weekly_percent, Some(95.0));
-        assert_eq!(first.seats, ["agent/alder.first", "agent/alder.second"]);
+        assert!(store.account_limits().unwrap().is_empty());
         assert_eq!(
-            first.account,
-            fractal_drivers::account::account_label("codex", "declared:ada/one")
-        );
-        assert_ne!(limits[0].account, limits[1].account);
-    }
-
-    #[test]
-    fn an_exhausted_account_keeps_its_reading_after_its_last_seat_switches_away() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let seat = "agent/alder.pooled";
-        let now = now_ms();
-        read_account(&store, seat, "", "", 100.0, now - 3 * 24 * HOUR);
-        read_account(&store, seat, "ada/one", "codex/aaaa", 97.0, now);
-        read_account(&store, seat, "ada/two", "codex/bbbb", 20.0, now + 1);
-
-        let limits = store.account_limits().unwrap();
-        let exhausted = limits
-            .iter()
-            .find(|limit| limit.account_ref.as_deref() == Some("ada/one"))
-            .unwrap();
-        assert_eq!(limits.len(), 2);
-        assert_eq!(exhausted.weekly_percent, Some(97.0));
-        assert!(exhausted.seats.is_empty());
-        let binding = store.seat_binding(seat).unwrap().unwrap();
-        assert!(
-            store
-                .pool_alternatives(&binding, "alder", "ada/two", 95.0, now + 2)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn declared_accounts_without_provider_identities_keep_separate_limits() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        read_account(&store, "agent/alder.pooled", "ada/one", "", 97.0, now);
-        read_account(&store, "agent/alder.other", "ada/two", "", 20.0, now + 1);
-        let limits = store.account_limits().unwrap();
-        assert_eq!(limits.len(), 2);
-        let first = limits.iter().find(|limit| limit.account_ref.as_deref() == Some("ada/one")).unwrap();
-        let second = limits.iter().find(|limit| limit.account_ref.as_deref() == Some("ada/two")).unwrap();
-        assert_eq!(first.weekly_percent, Some(97.0));
-        assert_eq!(second.weekly_percent, Some(20.0));
-        let outcome = store.enforce_account_limits(&policy(), now + 2).unwrap();
-        assert_eq!(
-            outcome.switched,
-            [("agent/alder.pooled".to_owned(), "ada/two".to_owned())]
-        );
-        assert!(outcome.stopped.is_empty());
-    }
-
-    #[test]
-    fn a_sole_reporter_stops_after_exhausting_both_accounts_in_one_weekly_window() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        let seat = "agent/alder.pooled";
-        read_account(&store, seat, "ada/one", "codex/aaaa", 97.0, now);
-        assert_eq!(
-            store
-                .enforce_account_limits(&policy(), now)
-                .unwrap()
-                .switched,
-            [(seat.to_owned(), "ada/two".to_owned())]
-        );
-        // The first account's reading cannot stop the new binding before it reports.
-        assert_eq!(
-            store.enforce_account_limits(&policy(), now + 1).unwrap(),
+            store.enforce_account_limits(&policy(), NOW).unwrap(),
             LimitsOutcome::default()
         );
-        read_account(&store, seat, "ada/two", "codex/bbbb", 97.0, now + 1);
-        let outcome = store.enforce_account_limits(&policy(), now + 2).unwrap();
-        assert!(outcome.switched.is_empty());
-        assert_eq!(outcome.stopped, [seat]);
+        observe(&store, vec![quota("ada/one", "weekly", Some(95.0), NOW)]);
+        let limits = store.account_limits().unwrap();
+        assert_eq!(limits[0].measured_by, WRITER);
+        assert_eq!(limits[0].seats, [SINGLE]);
+        assert_eq!(limits[0].windows[0].source, "omp-usage");
         assert_eq!(
-            store.seat_account_choice(seat).unwrap().as_deref(),
-            Some("ada/two")
+            store.enforce_account_limits(&policy(), NOW).unwrap().stopped,
+            [SINGLE]
         );
     }
 
     #[test]
-    fn accounts_with_the_same_legacy_label_have_separate_handled_episodes() {
-        let store = Store::open_memory("alder").unwrap();
+    fn latest_weekly_value_wins_in_both_directions_not_the_recent_maximum() {
+        for (older, newer, stops) in [(99.0, 20.0, false), (20.0, 99.0, true)] {
+            let store = single_store();
+            observe(&store, vec![quota("ada/one", "weekly", Some(older), NOW - 2)]);
+            observe(&store, vec![quota("ada/one", "weekly", Some(newer), NOW)]);
+            // Arrival order cannot replace newer source evidence with an older maximum.
+            observe(&store, vec![quota("ada/one", "weekly", Some(100.0), NOW - 1)]);
+            let limits = store.account_limits().unwrap();
+            let weekly = limits[0].weekly_window(NOW, HOUR as u64).unwrap();
+            assert_eq!(weekly.used_percent, Some(newer));
+            assert_eq!(weekly.measured_at_unix_ms, NOW as u64);
+            let outcome = store.enforce_account_limits(&policy(), NOW).unwrap();
+            assert_eq!(outcome.stopped, if stops { vec![SINGLE] } else { vec![] });
+            assert_eq!(live(&store, SINGLE), !stops);
+        }
+    }
+
+    #[test]
+    fn one_hour_is_inclusive_but_one_millisecond_later_never_enforces() {
+        for (age, horizon, stops) in [
+            (HOUR, HOUR, true),
+            (HOUR + 1, HOUR, false),
+            (HOUR + 1, 24 * HOUR, false),
+            (60_000, 60_000, true),
+            (60_001, 60_000, false),
+        ] {
+            let store = single_store();
+            observe(&store, vec![quota("ada/one", "weekly", Some(99.0), NOW - age)]);
+            let configured = LimitsPolicy { fresh_ms: horizon as u64, ..policy() };
+            let outcome = store.enforce_account_limits(&configured, NOW).unwrap();
+            assert_eq!(outcome.stopped, if stops { vec![SINGLE] } else { vec![] });
+            assert_eq!(live(&store, SINGLE), !stops);
+        }
+    }
+
+    #[test]
+    fn newer_unreported_gap_missing_reset_and_expired_evidence_do_not_enforce() {
+        for case in ["unreported", "gap", "missing-reset", "expired", "future"] {
+            let store = single_store();
+            observe(&store, vec![quota("ada/one", "weekly", Some(99.0), NOW - 1)]);
+            let mut unavailable = quota("ada/one", "weekly", Some(100.0), NOW);
+            match case {
+                "unreported" => unavailable["coverage"] = json!("unreported"),
+                "gap" => unavailable["used_percent"] = Value::Null,
+                "missing-reset" => unavailable["resets_at"] = Value::Null,
+                "expired" => unavailable["resets_at"] = json!(timestamp(NOW)),
+                "future" => unavailable["measured_at"] = json!(timestamp(NOW + 60_001)),
+                _ => unreachable!(),
+            }
+            observe(&store, vec![unavailable]);
+            let limits = store.account_limits().unwrap();
+            assert!(limits[0].weekly_window(NOW, HOUR as u64).is_none(), "{case}");
+            assert_eq!(
+                store.enforce_account_limits(&policy(), NOW).unwrap(),
+                LimitsOutcome::default(),
+                "{case}"
+            );
+            assert!(live(&store, SINGLE));
+            let check = store.account_limits_check(NOW, HOUR as u64).unwrap();
+            assert_eq!(check.status, "warn", "{case}");
+            assert!(check.message.contains("weekly evidence is unavailable"), "{case}");
+            assert!(check.message.contains("not below the limit"));
+        }
+    }
+
+    #[test]
+    fn another_window_neither_enforces_nor_refreshes_stale_weekly_evidence() {
+        let store = single_store();
+        observe(&store, vec![quota("ada/one", "weekly", Some(99.0), NOW - HOUR - 1)]);
+        observe(&store, vec![quota("ada/one", "5h", Some(100.0), NOW)]);
+        let limits = store.account_limits().unwrap();
+        assert_eq!(limits[0].measured_at_unix_ms, NOW as u64);
+        assert!(limits[0].weekly_window(NOW, HOUR as u64).is_none());
+        assert_eq!(
+            store.enforce_account_limits(&policy(), NOW).unwrap(),
+            LimitsOutcome::default()
+        );
+        assert_eq!(store.account_limits_check(NOW, HOUR as u64).unwrap().status, "warn");
+        observe(&store, vec![quota("ada/one", "weekly", Some(94.9), NOW)]);
+        assert_eq!(
+            store.enforce_account_limits(&policy(), NOW).unwrap(),
+            LimitsOutcome::default(),
+            "a full five-hour window does not substitute for weekly quota"
+        );
+        assert!(live(&store, SINGLE));
+    }
+
+    #[test]
+    fn seven_day_window_is_weekly_evidence_and_future_tolerance_is_bounded() {
+        for (offset, stops) in [(60_000, true), (60_001, false)] {
+            let store = single_store();
+            observe(&store, vec![quota("ada/one", "7d", Some(95.0), NOW + offset)]);
+            let outcome = store.enforce_account_limits(&policy(), NOW).unwrap();
+            assert_eq!(outcome.stopped, if stops { vec![SINGLE] } else { vec![] });
+        }
+    }
+
+    #[test]
+    fn notification_ownership_uses_the_weekly_host_not_the_newest_other_window() {
+        for (weekly_host, other_host, notifies) in [
+            ("alder", "cedar", true),
+            ("cedar", "alder", false),
+        ] {
+            let store = single_store();
+            let mut weekly = quota("ada/one", "weekly", Some(99.0), NOW - 1);
+            weekly["host"] = json!(weekly_host);
+            let mut other = quota("ada/one", "5h", Some(20.0), NOW);
+            other["host"] = json!(other_host);
+            observe(&store, vec![weekly, other]);
+            let outcome = store.enforce_account_limits(&policy(), NOW).unwrap();
+            assert_eq!(outcome.stopped, [SINGLE]);
+            assert_eq!(outcome.notified.len(), usize::from(notifies));
+        }
+    }
+
+    #[test]
+    fn missing_evidence_warns_without_enforcing_and_fresh_evidence_clears_warning() {
+        let store = single_store();
+        let missing = store.account_limits_check(NOW, HOUR as u64).unwrap();
+        assert_eq!(missing.status, "warn");
+        assert!(missing.message.contains("account/ada/one: no weekly reading"));
+        assert_eq!(
+            store.enforce_account_limits(&policy(), NOW).unwrap(),
+            LimitsOutcome::default()
+        );
+        observe(&store, vec![quota("ada/one", "weekly", Some(40.0), NOW)]);
+        assert_eq!(store.account_limits_check(NOW, HOUR as u64).unwrap().status, "pass");
+        assert_eq!(
+            store.account_limits_check(NOW + HOUR + 1, HOUR as u64).unwrap().status,
+            "warn"
+        );
+    }
+
+    #[test]
+    fn stops_are_local_keep_is_respected_and_operations_is_notified_once_per_reset() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let store = Store::open(&path, "alder").unwrap();
         declare_accounts(&store);
-        let now = now_ms();
-        let seat = "agent/alder.pooled";
-        read_account(&store, seat, "ada/one", "codex/unknown", 97.0, now);
+        for (name, host) in [("single", "alder"), ("idle", "alder"), ("kept", "alder"), ("remote", "birch")] {
+            declare_seat(&store, name, "account \"ada/one\"", host);
+        }
+        observe(&store, vec![quota("ada/one", "weekly", Some(96.0), NOW)]);
+        let configured = LimitsPolicy {
+            keep: BTreeSet::from(["agent/alder.kept".into()]),
+            ..policy()
+        };
+        let first = store.enforce_account_limits(&configured, NOW).unwrap();
+        assert_eq!(first.stopped, ["agent/alder.idle", SINGLE]);
+        assert_eq!(first.notified.len(), 1);
+        assert!(live(&store, "agent/alder.kept"));
+        assert!(live(&store, "agent/alder.remote"));
+        let message = store.message(&first.notified[0]).unwrap().unwrap();
+        assert_eq!(message.to, configured.notify);
+        assert!(message.title.as_deref().unwrap().contains("96%"));
+        assert!(message.content.contains(SINGLE));
+        assert!(message.content.contains("It resets"));
+        assert!(store.claims_for_kind_at("work.person-asked", None, false, 1).unwrap().claims.is_empty());
+        drop(store);
+
+        let store = Store::open(&path, "alder").unwrap();
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+        declare_seat(&store, "single", "account \"ada/one\"", "alder");
+        observe(&store, vec![quota("ada/one", "weekly", Some(97.0), NOW + 1)]);
+        let again = store.enforce_account_limits(&configured, NOW + 1).unwrap();
+        assert!(again.stopped.is_empty());
+        assert!(live(&store, SINGLE));
+        assert_eq!(again.notified, first.notified);
+        assert_eq!(store.claims_for(&first.notified[0], Some("message.sent")).unwrap().len(), 1);
+        assert_eq!(store.message(&first.notified[0]).unwrap().unwrap().content, message.content);
+
+        let mut next = quota("ada/one", "weekly", Some(99.0), NOW + 2);
+        next["resets_at"] = json!(timestamp(NOW + 14 * 24 * HOUR));
+        observe(&store, vec![next]);
+        let next_window = store.enforce_account_limits(&configured, NOW + 2).unwrap();
+        assert_eq!(next_window.stopped, [SINGLE]);
+        assert_eq!(next_window.notified.len(), 1);
+        assert_ne!(next_window.notified, first.notified);
+    }
+
+    #[test]
+    fn a_restarted_bound_seat_uses_account_evidence_without_its_own_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        {
+            let store = Store::open(&path, "alder").unwrap();
+            declare_accounts(&store);
+            declare_seat(&store, "single", "account \"ada/one\"", "alder");
+            observe(&store, vec![quota("ada/one", "weekly", Some(95.0), NOW)]);
+        }
+        let store = Store::open(&path, "alder").unwrap();
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+        store.append_claim(&ClaimInput {
+            subject: SINGLE.into(),
+            kind: "runtime.observed".into(),
+            actor: Some("daemon/alder".into()),
+            fields: serde_json::from_value(json!({
+                "status": "running", "runtime_id": "alder.single", "incarnation_id": "inc-2"
+            })).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(store.enforce_account_limits(&policy(), NOW).unwrap().stopped, [SINGLE]);
+    }
+
+    #[test]
+    fn a_pooled_seat_switches_while_a_single_account_seat_stops() {
+        let store = pooled_store();
+        observe(&store, vec![
+            quota("ada/one", "weekly", Some(96.0), NOW),
+            quota("ada/two", "weekly", Some(40.0), NOW),
+        ]);
+        let outcome = store.enforce_account_limits(&policy(), NOW).unwrap();
+        assert_eq!(outcome.stopped, [SINGLE]);
+        assert_eq!(outcome.switched, [(POOLED.to_owned(), "ada/two".to_owned())]);
+        assert!(live(&store, POOLED));
+        assert_eq!(store.seat_account_choice(POOLED).unwrap().as_deref(), Some("ada/two"));
+        let restart = store.claims_for(POOLED, Some("runtime.action.requested")).unwrap().pop().unwrap();
+        assert_eq!(restart.actor.as_deref(), Some(LIMITS_ACTOR));
+        assert_eq!(restart.body["fields"]["action"], "restart");
+        let again = store.enforce_account_limits(&policy(), NOW + 1).unwrap();
+        assert!(again.stopped.is_empty() && again.switched.is_empty());
+        // The old account remains exhausted, but it no longer owns the switched seat.
+        let limits = store.account_limits().unwrap();
+        let exhausted = limits.iter().find(|limit| limit.account_ref.as_deref() == Some("ada/one")).unwrap();
+        assert_eq!(exhausted.weekly_window(NOW, HOUR as u64).unwrap().used_percent, Some(96.0));
+        assert!(!exhausted.seats.contains(&POOLED.to_owned()));
+        observe(&store, vec![quota("ada/two", "weekly", Some(99.0), NOW + 2)]);
+        let exhausted_pool = store.enforce_account_limits(&policy(), NOW + 2).unwrap();
+        assert!(exhausted_pool.switched.is_empty());
+        assert_eq!(exhausted_pool.stopped, [POOLED]);
+    }
+
+    #[test]
+    fn rebinding_does_not_enforce_the_previous_accounts_reading() {
+        let store = single_store();
+        observe(&store, vec![quota("ada/one", "weekly", Some(99.0), NOW)]);
+        declare_seat(&store, "single", "account \"ada/two\"", "alder");
         assert_eq!(
-            store
-                .enforce_account_limits(&policy(), now)
-                .unwrap()
-                .switched,
-            [(seat.to_owned(), "ada/two".to_owned())]
+            store.enforce_account_limits(&policy(), NOW).unwrap(),
+            LimitsOutcome::default()
         );
-        read_account(&store, seat, "ada/two", "codex/unknown", 97.0, now + 1);
-        assert_eq!(
-            store
-                .enforce_account_limits(&policy(), now + 2)
-                .unwrap()
-                .stopped,
-            [seat]
-        );
+        assert!(live(&store, SINGLE));
     }
 
     #[test]
     fn an_interrupted_switch_rolls_back_choice_restart_and_episode_and_can_retry() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        let seat = "agent/alder.pooled";
-        store.choose_seat_account(seat, "ada/one", now).unwrap();
-        read_account(&store, seat, "ada/one", "codex/aaaa", 97.0, now);
-        // Fail the final write after the new choice and restart claim have been inserted.
-        store
-            .connection
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER fail_account_switch BEFORE INSERT ON local_limit_stops
+        let store = pooled_store();
+        observe(&store, vec![
+            quota("ada/one", "weekly", Some(97.0), NOW),
+            quota("ada/two", "weekly", Some(20.0), NOW),
+        ]);
+        store.connection.write().execute_batch(
+            "CREATE TRIGGER fail_account_switch BEFORE INSERT ON local_limit_stops
              BEGIN SELECT RAISE(ABORT, 'injected account switch interruption'); END;",
-            )
-            .unwrap();
-        assert!(store.enforce_account_limits(&policy(), now).is_err());
-        assert_eq!(
-            store.seat_account_choice(seat).unwrap().as_deref(),
-            Some("ada/one")
-        );
-        assert!(
-            store
-                .claims_for(seat, Some("runtime.action.requested"))
-                .unwrap()
-                .is_empty()
-        );
-        let markers: u64 = store
-            .readers
-            .get()
-            .query_row("SELECT COUNT(*) FROM local_limit_stops", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
+        ).unwrap();
+        assert!(store.enforce_account_limits(&policy(), NOW).is_err());
+        assert_eq!(store.seat_account_choice(POOLED).unwrap().as_deref(), Some("ada/one"));
+        assert!(store.claims_for(POOLED, Some("runtime.action.requested")).unwrap().is_empty());
+        let markers: u64 = store.readers.get()
+            .query_row("SELECT COUNT(*) FROM local_limit_stops", [], |row| row.get(0)).unwrap();
         assert_eq!(markers, 0);
-        store
-            .connection
-            .lock()
-            .unwrap()
-            .execute_batch("DROP TRIGGER fail_account_switch")
-            .unwrap();
-        let retried = store.enforce_account_limits(&policy(), now + 1).unwrap();
-        assert_eq!(retried.switched, [(seat.to_owned(), "ada/two".to_owned())]);
-        assert_eq!(
-            store
-                .claims_for(seat, Some("runtime.action.requested"))
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(
-            store
-                .enforce_account_limits(&policy(), now + 2)
-                .unwrap()
-                .switched
-                .is_empty()
-        );
+        store.connection.write().execute_batch("DROP TRIGGER fail_account_switch").unwrap();
+        let retried = store.enforce_account_limits(&policy(), NOW + 1).unwrap();
+        assert_eq!(retried.switched, [(POOLED.to_owned(), "ada/two".to_owned())]);
+        assert_eq!(store.claims_for(POOLED, Some("runtime.action.requested")).unwrap().len(), 1);
     }
 
     #[test]
-    fn a_person_restarting_a_stopped_seat_is_not_stopped_twice_in_the_same_window() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        let seat = "agent/alder.single";
-        read_account(&store, seat, "ada/one", "codex/aaaa", 97.0, now);
-        assert_eq!(
-            store
-                .enforce_account_limits(&policy(), now)
-                .unwrap()
-                .stopped,
-            [seat]
-        );
-        let intent = crate::graph::parse_internal_intent(
-            "version 2\nagent \"single\" { workspace \"/tmp\"; harness \"codex\" { account \"ada/one\"; }; }",
-            "alder",
-        ).unwrap();
-        store.apply_internal(&intent, "person-restart").unwrap();
-        store.append_claim(&ClaimInput {
-            subject: seat.into(), kind: "runtime.observed".into(), actor: None,
-            fields: serde_json::from_value(json!({"status": "running", "runtime_id": "alder.single", "incarnation_id": "inc-two"})).unwrap(),
-            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-        }).unwrap();
-        let again = store.enforce_account_limits(&policy(), now).unwrap();
-        assert!(again.stopped.is_empty());
-        assert!(again.switched.is_empty());
-        assert_eq!(again.notified.len(), 1);
-        assert!(live(&store, seat));
-    }
-
-    #[test]
-    fn missing_stale_and_reset_weekly_evidence_are_reported_as_unknown() {
-        let store = Store::open_memory("alder").unwrap();
-        let intent = crate::graph::parse_internal_intent(
-            "version 2\nagent \"worker\" { workspace \"/tmp\"; harness \"claude\" {}; }",
-            "alder",
-        )
-        .unwrap();
-        store.apply_internal(&intent, "weekly-health").unwrap();
-        let now = now_ms();
-        let check = store.account_limits_check(now, HOUR as u64).unwrap();
-        assert_eq!(check.status, "warn");
-        assert!(check.message.contains("no weekly reading"));
-        assert!(check.message.contains("not below the limit"));
-        store
-            .append_claim(&ClaimInput {
-                subject: "agent/alder.worker".into(),
-                kind: "harness.limits".into(),
-                actor: Some("agent/alder.worker".into()),
-                fields: BTreeMap::from([
-                    ("driver".into(), json!("claude")),
-                    ("account".into(), json!("claude/example")),
-                    ("five_hour_percent".into(), json!(1.0)),
-                    ("measured_at_unix_ms".into(), json!(now as u64)),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-        assert!(
-            store
-                .account_limits_check(now, HOUR as u64)
-                .unwrap()
-                .message
-                .contains("no weekly reading")
-        );
-        assert_eq!(
-            store.enforce_account_limits(&policy(), now).unwrap(),
-            LimitsOutcome::default()
-        );
-        read(
-            &store,
-            "agent/alder.worker",
-            Some("claude/example"),
-            95.0,
-            now,
-        );
-        assert_eq!(
-            store.account_limits_check(now, HOUR as u64).unwrap().status,
-            "pass"
-        );
-        let stale = now + HOUR + 1;
-        assert!(
-            store
-                .account_limits_check(stale, HOUR as u64)
-                .unwrap()
-                .message
-                .contains("is stale")
-        );
-        assert_eq!(
-            store.enforce_account_limits(&policy(), stale).unwrap(),
-            LimitsOutcome::default()
-        );
-        assert!(live(&store, "agent/alder.worker"));
-        let reset = 1_800_000_000_001;
-        assert!(
-            store
-                .account_limits_check(reset, HOUR as u64)
-                .unwrap()
-                .message
-                .contains("since the reset")
-        );
-        assert_eq!(
-            store.enforce_account_limits(&policy(), reset).unwrap(),
-            LimitsOutcome::default()
-        );
-    }
-
-    #[test]
-    fn a_declared_account_with_no_quota_source_is_reported() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let check = store.account_limits_check(now_ms(), HOUR as u64).unwrap();
-        assert_eq!(check.status, "warn");
-        assert!(check.message.contains("account/ada/one: no weekly reading"));
-        assert_eq!(
-            store.enforce_account_limits(&policy(), now_ms()).unwrap(),
-            LimitsOutcome::default()
-        );
-    }
-
-    #[test]
-    fn a_single_account_rebinding_ignores_the_previous_accounts_limits() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        let seat = "agent/alder.single";
-        read_account(&store, seat, "ada/one", "codex/aaaa", 97.0, now);
-        let intent = crate::graph::parse_internal_intent(
-            "version 2\nagent \"single\" { workspace \"/tmp\"; harness \"codex\" { account \"ada/two\"; }; }\n",
-            "alder",
-        ).unwrap();
-        store.apply_internal(&intent, "rebind-single").unwrap();
-        assert_eq!(
-            store.enforce_account_limits(&policy(), now).unwrap(),
-            LimitsOutcome::default()
-        );
-        assert!(live(&store, seat));
-    }
-
-    #[test]
-    fn an_account_with_a_reset_weekly_window_does_not_stop_its_seats() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = 1_800_000_000_001;
-        read_account(
-            &store,
-            "agent/alder.pooled",
-            "ada/one",
-            "codex/aaaa",
-            97.0,
-            now - 2,
-        );
-        assert_eq!(
-            store.enforce_account_limits(&policy(), now).unwrap(),
-            LimitsOutcome::default()
-        );
-    }
-
-    #[test]
-    fn a_pooled_seat_at_its_limit_restarts_on_another_account_and_a_single_account_seat_stops() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let [pooled, single] = ["agent/alder.pooled", "agent/alder.single"];
-        let now = now_ms();
-        read_account(&store, pooled, "ada/one", "codex/aaaa", 96.0, now - 60_000);
-        read_account(&store, single, "ada/one", "codex/aaaa", 96.0, now - 90_000);
-        // Another seat on the other account shows what it has left.
-        read_account(
-            &store,
-            "agent/alder.other",
-            "ada/two",
-            "codex/bbbb",
-            40.0,
-            now - 30_000,
-        );
-
-        let outcome = store.enforce_account_limits(&policy(), now).unwrap();
-
-        assert_eq!(
-            outcome.switched,
-            [(pooled.to_owned(), "ada/two".to_owned())]
-        );
-        assert_eq!(
-            outcome.stopped,
-            [single],
-            "a single account has nowhere to go"
-        );
-        assert!(live(&store, pooled) && !live(&store, single));
-        assert_eq!(
-            store.seat_account_choice(pooled).unwrap().as_deref(),
-            Some("ada/two"),
-            "the restart starts on the new account"
-        );
-        let restart = store
-            .claims_for(pooled, Some("runtime.action.requested"))
-            .unwrap()
-            .pop()
-            .expect("the seat was asked to restart");
-        assert_eq!(restart.actor.as_deref(), Some(LIMITS_ACTOR));
-        assert_eq!(restart.body["fields"]["action"], "restart");
-        let notification = store
-            .claims_for(&outcome.notified[0], Some("message.sent"))
-            .unwrap()
-            .pop()
-            .expect("operations is notified about the stopped seat");
-        assert_eq!(notification.body["fields"]["to"], "agent/alder.operations");
-        assert!(
-            notification.body["fields"]["title"]
-                .as_str()
-                .unwrap()
-                .contains("1 affected seat")
-        );
-
-        // The restarted seat has not reported yet, so the old reading still names the account.
-        // It does not move twice.
-        let again = store
-            .enforce_account_limits(&policy(), now + 60_000)
-            .unwrap();
-        assert!(
-            again.switched.is_empty() && again.stopped.is_empty(),
-            "{again:?}"
-        );
-    }
-
-    #[test]
-    fn a_pooled_seat_stops_when_every_account_in_its_pool_is_at_its_limit() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        read_account(
-            &store,
-            "agent/alder.pooled",
-            "ada/one",
-            "codex/aaaa",
-            97.0,
-            now - 60_000,
-        );
-        read_account(
-            &store,
-            "agent/alder.other",
-            "ada/two",
-            "codex/bbbb",
-            99.0,
-            now - 30_000,
-        );
-
-        let outcome = store.enforce_account_limits(&policy(), now).unwrap();
-
-        assert!(outcome.switched.is_empty());
-        let mut stopped = outcome.stopped.clone();
-        stopped.sort();
-        assert_eq!(
-            stopped,
-            ["agent/alder.other", "agent/alder.pooled"],
-            "with nowhere to move, each pooled seat stops like a single-account seat"
-        );
-    }
-
-    #[test]
-    fn an_account_whose_weekly_window_has_reset_counts_as_unused_for_the_pool() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        read_account(
-            &store,
-            "agent/alder.pooled",
-            "ada/one",
-            "codex/aaaa",
-            97.0,
-            now - 60_000,
-        );
-        // A stale, high reading of the other account whose window ended before `now`.
-        store
-            .append_claim(&ClaimInput {
-                subject: "agent/alder.other".into(),
-                kind: "harness.limits".into(),
-                actor: Some("agent/alder.other".into()),
-                fields: BTreeMap::from([
-                    ("driver".into(), json!("codex")),
-                    ("account".into(), json!("codex/bbbb")),
-                    ("account_ref".into(), json!("ada/two")),
-                    ("weekly_percent".into(), json!(99.0)),
-                    (
-                        "weekly_resets_at_unix_ms".into(),
-                        json!((now - 1000) as u64),
-                    ),
-                    ("measured_at_unix_ms".into(), json!((now - 2 * HOUR) as u64)),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
-
-        let outcome = store.enforce_account_limits(&policy(), now).unwrap();
-
-        assert_eq!(
-            outcome.switched,
-            [("agent/alder.pooled".to_owned(), "ada/two".to_owned())]
-        );
-    }
-
-    #[test]
-    fn a_reading_below_the_limit_or_too_old_stops_nothing() {
-        let store = Store::open_memory("alder").unwrap();
-        declare(&store, "agent/alder.seat", "alder");
-        let now = now_ms();
-        let policy = LimitsPolicy {
-            stop_at_weekly_percent: 95,
-            keep: BTreeSet::new(),
-            exempt_accounts: BTreeSet::new(),
-            exempt_harnesses: BTreeSet::new(),
-            notify: "agent/alder.operations".into(),
-            fresh_ms: HOUR as u64,
-        };
-        read(&store, "agent/alder.seat", Some("codex/bbbb"), 94.9, now);
-        assert_eq!(
-            store.enforce_account_limits(&policy, now).unwrap(),
-            LimitsOutcome::default()
-        );
-        read(
-            &store,
-            "agent/alder.seat",
-            Some("codex/bbbb"),
-            99.0,
-            now - 2 * HOUR,
-        );
-        assert_eq!(
-            store.enforce_account_limits(&policy, now).unwrap(),
-            LimitsOutcome::default()
-        );
-        assert!(live(&store, "agent/alder.seat"));
-    }
-
-    #[test]
-    fn a_seat_started_later_on_an_exempt_account_is_never_stopped() {
-        let store = Store::open_memory("alder").unwrap();
-        let now = now_ms();
-        let first = "agent/alder.first";
-        let later = "agent/alder.later";
-        declare(&store, first, "alder");
-        read(&store, first, Some("claude/aaaa"), 99.0, now);
-        let exempt = LimitsPolicy {
-            exempt_accounts: BTreeSet::from(["claude/aaaa".to_owned()]),
-            ..policy()
-        };
-        assert_eq!(
-            store.enforce_account_limits(&exempt, now).unwrap(),
-            LimitsOutcome::default()
-        );
-        // A seat started after the account passed its threshold, and after the config named it.
-        declare(&store, later, "alder");
-        read(&store, later, Some("claude/aaaa"), 99.0, now + 1);
-        assert_eq!(
-            store.enforce_account_limits(&exempt, now + 1).unwrap(),
-            LimitsOutcome::default()
-        );
-        assert!(live(&store, first) && live(&store, later));
-        // The same readings stop both once the account is no longer exempt, so a reload applies.
-        let outcome = store.enforce_account_limits(&policy(), now + 2).unwrap();
-        assert_eq!(outcome.stopped, [first, later]);
-    }
-
-    #[test]
-    fn declared_seats_names_the_kept_entries_that_still_exist() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let kept = ["agent/alder.pooled".to_owned(), "agent/alder.retired".to_owned()];
-        assert_eq!(
-            store.declared_seats(&kept).unwrap(),
-            BTreeSet::from(["agent/alder.pooled".to_owned()])
-        );
-    }
-
-    #[test]
-    fn a_kept_seat_is_never_stopped_or_switched_whatever_account_it_is_bound_to() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let [pooled, single, unbound] = [
-            "agent/alder.pooled",
-            "agent/alder.single",
-            "agent/alder.coordinator",
-        ];
-        declare(&store, unbound, "alder");
-        let now = now_ms();
-        // One account of the pool is past the stop and the other has room, so an unkept pooled
-        // seat would move; a single-account seat would stop; an unbound seat would stop.
-        read_account(&store, pooled, "ada/one", "codex/aaaa", 100.0, now - 60_000);
-        read_account(&store, single, "ada/one", "codex/aaaa", 100.0, now - 90_000);
-        read(&store, unbound, Some("claude/cccc"), 100.0, now - 30_000);
-        read_account(
-            &store,
-            "agent/alder.other",
-            "ada/two",
-            "codex/bbbb",
-            10.0,
-            now - 30_000,
-        );
+    fn kept_seats_never_stop_or_switch_and_exemptions_apply_to_later_seats() {
+        let store = pooled_store();
+        observe(&store, vec![
+            quota("ada/one", "weekly", Some(100.0), NOW),
+            quota("ada/two", "weekly", Some(10.0), NOW),
+        ]);
         let kept = LimitsPolicy {
-            keep: BTreeSet::from([pooled.to_owned(), single.to_owned(), unbound.to_owned()]),
+            keep: BTreeSet::from([SINGLE.into(), POOLED.into()]),
             ..policy()
         };
-
-        for later in [0, 60_000, 3_600_000 / 2] {
-            let outcome = store.enforce_account_limits(&kept, now + later).unwrap();
-            assert!(outcome.stopped.is_empty(), "{outcome:?}");
-            assert!(outcome.switched.is_empty(), "{outcome:?}");
-            assert!(live(&store, pooled) && live(&store, single) && live(&store, unbound));
-        }
-        assert_eq!(
-            store.seat_account_choice(pooled).unwrap(),
-            None,
-            "the kept pooled seat's account is not changed"
-        );
-        assert!(
-            store
-                .claims_for(pooled, Some("runtime.action.requested"))
-                .unwrap()
-                .is_empty(),
-            "no restart was asked of a kept seat"
-        );
-
-        // The same readings act on all three once none is kept, so only `keep` held them.
-        let outcome = store.enforce_account_limits(&policy(), now).unwrap();
-        assert_eq!(outcome.stopped, [unbound, single], "{outcome:?}");
-        assert_eq!(
-            outcome.switched,
-            [(pooled.to_owned(), "ada/two".to_owned())]
-        );
+        let outcome = store.enforce_account_limits(&kept, NOW).unwrap();
+        assert!(outcome.stopped.is_empty() && outcome.switched.is_empty());
+        assert!(live(&store, SINGLE) && live(&store, POOLED));
+        assert_eq!(store.seat_account_choice(POOLED).unwrap().as_deref(), Some("ada/one"));
+        assert!(store.claims_for(POOLED, Some("runtime.action.requested")).unwrap().is_empty());
+        let exempt = LimitsPolicy {
+            exempt_accounts: BTreeSet::from(["ada/one".into()]),
+            ..policy()
+        };
+        assert_eq!(store.enforce_account_limits(&exempt, NOW).unwrap(), LimitsOutcome::default());
+        declare_seat(&store, "later", "account \"ada/one\"", "alder");
+        assert_eq!(store.enforce_account_limits(&exempt, NOW + 1).unwrap(), LimitsOutcome::default());
+        assert!(live(&store, "agent/alder.later"));
+        let outcome = store.enforce_account_limits(&policy(), NOW + 2).unwrap();
+        assert_eq!(outcome.stopped, ["agent/alder.later", SINGLE]);
+        assert_eq!(outcome.switched, [(POOLED.to_owned(), "ada/two".to_owned())]);
     }
 
     #[test]
-    fn exemptions_match_a_label_a_declared_name_or_a_harness_and_nothing_else() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        read_account(&store, "agent/alder.single", "ada/one", "codex/one", 99.0, now);
+    fn exemptions_match_a_label_declared_name_or_driver_and_nothing_else() {
+        let store = single_store();
+        observe(&store, vec![quota("ada/one", "weekly", Some(99.0), NOW)]);
         let limit = store.account_limits().unwrap().remove(0);
         let with = |accounts: &[&str], harnesses: &[&str]| LimitsPolicy {
             exempt_accounts: accounts.iter().map(|name| (*name).to_owned()).collect(),
@@ -1752,67 +935,59 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
             ..policy()
         };
         assert!(!with(&[], &[]).exempts(&limit));
-        assert!(with(&["ada/one"], &[]).exempts(&limit), "the declared name");
+        assert!(with(&["ada/one"], &[]).exempts(&limit));
         assert!(with(&["account/ada/one"], &[]).exempts(&limit));
-        assert!(with(&[limit.account.as_str()], &[]).exempts(&limit), "the label");
-        assert!(with(&[], &["codex"]).exempts(&limit), "the harness");
+        assert!(with(&[limit.account.as_str()], &[]).exempts(&limit));
+        assert!(with(&[], &["codex"]).exempts(&limit));
         assert!(!with(&["ada/two"], &["claude"]).exempts(&limit));
-    }
-
-    #[test]
-    fn a_relogin_that_changes_the_provider_identity_leaves_one_declared_account_with_the_live_reading() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        let sixty_hours = 60 * HOUR;
-        // Sixty hours ago the login was seen twice: by a bound seat, and by a seat that sets the
-        // login directory itself and so reported under the provider's identity.
-        read_account(&store, "agent/alder.pooled", "ada/one", "codex/ignored", 84.0, now - sixty_hours);
-        read_unnamed(&store, "agent/alder.walker", "codex/before-login", 84.0, now - sixty_hours);
-        // The login was renewed. The walker now runs on the declared account and says so,
-        // and the live reading is higher.
-        read_account(&store, "agent/alder.walker", "ada/one", "codex/ignored", 94.0, now - 30_000);
-        read_account(&store, "agent/alder.other", "ada/two", "codex/ignored", 90.0, now - 30_000);
-
-        let limits = store.account_limits().unwrap();
-        let mut rows = limits
-            .iter()
-            .map(|limit| (limit.account_ref.as_deref(), limit.weekly_percent))
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(
-            rows,
-            [(Some("ada/one"), Some(94.0)), (Some("ada/two"), Some(90.0))],
-            "{limits:?}"
+            store.declared_seats(&[SINGLE.into(), "agent/alder.retired".into()]).unwrap(),
+            BTreeSet::from([SINGLE.to_owned()])
         );
-        assert!(
-            limits.iter().all(|limit| limit.account != "codex/before-login"),
-            "the old identity is the declared account, not a second row"
-        );
-        let one = limits.iter().find(|limit| limit.account_ref.as_deref() == Some("ada/one")).unwrap();
-        assert!(one.identified && one.measured_at_unix_ms > (now - HOUR) as u64);
-        assert!(one.seats.contains(&"agent/alder.walker".to_owned()));
-
-        // The pool picks by the live reading: ada/one at 94 is worse than ada/two at 90, where the
-        // sixty-hour-old 84 would have kept choosing ada/one.
-        let binding = store.seat_binding("agent/alder.other").unwrap().unwrap();
-        let chosen = store
-            .account_for_start("agent/alder.other", &binding, "alder", now, true)
-            .unwrap();
-        assert_eq!(chosen.account.name, "ada/two");
     }
 
     #[test]
-    fn identity_readings_with_no_seat_in_common_are_never_attributed_to_a_declared_account() {
-        let store = Store::open_memory("alder").unwrap();
-        declare_accounts(&store);
-        let now = now_ms();
-        read_account(&store, "agent/alder.pooled", "ada/one", "codex/ignored", 40.0, now - 30_000);
-        read_unnamed(&store, "agent/alder.stranger", "codex/someone-else", 70.0, now - 30_000);
-
-        let limits = store.account_limits().unwrap();
-
-        assert_eq!(limits.len(), 2, "{limits:?}");
-        assert!(limits.iter().any(|limit| limit.account == "codex/someone-else" && limit.account_ref.is_none()));
+    fn catch_up_is_resumable_and_no_policy_decides_from_a_partial_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        {
+            let store = Store::open(&path, "alder").unwrap();
+            declare_accounts(&store);
+            declare_seat(&store, "single", "account \"ada/one\"", "alder");
+            declare_seat(&store, "pooled", "account-pool \"person/ada\"", "alder");
+            store.choose_seat_account(POOLED, "ada/one", NOW).unwrap();
+            observe(&store, vec![quota("ada/one", "weekly", Some(99.0), NOW)]);
+            observe(&store, vec![quota("ada/two", "weekly", Some(20.0), NOW)]);
+        }
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute("DELETE FROM observed_account_limits_v4", []).unwrap();
+            connection.execute(
+                "DELETE FROM meta WHERE key IN (?1,?2)",
+                params![LIMITS_READY, "observed_account_limits_v4_through_index"],
+            ).unwrap();
+        }
+        let store = Store::open(&path, "alder").unwrap();
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+        assert!(!store.account_limits_ready().unwrap());
+        assert!(store.account_limits().unwrap().is_empty());
+        assert_eq!(store.enforce_account_limits(&policy(), NOW).unwrap(), LimitsOutcome::default());
+        assert!(store.account_limits_check(NOW, HOUR as u64).unwrap().message.contains("catching up"));
+        let binding = store.seat_binding(POOLED).unwrap().unwrap();
+        assert!(store.account_for_start(POOLED, &binding, "alder", NOW, true).unwrap_err().contains("catching up"));
+        assert!(store.pool_alternatives(&binding, "alder", "ada/one", 95.0, NOW).unwrap().is_empty());
+        assert!(store.catch_up_account_limits(1).unwrap());
+        assert!(!store.account_limits_ready().unwrap());
+        assert_eq!(store.enforce_account_limits(&policy(), NOW).unwrap(), LimitsOutcome::default());
+        drop(store);
+        let store = Store::open(&path, "alder").unwrap();
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+        assert!(!store.account_limits_ready().unwrap());
+        while store.catch_up_account_limits(1).unwrap() {}
+        assert!(store.account_limits_ready().unwrap());
+        assert_eq!(store.account_limits().unwrap().len(), 2);
+        let outcome = store.enforce_account_limits(&policy(), NOW).unwrap();
+        assert_eq!(outcome.stopped, [SINGLE]);
+        assert_eq!(outcome.switched, [(POOLED.to_owned(), "ada/two".to_owned())]);
     }
 }

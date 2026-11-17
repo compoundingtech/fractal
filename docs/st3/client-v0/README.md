@@ -1173,28 +1173,26 @@ neither could price) and optional `unpriced_responses` (responses without any pr
 their total tokens are absent). Either nonzero unpriced counter means the known cost is only a
 lower bound, never a known free bill. Reported zero cost remains a known price. An identity Fractal does not know,
 such as the mission run of a standing seat, is absent from the row. A period whose start is after
-its end is `validation-failed`. `limits` lists each account's selected limits reading: `account`
-(a label such as `claude/<digest>`, or `DRIVER/unknown`), `driver`, optional `account_ref`,
-`identified` (optional for older servers), and `plan`,
-`five_hour_percent`, `weekly_percent` and their `*_resets_at_unix_ms`, when and by which seat and
-host it was measured, and the seats whose newest reading names the account. A harness that does
-not report a value leaves it out. Selection uses quota observation time, independently of
-context refresh and publication time. Within an hour of the account's freshest observation,
-the highest weekly reading in the latest reported reset window wins; ties use source time
-and seat identity. A new reset window can lower the reading, and an older high reading
-outside the hour cannot override it. This same selection serves `fractal usage`, terminal UI, iOS,
-account pools and the limits policy. The policy tests freshness against the selected source
-time, so a recent low publication cannot freshen an old high observation. Claim kinds and
-client fields remain compatible with older clients.
-`identified` is true for a provider identity or declared account, false when both are missing;
-it does not describe quota freshness. Identity-less history with no active reporting seat is
-hidden once identified evidence exists for that driver. Active unknown evidence and every
-identified account, including exhausted accounts with no seats, remain visible. Bound readings
-use the same stable declared label as publishers, including older generic provider labels.
-Partial reports without a weekly percentage do not replace or refresh a prior weekly source.
-The durable reading survives member restarts. Consumers must check its original measurement time
-and reset window; missing or stale evidence is unknown, never zero. `fractal doctor` reports missing,
-stale, future-dated or already-reset weekly evidence for active accounts as `account-limits`.
+its end is `validation-failed`. `limits` lists accounts with quota from configured
+`omp-usage` writers: `account`, `driver`, optional `account_ref`, `identified`, `plan`,
+measurement provenance and currently bound `seats`. Each account has `windows`, not
+parallel weekly/five-hour percentage fields. A window carries `window` (for example
+`weekly` or `5h`), optional `used_percent` and `resets_at_unix_ms`,
+`measured_at_unix_ms`, `coverage`, `source` and `host`.
+
+Only `usage.limits.observed` produces quota. The newest provider measurement wins for
+each account/window independently across configured writers, with canonical claim order
+breaking ties. `reported` carries a percentage, `unreported` is unknown rather than zero,
+and `unsupported` is explicit. A partial batch does not replace or refresh omitted windows.
+The same selected windows serve usage panels, SLO budgets, account pools and the limits
+policy. Every member supplies its `[usage_limits] writers` configuration; absent or empty
+configuration contributes no quota, without discarding replicated observations.
+
+The durable reading survives member restarts. Consumers check each window's original
+measurement time and reset: weekly policy evidence must be reported, fresh and have a
+future reset, otherwise it is unknown. `fractal doctor` reports unavailable weekly evidence
+for active accounts as `account-limits`. Seat membership follows account bindings;
+the producer does not become a consuming seat merely by observing an account.
 See [account limits](../accounts.md#at-the-limit) for the policy and external backstop behavior.
 Rows also carry optional `native_session_id` (the provider's session UUID, fenced by incarnation)
 and `pricing_provenance`. The legacy `pricing` label remains readable. Each provenance entry

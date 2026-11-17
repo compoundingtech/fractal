@@ -197,16 +197,25 @@ async fn admission_override_preserves_bound_own_and_unbound_person_requests() {
 async fn slo_budgets_forecast_their_use_at_the_reset_from_the_local_history() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
+    state.store.set_usage_limits_writers(vec!["agent/example.live".into()]).unwrap();
     let app = router(state.clone());
     let now = client_now_ms() as u64;
     let (status, body) = json_request(
         app.clone(),
         "/v1/claims",
-        json!({"subject": "agent/example.live", "kind": "harness.limits", "actor": "agent/example.live",
-            "fields": {"driver": "claude", "account_ref": "ada/claude-1", "weekly_percent": 30.0,
-                "five_hour_percent": 40.0, "measured_at_unix_ms": now - 10_000,
-                "five_hour_resets_at_unix_ms": now + 3 * 3_600_000,
-                "weekly_resets_at_unix_ms": now + 3 * 86_400_000},
+        json!({"subject": "agent/example.live", "kind": "usage.limits.observed", "actor": "agent/example.live",
+            "fields": {"readings": [
+                {"account": "claude/ada-1", "account_ref": "ada/claude-1", "provider": "anthropic",
+                    "window": "weekly", "used_percent": 30.0,
+                    "resets_at": chrono::DateTime::from_timestamp_millis((now + 3 * 86_400_000) as i64).unwrap().to_rfc3339(),
+                    "measured_at": chrono::DateTime::from_timestamp_millis((now - 10_000) as i64).unwrap().to_rfc3339(),
+                    "coverage": "reported", "source": "omp-usage", "host": "test-node"},
+                {"account": "claude/ada-1", "account_ref": "ada/claude-1", "provider": "anthropic",
+                    "window": "5h", "used_percent": 40.0,
+                    "resets_at": chrono::DateTime::from_timestamp_millis((now + 3 * 3_600_000) as i64).unwrap().to_rfc3339(),
+                    "measured_at": chrono::DateTime::from_timestamp_millis((now - 10_000) as i64).unwrap().to_rfc3339(),
+                    "coverage": "reported", "source": "omp-usage", "host": "test-node"}],
+                "credit_readings": []},
             "evidence": [], "idempotency_key": "slo-forecast-limits"}),
     )
     .await;
@@ -259,14 +268,23 @@ async fn slo_points_to_the_otel_ui_only_when_one_is_configured() {
 async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
+    state.store.set_usage_limits_writers(vec!["agent/example.live".into()]).unwrap();
     let app = router(state.clone());
     let now = client_now_ms() as u64;
     let (status, body) = json_request(
         app.clone(),
         "/v1/claims",
-        json!({"subject": "agent/example.live", "kind": "harness.limits", "actor": "agent/example.live",
-            "fields": {"driver": "claude", "account_ref": "ada/claude-1", "weekly_percent": 30.0,
-                "five_hour_percent": 10.0, "measured_at_unix_ms": now - 10_000},
+        json!({"subject": "agent/example.live", "kind": "usage.limits.observed", "actor": "agent/example.live",
+            "fields": {"readings": [
+                {"account": "claude/ada-1", "account_ref": "ada/claude-1", "provider": "anthropic",
+                    "window": "weekly", "used_percent": 30.0, "resets_at": null,
+                    "measured_at": chrono::DateTime::from_timestamp_millis((now - 10_000) as i64).unwrap().to_rfc3339(),
+                    "coverage": "reported", "source": "omp-usage", "host": "test-node"},
+                {"account": "claude/ada-1", "account_ref": "ada/claude-1", "provider": "anthropic",
+                    "window": "5h", "used_percent": 10.0, "resets_at": null,
+                    "measured_at": chrono::DateTime::from_timestamp_millis((now - 10_000) as i64).unwrap().to_rfc3339(),
+                    "coverage": "reported", "source": "omp-usage", "host": "test-node"}],
+                "credit_readings": []},
             "evidence": [], "idempotency_key": "slo-limits"}),
     )
     .await;

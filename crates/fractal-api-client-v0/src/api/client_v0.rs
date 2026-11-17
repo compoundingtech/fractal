@@ -24805,13 +24805,14 @@ mission "example/zero-run" state="ready" {
     }
 
     /// A member one build behind still routes to a terminal on a newer member whose seat reports
-    /// a claim kind it does not know yet (`harness.limits`): the valid runtime observation
+    /// a claim kind it does not know yet (`usage.limits.observed`): the valid runtime observation
     /// decides, and the unknown claim waits for an upgrade.
     #[test]
-    fn an_older_member_routes_to_a_terminal_despite_an_unknown_harness_claim() {
+    fn an_older_member_routes_to_a_terminal_despite_an_unknown_usage_claim() {
         let owner_root = tempfile::tempdir().unwrap();
         let follower_root = tempfile::tempdir().unwrap();
         let owner = test_state_named(owner_root.path(), "owner-node");
+        owner.store.set_usage_limits_writers(vec!["agent/fleet-terminal".into()]).unwrap();
         let mut follower = test_state_named(follower_root.path(), "follower-node");
         let secret = follower_root.path().join("fleet-secret");
         std::fs::write(&secret, [7_u8; 32]).unwrap();
@@ -24828,7 +24829,7 @@ mission "example/zero-run" state="ready" {
         })
         .unwrap();
         let mut registry = fractal_schema::registry().clone();
-        registry.claims.remove("harness.limits").unwrap();
+        registry.claims.remove("usage.limits.observed").unwrap();
         follower.store.set_claim_registry(registry);
         let subject = "agent/fleet-terminal";
         let claim = |kind: &str, fields: Value, key: &str| ClaimInput {
@@ -24852,9 +24853,12 @@ mission "example/zero-run" state="ready" {
         owner
             .store
             .append_claim(&claim(
-                "harness.limits",
-                json!({"driver": "claude", "incarnation_id": "same-runtime-id:i1",
-                       "weekly_percent": 40.0, "measured_at_unix_ms": 1_790_000_000_000_u64}),
+                "usage.limits.observed",
+                json!({"readings": [{"account": "claude/example", "account_ref": "ada/claude",
+                    "provider": "anthropic", "window": "weekly", "used_percent": 40.0,
+                    "resets_at": null, "measured_at": "2026-09-22T12:26:40Z",
+                    "coverage": "reported", "source": "omp-usage", "host": "owner-node"}],
+                    "credit_readings": []}),
                 "owner-limits",
             ))
             .unwrap();

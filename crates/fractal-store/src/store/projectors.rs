@@ -111,7 +111,7 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "limits",
-        takes: Takes::Kinds(&["harness.limits", "usage.limits.observed"]),
+        takes: Takes::Kinds(&["usage.limits.observed"]),
         project: |transaction, _| limits::flush_limits(transaction).map(drop),
     },
     AppendProjector {

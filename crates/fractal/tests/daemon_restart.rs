@@ -1659,7 +1659,7 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribution() {
+async fn native_outbox_drain_preserves_usage_attribution_alongside_omp_usage_limits() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -1690,7 +1690,6 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
         "schema":"st.harness-context.v1", "agent":"drain-accounts", "harness":"omp",
         "incarnation":"account-producer", "observedAtMs":now, "writtenAtMs":now,
         "sessionTotalTokens":123, "account":"omp/provider-account",
-        "rateLimits":{"fiveHour":37,"sevenDay":41,"observedAtMs":now - 120_000},
     })).unwrap()).unwrap();
     let mut timeline = fractal_drivers::harness_timeline::Writer::new(&dir, "omp", "account-producer");
     timeline.append("account-response", fractal_drivers::harness_timeline::Role::System,
@@ -1698,14 +1697,33 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
             "semantics":"response", "model":"example", "account":"omp/provider-account",
             "input_tokens":10,"output_tokens":2,"total_tokens":12,
         }), true).unwrap();
-    wait_until("limits and usage publish through the native drain", Duration::from_secs(10), || {
-        !daemon.store.observations_for(seat, "harness.limits").unwrap_or_default().is_empty()
+    let writer = "agent/omp-usage";
+    daemon.store.set_usage_limits_writers(vec![writer.into()]).unwrap();
+    let measured_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis((now - 120_000) as i64)
+        .unwrap().to_rfc3339();
+    let resets_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis((now + 86_400_000) as i64)
+        .unwrap().to_rfc3339();
+    daemon.store.append_claim(&ClaimInput {
+        subject: writer.into(), kind: "usage.limits.observed".into(), actor: Some(writer.into()),
+        fields: serde_json::from_value(json!({
+            "readings": [{
+                "account": "omp/provider-account", "account_ref": "ada/omp",
+                "provider": "anthropic", "window": "5h", "used_percent": 37.0,
+                "resets_at": resets_at, "measured_at": measured_at,
+                "coverage": "reported", "source": "omp-usage", "host": "restart-node"
+            }],
+            "credit_readings": []
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    wait_until("native usage publishes alongside omp-usage limits", Duration::from_secs(10), || {
+        !daemon.store.observations_for(writer, "usage.limits.observed").unwrap_or_default().is_empty()
             && daemon.store.observations_for(seat, "harness.usage").unwrap_or_default().iter()
                 .any(|claim| claim.body.pointer("/fields/semantics").and_then(Value::as_str)
                     == Some("session_cumulative"))
             && !daemon.store.observations_for(seat, "harness.timeline").unwrap_or_default().is_empty()
     }).await;
-    let limits = daemon.store.observations_for(seat, "harness.limits").unwrap().pop().unwrap();
+    let limits = daemon.store.observations_for(writer, "usage.limits.observed").unwrap().pop().unwrap();
     let cumulative = daemon.store.observations_for(seat, "harness.usage").unwrap().into_iter()
         .find(|claim| claim.body.pointer("/fields/semantics").and_then(Value::as_str)
             == Some("session_cumulative")).unwrap();
@@ -1714,10 +1732,10 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
     let account = captured.as_ref().map(|account| {
         fractal_drivers::account::account_label("omp", &format!("declared:{account}"))
     }).unwrap_or_else(|| "omp/provider-account".into());
-    assert_eq!(limits.body.pointer("/fields/account").and_then(Value::as_str), Some(account.as_str()));
-    assert_eq!(limits.body.pointer("/fields/account_ref").and_then(Value::as_str), captured.as_deref());
-    assert_eq!(limits.body.pointer("/fields/five_hour_percent").and_then(Value::as_f64), Some(37.0));
-    assert_eq!(limits.body.pointer("/fields/measured_at_unix_ms").and_then(Value::as_u64), Some(now - 120_000));
+    assert_eq!(limits.body.pointer("/fields/readings/0/account").and_then(Value::as_str), Some("omp/provider-account"));
+    assert_eq!(limits.body.pointer("/fields/readings/0/account_ref").and_then(Value::as_str), Some("ada/omp"));
+    assert_eq!(limits.body.pointer("/fields/readings/0/used_percent").and_then(Value::as_f64), Some(37.0));
+    assert_eq!(limits.body.pointer("/fields/readings/0/measured_at").and_then(Value::as_str), Some(measured_at.as_str()));
     assert_eq!(cumulative.body.pointer("/fields/total_tokens").and_then(Value::as_u64), Some(123));
     assert_eq!(cumulative.body.pointer("/fields/account").and_then(Value::as_str),
         captured.as_ref().map(|_| account.as_str()));

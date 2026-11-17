@@ -142,13 +142,13 @@ fn conflict_lookup_seeks_operations_without_scanning_subject_history() {
 #[test]
 fn replica_records_bear_authority_only_in_the_authority_families() {
     for (state, kind, bears) in [
-        ("unknown", Some("harness.limits"), false),
+        ("unknown", Some("usage.limits.observed"), false),
         ("unknown", Some("message.tagged"), false),
         ("unknown", Some("runtime.lease"), true),
         ("unknown", Some("intent.paused"), true),
         ("unknown", Some("transport.future-observed"), true),
         ("unknown", None, true),
-        ("invalid", Some("harness.limits"), true),
+        ("invalid", Some("usage.limits.observed"), true),
     ] {
         assert_eq!(
             replica_record_bears_authority(state, kind),

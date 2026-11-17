@@ -10,8 +10,12 @@ const reading = {
   account: 'claude/account-observation', account_ref: 'account/ada/claude-1', driver: 'claude',
   host: 'member-a', measured_by: 'agent/ada/test', measured_at_unix_ms: NOW - 1000,
   seats: ['agent/ada/test'], identified: true,
-  five_hour_percent: 0, weekly_percent: 97,
-  weekly_resets_at_unix_ms: NOW + 1000,
+  windows: [
+    { window: 'weekly', used_percent: 97, resets_at_unix_ms: NOW + 1000,
+      measured_at_unix_ms: NOW - 1000, coverage: 'reported', source: 'omp-usage', host: 'member-a' },
+    { window: '5h', used_percent: 0, resets_at_unix_ms: null,
+      measured_at_unix_ms: NOW - 1000, coverage: 'reported', source: 'omp-usage', host: 'member-a' },
+  ],
 }
 const envelope = (limits: unknown = [reading]) => ({
   api_version: 'st3.client.v0', value: { since_ms: NOW - 86400000, until_ms: NOW, rows: [],
@@ -92,9 +96,10 @@ describe('native usage.period quota presentation', () => {
       usage: { unit: 'usd', used: 154, limit: 200 } })
     expect(decodeQuota(native.value, { nativeProjection: true })._tag).toBe('ok')
   })
-  it('leaves missing percentages unreported rather than zero', () => {
-    const { five_hour_percent: _fiveHour, weekly_percent: _weekly, ...withoutPercentages } = reading
-    const row = account(envelope([withoutPercentages]))
+  it('leaves unreported and unsupported coverage unknown rather than zero', () => {
+    const row = account(envelope([{ ...reading, windows: reading.windows.map((window, i) => ({
+      ...window, used_percent: null, coverage: i === 0 ? 'unreported' : 'unsupported',
+    })) }]))
     expect(row.limits.map(cellState)).toEqual([{ _tag: 'unreported' }, { _tag: 'unreported' }])
   })
   it('distinguishes a missing limits capability from an explicitly empty observation list', () => {
@@ -104,14 +109,23 @@ describe('native usage.period quota presentation', () => {
   })
   it('marks stale and future-dated source values unknown without changing their source time', () => {
     for (const measured of [NOW - NATIVE_LIMIT_FRESHNESS_MS - 1, NOW + 1, NOW + 60001]) {
-      const row = account(envelope([{ ...reading, measured_at_unix_ms: measured }]))
+      const row = account(envelope([{ ...reading, measured_at_unix_ms: measured,
+        windows: reading.windows.map((window) => ({ ...window, measured_at_unix_ms: measured })) }]))
       expect(row.limits.map(cellState)).toEqual([{ _tag: 'unknown' }, { _tag: 'unknown' }])
       expect(row.retained).toBe(true)
       expect(row.valueObservedAt).toBe(new Date(measured).toISOString())
     }
   })
   it('treats an already reset weekly window as unknown independently of the 5h value', () => {
-    const row = account(envelope([{ ...reading, weekly_resets_at_unix_ms: NOW }]))
+    const row = account(envelope([{ ...reading, windows: reading.windows.map((window) =>
+      window.window === 'weekly' ? { ...window, resets_at_unix_ms: NOW } : window) }]))
+    expect(row.limits.map(cellState)).toEqual([{ _tag: 'unknown' }, { _tag: 'fraction', percent: 0, exhausted: false }])
+  })
+  it('uses each window clock instead of the latest account measurement', () => {
+    const row = account(envelope([{ ...reading, windows: reading.windows.map((window) =>
+      window.window === 'weekly'
+        ? { ...window, measured_at_unix_ms: NOW - NATIVE_LIMIT_FRESHNESS_MS - 1 }
+        : window) }]))
     expect(row.limits.map(cellState)).toEqual([{ _tag: 'unknown' }, { _tag: 'fraction', percent: 0, exhausted: false }])
   })
   it('rejects malformed native envelopes and unrepresentable dates', () => {

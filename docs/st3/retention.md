@@ -16,9 +16,9 @@ and the checkpoint waits for it, so no member drops a claim its peers keep. See
 
 | Class | What it holds | How it is kept |
 |---|---|---|
-| `current` | agent status, harness state, limits readings, leases | the newest claim of each slot; older ones go at the next checkpoint |
+| `current` | agent status, harness state, leases | the newest claim of each slot; older ones go at the next checkpoint |
 | `transition` | status changes and deliveries | for its `window` (seven days), then dropped |
-| `durable` | missions, decisions, messages, reviews, evidence, deploy receipts | forever |
+| `durable` | missions, decisions, messages, reviews, evidence, observed quota and credit history, deploy receipts | forever |
 | `otel` | observation series: usage samples, latency, readings over time | history goes to OpenTelemetry through `[observations.otlp]`; the graph keeps the latest of each slot |
 
 A person's claim of any kind is durable, whatever its class: the planner never drops one.

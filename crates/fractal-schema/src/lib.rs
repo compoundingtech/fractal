@@ -2578,15 +2578,6 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
-            "harness.limits",
-            &["agent"],
-            WritePolicy::SameSubjectActor,
-            Cardinality::Append,
-            Some("harnesses"),
-            false,
-            &[],
-        ),
-        (
             "usage.limits.observed",
             &["agent"],
             WritePolicy::SameSubjectActor,
@@ -4408,21 +4399,6 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("driver", required_string()),
             ("model", string()),
             ("incarnation_id", required_string()),
-        ],
-        // A harness's reading of its paying account's limits. Percentages are the harness's own;
-        // absent windows are unknown, never zero.
-        "harness.limits" => &[
-            ("driver", required_string()),
-            ("incarnation_id", string()),
-            ("account", string()),
-            // The declared account the seat was launched on (`ada/claude`), when it was bound to one.
-            ("account_ref", string()),
-            ("plan", string()),
-            ("five_hour_percent", number()),
-            ("five_hour_resets_at_unix_ms", integer()),
-            ("weekly_percent", number()),
-            ("weekly_resets_at_unix_ms", integer()),
-            ("measured_at_unix_ms", required_integer()),
         ],
         "usage.limits.observed" => &[
             ("readings", FieldSpec { required: true, ..array() }),

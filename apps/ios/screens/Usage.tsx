@@ -175,8 +175,8 @@ export function UsageScreen() {
           return <ListRow key={id} title={label(id, names, rows, declared)} right={<T color={theme.accent}>{cost(spent)}</T>} onPress={() => open(id)}
             second={credits
               ? <T dim>credits <T bold color={tone[credits.tone]}>{credits.used}</T> of {credits.budget} this month</T>
-              : line
-                ? <T dim>weekly <T bold color={tone[line.weekly.tone]}>{line.weekly.text}</T>{line.resets ? ` ${line.resets}` : ''}{limit?.five_hour_percent != null ? <> · 5-hour <T bold color={tone[line.fiveHour.tone]}>{line.fiveHour.text}</T></> : null} · {line.measured}</T>
+              : line?.length
+                ? <T dim>{line.map((window, index) => <T key={window.window}>{index ? ' · ' : ''}{window.label} <T bold color={tone[window.tone]}>{window.text}</T>{window.resets ? ` ${window.resets}` : ''} · {window.measured}</T>)}</T>
                 : `${tokens(spent.tokens)} tokens · no limits reported`} />;
         })}
         <SectionHeader title="summary" />
@@ -242,8 +242,12 @@ export function UsageDetailScreen() {
         const line = limitLine(limit, now);
         return <View key={limit.account}>
           <SectionHeader title="limits" />
-          <T>weekly <T bold color={tone[line.weekly.tone]}>{line.weekly.text}</T>{line.resets ? ` ${line.resets}` : ''}{limit.five_hour_percent != null ? <> · 5-hour <T bold color={tone[line.fiveHour.tone]}>{line.fiveHour.text}</T></> : null}</T>
-          <T dim>{line.measured} by {label(limit.measured_by, names, rows, declared)} on {limit.host} · {limit.seats.length} seat{limit.seats.length === 1 ? '' : 's'}{limit.plan ? ` · plan ${limit.plan}` : ''}</T>
+          {!line.length ? <T dim>No quota windows reported.</T> : null}
+          {line.map(window => <View key={window.window}>
+            <T>{window.label} <T bold color={tone[window.tone]}>{window.text}</T>{window.resets ? ` ${window.resets}` : ''}</T>
+            <T dim>{window.measured} on {window.host}</T>
+          </View>)}
+          <T dim>by {label(limit.measured_by, names, rows, declared)} · {limit.seats.length} seat{limit.seats.length === 1 ? '' : 's'}{limit.plan ? ` · plan ${limit.plan}` : ''}</T>
         </View>;
       })}
     </ScrollView>
@@ -264,7 +268,7 @@ export function UsageCard() {
     {issue ? <Note tone="warning">{issue}</Note> : null}
     {!period && !issue ? <Note>Loading usage…</Note> : null}
     {found.map(({ id, total: spent, limit, declared: account }) => {
-      const weekly = limit ? limitLine(limit, now).weekly : null;
+      const weekly = limit ? limitLine(limit, now).find(window => window.window === 'weekly') : null;
       const credits = account?.credits ? creditsLine(account.credits) : null;
       return <ListRow key={id} title={label(id, names, rows, declared)} onPress={() => navigation.navigate('Usage')}
         right={<T color={theme.accent}>{cost(spent)}</T>}

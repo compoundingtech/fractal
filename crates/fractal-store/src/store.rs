@@ -11622,7 +11622,7 @@ const RUNTIME_AUTHORITY_FAMILIES: &[&str] = &["intent.", "runtime.", "transport.
 
 /// Whether a replica record this build cannot project could bear on a subject's runtime
 /// authority. An invalid record, or an unknown one without a kind, always could. An unknown kind
-/// outside the authority families (a newer member's `harness.limits`, say) is kept and waits for
+/// outside the authority families (a newer member's `usage.limits.observed`, say) is kept and waits for
 /// an upgrade, but it never makes the subject's reachability indeterminate.
 fn replica_record_bears_authority(state: &str, kind: Option<&str>) -> bool {
     state != "unknown"
@@ -13350,6 +13350,23 @@ impl crate::otlp::ObservationSource for Store {
 
     fn observations_after(&self, cursor: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
         self.local_observations_after(cursor, limit)
+    }
+
+    fn account_limit_readings(&self) -> Result<Vec<crate::otlp::AccountLimitReading>> {
+        let limits = limits::account_limits_for_writers(
+            &self.readers.get(), &self.usage_limits_writers(),
+        )?;
+        let now = now_ms();
+        Ok(limits.into_iter().flat_map(|limit| {
+            limit.windows.into_iter().filter_map(move |window| {
+                if !window.available(now, limits::ACCOUNT_READING_WINDOW_MS) { return None; }
+                Some(crate::otlp::AccountLimitReading {
+                    driver: limit.driver.clone(), account: limit.account.clone(),
+                    window: window.window, used_percent: window.used_percent?,
+                    measured_at_unix_ms: window.measured_at_unix_ms,
+                })
+            })
+        }).collect())
     }
 
     fn save_export_cursor(
@@ -25153,48 +25170,6 @@ pub fn append_latest_observation_publication(
         .map_err(|error| FractalError::new("internal", error))?
 }
 
-/// Record a native limits report in the local observation log, and replicate it as a claim
-/// only when it changes what the account limits answer ([`limits::limits_publication_due`]).
-/// The returned record is that claim, or the local observation when nothing replicated.
-pub fn append_limits_publication(
-    graph: &GraphStore,
-    input: &ClaimInput,
-    now: u128,
-    event_runtime: Option<&str>,
-) -> Result<(ClaimRecord, bool), FractalError> {
-    validate_local_observation(input)?;
-    graph
-        .connection
-        .batched(|transaction| {
-            check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
-            let (local, appended) =
-                insert_local_observation_tx(transaction, &graph.origin, input, now)?;
-            if !appended {
-                return Ok((local, false));
-            }
-            let fields = json!(input.fields);
-            if !limits::limits_publication_due(
-                transaction,
-                &graph.origin,
-                &input.subject,
-                &json!({ "fields": &fields }),
-            )
-            .map_err(internal)?
-            {
-                return Ok((local, true));
-            }
-            publish_latest_claim_tx(
-                transaction,
-                &graph.origin,
-                &input.subject,
-                &input.kind,
-                input.actor.as_deref(),
-                &fields,
-            )
-            .map(|claim| (claim, true))
-        })
-        .map_err(|error| FractalError::new("internal", error))?
-}
 
 /// Shared tables the projection digest covers, with the columns each leaves out.
 const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[

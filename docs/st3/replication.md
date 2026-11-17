@@ -1566,9 +1566,10 @@ it keeps sets every field a reader takes from the dropped one:
   before that. `fractal usage` stays exact to the hour for a period inside that window, a longer period
   counts each series from its start, and a series' total never changes. A session's cumulative
   reading keeps its newest and its largest; a context reading keeps its newest. Per-response
-  claims from older builds stay;
-- `harness.limits` readings, keeping each seat's newest and every reading within an hour of the
-  newest of its account group.
+  claims from older builds stay.
+
+`usage.limits.observed` is durable: quota snapshots also carry immutable credit evidence,
+so checkpoints preserve every observation rather than retaining only recent quota readings.
 
 [Retention](retention.md) lists every kind's class and the rules.
 

@@ -121,13 +121,18 @@ Each local observation becomes one OTLP log record in OTLP/HTTP JSON:
   `st3.local_id`;
 - the resource names `service.name = st-daemon` and `st3.node`; the scope is `st.observations`.
 
-This log is the full harness telemetry series. Every `harness.observed`, `harness.usage` and
-`harness.limits` reading lands in the local observation log, including the readings the graph
-keeps local because they change no current value, so the collector receives each one with its
-subject and incarnation. Nothing in the graph depends on that series: the graph keeps each
-seat's current state and usage, and each account's current limits. The same batches also post
-`st_account_limit_used_percent` on `/v1/metrics`, a gauge of the newest reading of each driver,
-account and window (`five_hour` or `weekly`); seat identities appear only in the log records.
+This log is the full harness telemetry series. Every `harness.observed` and `harness.usage`
+reading lands in the local observation log, including readings kept local because they
+change no current value. The collector receives each with its subject and incarnation.
+Nothing in the graph depends on that exported series.
+
+Quota comes separately from durable `usage.limits.observed` claims by configured `omp-usage`
+writers, not from harness telemetry. On every export pass the exporter reads the selected
+fresh reported account windows with a future reset and posts `st_account_limit_used_percent` to `/v1/metrics`.
+The gauge uses the window's provider measurement time and driver/account/window labels
+(`5h`, `weekly`, or another reported provider window); seat identities are not metric labels.
+Quota exports even when no harness observation was appended. Exporting writes no quota claims
+and creates no second quota observation log.
 
 Each node also counts the rows it stores into its claims table, written here or received from a
 peer, per kind and writing node: a trigger on claim insert adds to the node-local `claims_stored`

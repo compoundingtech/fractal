@@ -5103,16 +5103,23 @@ export type UsageLimit = {
   account: string;
   account_ref?: string;
   driver: string;
-  five_hour_percent?: number;
-  five_hour_resets_at_unix_ms?: number;
   host: string;
   identified?: boolean;
   measured_at_unix_ms: number;
   measured_by: string;
   plan?: string;
   seats: Array<string>;
-  weekly_percent?: number;
-  weekly_resets_at_unix_ms?: number;
+  windows: Array<UsageLimitWindow>;
+};
+
+export type UsageLimitWindow = {
+  coverage: "reported" | "unreported" | "unsupported";
+  host: string;
+  measured_at_unix_ms: number;
+  resets_at_unix_ms: number | null;
+  source: "omp-usage";
+  used_percent: number | null;
+  window: string;
 };
 
 export type UsagePeriod = {

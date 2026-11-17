@@ -97,29 +97,25 @@ logins.
 
 ## Usage and limits per account
 
-A bound seat's limits readings carry the declared account's name (`account_ref`) next to the
-opaque account label, so `fractal usage` and the terminal UI name the account:
+`omp-usage` is the sole quota producer. Its configured agent writer publishes
+`usage.limits.observed` batches with provider account labels and account references
+(`account_ref`). Harness state, status lines and transcripts do not publish quota.
+Configure the writer on every member that reads quota:
 
+```toml
+[usage_limits]
+writers = ["agent/sample/usage-producer"]
 ```
-LIMITS  2 · the freshest reading of each account
-WEEKLY  5-HOUR  WEEKLY RESET  MEASURED  account
-97%  ?  2026-10-05 21:34 UTC  2026-10-02 21:34 UTC  ada/claude-1 (claude/aaaa000000000001)
-```
 
-Spend rows by account carry the same name. Seats that run on no declared account show the provider's label.
-An account keeps its last limits reading after its last seat switches away, until its window
-resets. Declared accounts have separate readings even when the provider reports no account label.
-Their spend and limits use a stable label derived from the declared name; unbound seats keep the
-provider's label. Queued observations capture the account at their source, so replay after a
-switch still charges the account that produced them.
+An absent or empty writer list admits no local quota appends and contributes no quota
+to account views or enforcement. Replication still retains valid observations for replay
+when a writer is configured. Account windows survive the last seat switching away and
+member restarts; each keeps its original provider measurement time and reset.
 
-A seat that binds nothing but sets its harness's login variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) to
-a declared account's login directory on its host runs on that account: it is launched with
-`ST3_ACCOUNT`, and its readings carry the declared name, whatever identity the provider shows. A
-re-login in that directory changes the provider's identity but not the account. When one seat has
-reported both under a provider identity and under a declared account, that identity's readings are
-the declared account's, so `fractal usage` and the pool show the account once, with the live reading.
-Identity readings that share no seat with a declared account are never assigned to one.
+Spend rows retain their source account binding. A seat that binds nothing but points
+its harness login variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) at a declared account's
+login directory runs on that account and records it in its spend. This does not turn
+the harness into a quota producer.
 
 A seat that sets no login variable runs on the harness's default login (`~/.claude` for Claude Code,
 `~/.codex` for Codex), so when a declared account's login on that host is that directory the seat
@@ -177,22 +173,17 @@ separate snapshots, which is harmless for a display.
 `fractal --json usage` and the client's `usage.period` return these as `accounts`, and each row carries
 `account_ref` when a declaration claims it.
 
-A limits reading older than the limits cadence (`[limits] fresh`, one hour unless configured) is the
-last known reading, not the current one. `fractal --json usage` marks it `stale: true`, and `fractal usage`
-ends its row with `stale`. The pool chooses by the account's freshest reading.
+Every account exposes `windows`, each with `window`, `used_percent`, `coverage`,
+`measured_at_unix_ms`, optional `resets_at_unix_ms`, `source` and `host`.
+The newest provider measurement wins independently for each account/window across
+configured writers; canonical claim order breaks ties. `reported` carries a percentage,
+`unreported` is unknown rather than zero, and `unsupported` is explicit.
 
-Limits include `identified`: true when the source names a provider identity or a declared account,
-false when it names neither. Identity and quota
-freshness are separate: a missing identity does not make a reading stale. Once a driver has
-identified evidence, its identity-less historical group is hidden if none of its latest reporting
-seats is still declared active. Unknown evidence from active seats remains visible, as does unknown
-evidence for a driver with no identified readings. Identified accounts keep their readings even
-without seats; unknown readings are never assigned to an identified account.
-
-A relaunch or a partial five-hour report cannot erase the last weekly observation or give it a
-new timestamp. Weekly selection uses only reports that actually contain a weekly percentage;
-providers with only a five-hour window still show that window. The original observation survives
-a member restart in the durable graph and remains available to other members through replication.
+Quota freshness belongs to each window, not to the last batch or a harness refresh.
+A partial five-hour batch cannot erase weekly evidence or advance its clock. The pool
+and stop policy use a fresh reported `weekly` (or `7d`) window with a future reset.
+Account identity comes from the observer's provider account and account reference;
+seat membership comes from current account bindings, not from the producer's identity.
 
 ## At the limit
 
@@ -221,14 +212,14 @@ freshness bound, even when the policy is disabled. This avoids stopping an accou
 missing number while making the gap visible to operations. An account that has never reported
 quota has no fabricated row in `fractal usage`; its missing evidence is reported by doctor.
 
-External backstops must read `fractal --json usage` (`limits`), or the client-v0 usage endpoint, rather
-than scanning driver directories, status-line files, or provider transcripts. Fresh harnesses
-commit observations through a SQLite outbox and need not produce those files; a relaunch
-can remove every source a file collector sees. For each account:
+External backstops must read `fractal --json usage` (`limits`), or the client-v0 usage endpoint,
+not driver directories, status-line files, or provider transcripts. For each account:
 
-- Use `weekly_percent` alone; a missing `five_hour_percent` does not invalidate weekly evidence.
-- Check `measured_at_unix_ms` against the freshness bound and reject times over a minute ahead.
-  Check `weekly_resets_at_unix_ms` when provided; an elapsed reset needs a new observation.
+- Select the reported `weekly` (or `7d`) entry in `windows`; a missing `5h` window does
+  not invalidate weekly evidence.
+- Check that window's `measured_at_unix_ms` against the freshness bound and reject
+  times over a minute ahead. Require a future `resets_at_unix_ms`; missing or elapsed
+  reset information is unavailable evidence.
 - Retain `account` and `account_ref`, the account's `seats`, and the configured exemptions. Evaluate
   accounts separately and verify the seat's current binding before stopping it.
 - When the account row or weekly evidence is missing or stale, report an operations/attention

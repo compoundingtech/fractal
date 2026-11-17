@@ -1375,7 +1375,7 @@ mod schema_install_tests {
             .unwrap();
         let last = events
             .iter()
-            .position(|event| event == "table:account_limit_seats")
+            .position(|event| event == "table:observed_account_limits_v4")
             .unwrap();
         assert!(first < last);
         assert_eq!(

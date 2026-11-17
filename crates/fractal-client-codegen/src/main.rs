@@ -971,6 +971,7 @@ fn validate_surfaces(
         "ClientConnections",
         "ClientConnection",
         "UsageLimit",
+        "UsageLimitWindow",
         "UsageAccount",
         "UsageCredits",
         "LaunchPreview",

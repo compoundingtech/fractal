@@ -91,21 +91,6 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
     })?;
     drop(keep_status);
 
-    // The newest measurement of each account group, across every seat, for the limits rule.
-    let mut limits_newest = BTreeMap::new();
-    {
-        let mut statement = staging.prepare(
-            "SELECT limits_group, MAX(limits_measured) FROM claims
-             WHERE first=1 AND kind=?1 AND limits_group IS NOT NULL
-             GROUP BY limits_group",
-        )?;
-        let mut rows = statement.query([LIMITS_KIND])?;
-        while let Some(row) = rows.next()? {
-            let group: (String, String, String, bool) = serde_json::from_str(&row.get::<_, String>(0)?)?;
-            limits_newest.insert(group, u64::try_from(row.get::<_, i64>(1)?)?);
-        }
-    }
-
     // The questions resolved at least a day before the cut, for the question rule.
     let resolutions = staging
         .prepare("SELECT subject, accepted_at FROM claims WHERE first=1 AND kind=?1")?
@@ -141,7 +126,7 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
             Rule::QuestionLifecycle => expired.contains(slot[0].as_str()),
             _ => false,
         };
-        let mut keep = rule_keep(rule, members.len(), &slot_claims, is_closed, &limits_newest, cut);
+        let mut keep = rule_keep(rule, members.len(), &slot_claims, is_closed, cut);
         if rule.keeps_field_carriers() {
             keep.extend(carriers(&members.iter().map(|member| member.fields.clone()).collect::<Vec<_>>()));
         }

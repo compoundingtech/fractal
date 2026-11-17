@@ -37,6 +37,8 @@ pub trait ObservationSource: Send + Sync + 'static {
     /// stored that pair. The totals grow as claims are stored and never fall when claims are
     /// deleted.
     fn claims_stored(&self) -> Result<Vec<StoredClaims>>;
+    /// Current reported quota windows selected from the configured observer writers.
+    fn account_limit_readings(&self) -> Result<Vec<AccountLimitReading>>;
 }
 
 /// The claims of one kind from one writing node stored since `since_unix_ms`, when this node first
@@ -48,6 +50,15 @@ pub struct StoredClaims {
     pub since_unix_ms: u128,
     pub claims: u64,
     pub bytes: u64,
+}
+
+/// One selected provider quota window for the bounded account gauge.
+pub struct AccountLimitReading {
+    pub driver: String,
+    pub account: String,
+    pub window: String,
+    pub used_percent: f64,
+    pub measured_at_unix_ms: u64,
 }
 
 /// The most observations sent in one request.
@@ -79,7 +90,7 @@ pub struct OtlpExporter {
 }
 
 /// Each limits gauge series, (driver, account, window), and the measured time of its newest reading.
-type LimitsSent = BTreeMap<(String, String, &'static str), u128>;
+type LimitsSent = BTreeMap<(String, String, String), u128>;
 
 impl OtlpExporter {
     pub fn new(config: &OtlpConfig, node: &str) -> Result<Self> {
@@ -111,6 +122,17 @@ impl OtlpExporter {
     /// collector accepts the batch.
     pub async fn export_once<S: ObservationSource>(&self, store: &Arc<S>) -> Result<ExportOutcome> {
         self.export_claims_stored(store).await?;
+        let readings = {
+            let store = store.clone();
+            tokio::task::spawn_blocking(move || smallclaims::task_cpu::blocking(
+                "observations.export", || store.account_limit_readings(),
+            )).await??
+        };
+        let limits = otlp_limits_metrics(&self.node, &readings, &self.limits_sent.lock().unwrap());
+        if let Some((metrics, newest)) = limits {
+            self.send(&self.metrics_url, &metrics).await?;
+            self.limits_sent.lock().unwrap().extend(newest);
+        }
         let cursor = {
             let store = store.clone();
             tokio::task::spawn_blocking(move || smallclaims::task_cpu::blocking("observations.export", || store.export_cursor())).await??
@@ -134,11 +156,6 @@ impl OtlpExporter {
         }
         if let Some(metrics) = otlp_usage_metrics(&self.node, &batch) {
             self.send(&self.metrics_url, &metrics).await?;
-        }
-        let limits = otlp_limits_metrics(&self.node, &batch, &self.limits_sent.lock().unwrap());
-        if let Some((metrics, newest)) = limits {
-            self.send(&self.metrics_url, &metrics).await?;
-            self.limits_sent.lock().unwrap().extend(newest);
         }
         if let Some(traces) = otlp_hook_traces(&self.node, &batch) {
             self.send(&self.traces_url, &traces).await?;
@@ -477,28 +494,15 @@ fn otlp_usage_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
     )
 }
 
-/// Account limits as a bounded gauge: the newest reading of each driver, account and limit
-/// window, skipping any older than the newest already `sent`. Returns the metrics and the
-/// measured times to record once the collector accepts them. The full series, every reading with
-/// its subject and incarnation, is the batch's log records; the graph keeps only current values.
-fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord], sent: &LimitsSent) -> Option<(Value, LimitsSent)> {
-    let text = |fields: &Value, key: &str| fields[key].as_str().unwrap_or("unknown").to_owned();
-    let mut limits = BTreeMap::<(String, String, &'static str), (u128, f64)>::new();
-    for observation in batch.iter().filter(|observation| observation.kind == "harness.limits") {
-        let fields = &observation.body["fields"];
-        let measured = fields["measured_at_unix_ms"]
-            .as_u64()
-            .map_or(observation.accepted_at_unix_ms, u128::from);
-        for (window, field) in [("five_hour", "five_hour_percent"), ("weekly", "weekly_percent")] {
-            if let Some(percent) = fields[field].as_f64() {
-                let key = (text(fields, "driver"), text(fields, "account"), window);
-                // Readings can arrive out of measured order, within a batch or across batches; an
-                // equal time keeps the later arrival.
-                let newest = limits.get(&key).map(|(newest, _)| newest).or_else(|| sent.get(&key));
-                if newest.is_none_or(|newest| measured >= *newest) {
-                    limits.insert(key, (measured, percent));
-                }
-            }
+/// Account windows from the configured quota observer, skipping measurements older
+/// than the newest already sent. Observer readings retain their provider measurement clock.
+fn otlp_limits_metrics(node: &str, readings: &[AccountLimitReading], sent: &LimitsSent) -> Option<(Value, LimitsSent)> {
+    let mut limits = BTreeMap::<(String, String, String), (u128, f64)>::new();
+    for reading in readings {
+        let key = (reading.driver.clone(), reading.account.clone(), reading.window.clone());
+        let measured = u128::from(reading.measured_at_unix_ms);
+        if sent.get(&key).is_none_or(|newest| measured > *newest) {
+            limits.insert(key, (measured, reading.used_percent));
         }
     }
     if limits.is_empty() {
@@ -507,7 +511,7 @@ fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord], sent: &LimitsSent) -> 
     let points = limits
         .iter()
         .map(|((driver, account, window), (measured, percent))| {
-            let attributes = [("driver", driver.as_str()), ("account", account), ("window", window)]
+            let attributes = [("driver", driver.as_str()), ("account", account.as_str()), ("window", window.as_str())]
                 .iter()
                 .map(|(key, value)| attribute(key, json!({ "stringValue": value })))
                 .collect::<Vec<_>>();
@@ -521,7 +525,7 @@ fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord], sent: &LimitsSent) -> 
     Some((json!({"resourceMetrics": [{"resource": resource(node, DAEMON_SERVICE), "scopeMetrics": [{
         "scope": {"name": "st"}, "metrics": [{
             "name": "st_account_limit_used_percent", "unit": "%",
-            "description": "Share of a paying account's usage window used, by driver, account and window (five_hour or weekly)",
+            "description": "Share of a paying account's observed usage window used, by driver, account and window",
             "gauge": {"dataPoints": points},
         }],
     }]}]}), newest))

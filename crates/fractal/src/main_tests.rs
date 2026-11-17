@@ -1436,20 +1436,20 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
     assert!(output.contains("$4.00  40  7  3  4  26  claude/bbbb"));
     assert!(output.contains("$0.00+  50  50  0  0  0  unknown"));
     let with_limits = json!({"rows": [], "limits": [
-        {"account": "claude/aaaa", "weekly_percent": 96.4, "five_hour_percent": null,
-         "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
+        {"account": "claude/aaaa", "windows": [{"window":"weekly", "used_percent":96.4,
+         "resets_at_unix_ms":1_800_000_000_000_u64, "measured_at_unix_ms":1_799_000_000_000_u64}]},
     ]});
     let output_with_limits = render_usage_report(&with_limits, 24, None);
     assert!(
         output_with_limits
-            .contains("96%  ?  2027-01-15 08:00 UTC  2027-01-03 18:13 UTC  claude/aaaa"),
+            .contains("weekly  96%  2027-01-15 08:00 UTC  2027-01-03 18:13 UTC  claude/aaaa"),
         "{output_with_limits}"
     );
     let exempt = json!({"rows": [], "limits": [
-        {"account": "codex/aaaa", "weekly_percent": 99.0, "five_hour_percent": null, "exempt": true,
-         "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
-        {"account": "claude/bbbb", "weekly_percent": 50.0, "five_hour_percent": null, "exempt": false,
-         "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
+        {"account":"codex/aaaa", "exempt":true, "windows":[{"window":"weekly", "used_percent":99.0,
+         "resets_at_unix_ms":1_800_000_000_000_u64, "measured_at_unix_ms":1_799_000_000_000_u64}]},
+        {"account":"claude/bbbb", "exempt":false, "windows":[{"window":"weekly", "used_percent":50.0,
+         "resets_at_unix_ms":1_800_000_000_000_u64, "measured_at_unix_ms":1_799_000_000_000_u64}]},
     ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": [], "keep": ["agent/example/coordinator", "agent/example/lead"], "keep_retired": ["agent/example/lead"]}});
     let output_exempt = render_usage_report(&exempt, 24, None);
     assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
@@ -1508,7 +1508,7 @@ fn usage_report_labels_the_daily_proxy_and_unknown_share() {
 }
 
 #[test]
-fn declared_accounts_keep_response_spend_and_limits_separate_without_provider_identity() {
+fn declared_accounts_keep_response_spend_separate_without_provider_identity() {
     let store = Store::open_memory("alder").unwrap();
     let mut labels = Vec::new();
     for (index, account) in ["ada/one", "ada/two"].into_iter().enumerate() {
@@ -1533,26 +1533,16 @@ fn declared_accounts_keep_response_spend_and_limits_separate_without_provider_id
         assert_eq!(rollup.fields["account"], labels[index]);
         assert_eq!(rollup.fields["total_tokens"], 12);
         store.append_claim(&rollup).unwrap();
-
-        claim.kind = "harness.limits".into();
-        claim.fields =
-            serde_json::from_value(json!({"driver": "codex", "weekly_percent": 20 + index,
-            "measured_at_unix_ms": now_ms() as u64}))
-            .unwrap();
-        bind_observation_account(&mut claim, Some(account));
-        assert_eq!(claim.fields["account"], labels[index]);
-        assert_eq!(claim.fields["account_ref"], account);
-        store.append_claim(&claim).unwrap();
     }
     assert_ne!(labels[0], labels[1]);
-    assert_eq!(store.account_limits().unwrap().len(), 2);
+    assert!(store.account_limits().unwrap().is_empty());
 }
 
 #[test]
 fn an_unbound_observation_keeps_the_provider_account() {
     let mut claim = ClaimInput {
         subject: "agent/example/seat".into(),
-        kind: "harness.limits".into(),
+        kind: "harness.usage".into(),
         actor: None,
         fields: BTreeMap::from([
             ("driver".into(), json!("claude")),
@@ -1600,10 +1590,10 @@ fn usage_shows_agent_messages_per_merged_pull_request() {
 #[test]
 fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
     let report = json!({"rows": [], "limits": [
-        {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 84.0, "stale": true,
-         "measured_at_unix_ms": 1_799_000_000_000_u64},
-        {"account": "claude/bbbb", "weekly_percent": 50.0, "stale": false,
-         "measured_at_unix_ms": 1_799_000_000_000_u64},
+        {"account":"claude/aaaa", "account_ref":"ada/claude-1", "stale":true,
+         "windows":[{"window":"weekly", "used_percent":84.0, "measured_at_unix_ms":1_799_000_000_000_u64}]},
+        {"account":"claude/bbbb", "stale":false,
+         "windows":[{"window":"weekly", "used_percent":50.0, "measured_at_unix_ms":1_799_000_000_000_u64}]},
     ]});
     let output = render_usage_report(&report, 24, None);
     assert!(output.contains("  ada/claude-1 (claude/aaaa)  stale\n"), "{output}");
@@ -1615,9 +1605,9 @@ fn usage_lists_every_declared_account_with_its_limit_or_credits() {
     let report = json!({
         "rows": [],
         "limits": [
-            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 24.0,
-             "weekly_resets_at_unix_ms": 1_799_500_000_000_u64, "stale": false,
-             "measured_at_unix_ms": 1_799_000_000_000_u64},
+            {"account":"claude/aaaa", "account_ref":"ada/claude-1", "stale":false,
+             "windows":[{"window":"weekly", "used_percent":24.0,
+             "resets_at_unix_ms":1_799_500_000_000_u64, "measured_at_unix_ms":1_799_000_000_000_u64}]},
         ],
         "accounts": [
             {"name": "ada/claude-1", "account": "claude/aaaa", "provider": "anthropic", "kind": "subscription"},
@@ -1642,10 +1632,10 @@ fn usage_names_a_declared_account_beside_the_providers_label() {
             {"agent":"agent/b","model":"m","account":"claude/bbbb","host":"host/a","cost_microusd":1000000,"total_tokens":10,"input_tokens":5,"output_tokens":5,"cache_write_tokens":0,"cached_tokens":0,"unpriced_tokens":0},
         ],
         "limits": [
-            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 40.0,
-             "measured_at_unix_ms": 1_799_000_000_000_u64},
-            {"account": "claude/bbbb", "weekly_percent": 10.0,
-             "measured_at_unix_ms": 1_799_000_000_000_u64},
+            {"account":"claude/aaaa", "account_ref":"ada/claude-1",
+             "windows":[{"window":"weekly", "used_percent":40.0, "measured_at_unix_ms":1_799_000_000_000_u64}]},
+            {"account":"claude/bbbb",
+             "windows":[{"window":"weekly", "used_percent":10.0, "measured_at_unix_ms":1_799_000_000_000_u64}]},
         ],
     });
     let output = render_usage_report(&report, 24, None);
@@ -1653,7 +1643,7 @@ fn usage_names_a_declared_account_beside_the_providers_label() {
         output.contains("  ada/claude-1 (claude/aaaa)\n"),
         "{output}"
     );
-    assert!(output.contains("40%  ?"), "{output}");
+    assert!(output.contains("weekly  40%  ?"), "{output}");
     assert!(
         output.contains("  claude/bbbb\n"),
         "an account no declaration names keeps its label: {output}"

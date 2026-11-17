@@ -18,31 +18,32 @@ const iso = (ms: number): string | undefined => {
   return Number.isFinite(date.getTime()) ? date.toISOString() : undefined
 }
 
-const limit = ({ reading, window, slot, now }: {
-  readonly reading: UsageLimit
-  readonly window: '5h' | 'weekly'
-  readonly slot: 'pressure-1' | 'pressure-2'
+const limit = ({ window, position, now }: {
+  readonly window: UsageLimit['windows'][number]
+  readonly position: number
   readonly now: number
 }): QuotaLimit => {
-  const percent = window === '5h' ? reading.five_hour_percent : reading.weekly_percent
-  const resetMs = window === '5h' ? reading.five_hour_resets_at_unix_ms : reading.weekly_resets_at_unix_ms
-  const fresh = now - reading.measured_at_unix_ms <= NATIVE_LIMIT_FRESHNESS_MS &&
-    reading.measured_at_unix_ms <= now &&
-    (resetMs === undefined || resetMs > now)
-  const known = percent !== undefined && Number.isFinite(percent) && percent >= 0 && fresh
+  const percent = window.used_percent
+  const resetMs = window.resets_at_unix_ms
+  const fresh = now - window.measured_at_unix_ms <= NATIVE_LIMIT_FRESHNESS_MS &&
+    window.measured_at_unix_ms <= now &&
+    (resetMs == null || resetMs > now)
+  const known = window.coverage === 'reported' && percent != null &&
+    Number.isFinite(percent) && percent >= 0 && fresh
+  const label = window.window === '5h' ? '5-hour' : window.window === 'weekly' ? 'Weekly' : window.window
   return {
-    limitId: window,
-    label: window === '5h' ? '5-hour' : 'Weekly',
-    shortLabel: window,
+    limitId: window.window,
+    label,
+    shortLabel: window.window,
     // Fractal does not declare a governing limit or a ranked summary inventory.
     summaryRole: 'unknown',
-    summarySlot: slot,
+    summarySlot: window.window === 'weekly' ? 'pressure-1' : window.window === '5h' ? 'pressure-2' : 'none',
     scope: { class: 'account' },
-    order: { source: 'native', position: slot === 'pressure-1' ? 0 : 1 },
-    observation: percent === undefined ? { state: 'unreported' } : {
+    order: { source: 'native', position },
+    observation: window.coverage !== 'reported' || percent == null ? { state: 'unreported' } : {
       state: 'reported',
-      window: { id: window, label: window === '5h' ? '5-hour' : 'Weekly', kind: 'provider',
-        ...(resetMs === undefined || iso(resetMs) === undefined ? {} : { resetsAt: iso(resetMs) }) },
+      window: { id: window.window, label, kind: 'provider',
+        ...(resetMs == null || iso(resetMs) === undefined ? {} : { resetsAt: iso(resetMs) }) },
       usage: {
         unit: 'fraction',
         ...(known ? { usedFraction: percent / 100 } : {}),
@@ -65,7 +66,8 @@ export const projectNativeQuota = (input: unknown, now: number):
   if (period.limits === undefined) return { _tag: 'failed', failure: {
     kind: 'unavailable', reason: 'This Fractal usage.period response does not report account limits.',
   } }
-  if (period.limits.some((reading) => iso(reading.measured_at_unix_ms) === undefined)) {
+  if (period.limits.some((reading) => iso(reading.measured_at_unix_ms) === undefined ||
+    reading.windows.some((window) => iso(window.measured_at_unix_ms) === undefined))) {
     return { _tag: 'failed', failure: { kind: 'incompatible', reason: 'Fractal usage.period observation time is not representable.' } }
   }
   const fromReading = (reading: UsageLimit, name?: string): QuotaAccount => {
@@ -81,10 +83,9 @@ export const projectNativeQuota = (input: unknown, now: number):
         ...(stale ? { reason: 'source observation stale or future-dated' } : {}) },
       valueObservedAt: observedAt,
       retained: stale,
-      source: { authority: 'st3.usage.period', confidence: reading.identified === false ? 'identity unknown' : 'harness observation' },
-      ...(reading.plan === undefined ? {} : { plan: { id: reading.plan, displayName: reading.plan, authority: 'harness observation' } }),
-      limits: [limit({ reading, window: 'weekly', slot: 'pressure-1', now }),
-        limit({ reading, window: '5h', slot: 'pressure-2', now })],
+      source: { authority: 'st3.usage.period', confidence: reading.identified === false ? 'identity unknown' : 'omp-usage observation' },
+      ...(reading.plan === undefined ? {} : { plan: { id: reading.plan, displayName: reading.plan, authority: 'omp-usage observation' } }),
+      limits: reading.windows.map((window, position) => limit({ window, position, now })),
       // The period's default 24h spend is not seven-day spend or per-account ledger history.
       usage7d: { basis: 'not reported by Fractal usage.period' },
     }
@@ -147,7 +148,7 @@ export const projectNativeQuota = (input: unknown, now: number):
       latestAttempt: { at: observedAt, outcome: 'unreported' },
       valueObservedAt: observedAt,
       retained: true,
-      source: { authority: 'st3.usage.period', confidence: 'no harness observation' },
+      source: { authority: 'st3.usage.period', confidence: 'no omp-usage observation' },
       limits: [],
       usage7d: { basis: 'not reported by st usage.period' },
     }

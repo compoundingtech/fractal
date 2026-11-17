@@ -3272,6 +3272,7 @@ async fn rules_audit_an_agents_write_then_refuse_it_once_enforced() {
 async fn the_usage_report_marks_only_old_limits_readings_stale() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
+    state.store.set_usage_limits_writers(vec!["agent/example.old".into(), "agent/example.live".into()]).unwrap();
     let app = router(state.clone());
     let now = client_now_ms() as u64;
     for (seat, account, measured) in [
@@ -3281,9 +3282,13 @@ async fn the_usage_report_marks_only_old_limits_readings_stale() {
         let (status, body) = json_request(
             app.clone(),
             "/v1/claims",
-            json!({"subject": seat, "kind": "harness.limits", "actor": seat,
-                "fields": {"driver": "claude", "account_ref": account, "weekly_percent": 84.0,
-                    "measured_at_unix_ms": measured},
+            json!({"subject": seat, "kind": "usage.limits.observed", "actor": seat,
+                "fields": {"readings": [{"account": format!("claude/{account}"),
+                    "account_ref": account, "provider": "anthropic", "window": "weekly",
+                    "used_percent": 84.0, "resets_at": null,
+                    "measured_at": chrono::DateTime::from_timestamp_millis(measured as i64).unwrap().to_rfc3339(),
+                    "coverage": "reported", "source": "omp-usage", "host": "test-node"}],
+                    "credit_readings": []},
                 "evidence": [], "idempotency_key": format!("limits-{seat}")}),
         )
         .await;
@@ -3291,13 +3296,16 @@ async fn the_usage_report_marks_only_old_limits_readings_stale() {
     }
     let (_, report) = get_request(app, "/v1/usage").await;
     let stale = |name: &str| {
-        report["limits"]
+        let limit = report["limits"]
             .as_array()
             .unwrap()
             .iter()
             .find(|limit| limit["account_ref"] == name)
-            .unwrap_or_else(|| panic!("{name} missing in {report}"))["stale"]
-            .clone()
+            .unwrap_or_else(|| panic!("{name} missing in {report}"));
+        assert_eq!(limit["windows"][0]["window"], "weekly", "{report}");
+        assert_eq!(limit["windows"][0]["used_percent"], 84.0, "{report}");
+        assert_eq!(limit["windows"][0]["coverage"], "reported", "{report}");
+        limit["stale"].clone()
     };
     assert_eq!(stale("ada/claude-1"), true);
     assert_eq!(stale("ada/claude-2"), false);
@@ -3310,6 +3318,7 @@ async fn a_local_only_harness_observation_wakes_only_the_client_feed() {
     let wake_file = root.path().join("replication.wake");
     let mut client_feed = state.event_notify.subscribe();
     let subject = "agent/node.worker";
+    state.store.set_usage_limits_writers(vec![subject.into()]).unwrap();
     let observed = |state_name: &str, observed_at_ms: u64| ClaimInput {
         subject: subject.into(),
         kind: "harness.observed".into(),
@@ -3382,20 +3391,20 @@ async fn a_local_only_harness_observation_wakes_only_the_client_feed() {
     assert!(client_feed_woke());
 
     // The reconciler reads no limits claim; the limits policy runs on its own timer.
-    let limits = |weekly: f64| ClaimInput {
+    let limits = |used: f64| ClaimInput {
         subject: subject.into(),
-        kind: "harness.limits".into(),
+        kind: "usage.limits.observed".into(),
         actor: Some(subject.into()),
         fields: BTreeMap::from([
-            ("driver".into(), Value::String("codex".into())),
-            ("account".into(), Value::String("codex/ada".into())),
-            ("account_ref".into(), Value::String("ada".into())),
-            ("weekly_percent".into(), Value::from(weekly)),
-            ("measured_at_unix_ms".into(), Value::from(1u64)),
+            ("readings".into(), json!([{"account": "codex/ada", "account_ref": "ada",
+                "provider": "openai-codex", "window": "weekly", "used_percent": used,
+                "resets_at": null, "measured_at": "2026-11-07T10:00:00Z",
+                "coverage": "reported", "source": "omp-usage", "host": "test-node"}])),
+            ("credit_readings".into(), json!([])),
         ]),
         evidence: Vec::new(),
         expected_subject: None,
-        idempotency_key: Some(format!("wake-limits-{weekly}")),
+        idempotency_key: Some(format!("wake-limits-{used}")),
     };
     let _ = post(limits(10.0)).await.unwrap();
     assert!(!reconciler_woke().await, "limits never reconcile");

@@ -565,8 +565,8 @@ fn accounts(world: &World) -> Vec<AccountEntry<'_>> {
     accounts
 }
 
-/// An account's limits, a line each: weekly first, since that is the one that stops seats. An
-/// api-key account has no limits to report; it shows its credits used this month instead.
+/// Every observed window retains its coverage and measurement clock. An api-key account shows
+/// its credits used this month instead.
 fn limit_lines(
     id: &str,
     limit: Option<&UsageLimit>,
@@ -584,41 +584,30 @@ fn limit_lines(
         };
         return vec![Line::from(span(note, theme::dim()))];
     };
-    let now = now_ms();
-    let (weekly, weekly_color) = limit_share(limit.weekly_percent);
-    let resets = limit
-        .weekly_resets_at_unix_ms
-        .map(|at| format!(" · resets {}", span_of(at.saturating_sub(now))))
-        .unwrap_or_default();
-    let mut lines = vec![Line::from(vec![
-        span("   weekly   ", theme::dim()),
-        span(weekly, theme::strong(weekly_color)),
-        span(resets, theme::dim()),
-    ])];
-    // A harness with no 5-hour window (Codex) has nothing to show on its own line.
-    if limit.five_hour_percent.is_some() {
-        let (five, five_color) = limit_share(limit.five_hour_percent);
-        lines.push(Line::from(vec![
-            span("   5-hour   ", theme::dim()),
-            span(five, theme::strong(five_color)),
-            span(
-                format!(
-                    " · as of {} ago",
-                    span_of(now.saturating_sub(limit.measured_at_unix_ms))
-                ),
-                theme::dim(),
-            ),
-        ]));
-    } else {
-        lines.push(Line::from(span(
-            format!(
-                "   as of {} ago",
-                span_of(now.saturating_sub(limit.measured_at_unix_ms))
-            ),
-            theme::dim(),
-        )));
+    if limit.windows.is_empty() {
+        return vec![Line::from(span("   no quota windows reported", theme::dim()))];
     }
-    lines
+    let now = now_ms();
+    limit.windows.iter().map(|window| {
+        let fresh = window.measured_at_unix_ms <= now
+            && now.saturating_sub(window.measured_at_unix_ms) <= 3_600_000
+            && window.resets_at_unix_ms.is_none_or(|at| at > now);
+        let (value, color) = match window.coverage.as_str() {
+            "reported" => limit_share(if fresh { window.used_percent } else { None }),
+            "unsupported" => ("unsupported".into(), theme::OVERLAY1),
+            _ => ("not reported".into(), theme::OVERLAY1),
+        };
+        let resets = window.resets_at_unix_ms
+            .map(|at| format!(" · resets {}", span_of(at.saturating_sub(now))))
+            .unwrap_or_default();
+        let label = if window.window == "5h" { "5-hour" } else { &window.window };
+        Line::from(vec![
+            span(format!("   {label:<8} "), theme::dim()),
+            span(value, theme::strong(color)),
+            span(resets, theme::dim()),
+            span(format!(" · as of {} ago", span_of(now.saturating_sub(window.measured_at_unix_ms))), theme::dim()),
+        ])
+    }).collect()
 }
 
 fn limit_share(percent: Option<f64>) -> (String, ratatui::style::Color) {

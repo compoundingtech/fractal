@@ -6392,26 +6392,40 @@ agent "worker" {{
             "account-pool \"person/ada\"",
         );
         apply_source(&store, &source, "pooled-account");
-        let reading = |seat: &str, account: &str, weekly: f64| ClaimInput {
-            subject: seat.into(),
-            kind: "harness.limits".into(),
-            actor: Some(seat.into()),
-            fields: BTreeMap::from([
-                ("driver".into(), Value::String("codex".into())),
-                ("account".into(), Value::String(format!("codex/{account}"))),
-                ("account_ref".into(), Value::String(account.into())),
-                ("weekly_percent".into(), Value::from(weekly)),
-                ("measured_at_unix_ms".into(), Value::from(now_ms() as u64)),
-            ]),
+        let writer = "agent/node.usage-producer";
+        store.set_usage_limits_writers(vec![writer.into()]).unwrap();
+        let reading = |account: &str, weekly: f64| {
+            let measured = now_ms() as i64;
+            ClaimInput {
+            subject: writer.into(),
+            kind: "usage.limits.observed".into(),
+            actor: Some(writer.into()),
+            fields: serde_json::from_value(serde_json::json!({
+                "readings": [{
+                    "account": fractal_drivers::account::account_label(
+                        "codex", &format!("declared:{account}")
+                    ),
+                    "account_ref": account,
+                    "provider": "openai-codex",
+                    "window": "weekly",
+                    "used_percent": weekly,
+                    "measured_at": chrono::DateTime::from_timestamp_millis(measured).unwrap().to_rfc3339(),
+                    "resets_at": chrono::DateTime::from_timestamp_millis(measured + 7 * 24 * 3_600_000).unwrap().to_rfc3339(),
+                    "coverage": "reported",
+                    "source": "omp-usage",
+                    "host": "node"
+                }],
+                "credit_readings": []
+            })).unwrap(),
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        };
+        }};
         store
-            .append_claim(&reading("agent/node.elsewhere-1", "ada/one", 70.0))
+            .append_claim(&reading("ada/one", 70.0))
             .unwrap();
         store
-            .append_claim(&reading("agent/node.elsewhere-2", "ada/two", 30.0))
+            .append_claim(&reading("ada/two", 30.0))
             .unwrap();
         let runtime = Arc::new(FakeRuntime::default());
         let reconciler = Reconciler::new(
@@ -6442,7 +6456,7 @@ agent "worker" {{
 
         // The seat keeps its account when the other account has more left later.
         store
-            .append_claim(&reading("agent/node.elsewhere-2", "ada/two", 90.0))
+            .append_claim(&reading("ada/two", 90.0))
             .unwrap();
         let binding = store
             .seat_binding("agent/node.worker")

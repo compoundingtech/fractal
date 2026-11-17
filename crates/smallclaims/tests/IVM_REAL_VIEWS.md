@@ -1,6 +1,6 @@
 # Application-shaped incremental-view fixtures
 
-All 23 prototype tests have passed in local iteration. These are restricted fixture proofs;
+These restricted fixture proofs exercise incremental-view behavior;
 the runtime has not been activated in production.
 Run the integration cohort with:
 
@@ -20,7 +20,6 @@ rollback, persisted outputs, readiness and semantic invalidations.
 | Family | Fixture relation and limits |
 |---|---|
 | Agent card | Runtime incarnation; harness state and independent boolean auth evidence; maximum cumulative total; canonical step ownership and old/new actor membership. Omitted auth cannot erase a refusal, and restoration can change permission without changing work. Full operational card, lease/deadline/prompt/presence predicate, work queue, cost and response-delta aggregation are absent. |
-| Account limits | Highest weekly reading inside the inclusive hour behind the freshest original weekly sample, greatest reset first, then percent/time/seat/canonical ties. Partial five-hour evidence cannot freshen weekly evidence. Identified provider accounts are partitioned by driver/account/account-ref. Full declared-label normalization, privacy, bindings, active seats and stop policy are absent. The historical comparator comes from the application's limits reader. |
 | Fleet | Direct listening-mode admissions and anchor removals by a pinned anchor, checked against the crate's membership fold. Signers come from verified envelope storage or the configured local node key, never claim JSON. Admission floors are zero (including the omitted anchor default), root never ends, and there is one admission per member. Bootstrap precedes child permutations; child removal can precede admission. General sponsor chains, writer windows, conflicts, cycles and complete authority admission are absent. Unsupported sponsor/mode/window/remover or unproven signer input fences readiness. Signature mutations invalidate affected fixture state; an anticipated local signature is equal evidence. |
 | Mailbox | Current sent rows, terminal read/closed membership and per-recipient unread deltas, including read-before-send and recipient replacement. Full sender/recipient authority is an application admission prerequisite, not supplied by this claims-only fixture runtime. Thread/tag/answer/reopen/age and cursor semantics are absent. |
 | Mission tree | Indexed run/step rows, nested run parent and canonical step state. Immutable layout is installed as bounded local-source input on an empty fixture and supplied independently to the oracle. Authored-definition validation, generation ownership, gates and queue rank are absent. |
@@ -66,19 +65,18 @@ interrupted metadata controls are not such a certificate or execution proof.
 
 ## Historical observations and current inputs
 
-Historical limits retains candidates and radix summaries; work selection retains
-candidate claims. Growth is unbounded until an explicit retention contract exists.
-No writer budget or growth result is qualified. Range lookup uses fixed-width
-aligned blocks and summary updates stop when an ancestor is unchanged. Canonical
-legacy batch positions still use existing COUNT semantics, not arrival order.
-Unsupported same-index rank changes can fence the prototype.
+Work selection retains candidate claims. Growth is unbounded until an explicit
+retention contract exists. No writer budget or growth result is qualified.
+Canonical legacy batch positions still use existing COUNT semantics, not arrival
+order. Unsupported same-index rank changes can fence the prototype.
 
-Latest per-seat state is not equivalent to historical limits: replacing a reading
-can discard an earlier higher weekly sample still inside the hour. These fixtures
-do not propose production telemetry claims or reconstruct telemetry history.
-Current adapters need separate old/new seat, incarnation, host and account tests;
-replacement/removal; independent weekly/five-hour slots; original time; reset
-advancement; stale exhaustion; and incomplete-evidence readiness.
+The historical harness-quota comparator and its radix summaries were removed
+with the harness quota producer. They modeled the obsolete highest-within-an-hour
+fold, not the canonical omp-usage provider-window contract. Agent-card cumulative
+usage, fleet, mailbox, mission-tree and desired-host relations retain independent
+raw-history oracles and replication-permutation coverage. The rollback fixture
+checks cumulative usage and unread-counter changes alongside rows, generations
+and the source cut. These fixtures do not certify a production quota reader.
 
 ## Correctness instrumentation and future measurement
 

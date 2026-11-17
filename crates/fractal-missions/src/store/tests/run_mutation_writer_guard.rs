@@ -99,8 +99,8 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [0, 0, 4, 0, 0],
         },
         Exception {
-            reason: "append_local_observation_fenced, append_latest_observation_publication and append_limits_publication append local telemetry/observations, not mission/run action decisions",
-            counts: [0, 0, 3, 0, 0],
+            reason: "append_local_observation_fenced and append_latest_observation_publication append local telemetry/observations, not mission/run action decisions",
+            counts: [0, 0, 2, 0, 0],
         },
         Exception {
             reason: "prune_events_before trims local event history; capability issue/consume only mutate capability records",

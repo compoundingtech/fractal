@@ -6,8 +6,6 @@ mod desired_wakes;
 mod fleet_view;
 #[path = "support/history.rs"]
 mod history;
-#[path = "support/limits_view.rs"]
-mod limits_view;
 #[path = "support/real_views.rs"]
 mod real_views;
 use anyhow::Result;
@@ -40,7 +38,6 @@ const STEPS: &[history::Step] = &[
 ];
 const NAMES: &[&str] = &[
     "agent-card",
-    "account-limits",
     "fleet-membership",
     "mailbox",
     "mission-tree",
@@ -59,7 +56,6 @@ fn definitions(origin: &str, anchor: &str, local_signer: Option<&str>) -> Views 
     );
     Views::new(vec![
         Box::new(Family::Card),
-        Box::new(limits_view::AccountLimits),
         Box::new(fleet_view::AnchorFleet {
             root: "alder".into(),
             anchor: anchor.into(),
@@ -254,7 +250,6 @@ fn check(n: &Node) {
                     .collect::<BTreeMap<_, _>>()
             );
             assert_eq!(rows(&c, "mission-tree"), history::tree(&claims, STEPS));
-            assert_eq!(rows(&c, "account-limits"), history::limits(&claims));
             let (desired, prior) = history::desired(&claims);
             assert_eq!(rows(&c, "desired-by-host"), desired);
             let actual_prior = c
@@ -468,145 +463,6 @@ fn agent_card_incarnation_status_cumulative_usage_and_actor_work_converge() {
     assert_eq!(card["work"], json!([]));
     noise(&n, a);
     noise(&n, STEPS[0].0);
-    replicate_permutations(&n, 0);
-}
-
-fn reading(
-    driver: &str,
-    account: &str,
-    time: u64,
-    weekly: Option<f64>,
-    reset: Option<u64>,
-) -> Value {
-    json!({"driver":driver,"account":account,"account_ref":Value::Null,"weekly_percent":weekly,
-        "weekly_resets_at_unix_ms":reset,"five_hour_percent":10.0,"five_hour_resets_at_unix_ms":50,
-        "measured_at_unix_ms":time})
-}
-#[test]
-fn account_limits_original_weekly_time_reset_hour_boundary_and_provider_partition() {
-    let n = ordinary();
-    let mut newest = None;
-    for (seat, f) in [
-        (
-            "agent/fixture/old",
-            reading("claude", "acct", 1_000_000, Some(100.0), Some(100)),
-        ),
-        (
-            "agent/fixture/a",
-            reading("claude", "acct", 10_000_000, Some(97.0), Some(100)),
-        ),
-        (
-            "agent/fixture/b",
-            reading("claude", "acct", 11_000_000, Some(20.0), Some(100)),
-        ),
-        (
-            "agent/fixture/b",
-            reading("claude", "acct", 24_000_000, None, None),
-        ),
-    ] {
-        newest = Some(append(&n, seat, "harness.limits", None, f));
-        check(&n);
-    }
-    let key = limits_view::account_key(&reading("claude", "acct", 0, None, None));
-    let selected = row(&n.store.readers.get(), "account-limits", &key)
-        .unwrap()
-        .unwrap();
-    assert_eq!(selected["weekly_percent"], 97.0);
-    assert_eq!(selected["measured_at_unix_ms"], 10_000_000);
-    // A latest-claim or latest-per-seat-only oracle would choose the partial/latest low reading.
-    assert!(newest.unwrap().body["fields"]["weekly_percent"].is_null());
-    for (seat, f) in [
-        (
-            "agent/fixture/b",
-            reading("claude", "acct", 11_500_000, Some(4.0), Some(200)),
-        ),
-        (
-            "agent/fixture/a",
-            reading("claude", "acct", 12_000_000, Some(99.0), Some(100)),
-        ),
-        (
-            "agent/fixture/c",
-            reading("codex", "acct", 5_000_000, Some(98.0), Some(300)),
-        ),
-        (
-            "agent/fixture/d",
-            reading("codex", "acct", 8_600_000, Some(10.0), Some(300)),
-        ),
-    ] {
-        append(&n, seat, "harness.limits", None, f);
-        check(&n);
-    }
-    assert_eq!(
-        row(&n.store.readers.get(), "account-limits", &key)
-            .unwrap()
-            .unwrap()["weekly_percent"],
-        4.0
-    );
-    let other = limits_view::account_key(&reading("codex", "acct", 0, None, None));
-    assert_eq!(
-        row(&n.store.readers.get(), "account-limits", &other)
-            .unwrap()
-            .unwrap()["weekly_percent"],
-        98.0
-    );
-    append(
-        &n,
-        "agent/fixture/d",
-        "harness.limits",
-        None,
-        reading("codex", "acct", 8_600_001, Some(10.0), Some(300)),
-    );
-    check(&n);
-    assert_eq!(
-        row(&n.store.readers.get(), "account-limits", &other)
-            .unwrap()
-            .unwrap()["weekly_percent"],
-        10.0
-    );
-    for seat in ["agent/fixture/z", "agent/fixture/a"] {
-        append(
-            &n,
-            seat,
-            "harness.limits",
-            None,
-            reading("claude", "acct", 12_000_000, Some(4.0), Some(200)),
-        );
-        check(&n);
-    }
-    assert_eq!(
-        row(&n.store.readers.get(), "account-limits", &key)
-            .unwrap()
-            .unwrap()["measured_by"],
-        "agent/fixture/z"
-    );
-    let mut exact_tie = reading("claude", "acct", 12_000_000, Some(4.0), Some(200));
-    exact_tie["five_hour_percent"] = json!(99.0);
-    append(&n, "agent/fixture/z", "harness.limits", None, exact_tie);
-    check(&n);
-    assert_eq!(
-        row(&n.store.readers.get(), "account-limits", &key)
-            .unwrap()
-            .unwrap()["five_hour_percent"],
-        99.0
-    );
-    for (time, reset, percent) in [
-        (1_000_000, Some(100), Some(20.0)),
-        (1_001_000, Some(200), Some(5.0)),
-    ] {
-        let mut partial = reading("claude", "partial-only", time, None, None);
-        partial["five_hour_resets_at_unix_ms"] = json!(reset);
-        partial["five_hour_percent"] = json!(percent);
-        append(&n, "agent/fixture/partial", "harness.limits", None, partial);
-        check(&n);
-    }
-    let partial = limits_view::account_key(&reading("claude", "partial-only", 0, None, None));
-    assert_eq!(
-        row(&n.store.readers.get(), "account-limits", &partial)
-            .unwrap()
-            .unwrap()["five_hour_percent"],
-        5.0
-    );
-    noise(&n, "agent/fixture/a");
     replicate_permutations(&n, 0);
 }
 
@@ -1434,14 +1290,21 @@ fn unsupported_fleet_sponsor_window_and_removal_authority_are_fenced() {
 }
 
 #[test]
-fn rollback_restores_range_summaries_unread_counters_rows_generations_and_cut() {
+fn rollback_restores_usage_unread_counters_rows_generations_and_cut() {
     let n = ordinary();
     append(
         &n,
         "agent/fixture/a",
-        "harness.limits",
+        "runtime.observed",
         None,
-        reading("claude", "acct", 10_000_000, Some(97.0), Some(100)),
+        json!({"incarnation_id":"i1","status":"running"}),
+    );
+    append(
+        &n,
+        "agent/fixture/a",
+        "harness.usage",
+        None,
+        json!({"incarnation_id":"i1","semantics":"session_cumulative","total_tokens":97}),
     );
     append(
         &n,
@@ -1450,6 +1313,7 @@ fn rollback_restores_range_summaries_unread_counters_rows_generations_and_cut() 
         Some("person/blair"),
         json!({"to":"person/ada","from":"person/blair","body":"hello"}),
     );
+    assert_eq!(row(&n.store.readers.get(), "agent-card", "agent/fixture/a").unwrap().unwrap()["usage"], 97);
     check(&n);
     let before = semantic_tokens(&n);
     let before_cut = source_cut(&n.store.readers.get()).unwrap();
@@ -1459,14 +1323,15 @@ fn rollback_restores_range_summaries_unread_counters_rows_generations_and_cut() 
         .append_claim_tx(
             &tx,
             &n.store.origin,
-            "agent/fixture/b",
-            "harness.limits",
+            "agent/fixture/a",
+            "harness.usage",
             None,
-            &json!({"fields":reading("claude","acct",11_000_000,Some(1.0),Some(200))}),
+            &json!({"fields":{"incarnation_id":"i1","semantics":"session_cumulative","total_tokens":100}}),
             &[],
             None,
         )
         .unwrap();
+    assert_eq!(row(&tx, "agent-card", "agent/fixture/a").unwrap().unwrap()["usage"], 100);
     n.runtime
         .append_claim_tx(
             &tx,
@@ -1496,32 +1361,6 @@ fn rollback_restores_range_summaries_unread_counters_rows_generations_and_cut() 
 }
 
 #[test]
-fn hour_range_partition_has_no_gaps_overlap_or_time_rounding() -> Result<()> {
-    // Structural oracle checks exact integer inclusivity, not a mirror of the range algorithm.
-    for (low, high) in [
-        (0, 0),
-        (0, 3_600_000),
-        (255, 256),
-        (65_535, 65_536),
-        (10_000_000, 13_600_000),
-        (i64::MAX as u64 - 3_600_000, i64::MAX as u64),
-    ] {
-        let blocks = limits_view::blocks(low, high);
-        let mut next = low;
-        assert!(blocks.len() <= 2 * 8 * 255);
-        for (level, prefix) in blocks {
-            let start = prefix << (level * 8);
-            let span = 1u64 << (level * 8);
-            assert_eq!(start, next);
-            assert!(span - 1 <= high - start);
-            next = start + span;
-        }
-        assert_eq!(next, high + 1);
-    }
-    Ok(())
-}
-
-#[test]
 fn persisted_custom_outputs_reopen_without_reapplying_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("views.sqlite");
@@ -1540,9 +1379,16 @@ fn persisted_custom_outputs_reopen_without_reapplying_history() {
     append(
         &n,
         "agent/fixture/a",
-        "harness.limits",
+        "runtime.observed",
         None,
-        reading("claude", "acct", 10_000_000, Some(97.0), Some(100)),
+        json!({"incarnation_id":"i1","status":"running"}),
+    );
+    append(
+        &n,
+        "agent/fixture/a",
+        "harness.usage",
+        None,
+        json!({"incarnation_id":"i1","semantics":"session_cumulative","total_tokens":97}),
     );
     append(
         &n,

@@ -64,8 +64,9 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
         if !limit.windows.is_empty() {
             for window in &limit.windows {
                 let label = if window.window == "5h" { "5-hour" } else { &window.window };
-                let stale = now_unix_ms.saturating_sub(window.measured_at_unix_ms) > stale_after_ms;
-                let mut row = budget(name, &limit.account, &window.window, label, window.used_percent,
+                let stale = now_unix_ms.saturating_sub(window.measured_at_unix_ms) > stale_after_ms.min(3_600_000);
+                let available = window.available(u128::from(now_unix_ms), stale_after_ms);
+                let mut row = budget(name, &limit.account, &window.window, label, window.used_percent.filter(|_| available),
                     window.resets_at_unix_ms, window.measured_at_unix_ms, stale, now_unix_ms);
                 row["source"] = json!(window.source);
                 row["host"] = json!(window.host);
@@ -75,21 +76,13 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
                     row["current"] = json!("unsupported");
                     row["remaining_percent"] = Value::Null;
                     row["explain"] = json!(format!("{} does not support {} quota evidence for {name}.", window.source, window.window));
-                } else if window.coverage != "reported" {
+                } else if !available {
                     row["status"] = json!(if stale { "stale" } else { "no-data" });
                     row["current"] = json!("not reported");
                     row["remaining_percent"] = Value::Null;
                 }
                 rows.push(row);
             }
-            continue;
-        }
-        let stale = now_unix_ms.saturating_sub(limit.measured_at_unix_ms) > stale_after_ms;
-        for (period, label, percent, resets) in [
-            ("weekly", "weekly", limit.weekly_percent, limit.weekly_resets_at_unix_ms),
-            ("5h", "5-hour", limit.five_hour_percent, limit.five_hour_resets_at_unix_ms),
-        ] {
-            rows.push(budget(name, &limit.account, period, label, percent, resets, limit.measured_at_unix_ms, stale, now_unix_ms));
         }
     }
     rows
@@ -409,7 +402,7 @@ fn budget(
             "target": "100% allowance", "current": "not reported", "window": period_label,
             "remaining_percent": null, "status": "no-data", "resets_at_unix_ms": resets_at,
             "measured_at_unix_ms": measured_at,
-            "explain": format!("No seat on {name} has reported its {period_label} limit."),
+            "explain": format!("No current omp-usage evidence is available for {name}'s {period_label} limit ({reset})."),
         });
     };
     let remaining = clamp_percent(100.0 - used);
@@ -564,39 +557,42 @@ mod tests {
             identified: true,
             driver: "claude".into(),
             plan: None,
-            five_hour_percent: five,
-            five_hour_resets_at_unix_ms: Some(10_000_000 + 3 * 3_600_000),
-            weekly_percent: weekly,
-            weekly_resets_at_unix_ms: Some(10_000_000 + 3 * 86_400_000),
+            windows: [("weekly", weekly, 3 * 86_400_000), ("5h", five, 3 * 3_600_000)]
+                .into_iter().map(|(window, used_percent, reset)| crate::store::limits::LimitWindow {
+                    window: window.into(), used_percent, resets_at_unix_ms: Some(10_000_000 + reset),
+                    measured_at_unix_ms: 10_000_000,
+                    coverage: if used_percent.is_some() { "reported" } else { "unreported" }.into(),
+                    source: "omp-usage".into(), host: "host".into(),
+                }).collect(),
             measured_at_unix_ms: 10_000_000,
             measured_by: "agent/a".into(),
             host: "host".into(),
             seats: vec![],
             identity: None,
-            windows: vec![],
         }
     }
 
     #[test]
-    fn five_hour_only_harness_refresh_preserves_weekly_budget_and_its_clock() {
+    fn five_hour_only_refresh_preserves_weekly_budget_and_its_clock() {
         use crate::LimitsStore;
         let store = crate::store::Store::open_memory("alder").unwrap();
-        for fields in [
-            json!({"driver":"claude", "account":"claude/example",
-                "weekly_percent":40.0, "measured_at_unix_ms":1000}),
-            json!({"driver":"claude", "account":"claude/example",
-                "five_hour_percent":20.0, "measured_at_unix_ms":2000}),
-        ] {
+        let writer = "agent/sample/usage-producer";
+        store.set_usage_limits_writers(vec![writer.into()]).unwrap();
+        for (window, percent, measured) in [("weekly", 40.0, "1970-01-01T00:00:01Z"), ("5h", 20.0, "1970-01-01T00:00:02Z")] {
             store.append_claim(&crate::model::ClaimInput {
-                subject:"agent/sample/harness".into(), actor:Some("agent/sample/harness".into()),
-                kind:"harness.limits".into(), fields:serde_json::from_value(fields).unwrap(),
+                subject:writer.into(), actor:Some(writer.into()), kind:"usage.limits.observed".into(),
+                fields:serde_json::from_value(json!({"readings":[{
+                    "provider":"anthropic","account":"claude/example","account_ref":"claude/example",
+                    "window":window,"used_percent":percent,"resets_at":"1970-01-02T00:00:00Z",
+                    "measured_at":measured,"coverage":"reported","source":"omp-usage","host":"alder"
+                }],"credit_readings":[]})).unwrap(),
                 evidence:vec![], expected_subject:None, idempotency_key:None,
             }).unwrap();
         }
         let limits = store.account_limits().unwrap();
         let report = rows(&json!({"targets":[]}), &limits, 2500, 1000);
         let weekly = by_id(&report, "claude/example/weekly");
-        assert_eq!(weekly["remaining_percent"], 60.0);
+        assert!(weekly["remaining_percent"].is_null());
         assert_eq!(weekly["status"], "stale");
         assert_eq!(weekly["measured_at_unix_ms"], 1000);
         let five = by_id(&report, "claude/example/5h");
@@ -626,6 +622,18 @@ mod tests {
         assert_eq!(five["current"], "unsupported");
         assert!(five["remaining_percent"].is_null());
         assert_eq!(by_id(&report, "claude/example/daily")["status"], "no-data");
+    }
+
+    #[test]
+    fn a_reset_passed_or_missing_reset_is_unavailable_even_when_recent() {
+        for reset in [None, Some(10_000_000)] {
+            let mut account = limit("claude/example", None, Some(99.0), None);
+            account.windows[0].resets_at_unix_ms = reset;
+            let report = rows(&json!({"targets":[]}), &[account], 10_000_001, 3_600_000);
+            let weekly = by_id(&report, "claude/example/weekly");
+            assert_eq!(weekly["status"], "no-data");
+            assert!(weekly["remaining_percent"].is_null());
+        }
     }
 
     fn by_id<'a>(rows: &'a [Value], id: &str) -> &'a Value {

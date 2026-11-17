@@ -290,7 +290,7 @@ fn slo_history() -> BTreeMap<String, Load<fractal_client::SloHistory>> {
     ])
 }
 
-/// The demo accounts' limits, as their harnesses last reported them.
+/// The demo accounts' quota windows, as omp-usage last reported them.
 fn usage_limits() -> Vec<fractal_client::UsageLimit> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -302,11 +302,21 @@ fn usage_limits() -> Vec<fractal_client::UsageLimit> {
             identified: Some(true),
             driver: s("claude"),
             plan: Some(s("max")),
-            five_hour_percent: Some(41.0),
-            five_hour_resets_at_unix_ms: Some(now + 2 * 3_600_000),
-            weekly_percent: Some(23.0),
-            weekly_resets_at_unix_ms: Some(now + 3 * 86_400_000),
-            measured_at_unix_ms: now - 180_000,
+            windows: vec![
+                fractal_client::UsageLimitWindow {
+                    window: s("weekly"), used_percent: Some(23.0),
+                    resets_at_unix_ms: Some(now + 3 * 86_400_000),
+                    measured_at_unix_ms: now - 180_000, coverage: s("reported"),
+                    source: s("omp-usage"), host: s("lark"),
+                },
+                fractal_client::UsageLimitWindow {
+                    window: s("5h"), used_percent: Some(41.0),
+                    resets_at_unix_ms: Some(now + 2 * 3_600_000),
+                    measured_at_unix_ms: now - 120_000, coverage: s("reported"),
+                    source: s("omp-usage"), host: s("lark"),
+                },
+            ],
+            measured_at_unix_ms: now - 120_000,
             measured_by: s("agent/example/atlas/builder"),
             host: s("lark"),
             seats: vec![s("agent/example/atlas/builder"), s("agent/example/cos")],
@@ -317,10 +327,12 @@ fn usage_limits() -> Vec<fractal_client::UsageLimit> {
             identified: Some(true),
             driver: s("codex"),
             plan: None,
-            five_hour_percent: None,
-            five_hour_resets_at_unix_ms: None,
-            weekly_percent: Some(6.0),
-            weekly_resets_at_unix_ms: Some(now + 6 * 86_400_000),
+            windows: vec![fractal_client::UsageLimitWindow {
+                window: s("weekly"), used_percent: Some(6.0),
+                resets_at_unix_ms: Some(now + 6 * 86_400_000),
+                measured_at_unix_ms: now - 3_600_000, coverage: s("reported"),
+                source: s("omp-usage"), host: s("wren"),
+            }],
             measured_at_unix_ms: now - 3_600_000,
             measured_by: s("agent/example/release/captain"),
             host: s("wren"),
