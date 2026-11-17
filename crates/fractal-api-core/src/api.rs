@@ -2095,6 +2095,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
+        | "unknown-objective"
+        | "invalid-series"
+        | "unsupported-objective-series"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
@@ -2179,15 +2182,14 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "agent-charter-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
-        "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period"
-        | "invalid-series" | "unsupported-objective-series" => "validation-failed".into(),
+        "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
         "launch-review-not-authorized"
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
         | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
-        "lane-not-found" | "unknown-objective" => "not-found".into(),
+        "lane-not-found" => "not-found".into(),
         "invalid-person-ask"
         | "invalid-person-response"
         | "invalid-person-request"
