@@ -1130,7 +1130,7 @@ mod tests {
         let interval = format!(
             "{SOURCE}\nobjective \"change-rollout\" {{\n  about \"x\"\n  indicator \"interval\" {{\n    subject-prefix \"custom/acme/change/\"\n    start \"custom.acme.change-ready\"\n    stop \"custom.acme.change-applied\"\n  }}\n  window \"7d\"\n  target \"p95\" within=\"5m\"\n}}\n"
         );
-        assert!(error(&interval).contains("is an interval"), "{}", error(&interval));
+        assert!(error(&interval).contains("is a fleet declaration"), "{}", error(&interval));
     }
 
     #[test]
