@@ -52,24 +52,23 @@ pub fn admit_starting_work_claim_tx(
         &format!("{} LIMIT 1", newest_claims_of_kind_query("claims.id", "runtime.observed")),
         params![subject, i64::MAX], |row| row.get(0),
     ).optional()?;
-    let Some(current) = current.map(|id| claim_by_id_tx(tx, &id)).transpose()?.flatten() else {
-        return Ok(false);
-    };
-    let fields = &current.body["fields"];
-    if fields["status"] != "starting" {
-        return work_incarnation_live(tx, subject, incarnation);
+    let current = current.map(|id| claim_by_id_tx(tx, &id)).transpose()?.flatten();
+    if current.as_ref().is_some_and(|claim| claim.body["fields"]["status"] != "starting")
+        && work_incarnation_live(tx, subject, incarnation)?
+    {
+        return Ok(true);
     }
-    if current.origin != store.origin() || fields["incarnation_id"] != incarnation {
-        return Ok(false);
-    }
-    // The completion pins its exact observation. Merely finding some historical
-    // operation with the same incarnation must not grant a new launch authority.
+    // A worker's verified completion is sufficient: applying it is a planner
+    // task, and must not sit between a freshly spawned shell and its first claim.
     let mut statement = tx.prepare(
         "SELECT * FROM local_runtime_starts
-         WHERE subject=?1 AND finished=1 AND applied=1 AND receipted=1 AND revoked_by IS NULL
-           AND json_extract(result,'$.runtime_observation.receipt.id')=?2"
+         WHERE subject=?1 AND finished=1 AND revoked_by IS NULL
+           AND json_extract(result,'$.incarnation')=?2
+           AND (applied=0 OR json_extract(result,'$.runtime_observation.receipt.id')=?3)"
     )?;
-    let mut operations = statement.query_map(params![subject, current.id], read)?;
+    let mut operations = statement.query_map(
+        params![subject, incarnation, current.as_ref().map(|claim| &claim.id)], read,
+    )?;
     let Some(operation) = operations.next().transpose()? else { return Ok(false); };
     if operations.next().is_some() { return Ok(false); }
     let Some(result) = operation.result.as_ref() else { return Ok(false); };
@@ -79,10 +78,8 @@ pub fn admit_starting_work_claim_tx(
         || result["phase"] != "completed" || !result["error"].is_null()
         || result["verification"] != "operation-incarnation"
         || result["incarnation"] != incarnation
-        || result["runtime_id"] != fields["runtime_id"]
-        || result["terminal"] != fields["terminal"]
-        || member["runtime_id"] != fields["runtime_id"]
-        || member["terminal"] != fields["terminal"]
+        || result["runtime_id"] != member["runtime_id"]
+        || result["terminal"] != member["terminal"]
         || member["host"] != host || !member["driver"].is_null()
         || operation.body["subject"]["subject"] != subject
         || selected.as_ref().is_none_or(|row| {
@@ -93,6 +90,19 @@ pub fn admit_starting_work_claim_tx(
     {
         return Ok(false);
     }
+    let same_starting = current.as_ref().is_some_and(|claim| {
+        let fields = &claim.body["fields"];
+        claim.origin == store.origin() && fields["status"] == "starting"
+            && fields["incarnation_id"] == incarnation
+            && fields["runtime_id"] == member["runtime_id"]
+            && fields["terminal"] == member["terminal"]
+    });
+    // Before planner application there may be no runtime row at all, or just the
+    // predecessor. Only the unchanged pre-spawn observation may be superseded.
+    let unchanged_before_start = !operation.applied && result.get("runtime_before_start").is_some()
+        && current.as_ref().map(|claim| claim.id.as_str())
+            == result["runtime_before_start"].as_str();
+    if !same_starting && !unchanged_before_start { return Ok(false); }
     let newer: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND id<>?2
          AND (finished=0 OR applied=0 OR
@@ -101,30 +111,47 @@ pub fn admit_starting_work_claim_tx(
         |row| row.get(0),
     )?;
     if newer { return Ok(false); }
-    let Some(receipts) = result["result_receipts"].as_array() else { return Ok(false); };
-    let mut identity = None;
-    for receipt in receipts.iter().filter_map(Value::as_str) {
-        let Some(receipt) = retained_runtime_start_request(tx, store.origin(), receipt)? else { continue; };
-        let fields = &receipt.body["fields"];
-        if receipt.subject == subject && receipt.kind == "runtime.action.succeeded"
-            && fields["action"] == "start" && fields["operation"] == operation.id
-            && fields["runtime_id"] == member["runtime_id"]
-            && fields["incarnation_id"] == incarnation
-        {
-            identity = fields["runtime_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
-                .zip(fields["runtime_pid_start_token"].as_str().and_then(|token| token.parse::<u64>().ok()));
+    let decode_identity = |fields: &Value| {
+        fields["runtime_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+            .zip(fields["runtime_pid_start_token"].as_str().and_then(|token| token.parse::<u64>().ok()))
+    };
+    let mut identity = decode_identity(result);
+    // Already-applied results from earlier builds retain their process witness
+    // in the launch receipt rather than in the worker result.
+    if identity.is_none() && operation.applied
+        && let Some(receipts) = result["result_receipts"].as_array()
+    {
+        for receipt in receipts.iter().filter_map(Value::as_str) {
+            let Some(receipt) = retained_runtime_start_request(tx, store.origin(), receipt)? else { continue; };
+            let fields = &receipt.body["fields"];
+            if receipt.subject == subject && receipt.kind == "runtime.action.succeeded"
+                && fields["action"] == "start" && fields["operation"] == operation.id
+                && fields["runtime_id"] == member["runtime_id"]
+                && fields["incarnation_id"] == incarnation
+            {
+                identity = decode_identity(fields);
+            }
         }
     }
     let Some((pid, token)) = identity else { return Ok(false); };
-    // This is intentionally inside the writer: a cached planner observation or a
-    // numeric PID without its kernel birth identity is not sufficient authority.
+    let mut fields = if same_starting {
+        current.as_ref().expect("starting observation").body["fields"].clone()
+    } else {
+        result["runtime_start_fields"].clone()
+    };
+    if fields["status"] != "starting" || fields["incarnation_id"] != incarnation
+        || fields["runtime_id"] != member["runtime_id"] || fields["terminal"] != member["terminal"]
+    {
+        return Ok(false);
+    }
+    // Fresh kernel liveness, inside the same writer savepoint as the claim.
     if !alive(pid, token)? { return Ok(false); }
-    let mut fields = fields.clone();
     fields["status"] = Value::from("running");
     let predecessors = latest_claim_id_tx(tx, subject)?.into_iter().collect::<Vec<_>>();
+    let evidence = current.as_ref().map(|claim| &claim.id).into_iter().collect::<Vec<_>>();
     append_receipt_claim_tx(
         tx, store.origin(), subject, "runtime.observed", None,
-        &json!({"fields":fields, "evidence":[current.id]}), &predecessors, None,
+        &json!({"fields":fields, "evidence":evidence}), &predecessors, None,
         &format!("start-work-running:{}", operation.id),
     )?;
     Ok(true)

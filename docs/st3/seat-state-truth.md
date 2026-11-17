@@ -18,13 +18,18 @@ fields, so they cannot disagree.
 
 ## A custom shell's first work claim
 
-Completing a driver-less launch still records `runtime.observed.status: starting`;
-spawning alone is not readiness. A locally bound shell may establish running authority
-with its first work claim, without waiting for another reconcile sweep. The claim must
-explicitly name the exact incarnation in the latest starting receipt. The daemon checks
-the completed current start operation, subject and runtime, then freshly checks the
-launch receipt's PID and kernel process-start identity. Running authority and the work
-claim commit in one writer savepoint; a refused claim publishes neither.
+Reconcile completion of a driver-less launch still records `starting`;
+spawning alone is not readiness. A locally bound shell may establish running
+authority with its first explicitly incarnation-fenced work claim, even before any
+reconcile pass applies the launch completion. The launch worker durably records the
+verified operation, incarnation, PID and kernel process-start identity when spawn
+finishes. Admission checks that exact current subject/runtime operation and freshly
+checks the process generation. Until reconcile applies completion, the latest runtime
+observation must still be the one captured before spawn, or already name this starting
+incarnation. A newer unrelated observation cannot be overwritten.
+
+Running authority and the work claim commit in one writer savepoint; a refused claim
+publishes neither. Later reconciliation cannot regress that incarnation to `starting`.
 
 Missing process-birth evidence, a dead or reused PID, a different operation, subject or
 incarnation keeps the existing refusal. Unbound callers and omitted incarnation fences

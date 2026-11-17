@@ -173,6 +173,17 @@ mission "catalog" state="ready" {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn custom_shell_starting_claim_requires_exact_live_start() {
+    custom_shell_claim_cases(true).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn custom_shell_claim_precedes_reconcile_completion() {
+    custom_shell_claim_cases(false).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn custom_shell_claim_cases(applied: bool) {
     use std::process::{Command, Stdio};
     struct Process(std::process::Child);
     impl Drop for Process {
@@ -182,7 +193,7 @@ async fn custom_shell_starting_claim_requires_exact_live_start() {
         }
     }
     for mismatch in ["none", "dead", "incarnation", "operation", "subject", "pid-token",
-        "missing", "unbound", "refused-work", "revoked", "incomplete"] {
+        "missing", "unbound", "refused-work", "revoked", "incomplete", "observation", "prior-observation"] {
         let root = tempfile::tempdir().unwrap();
         let state = super::tests::state(root.path());
         state.store.apply_internal(&parse_intent(r#"version 2
@@ -213,6 +224,16 @@ mission "catalog" state="ready" {
         }
         let incarnation = "shell:first";
         let operation = "shell-start";
+        let before_start = (mismatch == "prior-observation").then(|| {
+            state.store.append_claim(&ClaimInput {
+                subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
+                fields: serde_json::from_value(json!({
+                    "status":"exited", "runtime_id":member.runtime_id,
+                    "terminal":member.terminal, "incarnation_id":"predecessor",
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap().id
+        });
         let body = json!({
             "subject": desired, "member": member, "selected_token": selected,
             "desired_token": selected,
@@ -223,36 +244,51 @@ mission "catalog" state="ready" {
             "runtime_id": member.runtime_id, "terminal": member.terminal,
             "incarnation": incarnation, "verification": "operation-incarnation",
             "phase": "completed",
+            "runtime_pid":pid,
+            "runtime_pid_start_token": if mismatch == "pid-token" { token + 1 } else { token }.to_string(),
+            "runtime_before_start":before_start,
+            "runtime_start_fields":{
+                "status":"starting", "runtime_id":member.runtime_id,
+                "terminal":member.terminal, "incarnation_id":incarnation,
+                "host":member.host, "adopted":false, "shutdown_timeout_ms":member.shutdown_timeout_ms,
+                "exit_code":null, "exit_signal":null, "exit_evidence":null,
+                "reachability":"reachable", "reason":null
+            },
         });
         state.store.connection.write().execute(
             "INSERT INTO local_runtime_starts(id,subject,owner,body,finished,result,applied,dispatched,receipted)
-             VALUES(?1,?2,'fixture',?3,1,?4,1,1,1)",
-            rusqlite::params![operation, SEAT, body.to_string(), result.to_string()],
+             VALUES(?1,?2,'fixture',?3,1,?4,?5,1,?5)",
+            rusqlite::params![operation, SEAT, body.to_string(), result.to_string(), applied],
         ).unwrap();
-        let succeeded = state.store.append_claim(&ClaimInput {
-            subject: SEAT.into(), kind: "runtime.action.succeeded".into(), actor: None,
-            fields: serde_json::from_value(json!({
-                "action":"start", "operation":operation, "runtime_id":member.runtime_id,
-                "incarnation_id":incarnation, "runtime_pid":pid,
-                "runtime_pid_start_token": if mismatch == "pid-token" { token + 1 } else { token }.to_string(),
-                "desired_token": selected,
-            })).unwrap(),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
-        }).unwrap();
-        let starting = state.store.append_claim(&ClaimInput {
-            subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
-            fields: serde_json::from_value(json!({
-                "status":"starting", "runtime_id":member.runtime_id,
-                "terminal":member.terminal, "incarnation_id":incarnation,
-            })).unwrap(),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
-        }).unwrap();
-        result["result_receipts"] = json!([succeeded.id, starting.id]);
-        result["runtime_observation"] = json!({"receipt":starting});
-        state.store.connection.write().execute(
-            "UPDATE local_runtime_starts SET result=?2 WHERE id=?1",
-            rusqlite::params![operation, result.to_string()],
-        ).unwrap();
+        if applied {
+            let succeeded = state.store.append_claim(&ClaimInput {
+                subject: SEAT.into(), kind: "runtime.action.succeeded".into(), actor: None,
+                fields: serde_json::from_value(json!({
+                    "action":"start", "operation":operation, "runtime_id":member.runtime_id,
+                    "incarnation_id":incarnation, "runtime_pid":pid,
+                    "runtime_pid_start_token": if mismatch == "pid-token" { token + 1 } else { token }.to_string(),
+                    "desired_token": selected,
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let starting = state.store.append_claim(&ClaimInput {
+                subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
+                fields: serde_json::from_value(json!({
+                    "status":"starting", "runtime_id":member.runtime_id,
+                    "terminal":member.terminal, "incarnation_id":incarnation,
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            result["result_receipts"] = json!([succeeded.id, starting.id]);
+            result["runtime_observation"] = json!({"receipt":starting});
+            // Also keep coverage for completed starts written by older workers.
+            result.as_object_mut().unwrap().remove("runtime_pid");
+            result.as_object_mut().unwrap().remove("runtime_pid_start_token");
+            state.store.connection.write().execute(
+                "UPDATE local_runtime_starts SET result=?2 WHERE id=?1",
+                rusqlite::params![operation, result.to_string()],
+            ).unwrap();
+        }
         if mismatch == "revoked" {
             state.store.connection.write().execute(
                 "UPDATE local_runtime_starts SET revoked_by='stop' WHERE id=?1", [operation],
@@ -265,6 +301,16 @@ mission "catalog" state="ready" {
         }
         if mismatch == "refused-work" {
             state.store.set_step_state(step, "completed", None).unwrap();
+        }
+        if mismatch == "observation" {
+            state.store.append_claim(&ClaimInput {
+                subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
+                fields: serde_json::from_value(json!({
+                    "status":"absent", "runtime_id":member.runtime_id,
+                    "terminal":member.terminal, "incarnation_id":"other",
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
         }
         let request = WorkRequest {
             actor: Some(SEAT.into()),
@@ -279,14 +325,24 @@ mission "catalog" state="ready" {
             (mismatch != "unbound").then(|| Extension(BoundAgent(SEAT.into()))), Json(request),
         ).await;
         let status = state.store.latest_claim(SEAT, Some("runtime.observed")).unwrap()
-            .unwrap().body["fields"]["status"].clone();
-        if mismatch == "none" {
+            .map_or(Value::Null, |claim| claim.body["fields"]["status"].clone());
+        if matches!(mismatch, "none" | "prior-observation") {
             assert!(response.is_ok(), "exact live shell claim refused: {response:?}");
             assert_eq!(status, "running");
             assert_eq!(state.store.step_run(step).unwrap().unwrap().status, "claimed");
+            if !applied {
+                let flags: (bool, bool) = state.store.connection.write().query_row(
+                    "SELECT applied,receipted FROM local_runtime_starts WHERE id=?1",
+                    [operation], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).unwrap();
+                assert_eq!(flags, (false, false), "claim must not depend on planner application");
+                assert!(state.store.latest_observation(SEAT, "runtime.action.succeeded").unwrap().is_none());
+            }
         } else {
             assert!(response.is_err(), "{mismatch} unexpectedly admitted");
-            assert_eq!(status, "starting", "{mismatch} published running");
+            let expected = if mismatch == "observation" { json!("absent") }
+                else if applied { json!("starting") } else { Value::Null };
+            assert_eq!(status, expected, "{mismatch} published running");
             assert_eq!(state.store.step_run(step).unwrap().unwrap().status,
                 if mismatch == "refused-work" { "completed" } else { "ready" });
         }
