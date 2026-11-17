@@ -547,8 +547,9 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assertFalse(self.saved_state().get("pending"))
 
     def test_build_logs_timestamped_phase_starts_in_order(self):
-        result = self.reconcile()
-        phases = [line for line in result.stdout.splitlines() if " phase=" in line]
+        self.reconcile()
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        phases = [line for line in log.read_text().splitlines() if " phase=" in line]
         self.assertEqual([line.split(" phase=", 1)[1] for line in phases], [
             "pnpm_install", "expo_config", "fabric_build", "prebuild_pod_install",
             "export_ios", "xcodebuild", "verify"])

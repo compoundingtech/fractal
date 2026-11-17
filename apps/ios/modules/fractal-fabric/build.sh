@@ -1,4 +1,5 @@
 #!/bin/sh
+# Manual callers must not package concurrently into the same output directory.
 set -eu
 cd "$(dirname "$0")"
 repo_root=$(cd ../../../.. && pwd)
