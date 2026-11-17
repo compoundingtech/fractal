@@ -11423,6 +11423,7 @@ fn migrate_person_cancellation_projections_tx(transaction: &Transaction<'_>) -> 
     // reopening. Keep their existing health state, but do not repeat every successful refold.
     // Actual errors (including contention/deadlines) propagate and roll this marker back.
     transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h7f69e83e8327 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
         "INSERT OR REPLACE INTO meta(key,value) VALUES('person_cancellation_projection_rules','1')",
         [],
     )?;
@@ -12288,7 +12289,7 @@ fn is_derived_person_cancellation_tx(transaction: &Transaction<'_>, claim: &Clai
     for predecessor in &claim.predecessors {
         if transaction.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND kind='work.person-cancelled')",
-        )?.query_row([predecessor], |row| row.get::<_, bool>(0))? {
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hc9b442dfc294 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [predecessor], |row| row.get::<_, bool>(0))? {
             return Ok(true);
         }
     }

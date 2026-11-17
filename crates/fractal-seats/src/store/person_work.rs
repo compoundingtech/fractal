@@ -2069,7 +2069,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
                     "attempt": 1, "status": "cancelled", "episode": asking.id,
                     "summary": "Historical owner is absent", "key": "absent-origin-response"
                 }}), std::slice::from_ref(&asking.id), None)?;
-            tx.execute("DELETE FROM meta WHERE key='person_cancellation_projection_rules'", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h4477e8df1206 owner=fractal_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='person_cancellation_projection_rules'", [])?;
             Ok(())
         }).unwrap().unwrap();
         drop(store);
@@ -2081,6 +2081,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
         assert_eq!(marker, "1", "unrepairable history must not strand the migration");
         repaired.connection.batched(|tx| -> Result<()> {
             tx.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h84685552bc74 owner=fractal_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */
                 "CREATE TRIGGER absent_origin_no_repeat_marker BEFORE INSERT ON meta
                  WHEN NEW.key='person_cancellation_projection_rules'
                  BEGIN SELECT RAISE(ABORT, 'migration must not repeat'); END;
@@ -2112,11 +2113,13 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
             // Simulate the persisted result of the historical projector, with the original
             // retained cancellation and its causally derived ready claim left untouched.
             tx.execute(
+                /* sqlite-large-value: allow-for-now lv-h7cb24bb2ce91 owner=fractal_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE step_runs SET status='ready',blocked_reason=NULL WHERE subject=?1",
                 [&origin.subject],
             )?;
-            tx.execute("DELETE FROM meta WHERE key='person_cancellation_projection_rules'", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h29fc8987584d owner=fractal_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='person_cancellation_projection_rules'", [])?;
             tx.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h7f6f0e52476e owner=fractal_seats::store::person_work TODO=prepare-body-and-predecessor-values */
                 "CREATE TRIGGER cancelled_ask_no_claim_insert BEFORE INSERT ON claims
                  BEGIN SELECT RAISE(ABORT, 'repair must not insert claims'); END;
                  CREATE TRIGGER cancelled_ask_no_claim_update BEFORE UPDATE ON claims
@@ -2146,6 +2149,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
             // A repeated run-tree rebuild deletes and reinserts step rows. Guard its deletion
             // path so the next successful open proves the persisted marker skips the repair.
             tx.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h1be5f67a49da owner=fractal_seats::store::person_work TODO=bound-or-reference-values-and-reclamation */
                 "CREATE TRIGGER cancelled_ask_no_repeat_rebuild BEFORE DELETE ON step_runs
                  BEGIN SELECT RAISE(ABORT, 'unchanged reopen must not rebuild steps'); END;",
             )?;
