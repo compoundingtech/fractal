@@ -478,10 +478,14 @@ async fn assistant_final_delivery_denials_leave_durable_receipts() {
 
 // Use the native Codex transcript/runtime-binding fixture, not a synthetic projection.
 fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
+    content_source_for_agent(fixture, text, "agent/reads-codex")
+}
+
+fn content_source_for_agent(fixture: &mut Fixture, text: &str, agent: &str) -> (String,String,String) {
     let home=fixture.root.path().join("home");
     let transcript=home.join(".codex/sessions/2026/10/11/assistant.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-    let agent="agent/reads-codex";
+    let agent_name = agent.strip_prefix("agent/").unwrap();
     let incarnation="native-pty:reads";
     let provider_incarnation="provider-reads";
     let native_id="native-reads-codex-test";
@@ -496,9 +500,9 @@ fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
         .join(&hex::encode(Sha256::digest(agent.as_bytes()))[..24]).join("state");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("runtime.json"),serde_json::to_vec(&json!({
-        "agent":"reads-codex","incarnation":provider_incarnation})).unwrap()).unwrap();
+        "agent":agent_name,"incarnation":provider_incarnation})).unwrap()).unwrap();
     std::fs::write(directory.join("binding.json"),serde_json::to_vec(&json!({
-        "agent":"reads-codex","runtimeIncarnation":provider_incarnation,"threadId":native_id})).unwrap()).unwrap();
+        "agent":agent_name,"runtimeIncarnation":provider_incarnation,"threadId":native_id})).unwrap()).unwrap();
     for (kind,fields) in [
         ("runtime.observed",json!({"status":"running","runtime_id":"reads-codex-pty",
             "incarnation_id":incarnation,"terminal":true})),
@@ -722,16 +726,23 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
 #[tokio::test]
 async fn thread_start_context_is_metadata_only_and_exact_conversation_bound() {
     let mut fixture = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
-    let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
+    let intent = crate::graph::parse_internal_intent(r#"version 2
+agent "start-context.reads-codex" { workspace "/tmp"; command "true"; restart always; }
+agent "start-context.other" { workspace "/tmp"; command "true"; restart always; }
+"#, "assistant-proof-tests").unwrap();
+    fixture.state.store.apply_internal(&intent, "start-context-agents").unwrap();
+    let (session, _, _) = content_source_for_agent(
+        &mut fixture, &"Agent conversation ".repeat(512), "agent/start-context.reads-codex",
+    );
     fixture.state.store.ask_person(&serde_json::from_value(json!({
-        "person": OWNER, "actor": "agent/reads-codex",
+        "person": OWNER, "actor": "agent/start-context.reads-codex",
         "title": "PRIVATE source title", "reason": "PRIVATE source prose",
         "new_run": "start-context", "idempotency_key": "start-context"
     })).unwrap()).unwrap();
     let item = fixture.state.store.attention_items(Some(OWNER)).unwrap().into_iter()
         .find(|item| item.title == "PRIVATE source title").unwrap();
     let query = format!(
-        "?agent_id=agent%2Freads-codex&session_id={}&source_id={}&episode={}&max_response_bytes=16384",
+        "?agent_id=agent%2Fstart-context.reads-codex&session_id={}&source_id={}&episode={}&max_response_bytes=16384",
         urlencoding::encode(&session), urlencoding::encode(&item.subject), urlencoding::encode(&item.episode),
     );
     let payload = fixture.payload("thread-start-context", &query);
@@ -742,7 +753,7 @@ async fn thread_start_context_is_metadata_only_and_exact_conversation_bound() {
     assert_eq!(status, StatusCode::OK, "{value}");
     assert_eq!(value["value"], json!({
         "kind": "thread-start-context", "source_id": item.subject, "episode": item.episode,
-        "start_recipient": {"agent_id": "agent/reads-codex", "basis": {"_tag": "original"}}
+        "start_recipient": {"agent_id": "agent/start-context.reads-codex", "basis": {"_tag": "original"}}
     }));
     assert!(!value.to_string().contains("PRIVATE"));
     assert!(bytes <= MAX_RESPONSE_BYTES);
@@ -756,7 +767,7 @@ async fn thread_start_context_is_metadata_only_and_exact_conversation_bound() {
         unknown,
         endpoint.replace(&urlencoding::encode(&item.episode).to_string(), "claim%2Funknown"),
         endpoint.replace(&urlencoding::encode(&session).to_string(), "session%2Fstale"),
-        endpoint.replace("agent%2Freads-codex", "agent%2Funobserved"),
+        endpoint.replace("agent%2Fstart-context.reads-codex", "agent%2Funobserved"),
     ] {
         let (status, value, _) = fixture.request(&denied, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
@@ -766,7 +777,7 @@ async fn thread_start_context_is_metadata_only_and_exact_conversation_bound() {
     }
     // A valid current conversation must still not read another recipient's source.
     fixture.state.store.ask_person(&serde_json::from_value(json!({
-        "person": OWNER, "actor": "agent/other",
+        "person": OWNER, "actor": "agent/start-context.other",
         "title": "PRIVATE other source", "reason": "PRIVATE other prose",
         "new_run": "other-start-context", "idempotency_key": "other-start-context"
     })).unwrap()).unwrap();
@@ -779,7 +790,7 @@ async fn thread_start_context_is_metadata_only_and_exact_conversation_bound() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
     assert_eq!(value["error"], unknown_body["error"]);
     fixture.state.store.ask_person(&serde_json::from_value(json!({
-        "person": "person/other", "actor": "agent/reads-codex",
+        "person": "person/other", "actor": "agent/start-context.reads-codex",
         "title": "PRIVATE foreign source", "reason": "PRIVATE foreign prose",
         "new_run": "foreign-start-context", "idempotency_key": "foreign-start-context"
     })).unwrap()).unwrap();

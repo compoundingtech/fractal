@@ -700,6 +700,9 @@ async fn browser_pairing_pending_cap_rechecks_admitted_candidate_membership() {
 async fn browser_retained_discussion_rechecks_revocation_and_exact_expiry() {
     use super::thread_fence_tests::retained_discussion;
     let (_root, state, owner) = fixture().await;
+    state.store.set_node_key(std::sync::Arc::new(
+        smallclaims::fleet::MemberKey::generate().unwrap().0,
+    )).unwrap();
     let origin = retained_discussion::install_source(&state, true);
     let key = "c".repeat(64);
     let pending = start(&state, &owner, &key).await;
@@ -709,6 +712,7 @@ async fn browser_retained_discussion_rechecks_revocation_and_exact_expiry() {
     let completion = state.store.claims_for_subject_kind_at(&begun(&state, &pending).subject,
         "custom.client.pairing-completed", None, true, 1).unwrap().claims.remove(0);
     let browser = paired_client_session(&state, &completion, "fabric-loopback", false).unwrap();
+    assert!(thread_access::browser_message_authority(&state, &browser).is_some());
     let expiry = completion.body["fields"]["expires_at_unix_ms"].as_u64().unwrap();
     assert!(paired_client_session_at(&state, &completion, "fabric-loopback", false, u128::from(expiry)).is_err());
     let first = retained_discussion::request(&state, &origin, "thread/browser-retained", "browser-retained");
@@ -729,6 +733,9 @@ async fn browser_discussion_terminal_retirement_creates_a_new_recipient_thread_w
     use crate::store::thread_metadata::{self, ThreadContext};
     for resolved in [false, true] {
         let (_root, state, owner) = fixture().await;
+        state.store.set_node_key(std::sync::Arc::new(
+            smallclaims::fleet::MemberKey::generate().unwrap().0,
+        )).unwrap();
         let origin = retained_discussion::install_source(&state, resolved);
         let key = "d".repeat(64);
         let pending = start(&state, &owner, &key).await;
@@ -738,6 +745,7 @@ async fn browser_discussion_terminal_retirement_creates_a_new_recipient_thread_w
         let completion = state.store.claims_for_subject_kind_at(&begun(&state, &pending).subject,
             "custom.client.pairing-completed", None, true, 1).unwrap().claims.remove(0);
         let browser = paired_client_session(&state, &completion, "fabric-loopback", false).unwrap();
+        assert!(thread_access::browser_message_authority(&state, &browser).is_some());
         let original_request = retained_discussion::request(&state, &origin,
             "thread/browser-original-recipient", "browser-original-recipient");
         let original = retained_discussion::start(&state, &browser, original_request.clone()).await.unwrap();
