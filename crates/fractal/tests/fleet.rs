@@ -9888,6 +9888,11 @@ async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
     }).await;
 
     if release_has_plugin {
+        wait_until("the elder holds the poller's active observer declaration", 90, || async {
+            observer_declarations(&elder).await.into_iter()
+                .rfind(|(origin, _)| origin == "fixture-poller")
+                .is_some_and(|(_, stopped)| !stopped)
+        }).await;
         let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
         assert_eq!(pull["pull"]["facts"]["head_sha"], "c".repeat(40), "{pull}");
     } else {
