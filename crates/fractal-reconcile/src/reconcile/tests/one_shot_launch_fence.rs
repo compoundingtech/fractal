@@ -22,10 +22,14 @@ fn native_ordinary_observation_cannot_admit_an_unreleased_launch() {
     let gate = fractal_runtime::NativeLaunchGate::prepare(&runtime.launch_gate_root, operation).unwrap();
     // A second gate holds the payload after release, without a timing delay.
     let payload = fractal_runtime::NativeLaunchGate::prepare(&root.path().join("payload"), "payload").unwrap();
-    let launch = gate.wrap(&payload.wrap(&fractal_runtime::Launch::Shell("exit 0".into())));
+    let mut launch = gate.wrap(&payload.wrap(&fractal_runtime::Launch::Shell("exit 0".into())));
     let declared = BTreeMap::from([(start_jobs::OPERATION_ENV.into(), operation.into())]);
     let mut environment = member_environment(&declared, &launch_executable().unwrap(), None).unwrap();
     set_lane(&mut environment, None);
+    if let fractal_runtime::Launch::Argv(argv) = &mut launch {
+        argv[0] = fractal_runtime::resolve_executable(&argv[0], &environment).unwrap()
+            .to_string_lossy().into_owned();
+    }
     let generation = runtime.exec.spawn("held-native", &launch, root.path(), &environment).unwrap();
     struct Cleanup<'a>(&'a NativeRuntime, &'a str);
     impl Drop for Cleanup<'_> {
