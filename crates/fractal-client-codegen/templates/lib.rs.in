@@ -1318,6 +1318,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::MembershipEditTooLarge
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
+        | ErrorCode::RecipientUnassigned
         | ErrorCode::IdentityCycle
         | ErrorCode::IdentityOccupied
         | ErrorCode::IdentityRetiredSource
@@ -4056,6 +4057,34 @@ mod tests {
                 assert_eq!(request.headers()["x-st3-features"], expected);
             }
         }
+    }
+
+    #[test]
+    fn recipient_unassigned_error_decodes_as_typed_variant_and_future_codes_stay_unknown() {
+        let wire = serde_json::json!({
+            "api_version": API_VERSION,
+            "error_version": ERROR_VERSION,
+            "request_id": "request/unassigned",
+            "code": "recipient-unassigned",
+            "message": "this Inbox source has no responsible agent or configured fallback",
+            "retryable": false,
+            "details": {}
+        });
+        let envelope: ErrorEnvelope = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(envelope.code, ErrorCode::RecipientUnassigned);
+        assert!(!envelope.retryable);
+        assert!(!envelope.details.contains_key("reason"));
+        assert_eq!(serde_json::to_value(&envelope).unwrap()["code"], "recipient-unassigned");
+        let error = ClientError::Api(envelope.code.clone(), envelope.message.clone(), Box::new(envelope));
+        assert!(!error.is_transient());
+        assert!(error.plain().contains("no responsible agent"));
+
+        let mut future_wire = wire;
+        future_wire["code"] = serde_json::json!("future-recipient-error");
+        let future: ErrorEnvelope = serde_json::from_value(future_wire).unwrap();
+        assert_eq!(future.code, ErrorCode::Unknown);
+        assert!(!future.retryable);
+        assert_eq!(future.message, "this Inbox source has no responsible agent or configured fallback");
     }
 
     #[test]
