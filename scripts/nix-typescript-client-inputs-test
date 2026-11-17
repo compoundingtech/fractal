@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Evaluate the real installation identity against isolated semantic-input mutations.
+
+Run with Nix flakes available, independently of the sparse/offline script-test lane.
+No installation is built. Temporary fixtures are removed on success or failure.
+"""
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    source_paths = json.loads((ROOT / 'pnpm-source-inputs.json').read_text())['sourceInputPaths']
+    scratch = ROOT / 'tmp'
+    scratch.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='typescript-client-inputs-', dir=scratch) as temporary:
+        work = Path(temporary)
+        upstream = work / 'upstream'
+        for source in source_paths:
+            package = upstream / source.removeprefix('repos/effect-utils/')
+            package.mkdir(parents=True)
+            (package / 'package.json').write_text('{"type":"module"}\n')
+            (package / 'source.ts').write_text('export const value = 1\n')
+            (package / 'empty').mkdir()
+        # These are fixture bytes, not executed helpers: changes to either closure member must key
+        # the real derivation even when all staged packages are otherwise identical.
+        helper = Path('nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs')
+        resolver = Path('packages/@overeng/genie/src/core/import-map/sync-resolver.ts')
+        for relative in (helper, resolver):
+            target = upstream / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('export {}\n')
+        (upstream / 'unrelated').write_text('first root\n')
+        package_path = Path(source_paths[0].removeprefix('repos/effect-utils/'))
+        cases = {}
+
+        def upstream_case(name, change):
+            path = work / name
+            shutil.copytree(upstream, path)
+            change(path)
+            cases[name] = {'source': str(path), 'fractal': str(ROOT)}
+
+        cases['base'] = {'source': str(upstream), 'fractal': str(ROOT)}
+        cases['toolchain'] = {**cases['base'], 'changeToolchain': True}
+        upstream_case('unrelated', lambda path: (path / 'unrelated').write_text('second root\n'))
+        upstream_case('source', lambda path: (path / package_path / 'source.ts').write_text('export const value = 2\n'))
+        upstream_case('package_manifest', lambda path: (path / package_path / 'package.json').write_text('{"type":"module","version":"2"}\n'))
+        upstream_case('executable', lambda path: (path / package_path / 'source.ts').chmod(0o755))
+        upstream_case('directory', lambda path: (path / package_path / 'another-empty').mkdir())
+        upstream_case('helper', lambda path: (path / helper).write_text('export const helper = 1\n'))
+        upstream_case('resolver', lambda path: (path / resolver).write_text('export const resolver = 1\n'))
+
+        def ignored(path):
+            for name in ('.git', 'node_modules'):
+                directory = path / package_path / name
+                directory.mkdir()
+                (directory / 'ignored').write_text('not an installation input\n')
+            sibling = path / package_path.parent / 'unselected-package'
+            sibling.mkdir()
+            (sibling / 'source.ts').write_text('not selected\n')
+
+        upstream_case('ignored', ignored)
+        upstream_case('symlink', lambda path: (path / package_path / 'alias.ts').symlink_to('source.ts'))
+        # Both symlink roots contain the same link, but the dereferenced staged bytes differ.
+        linked = work / 'symlink'
+        changed_link = work / 'symlink_changed'
+        shutil.copytree(linked, changed_link, symlinks=True)
+        (changed_link / package_path / 'source.ts').write_text('export const value = 3\n')
+        cases['symlink_changed'] = {'source': str(changed_link), 'fractal': str(ROOT)}
+
+        # Import the same derivation from minimal Fractal roots so its relative file inputs vary.
+        files = ['nix/typescript-client.nix', 'nix/typescript-client-sources.nix',
+                 'nix/typescript-client-installation.sh', 'nix/typescript-client-deps.hash',
+                 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-source-inputs.json']
+        # Keep this list derived from the actual fileset, not another workspace-member authority.
+        files += re.findall(r'\.\./([^\s]+/package\.json)', (ROOT / 'nix/typescript-client.nix').read_text())
+        for name, relative in [('lock', 'pnpm-lock.yaml'), ('manifest', 'package.json'),
+                               ('policy', 'pnpm-workspace.yaml'),
+                               ('recipe', 'nix/typescript-client-installation.sh')]:
+            fractal = work / name
+            for filename in files:
+                target = fractal / filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / filename, target)
+            with (fractal / relative).open('a') as handle:
+                handle.write('\n ' if relative.endswith('.json') else '\n# identity mutation\n')
+            cases[name] = {'source': str(upstream), 'fractal': str(fractal)}
+
+        expression = '''
+          let
+            flake = builtins.getFlake %s;
+            cases = builtins.fromJSON %s;
+            evaluate = system: fixture:
+              let check = import (builtins.toPath (fixture.fractal + "/nix/typescript-client.nix")) {
+                effect-utils = flake.inputs.effect-utils // {
+                  outPath = builtins.toPath fixture.source;
+                  narHash = throw "installation identity must not read the whole effect-utils narHash";
+                  lib = flake.inputs.effect-utils.lib // (
+                    if fixture.changeToolchain or false then {
+                      mkPnpm = args: (flake.inputs.effect-utils.lib.mkPnpm args).overrideAttrs (previous: {
+                        postInstall = (previous.postInstall or "") + "\n# identity mutation";
+                      });
+                    } else {}
+                  );
+                };
+                inherit system;
+                self = flake.outPath;
+                version = "identity-test";
+              }; in {
+                hash = check.installation.inputsHash;
+                name = check.installation.name;
+                guard = (builtins.tryEval check.installation.drvPath).success;
+              };
+          in (builtins.mapAttrs (_: evaluate "x86_64-linux") cases) // {
+            arm = evaluate "aarch64-linux" cases.base;
+            darwin = evaluate "aarch64-darwin" cases.base;
+          }
+        ''' % (json.dumps('git+file:' + str(ROOT)), json.dumps(json.dumps(cases)))
+        result = subprocess.run(['nix', 'eval', '--impure', '--json', '--expr', expression],
+                                text=True, capture_output=True)
+        if result.returncode:
+            raise RuntimeError(result.stderr)
+        identities = json.loads(result.stdout)
+        base = identities['base']['hash']
+        for name in ('unrelated', 'ignored', 'arm', 'darwin'):
+            assert identities[name]['hash'] == base, name
+        for name in ('source', 'executable', 'directory', 'helper', 'resolver', 'symlink',
+                     'lock', 'manifest', 'package_manifest', 'policy', 'recipe', 'toolchain'):
+            assert identities[name]['hash'] != base, name
+        assert identities['symlink']['hash'] != identities['symlink_changed']['hash']
+        for name, identity in identities.items():
+            assert identity['name'] == 'typescript-client-installation-' + identity['hash'], name
+            assert not identity['guard'], name  # Fixture bytes have never been measured.
+        print(f'semantic installation identity: {len(identities)} cases passed (evaluation only)')
+
+
+if __name__ == '__main__':
+    main()

@@ -6,10 +6,10 @@
 # uses the hoisted linker, so they are plain directories with relative links). The check restores them
 # over the source and runs the same script, unchanged.
 #
-# Refreshing the hash: the installation name carries the lockfile hash and effect-utils source identity.
-# `nix/typescript-client-deps.hash` records both the output hash and the effect-utils narHash it was measured
-# with, so consumers overriding that input fail before building. `scripts/nix-typescript-client-deps-hash`
-# refreshes both values. pnpm-workspace.yaml installs the same supported architectures on every host.
+# The versioned semantic identity covers the exact installation derivations on supported platforms:
+# selected manifests/policy, staged package bytes, staging helper closure, recipe and toolchains.
+# Name, pin guard and refresh passthru share it. Unrelated effect-utils edits are not inputs.
+# Refresh with `scripts/nix-typescript-client-deps-hash`; the measured output remains fail-closed.
 { effect-utils, system, self, version }:
 let
   pkgs = import effect-utils.inputs.nixpkgs { inherit system; };
@@ -17,11 +17,6 @@ let
   # pnpm and Node 24 from effect-utils' own nixpkgs, as the web shell (`nix/web-shell.nix`) has them.
   pnpm = effect-utils.lib.mkPnpm { inherit pkgs; };
   node = pkgs.nodejs_24;
-  # A fixed-output path is named by its name and hash, not by its builder inputs. The lockfile records the staged
-  # `@overeng/*` sources by path only, so both the lockfile and the effect-utils revision go into the name: a bump of
-  # either builds a new installation instead of reusing a stale one from a store or cache.
-  lockHash = builtins.substring 0 12 (builtins.hashFile "sha256" ../pnpm-lock.yaml);
-  sourcesHash = builtins.substring 0 12 (builtins.hashString "sha256" effect-utils.narHash);
   dependencyPin = builtins.fromJSON (builtins.readFile ./typescript-client-deps.hash);
   manifests = lib.fileset.toSource {
     root = ../.;
@@ -41,45 +36,43 @@ let
       ../packages/fractal-ui/package.json
     ];
   };
-  installation = pkgs.runCommand "typescript-client-installation-${lockHash}-${sourcesHash}" {
-    outputHashMode = "recursive";
-    outputHashAlgo = "sha256";
+  effectUtilsSources = import ./typescript-client-sources.nix {
+    inherit lib;
+    effectUtilsSource = effect-utils.outPath;
+    sourceInputPaths = (builtins.fromJSON (builtins.readFile ../pnpm-source-inputs.json)).sourceInputPaths;
+  };
+  # Hash the actual builder closure, not a separately maintained recipe description. Use a fixed
+  # probe name/hash to break the identity/name cycle. Recording every supported platform makes the
+  # input identity portable without pretending their measured installation outputs must be equal.
+  installationTemplates = lib.genAttrs [
+    "aarch64-darwin" "aarch64-linux" "x86_64-linux"
+  ] (targetSystem:
+    let
+      targetPkgs = import effect-utils.inputs.nixpkgs { system = targetSystem; };
+    in targetPkgs.runCommand "typescript-client-installation-inputs" {
+      outputHashMode = "recursive";
+      outputHashAlgo = "sha256";
+      outputHash = lib.fakeHash;
+      inherit manifests effectUtilsSources;
+      nativeBuildInputs = [
+        (effect-utils.lib.mkPnpm { pkgs = targetPkgs; })
+        targetPkgs.nodejs_24
+        targetPkgs.cacert
+      ];
+      SSL_CERT_FILE = "${targetPkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    } (builtins.readFile ./typescript-client-installation.sh)
+  );
+  inputsHash = builtins.hashString "sha256" (builtins.toJSON {
+    schemaVersion = 1;
+    installations = lib.mapAttrs (_: installation: installation.drvPath) installationTemplates;
+  });
+  installation = installationTemplates.${system}.overrideAttrs (_: {
+    name = "typescript-client-installation-${inputsHash}";
     outputHash =
-      if effect-utils.narHash == dependencyPin.effectUtilsNarHash then dependencyPin.hash
-      else throw "fractal's effect-utils input is overridden or changed (got ${effect-utils.narHash}, hash measured with ${dependencyPin.effectUtilsNarHash}); consumers must resolve effect-utils to fractal's pin, or run scripts/nix-typescript-client-deps-hash";
-    passthru.effectUtilsNarHash = effect-utils.narHash;
-    nativeBuildInputs = [ pnpm node pkgs.cacert ];
-    SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-  } ''
-    export HOME=$TMPDIR/home
-    mkdir -p "$HOME" source
-    cp -r ${manifests}/. source
-    chmod -R u+w source
-    cd source
-    # The workspace's `@overeng/*` packages are `file:` sources staged from effect-utils, as the web shell does.
-    mkdir repos
-    ln -s ${effect-utils} repos/effect-utils
-    node -e '
-      const { readFileSync } = require("node:fs");
-      const { spawnSync } = require("node:child_process");
-      const paths = JSON.parse(readFileSync("pnpm-source-inputs.json", "utf8")).sourceInputPaths;
-      const result = spawnSync(process.execPath, [
-        process.argv[1], "publish", process.cwd(), ".devenv/pnpm-source-inputs", ...paths,
-      ], { stdio: "inherit" });
-      process.exit(result.status ?? 1);
-    ' ${effect-utils}/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs
-    pnpm install --frozen-lockfile --store-dir "$TMPDIR/store"
-    # Both name the install directory and the time; neither is needed to run the workspace.
-    find . -name node_modules -prune -exec rm -f '{}/.modules.yaml' '{}/.pnpm-workspace-state-v1.json' ';'
-    # pacquet can leave atomic-write staging files with PID/time/counter names.
-    # They are not package inputs and make otherwise identical installations nondeterministic.
-    find . -type f -name 'package.json_pacquet-stage_*' -delete
-    mkdir "$out"
-    find . -name node_modules -prune -print | while IFS= read -r directory; do
-      mkdir -p "$out/$(dirname "$directory")"
-      cp -a "$directory" "$out/$directory"
-    done
-  '';
+      if (dependencyPin.schemaVersion or null) == 1 && (dependencyPin.inputsHash or null) == inputsHash then dependencyPin.hash
+      else throw "typescript-client installation inputs changed (got ${inputsHash}, measured ${dependencyPin.inputsHash or "missing"}); run scripts/nix-typescript-client-deps-hash";
+    passthru = { inherit inputsHash; };
+  });
 in
 pkgs.runCommand "typescript-client-${version}" {
   nativeBuildInputs = [ pnpm node pkgs.bubblewrap pkgs.coreutils pkgs.bash ];

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The TypeScript fixed-output installation uses a semantic inputsHash instead of the whole effect-utils source hash, allowing unrelated upstream and root changes to reuse the installation while real installation changes fail closed.",
+  "replay": {"status": "none", "detail": "Packaging only; no graph, replay or storage change."},
+  "schema": {"status": "changed", "detail": "The Fractal-owned nix/typescript-client-deps.hash pin now records schemaVersion 1, a 64-character lowercase SHA-256 inputsHash and the measured SRI output hash."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination change."},
+  "compatibility": {"status": "changed", "detail": "Installation names and guards use the full semantic inputsHash. Identity includes selected staged source bytes, transitive local source dependencies, the staging helper closure, installation recipe and builder/toolchain inputs across supported systems. Consumers no longer have to match the whole effect-utils narHash; Fractal remains the pin owner. The full TypeScript check is unchanged."},
+  "downtime": {"status": "none", "detail": "No daemon restart required."},
+  "manual": {"status": "changed", "detail": "Run scripts/nix-typescript-client-deps-hash after changing installation inputs. It reads the identity before forcing the guard, builds only the installation and atomically replaces the schema/identity/output pin, restoring original bytes on failure or interruption. Network and a builder for the selected system are required."},
+  "recovery": {"status": "none", "detail": "Revert the installation identity implementation and its pin together to restore the previous packaging contract."}
+}

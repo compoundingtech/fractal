@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -19,20 +20,18 @@ loader.exec_module(refresh)
 
 
 class ManifestTests(unittest.TestCase):
-    def test_the_hash_file_pins_the_output_and_its_source_identity(self):
+    def test_the_hash_file_pins_the_output_and_semantic_identity(self):
         pin = json.loads((root / 'nix/typescript-client-deps.hash').read_text())
-        self.assertEqual(set(pin), {'hash', 'effectUtilsNarHash'})
-        for value in pin.values():
-            self.assertRegex(value, r'^sha256-[A-Za-z0-9+/]{43}=\Z')
-        lock = json.loads((root / 'flake.lock').read_text())
-        source = lock['nodes'][lock['nodes']['root']['inputs']['effect-utils']]['locked']
-        self.assertEqual(pin['effectUtilsNarHash'], source['narHash'])
+        self.assertEqual(set(pin), {'schemaVersion', 'inputsHash', 'hash'})
+        self.assertEqual(pin['schemaVersion'], 1)
+        self.assertRegex(pin['inputsHash'], r'^[0-9a-f]{64}\Z')
+        self.assertRegex(pin['hash'], r'^sha256-[A-Za-z0-9+/]{43}=\Z')
 
-    def test_the_installation_name_carries_the_lockfile_and_the_effect_utils_revision(self):
+    def test_the_installation_name_and_guard_use_the_semantic_identity(self):
         derivation = (root / 'nix/typescript-client.nix').read_text()
-        self.assertIn('typescript-client-installation-${lockHash}-${sourcesHash}', derivation)
-        self.assertRegex(derivation, r'sourcesHash = [^\n]*effect-utils\.narHash')
-        self.assertRegex(derivation, r'lockHash = [^\n]*pnpm-lock\.yaml')
+        self.assertIn('typescript-client-installation-${inputsHash}', derivation)
+        self.assertIn('dependencyPin.inputsHash', derivation)
+        self.assertIn('dependencyPin.schemaVersion', derivation)
 
     def test_every_workspace_member_manifest_is_a_derivation_input(self):
         workspace = (root / 'pnpm-workspace.yaml').read_text()
@@ -45,8 +44,8 @@ class ManifestTests(unittest.TestCase):
             self.assertIn(f'../{name}\n', derivation)
 
     def test_pacquet_staging_cleanup_preserves_the_installed_package(self):
-        derivation = (root / 'nix/typescript-client.nix').read_text()
-        cleanup = next(line.strip() for line in derivation.splitlines()
+        recipe = (root / 'nix/typescript-client-installation.sh').read_text()
+        cleanup = next(line.strip() for line in recipe.splitlines()
                        if "find . -type f -name 'package.json_pacquet-stage_*'" in line)
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory) / 'node_modules' / 'vite'
@@ -64,58 +63,111 @@ class ManifestTests(unittest.TestCase):
 
 
 class RefreshTests(unittest.TestCase):
-    def run_refresh(self, stderr, returncode, system='x86_64-linux', eval_returncode=0, build_error=None):
+    def run_refresh(self, stderr, returncode, system='x86_64-linux', eval_returncode=0,
+                    build_error=None, source='e' * 64, replace_error_at=None, interrupt=None):
         with tempfile.TemporaryDirectory() as directory:
             hash_file = Path(directory) / 'deps.hash'
-            before = json.dumps({'hash': 'sha256-' + 'B' * 43 + '=',
-                                 'effectUtilsNarHash': 'sha256-' + 'D' * 43 + '='}) + '\n'
-            hash_file.write_text(before)
-            source = 'sha256-' + 'E' * 43 + '='
+            before = json.dumps({'schemaVersion': 1, 'inputsHash': 'd' * 64,
+                                 'hash': 'sha256-' + 'B' * 43 + '='}) + '\r\n'
+            hash_file.write_bytes(before.encode())
             seen = []
+            replacements = []
             target = f'.#checks.{system}.typescript-client.installation'
+            original_replace = refresh.os.replace
+            handlers = {signum: signal.getsignal(signum)
+                        for signum in (signal.SIGTERM, signal.SIGHUP)}
+
+            def replace(source_file, destination):
+                self.assertEqual(destination, hash_file)
+                self.assertEqual(Path(source_file).parent, hash_file.parent)
+                self.assertNotEqual(Path(source_file), hash_file)
+                # The old file stays complete until a complete replacement is ready.
+                replacements.append((hash_file.read_bytes(), Path(source_file).read_bytes()))
+                json.loads(replacements[-1][0])
+                json.loads(replacements[-1][1])
+                if len(replacements) == replace_error_at:
+                    raise OSError('replacement failed')
+                return original_replace(source_file, destination)
 
             def run(command, **kwargs):
                 if command[1] == 'eval':
-                    self.assertEqual(command, ['nix', 'eval', '--raw', f'{target}.effectUtilsNarHash'])
-                    self.assertEqual(hash_file.read_text(), before)
+                    self.assertEqual(command, ['nix', 'eval', '--raw', f'{target}.inputsHash'])
+                    self.assertEqual(hash_file.read_bytes(), before.encode())
                     return subprocess.CompletedProcess(command, eval_returncode, source, 'evaluation failed')
                 self.assertEqual(command, ['nix', 'build', target, '--no-link', '-L'])
-                seen.append(json.loads(hash_file.read_text()))
+                seen.append(json.loads(hash_file.read_bytes()))
+                if interrupt is not None:
+                    signal.raise_signal(interrupt)
                 if build_error:
                     raise build_error
                 return subprocess.CompletedProcess(command, returncode, '', stderr)
 
-            with patch.object(refresh.subprocess, 'run', side_effect=run):
+            with patch.object(refresh.subprocess, 'run', side_effect=run), \
+                    patch.object(refresh.os, 'replace', side_effect=replace):
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    if build_error:
-                        with self.assertRaises(type(build_error)):
+                    expected_error = (type(build_error) if build_error else
+                                      InterruptedError if interrupt is not None else
+                                      OSError if replace_error_at is not None else None)
+                    if expected_error:
+                        with self.assertRaises(expected_error):
                             refresh.main(['--system', system], nix=('nix',), hash_file=hash_file)
                         status = None
                     else:
                         status = refresh.main(['--system', system], nix=('nix',), hash_file=hash_file)
-            return status, hash_file.read_text(), seen, before, source
+            self.assertEqual({signum: signal.getsignal(signum) for signum in handlers}, handlers)
+            self.assertEqual(list(Path(directory).iterdir()), [hash_file])
+            return status, hash_file.read_bytes().decode(), seen, before, source, replacements
 
-    def test_the_reported_hash_and_actual_source_identity_are_written(self):
+    def test_the_reported_hash_and_actual_semantic_identity_are_written_atomically(self):
         good = 'sha256-' + 'C' * 43 + '='
         for system in ('x86_64-linux', 'aarch64-linux', 'aarch64-darwin'):
             with self.subTest(system=system):
-                status, written, seen, _, source = self.run_refresh(f'error: hash mismatch in fixed-output derivation\n         specified: x\n            got:    {good}\n', 1, system)
-                self.assertEqual(seen, [{'hash': refresh.PLACEHOLDER, 'effectUtilsNarHash': source}])
-                self.assertEqual((status, json.loads(written)), (0, {'hash': good, 'effectUtilsNarHash': source}))
+                status, written, seen, before, source, replacements = self.run_refresh(
+                    f'error: hash mismatch in fixed-output derivation\n         specified: x\n            got:    {good}\n', 1, system)
+                placeholder = {'schemaVersion': 1, 'inputsHash': source, 'hash': refresh.PLACEHOLDER}
+                self.assertEqual(seen, [placeholder])
+                self.assertEqual((status, json.loads(written)),
+                                 (0, {'schemaVersion': 1, 'inputsHash': source, 'hash': good}))
+                self.assertEqual(len(replacements), 2)
+                self.assertEqual(replacements[0][0], before.encode())
+                self.assertEqual(json.loads(replacements[0][1]), placeholder)
+                self.assertEqual(replacements[1][0], replacements[0][1])
+                self.assertEqual(replacements[1][1], written.encode())
 
     def test_another_build_failure_restores_the_exact_file(self):
         for returncode in (0, 1):
             with self.subTest(returncode=returncode):
-                status, written, _, before, _ = self.run_refresh('error: builder failed\n', returncode)
+                status, written, _, before, _, replacements = self.run_refresh('error: builder failed\n', returncode)
                 self.assertEqual((status, written), (1, before))
+                self.assertEqual(replacements[-1][1], before.encode())
 
     def test_evaluation_failure_does_not_change_the_file_or_build(self):
-        status, written, seen, before, _ = self.run_refresh('', 1, eval_returncode=1)
-        self.assertEqual((status, written, seen), (1, before, []))
+        status, written, seen, before, _, replacements = self.run_refresh('', 1, eval_returncode=1)
+        self.assertEqual((status, written, seen, replacements), (1, before, [], []))
+
+    def test_invalid_semantic_identity_does_not_change_the_file_or_build(self):
+        for source in ('', 'e' * 63, 'E' * 64, 'sha256-' + 'E' * 43 + '='):
+            with self.subTest(source=source):
+                status, written, seen, before, _, replacements = self.run_refresh('', 1, source=source)
+                self.assertEqual((status, written, seen, replacements), (1, before, [], []))
 
     def test_interrupted_build_restores_the_exact_file(self):
-        _, written, _, before, _ = self.run_refresh('', 1, build_error=KeyboardInterrupt())
+        _, written, _, before, _, _ = self.run_refresh('', 1, build_error=KeyboardInterrupt())
         self.assertEqual(written, before)
+
+    def test_termination_signals_restore_the_exact_file(self):
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signum=signum):
+                _, written, _, before, _, _ = self.run_refresh('', 1, interrupt=signum)
+                self.assertEqual(written, before)
+
+    def test_replacement_failure_restores_the_exact_file(self):
+        for replacement in (1, 2):
+            with self.subTest(replacement=replacement):
+                good = 'sha256-' + 'C' * 43 + '='
+                _, written, _, before, _, _ = self.run_refresh(
+                    f'error: hash mismatch\n got: {good}\n', 1, replace_error_at=replacement)
+                self.assertEqual(written, before)
 
 
 if __name__ == '__main__':

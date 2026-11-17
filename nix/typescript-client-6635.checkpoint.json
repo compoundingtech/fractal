@@ -1,0 +1,30 @@
+{
+  "issue": 6635,
+  "status": "paused-wip-not-ready-to-land",
+  "implementation": [
+    "Stable-named effect-utils projection selects generated sourceInputPaths and the staging helper/member-resolver closure, recursively excluding .git and node_modules.",
+    "Versioned semantic inputsHash hashes actual installation template derivations for aarch64-darwin, aarch64-linux and x86_64-linux, covering manifests, lock, workspace policy, selected package bytes/modes/directories, helper closure, recipe and toolchains.",
+    "Installation name, pin guard and refresh passthru share inputsHash; refresh atomically replaces the schema/identity/output pair with failure restoration.",
+    "Packaging documentation, release note and affected lane input declarations are updated. Client schema, codegen, SDK outputs and full TypeScript check are unchanged."
+  ],
+  "verification": [
+    {"command": "gate-slot --class eval --max-wait 3600 --max-hold 600 -- python3 scripts/nix-typescript-client-inputs-test", "result": "PASS: 18 evaluation-only cases, including distinct roots with equal selected inputs, ignored paths, source/package-manifest/mode/directory/helper/resolver/recipe/lock/policy/toolchain mutations, symlink target bytes, cross-platform identity, names and mismatch rejection; whole effect-utils narHash reads explicitly throw."},
+    {"command": "python3 scripts/lane-definition-closure-test", "result": "PASS: 32 tests"},
+    {"command": "python3 scripts/release_notes_test.py", "result": "PASS: 31 tests"},
+    {"command": "python3 scripts/lane-definition-closure --lane typescript-client --check", "result": "PASS: 14 executed paths covered"}
+  ],
+  "measurement": {
+    "result": "NOT RUN: heavy admission never granted before the operations pause; owned queued client withdrawn.",
+    "diskReservationBytes": 10000000000,
+    "baselineCachedOutputBytes": [1521822633, 1521822925],
+    "actualStoreAndOutputPeakBytes": null,
+    "pin": "nix/typescript-client-deps.hash intentionally remains the previous measured legacy pin; the new installation guard fails closed until migration. No output hash was hand-edited or remeasured."
+  },
+  "remaining": [
+    "Resume admitted local-only, single-job scripts/nix-typescript-client-deps-hash --system x86_64-linux with an honest disk reservation; measure only the dependency installation, not full check suites or Cargo builds.",
+    "Measure the actual pnpm store and node_modules output disk use; remove any retained measurement scratch.",
+    "Commit the generated schemaVersion/inputsHash/hash pin; retain the old measured output hash only if the measurement agrees.",
+    "Run python3 scripts/nix-typescript-client-test against the migrated pin and verify the exact dependency installation with the measured pin.",
+    "Create a signed completion commit and report its commit/tree and exercised evidence. The signed WIP checkpoint is not acceptance completion or merge readiness."
+  ]
+}

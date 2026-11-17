@@ -640,6 +640,59 @@ contract/schema tests and both compiler projects, the views' tests and typecheck
 6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
+#### Nix installation identity and refresh
+
+The `checks.<system>.typescript-client.installation` fixed-output derivation is also
+the dependency installation used by the web packages and releases. Fractal owns its
+`nix/typescript-client-deps.hash` pin: schema version 1 records the semantic
+`inputsHash` (64 lowercase SHA-256 hex characters) together with the measured output
+`hash` (SRI). Consumers do not supply or replace this pin.
+
+Identity covers the selected staged source bytes, not just package manifests:
+the workspace manifests and lock/configuration files, selected effect-utils
+packages and transitive local source dependencies, and the source-staging helper
+closure. It also includes the actual installation recipe
+(`nix/typescript-client-installation.sh`) and its builder/toolchain inputs across
+`aarch64-darwin`, `aarch64-linux` and `x86_64-linux`. These template derivation
+identities are hashed together, so the guard is platform-independent; this does
+not assert that all platforms produce identical installation output hashes.
+The full `inputsHash` names the installation
+and guards the pin. It is not the whole effect-utils source `narHash` or a root
+checkout hash: unrelated root or upstream changes can reuse the installation,
+while a real selected-source, helper, recipe or toolchain change fails closed
+until Fractal remeasures its pin.
+
+The stable-named upstream projection selects the generated `sourceInputPaths`
+plus the staging helper and member resolver, without admitting unselected
+ancestor siblings. Its NAR identity preserves file bytes, executable bits,
+empty directories and symlink targets, ignoring `.git` and `node_modules`
+recursively. The staging helper still dereferences in-package file links and
+rejects escaping or directory links. Symlink layout changes conservatively
+invalidate even when their dereferenced bytes happen to be equal.
+
+After changing installation inputs, run
+`scripts/nix-typescript-client-deps-hash --system x86_64-linux` (or select another
+supported installation system). The command needs network and a builder for that
+system. It reads `installation.inputsHash` before forcing the guard, atomically
+sets the schema/identity/placeholder pin, and builds only the installation, not
+the Linux-only check wrapper. It then atomically replaces the pin with the
+measured identity/output pair; failure or interruption restores the original
+bytes. Review and commit the pin with the input changes. The full TypeScript
+check and its fixed-output proof remain unchanged.
+
+Lightweight schema/refresh/rollback regressions run with
+`python3 scripts/nix-typescript-client-test`. The separate semantic-identity
+integration regression evaluates real installations against temporary Fractal
+and upstream fixtures:
+
+```sh
+gate-slot --class eval --max-wait 3600 --max-hold 600 -- python3 scripts/nix-typescript-client-inputs-test
+```
+
+The integration regression requires Nix with flakes and the locked inputs
+available. It is intentionally separate from the sparse, no-flake
+`ci-script-tests` lane.
+
 ### Storybook deployment
 
 The separate [Storybook deployment workflow](../.github/workflows/storybook-deploy.yml),

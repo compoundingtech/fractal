@@ -417,6 +417,8 @@
         "flake.lock",
         "flake.nix",
         "nix/typescript-client-deps.hash",
+        "nix/typescript-client-installation.sh",
+        "nix/typescript-client-sources.nix",
         "nix/typescript-client.nix",
         "nix/web-shell.nix",
         "package.json",

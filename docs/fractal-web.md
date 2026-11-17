@@ -255,6 +255,14 @@ tailscale serve --bg --https=8443 http://127.0.0.1:7411
 Set `TAILNET_HTTPS_ORIGIN` to the exact HTTPS origin published by Serve, including
 its port when non-default.
 
+The frozen installation has a Fractal-owned semantic identity/output hash pin.
+Its identity covers selected staged source bytes, the staging helper closure,
+installation recipe and toolchain, rather than requiring consumers to match the
+whole effect-utils checkout hash. Unrelated root changes can reuse it; actual
+installation input changes fail closed until the pin is refreshed. See
+[Nix installation identity and refresh](ci.md#nix-installation-identity-and-refresh)
+for the pin schema and atomic refresh workflow.
+
 For an immutable deployment, the flake exposes `packages.<system>.fractal-web-publisher`
 and `apps.<system>.fractal-web-publisher`. The executable bundles the upstream
 `server/main.mts` and its dependencies from the frozen workspace installation and
