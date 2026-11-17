@@ -19,7 +19,8 @@ const placement = (active = true) => {
   const panel = document.createElement('section'), container = document.createElement('div')
   const row = document.createElement('article'), body = document.createElement('div')
   panel.setAttribute('data-thread-panel', '')
-  row.setAttribute('data-thread-message', 'message/a')
+  row.setAttribute('data-thread-anchor', 'message/a')
+  row.setAttribute('data-thread-read-eligible', '')
   body.setAttribute('data-thread-message-content', ''); body.textContent = 'Actual message body'; body.style.lineHeight = '20px'
   row.append(body); container.append(row); panel.append(container); document.body.append(panel)
   let rect = new DOMRect(10, 10, 100, 20)
@@ -201,7 +202,7 @@ it('shares one cancellable timer across all message bodies and bounds the result
   for (let index = 1; index <= 60; index++) {
     const row = view.row.cloneNode(true)
     if (!(row instanceof HTMLElement)) throw new Error('Expected a message row')
-    row.setAttribute('data-thread-message', `message/${index}`)
+    row.setAttribute('data-thread-anchor', `message/${index}`)
     const body = row.querySelector<HTMLElement>('[data-thread-message-content]')!
     vi.spyOn(body, 'getBoundingClientRect').mockReturnValue(new DOMRect(10, 10, 100, 20))
     bodies.push(body); view.container.append(row)

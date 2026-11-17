@@ -10,6 +10,7 @@ import { detectPlatform } from '../workbench-kit/keys.tsx'
 import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
 import type { ThreadRefusal } from './threadSource.ts'
 import type { ThreadUnreadReminder, UnreadActionPort, UnreadActionResult } from './unread-action-port.ts'
+import { threadAnchorAttribute, threadAnchorSelector } from './threadAnchor.ts'
 
 export interface UnreadReminderControlsProps {
   readonly threadId: string
@@ -17,7 +18,7 @@ export interface UnreadReminderControlsProps {
   /** Reply IDs visible at press time, in timeline order; the first anchors Mark unread. */
   readonly visibleReplies: () => readonly string[]
   /**
-   * The timeline holding `[data-thread-message]` rows. When supplied, Option/Alt-click on a reply marks unread from
+   * The timeline holding message anchor rows. When supplied, Option/Alt-click on a message marks unread from
    * that reply, and Jump scrolls the reminded reply into view; without it neither is offered.
    */
   readonly timeline?: HTMLElement | null
@@ -28,7 +29,7 @@ export interface UnreadReminderControlsProps {
 }
 
 const unconfirmed: ThreadRefusal = { detail: 'The unread change could not be confirmed. Refresh to check its current state.' }
-const noVisibleReply: ThreadRefusal = { detail: 'Scroll to a visible reply before marking it unread.' }
+const noVisibleReply: ThreadRefusal = { detail: 'Scroll to a visible message before marking it unread.' }
 
 /**
  * The person's own unread reminder, kept apart from the natural unread count: an indicator with Jump when Fractal
@@ -82,8 +83,8 @@ export function UnreadReminderControls({ threadId, port, visibleReplies, timelin
     const click = (event: MouseEvent) => {
       if (!event.altKey || event.button !== 0 || !latest.current.canMutate || !(event.target instanceof Element)) return
       if (event.target.closest('a, button, input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null) return
-      const row = event.target.closest(anchorRows)
-      const anchor = row === null || !timeline.contains(row) ? null : anchorId(row)
+      const row = event.target.closest(threadAnchorSelector)
+      const anchor = row === null || !timeline.contains(row) ? null : row.getAttribute(threadAnchorAttribute)
       // A hidden, covered or offscreen row is not one the person deliberately chose.
       if (anchor === null || !latest.current.visibleReplies().includes(anchor)) return
       event.preventDefault()
@@ -108,7 +109,7 @@ export function UnreadReminderControls({ threadId, port, visibleReplies, timelin
       setAwaiting(undefined)
       setNotice(undefined)
     })
-    observer.observe(timeline, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-thread-anchor', 'data-thread-message'] })
+    observer.observe(timeline, { childList: true, subtree: true, attributes: true, attributeFilter: [threadAnchorAttribute] })
     get.addFinalizer(() => observer.disconnect())
     return undefined
   }), [timeline, awaiting])
@@ -167,11 +168,8 @@ export function UnreadReminderControls({ threadId, port, visibleReplies, timelin
 
 const noListener = Atom.make<undefined>(undefined)
 
-/** Message rows carry `data-thread-anchor`; `data-thread-message` rows are accepted as the same anchor. */
-const anchorRows = '[data-thread-anchor], [data-thread-message]'
-const anchorId = (row: Element): string | null => row.getAttribute('data-thread-anchor') ?? row.getAttribute('data-thread-message')
 const findAnchor = (timeline: HTMLElement, messageId: string): Element | undefined =>
-  [...timeline.querySelectorAll(anchorRows)].find(row => anchorId(row) === messageId)
+  [...timeline.querySelectorAll(threadAnchorSelector)].find(row => row.getAttribute(threadAnchorAttribute) === messageId)
 const reveal = (row: Element) => {
   const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   row.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' })

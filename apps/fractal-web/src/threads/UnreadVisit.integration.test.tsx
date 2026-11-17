@@ -63,9 +63,9 @@ it('keeps delayed marks sticky in two already-open placements; a deliberate late
     const embedded = host.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')
     expect(embedded).not.toBeNull()
     await act(async () => embedded?.click())
-    await vi.waitFor(() => expect(host.querySelectorAll('[data-thread-message]').length).toBe(2))
+    await vi.waitFor(() => expect(host.querySelectorAll('[data-thread-anchor]').length).toBe(2))
     let top = 120
-    for (const row of host.querySelectorAll('[data-thread-message]')) {
+    for (const row of host.querySelectorAll('[data-thread-anchor]')) {
       const rect = new DOMRect(10, top, 120, 40)
       top += 120
       vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(rect)

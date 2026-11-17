@@ -13,11 +13,12 @@ import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { UnreadReminderControls } from './UnreadReminderControls.tsx'
 import type { UnreadActionPort, UnreadActionResult, UnreadReminderRead, UnreadSeekResult } from './unread-action-port.ts'
+import { threadAnchorAttribute, threadAnchorSelector } from './threadAnchor.ts'
 
 const threadId = 'thread/worker-tests'
 const agent = 'agent/build-host-a/worker-tests'
 const person = 'person/operator'
-/** Oldest first, as the thread timeline renders them. Agent replies are the ones a reader can mark. */
+/** Oldest first, as the thread timeline renders them. Every readable message can anchor a reminder. */
 const replies = [
   { id: 'message/retry-ready', actor: agent, content: 'The retry fix is ready. I will run the worker tests before merge.' },
   { id: 'message/cancellation-ask', actor: person, content: 'Can you verify the cancellation case too?' },
@@ -90,10 +91,10 @@ const createFixture = ({ read, grant, seek, change }: Omit<Args, 'scheme'>) => {
 const visibleIn = (timeline: HTMLElement | null) => (): readonly string[] => {
   if (timeline === null) return []
   const frame = timeline.getBoundingClientRect()
-  return [...timeline.querySelectorAll<HTMLElement>('[data-thread-message]')].filter(row => {
+  return [...timeline.querySelectorAll<HTMLElement>(threadAnchorSelector)].filter(row => {
     const rect = row.getBoundingClientRect()
     return rect.bottom > frame.top && rect.top < frame.bottom
-  }).map(row => row.getAttribute('data-thread-message')!)
+  }).map(row => row.getAttribute(threadAnchorAttribute)!)
 }
 
 const ReminderScene = ({ label, ...args }: Omit<Args, 'scheme'> & { readonly label?: string }) => {
@@ -109,7 +110,7 @@ const ReminderScene = ({ label, ...args }: Omit<Args, 'scheme'> & { readonly lab
         onMarkRead={async () => undefined} canMarkRead
         unreadControls={<UnreadReminderControls threadId={threadId} port={fixture.port} visibleReplies={visibleIn(timeline)} timeline={timeline} />}>
         <ol ref={setTimeline} aria-label="Worker tests replies" tabIndex={0} {...stylex.props(styles.timeline)}>
-          {replies.map(reply => <li key={reply.id} data-thread-anchor={reply.id} data-thread-message={reply.actor === agent ? reply.id : undefined} {...stylex.props(styles.reply)}>
+          {replies.map(reply => <li key={reply.id} {...{ [threadAnchorAttribute]: reply.id }} {...stylex.props(styles.reply)}>
             <span {...stylex.props(styles.author)}>{reply.actor === agent ? 'Worker tests' : 'You'}</span>
             <span data-thread-message-content="">{reply.content}</span>
           </li>)}
@@ -169,7 +170,7 @@ const controls = (canvasElement: HTMLElement) => canvasElement.querySelector('[d
 const indicators = (canvasElement: HTMLElement) => canvasElement.querySelectorAll('[data-thread-unread-reminder]')
 const rowInView = (canvasElement: HTMLElement, id: string) => {
   const timeline = canvasElement.querySelector<HTMLElement>('ol[aria-label="Worker tests replies"]')!
-  const row = timeline.querySelector<HTMLElement>(`[data-thread-anchor="${id}"]`)!
+  const row = [...timeline.querySelectorAll<HTMLElement>(threadAnchorSelector)].find(row => row.getAttribute(threadAnchorAttribute) === id)!
   const frame = timeline.getBoundingClientRect(), rect = row.getBoundingClientRect()
   return rect.top >= frame.top - 1 && rect.bottom <= frame.bottom + 1
 }
@@ -180,7 +181,7 @@ const jumpStops = (detail: string): NonNullable<Story['play']> => async ({ canva
   await expect(await canvas.findByRole('status')).toHaveTextContent(detail)
   await expect(canvas.queryByRole('alert')).toBeNull()
   await expect(indicators(canvasElement)).toHaveLength(1)
-  await expect(canvasElement.querySelectorAll('[data-thread-anchor]')).toHaveLength(replies.length)
+  await expect(canvasElement.querySelectorAll(threadAnchorSelector)).toHaveLength(replies.length)
   await expect(rowInView(canvasElement, remindedAnchor)).toBe(false)
 }
 
