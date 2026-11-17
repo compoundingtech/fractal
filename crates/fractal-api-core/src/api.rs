@@ -1762,6 +1762,11 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
                 .cpu_minutes()
                 .settle(check, busy);
         }
+        match tokio::task::spawn_blocking(crate::slo::checkpoint_budgets).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("fractal: native SLO accounting checkpoint failed: {error:#}"),
+            Err(error) => eprintln!("fractal: native SLO accounting checkpoint task failed: {error}"),
+        }
         let now = client_now_ms() as u64;
         tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
     }
@@ -11696,7 +11701,8 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         rows.insert(budgets, crate::objectives::divergence(open));
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
-    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
+    let declared = crate::declared_objectives::rows(store, now, &rows)?;
+    drop(rows.splice(budgets..budgets, declared));
     Ok(rows)
 }
 
