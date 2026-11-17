@@ -23,6 +23,7 @@ import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
 import { useForegroundVisibility } from './useForegroundVisibility.ts'
 import { awayVisit, enterUnreadVisit, holdUnreadVisit, planUnreadView, type UnreadVisit } from './unreadVisit.ts'
 import { UnreadReminderControls } from './UnreadReminderControls.tsx'
+import { ThreadRequestHistory } from './RelatedRequests.tsx'
 import type { UnreadReminderRead } from './unread-action-port.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
@@ -177,12 +178,21 @@ function ThreadListPage({ source, query, exclude, opensInTab = false, framed = t
 }
 
 export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonly alert: Attention }) {
+  return <LiveResolvedInboxThreads sourceId={alert.source_id} episode={alert.episode} title={alert.title}
+    listedAgent={alert.conversation_id?.startsWith('agent/') === true ? alert.conversation_id : undefined} onOpenThread={onOpenThread} />
+}
+
+/** Exact retained keys use the same independent Start path as a current Inbox item. */
+export function LiveResolvedInboxThreads({ sourceId, episode, title, listedAgent, onOpenThread }: OpenThread & {
+  readonly sourceId: string
+  readonly episode: string | undefined
+  readonly title: string
+  readonly listedAgent: string | undefined
+}) {
   const source = useDataSource().threads
-  if (source === undefined || alert.episode === undefined) return null
-  const agent = alert.conversation_id?.startsWith('agent/') === true ? alert.conversation_id : undefined
-  return <InboxThreadsContent key={JSON.stringify([alert.source_id, alert.episode])} source={source} agent={agent}
-    originSource={alert.source_id} episode={alert.episode} title={alert.title}
-    canStart={alert.state === 'open'} onOpenThread={onOpenThread} />
+  if (source === undefined || episode === undefined) return null
+  return <InboxThreadsContent key={JSON.stringify([sourceId, episode])} source={source} agent={listedAgent}
+    originSource={sourceId} episode={episode} title={title} onOpenThread={onOpenThread} />
 }
 
 /** The agent's display name, with the exact id only as the title: never a guessed role, never the id as text. */
@@ -191,19 +201,19 @@ function AgentName({ id }: { readonly id: string }) {
   return <span title={id}>{nameInSentence(agentDisplayName({ id, name: agent._tag === 'Observed' ? agent.value?.name : undefined }))}</span>
 }
 
-function InboxThreadsContent({ source, agent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
+function InboxThreadsContent({ source, agent, originSource, episode, title, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly agent: string | undefined
   readonly originSource: string
   readonly episode: string
   readonly title: string
-  readonly canStart: boolean
 }) {
   const { read, actions, inboxOrigins, upgradeRequired, failure } = useAtomValue(source.access)
   const retained = useAtomValue(source.pendingStarts?.(originSource) ?? noPendingStarts)
     .filter(start => start.parameters.origin.episode === episode)
   const query = React.useMemo(() => ({ origin_source: originSource, origin_episode: episode }), [originSource, episode])
   const list = useAtomValue(source.list(query))
+
   const narrow = React.useContext(NarrowLayoutContext)
   const [threadReadsStale, reportStale] = useStaleThreadReads()
   // A stale read keeps what it last showed; Retry reads every thread projection on this item again.
@@ -231,7 +241,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   // Only a complete first page states how many threads this item has.
   const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
   // A start waits for the list: while it loads the sibling titles are unknown, and a refused or failed list is not offered one.
-  const offerStart = retained.length === 0 && actions.has('thread.start') && canStart && list._tag === 'Observed'
+  const offerStart = retained.length === 0 && actions.has('thread.start') && list._tag === 'Observed'
   if (count === 0 && focused === undefined && retained.length === 0 && !offerStart) return null
   const askTitle = threadTitleFromAsk(title)
   // Two threads named after the same ask cannot be told apart, so a second one is named after its first line.
@@ -454,8 +464,12 @@ function LiveThread({ source, thread, visitRef, active = true, embedded = true, 
       },
     })}
   >
-    {detailStatus ?? <ThreadConversation source={source} thread={summary} agentName={agentName} canReply={actions.has('thread.reply')} observed={observation !== undefined}
-      focusComposer={focusComposer} timelineRef={timeline} />}
+    {detailStatus ?? <>
+      {/* Explanatory history only: each related request keeps its own status; the conversation, unread and actions are unchanged. */}
+      <ThreadRequestHistory source={source} threadId={thread.id} />
+      <ThreadConversation source={source} thread={summary} agentName={agentName} canReply={actions.has('thread.reply')} observed={observation !== undefined}
+        focusComposer={focusComposer} timelineRef={timeline} />
+    </>}
     {readFailure === undefined ? null : <ThreadRefusalAlert refusal={readFailure} />}
   </ThreadPanel>
 }

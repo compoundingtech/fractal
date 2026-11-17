@@ -1,4 +1,5 @@
 import { markdownInline } from '@fractal/client/markdown'
+import type { Attention } from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -13,9 +14,10 @@ import { useAlertAnswersStore } from '../conversation/alerts/alertAnswers.ts'
 import { AnswerAlert } from '../conversation/alerts/AnswerAlert.tsx'
 import { PromptAlert } from '../conversation/alerts/PromptAlert.tsx'
 import { useAlertAnswers } from '../conversation/alerts/useAlertAnswers.ts'
+import { useAutoResolved } from '../conversation/alerts/useAutoResolved.ts'
 import { useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, credentialExpiredTitle } from '../data/source.ts'
-import { LiveInboxThreads } from '../threads/LiveThreads.tsx'
+import { LiveInboxThreads, LiveResolvedInboxThreads } from '../threads/LiveThreads.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { alertsTabRows } from './alertsTab.ts'
 
@@ -45,6 +47,14 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
   const row = open.find((each) => each.id === id)
   const records = [...store.getSnapshot().pending.values()]
   const answeredHere = store.getSnapshot().pending.has(id)
+  const { read: autoResolved } = useAutoResolved()
+  const resolvedAsk = autoResolved?._tag === 'Observed' ? autoResolved.asks.find(ask => `auto-resolved:${ask.resolution_id}` === id) : undefined
+  // Retain only the selected card's exact opening, not a new inventory of completed sources.
+  const retained = React.useRef<Attention | undefined>(undefined)
+  const current = feed._tag === 'Observed' ? feed.value.find(item => item.id === id) : undefined
+  const answered = records.find(record => record.item.id === id)?.item
+  if (current !== undefined || answered !== undefined) retained.current = current ?? answered
+  const resolved = row === undefined && retained.current?.id === id ? retained.current : undefined
   const card = React.useRef<HTMLElement>(null)
   const advance = () => {
     const at = open.findIndex((each) => each.id === id)
@@ -86,7 +96,15 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
                   : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} context="Inbox" paused={paused === true} {...(onAct === undefined ? {} : { onAct })} />}
                 <LiveInboxThreads alert={row.item} onOpenThread={onOpenRef} />
               </>
-              : <div {...stylex.props(styles.gone)}>
+              : resolvedAsk !== undefined ? <>
+                <DecisionCard density="full" label={resolvedAsk.title} meta={[]} heading={resolvedAsk.title}
+                  resolved={resolvedAsk.default_answer === undefined ? 'Resolved at its deadline' : `Default applied: ${resolvedAsk.default_answer.label}`} />
+                <LiveResolvedInboxThreads sourceId={resolvedAsk.target_id} episode={resolvedAsk.episode} title={resolvedAsk.title}
+                  listedAgent={resolvedAsk.requester_id.startsWith('agent/') ? resolvedAsk.requester_id : undefined} onOpenThread={onOpenRef} />
+              </> : resolved !== undefined ? <>
+                <DecisionCard density="full" label={resolved.title} meta={[]} heading={resolved.title} resolved="No longer open" />
+                <LiveInboxThreads alert={resolved} onOpenThread={onOpenRef} />
+              </> : <div {...stylex.props(styles.gone)}>
                 <h2 {...stylex.props(styles.goneTitle)}>{answeredHere ? 'All answered' : 'No longer open'}</h2>
                 {next === undefined
                   ? <p {...stylex.props(styles.goneText)}>Nothing else needs you.</p>

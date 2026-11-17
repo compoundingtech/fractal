@@ -1,6 +1,6 @@
 import { actionReceiptCheck, sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
-import type { ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
+import type { RequestHistoryPage, ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { FollowEvent, ThreadWindow } from '@fractal/sdk/read'
 import { Effect, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -8,6 +8,7 @@ import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
 import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
+import { readRequestHistoryPages, RequestHistoryPagingError } from './requestHistoryPages.ts'
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
 
@@ -75,6 +76,9 @@ export interface ThreadSource {
   readonly list: (query: ThreadListQuery) => Atom.Atom<Feed<ThreadSummaryPage>>
   readonly detail: (threadId: string) => Atom.Atom<Feed<ThreadObservation>>
   readonly timeline: (threadId: string, cursor?: string) => Atom.Atom<Feed<ThreadTimelinePage>>
+  /** Authorized original request episodes, read-only and separate from the conversation timeline. */
+  readonly requestHistory?: (threadId: string) => Atom.Atom<Feed<RequestHistoryPage>>
+  readonly reloadRequestHistory?: (threadId: string) => void
   readonly draft: (destination: string) => Atom.Writable<ThreadDraft>
   readonly start: (draftKey: string, parameters: Omit<ThreadStartParameters, 'target_id' | 'signature'>) => Promise<ThreadSendResult>
   readonly pendingStarts?: (sourceId?: string) => Atom.Atom<readonly RetainedThreadStart[]>
@@ -350,6 +354,19 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       return Native.decodeUnknownSync(Native.ThreadTimelinePage)(value)
     }, { refused: refusedThread, ...(follow === undefined ? {} : { follow }) })
   })
+  const readHistory = Atom.family((threadId: string) => reader(
+    signal => readRequestHistoryPages(async cursor => {
+      const { value } = await client.threadRequestHistory(threadId, { limit: 40, ...(cursor === undefined ? {} : { cursor }) }, { signal })
+      signal.throwIfAborted()
+      return Native.decodeUnknownSync(Native.RequestHistoryPage)(value)
+    }),
+    {
+      resetOnReload: true,
+      refused: error => error instanceof RequestHistoryPagingError
+        ? unavailable({ reason: 'failed', detail: error.message, retryable: true })
+        : refusedThread(error),
+    },
+  ))
   const soughtPages = Atom.family((_threadId: string) => Atom.make<{
     readonly page: ThreadTimelinePage
     readonly actor: string | undefined
@@ -551,6 +568,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     },
     list: query => readList(JSON.stringify(query)),
     detail: readDetail,
+    requestHistory: readHistory,
+    reloadRequestHistory: threadId => registry.refresh(readHistory(threadId)),
     timeline: (threadId, cursor) => cursor === undefined ? firstTimeline(threadId) : readTimeline(pageKey(threadId, cursor)),
     draft: drafts,
     start: (draftKey, parameters) => send(draftKey, parameters),

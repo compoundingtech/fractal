@@ -627,6 +627,46 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
+## Independent resolved Inbox discussions
+
+Resolved Inbox asks, authored steps and typed notices retain the same Start
+affordance when their exact source episode is available; auto-resolved rows open
+their resolved detail without overriding the default. A selected card retains
+its exact opening when it leaves the live list. This is not a new completed-source
+inventory. Every successful Start creates an independent discussion, even when
+other threads share that source episode; two Starts create two threads. Opening
+an existing discussion remains navigation, never Start coalescing. The daemon
+revalidates source authority and the recipient on each first send; neither the
+original discussion nor its participants are changed. The recipient-preview
+follow-up is deliberately separate from this history delivery.
+
+## Related requests
+
+An open thread shows a small "Related requests" section above its conversation,
+read through the optional `ThreadSource.requestHistory` reader over
+`/v1/client/threads/:id/request-history` (`RequestHistoryPage`); a source without
+that reader, or a Fractal that cannot serve it, shows no section. The section
+renders only what the reader returned: each request's original title and text and
+its own status and standing answers. "Requested after “…”" explains why one
+request followed another, with Fractal's reason, and moves focus to that request;
+it never marks one request a prerequisite of, or an answer to, another, and a
+completed predecessor never changes a later request's status. Visible episodes of
+the same source stay together, each with its own status. Boundary predecessors
+from another page are shown in order, not counted. A relation whose predecessor
+was not returned draws nothing, so hidden requests leave no identifier, reason or
+count.
+
+Missing original wording is labelled "Original request unavailable" with the
+payload reason; today's source text is never substituted. A missing status reads
+"Status unknown", and an incomplete page says requests may be missing. References
+stay references: a pinned revision is named, and a live target is labelled as
+possibly changed. An authorized source of another kind says Fractal keeps no
+request history for it. A lone complete request, which is the thread's own origin,
+shows no section. Loading, paused (with Retry), refused and failed (with Retry)
+reads use the shared system notices. The section never changes unread receipts,
+the timeline's anchors or any action. The component lives in
+`apps/fractal-web/src/threads/RelatedRequests.tsx`; Storybook's
+`Fractal/App/Threads/Related requests` covers every state and a walkthrough.
 ## Fractal web threads connected preview
 
 `node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,
