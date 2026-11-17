@@ -155,7 +155,6 @@ pub struct ExecRuntime {
     state_dir: PathBuf,
     log_dir: PathBuf,
     owned_children: Arc<Mutex<BTreeMap<OwnedChildKey, OwnedChild>>>,
-    reaper_running: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     reap_automatically: bool,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
@@ -246,7 +245,6 @@ impl ExecRuntime {
             state_dir,
             log_dir,
             owned_children: Arc::new(Mutex::new(BTreeMap::new())),
-            reaper_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             reap_automatically: true,
             unlaned_seat: None,
@@ -532,13 +530,15 @@ impl ExecRuntime {
             payload_released_at_unix_ms: None,
             resource_membership: self.resource_membership.clone(),
         };
+        // Register while this child is still ours, before an observer can consume its wait.
+        let subscription = subscribe_process_exit(pid, start_token);
         let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
         children.insert(OwnedChildKey::new(id, &generation), OwnedChild::Running(child));
         let receipt = self.write_generation(id, &generation);
-        // A pre-existing reaper cannot retire this obligation before the initial write finishes.
+        // Publish the initial receipt before exposing custody to concurrent observers.
         drop(children);
         // Registration precedes fallible receipt persistence. Even a failed launch must reap.
-        self.start_owned_reaper();
+        self.start_owned_reaper(OwnedChildKey::new(id, &generation), subscription);
         receipt?;
         // `systemd-run` joins its scope only when the user manager starts it, and runs the task
         // after. Until then it is in this process's cgroup and ends with it, so the exec outlives
@@ -756,59 +756,77 @@ impl ExecRuntime {
         Ok(false)
     }
 
-    /// Spawn custody, not mission membership, owns completion. One small nonblocking sweep per
-    /// owning runtime waits only on registered children; it never steals another subsystem's wait.
-    /// The worker retains the runtime until all waits and fallible receipt writes are finished.
-    fn start_owned_reaper(&self) {
+    /// Spawn custody, not mission membership, owns completion. Each child has a kernel exit
+    /// subscription and a parked completion worker, with no periodic running-child scans.
+    /// The worker retains the runtime until its wait and fallible receipt write are finished.
+    fn start_owned_reaper(
+        &self,
+        key: OwnedChildKey,
+        subscription: Result<Option<ProcessExitSubscription>>,
+    ) {
         #[cfg(test)]
         if !self.reap_automatically {
             return;
         }
-        use std::sync::atomic::Ordering;
-        if self.reaper_running.swap(true, Ordering::AcqRel) {
-            return;
-        }
         let runtime = self.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(100));
-            let mut children = runtime.owned_children.lock().expect("exec child mutex poisoned");
-            if children.is_empty() {
-                // Clear under the map lock: a concurrent registration either keeps this worker
-                // alive or observes false and starts the next one.
-                runtime.reaper_running.store(false, Ordering::Release);
-                break;
+        std::thread::spawn(move || {
+            let notification = subscription.and_then(|subscription| {
+                subscription.map_or(Ok(()), ProcessExitSubscription::wait)
+            });
+            let mut wait_for_child = notification.is_err();
+            if let Err(error) = notification {
+                // An old kernel or descriptor exhaustion must not erase a successfully spawned
+                // child's wait obligation. The exact-child waitid below is the blocking fallback.
+                tracing::warn!(runtime_id = key.id, generation = key.generation, pid = key.pid,
+                    %error, "owned child exit subscription unavailable; using exact-child wait");
             }
-            let mut exited = Vec::new();
-            for (key, child) in children.iter_mut() {
-                if let OwnedChild::Running(running) = child {
-                    match running.try_wait() {
-                        Ok(Some(status)) => *child = OwnedChild::Exited(status),
-                        Ok(None) => continue,
-                        Err(error) => {
-                            tracing::warn!(runtime_id = key.id, generation = key.generation, pid = key.pid,
-                                %error, "owned child wait failed");
-                            continue;
-                        }
-                    }
-                }
-                if let OwnedChild::Exited(status) = child {
-                    exited.push((key.clone(), *status));
-                }
-            }
-            drop(children);
-            for (key, status) in exited {
-                match runtime.persist_owned_exit(&key, status) {
-                    Ok(()) => {
-                        runtime.owned_children.lock().expect("exec child mutex poisoned").remove(&key);
-                    }
+            let mut retry_delay = Duration::from_millis(100);
+            loop {
+                let ready = if wait_for_child {
+                    // WNOWAIT leaves consumption and receipt custody in the owned-child map.
+                    wait_owned_child_exit(key.pid)
+                } else {
+                    Ok(())
+                };
+                let completion = ready.and_then(|()| runtime.finish_owned_child(&key));
+                match completion {
+                    Ok(true) => break,
+                    // Also covers a notification that preceded whole-process waitability.
+                    Ok(false) => wait_for_child = true,
                     Err(error) => {
-                        // The Exited mark is the only remaining copy of the kernel wait status.
+                        // Only failed completion I/O is retried on a timer. Healthy running
+                        // children sleep in the kernel, not in a daemon-wide polling loop.
                         tracing::warn!(runtime_id = key.id, generation = key.generation, pid = key.pid,
-                            %error, "owned child exit receipt remains pending");
+                            %error, "owned child completion remains pending");
+                        std::thread::sleep(retry_delay);
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
                     }
                 }
             }
         });
+    }
+
+    fn finish_owned_child(&self, key: &OwnedChildKey) -> Result<bool> {
+        let status = {
+            let mut children = self.owned_children.lock().expect("exec child mutex poisoned");
+            match children.get_mut(key) {
+                Some(owned @ OwnedChild::Running(_)) => {
+                    let OwnedChild::Running(child) = owned else { unreachable!() };
+                    let Some(status) = child.try_wait()? else {
+                        return Ok(false);
+                    };
+                    *owned = OwnedChild::Exited(status);
+                    status
+                }
+                Some(OwnedChild::Exited(status)) => *status,
+                None => return Ok(true),
+            }
+        };
+        // Failure deliberately leaves Exited in the map as the kernel status's durable-in-memory
+        // owner. Concurrent observers can persist it too, but only for this exact receipt.
+        self.persist_owned_exit(key, status)?;
+        self.owned_children.lock().expect("exec child mutex poisoned").remove(key);
+        Ok(true)
     }
 
     fn persist_owned_exit(&self, key: &OwnedChildKey, status: std::process::ExitStatus) -> Result<()> {
@@ -1451,45 +1469,44 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+struct ProcessExitSubscription {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    descriptor: std::os::fd::OwnedFd,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pid: u32,
+}
+
+fn wait_process_exit(pid: u32, start_token: u64) -> Result<()> {
+    subscribe_process_exit(pid, start_token)?.map_or(Ok(()), ProcessExitSubscription::wait)
+}
+
 /// Subscribe before rechecking identity so an exit between the snapshot and wait is not lost.
 #[cfg(target_os = "linux")]
-fn wait_process_exit(pid: u32, start_token: u64) -> Result<()> {
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+fn subscribe_process_exit(pid: u32, start_token: u64) -> Result<Option<ProcessExitSubscription>> {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
     let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     if descriptor < 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
+            return Ok(None);
         }
         return Err(error).context("subscribe to execution pidfd");
     }
     // SAFETY: pidfd_open returned a fresh owned descriptor.
     let descriptor = unsafe { OwnedFd::from_raw_fd(i32::try_from(descriptor)?) };
-    if !process_generation_alive(pid, start_token)? {
-        return Ok(());
+    match process_identity(pid) {
+        // A zombie leader can still have live threads. Only pidfd readiness proves that the
+        // whole process is waitable; do not shortcut the subscription on the leader's Z state.
+        Ok((_, token)) if token == start_token => {}
+        Ok(_) => return Ok(None),
+        Err(error) if process_is_absent(&error) => return Ok(None),
+        Err(error) => return Err(error),
     }
-    let mut event = libc::pollfd {
-        fd: descriptor.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    loop {
-        let result = unsafe { libc::poll(&mut event, 1, -1) };
-        if result < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error).context("wait for execution pidfd");
-        }
-        anyhow::ensure!(event.revents & libc::POLLIN != 0,
-            "execution pidfd produced an unreadable notification");
-        return Ok(());
-    }
+    Ok(Some(ProcessExitSubscription { descriptor, pid }))
 }
 
 #[cfg(target_os = "macos")]
-fn wait_process_exit(pid: u32, _start_token: u64) -> Result<()> {
+fn subscribe_process_exit(pid: u32, _start_token: u64) -> Result<Option<ProcessExitSubscription>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
     let descriptor = unsafe { libc::kqueue() };
     if descriptor < 0 {
@@ -1509,33 +1526,95 @@ fn wait_process_exit(pid: u32, _start_token: u64) -> Result<()> {
     if result < 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
+            return Ok(None);
         }
         return Err(error).context("subscribe to execution exit kqueue");
     }
-    loop {
-        // SAFETY: the kernel initializes this single event record on successful return.
-        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-        let ready = unsafe {
-            libc::kevent(descriptor.as_raw_fd(), std::ptr::null(), 0, &mut event, 1, std::ptr::null())
-        };
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error).context("wait for execution exit kqueue");
-        }
-        anyhow::ensure!(ready == 1 && event.flags & libc::EV_ERROR == 0
-            && event.ident == pid as libc::uintptr_t && event.fflags & libc::NOTE_EXIT != 0,
-            "execution kqueue produced an unreadable exit notification");
-        return Ok(());
-    }
+    Ok(Some(ProcessExitSubscription { descriptor, pid }))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn wait_process_exit(_pid: u32, _start_token: u64) -> Result<()> {
+fn subscribe_process_exit(_pid: u32, _start_token: u64) -> Result<Option<ProcessExitSubscription>> {
     anyhow::bail!("kernel execution exit subscriptions are unavailable on this platform")
+}
+
+impl ProcessExitSubscription {
+    #[cfg(target_os = "linux")]
+    fn wait(self) -> Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let mut event = libc::pollfd {
+            fd: self.descriptor.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            let result = unsafe { libc::poll(&mut event, 1, -1) };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("wait for execution pidfd");
+            }
+            anyhow::ensure!(event.revents & libc::POLLIN != 0,
+                "execution pidfd for {} produced an unreadable notification", self.pid);
+            return Ok(());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn wait(self) -> Result<()> {
+        use std::os::fd::AsRawFd as _;
+        loop {
+            // SAFETY: the kernel initializes this single event record on successful return.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let ready = unsafe {
+                libc::kevent(self.descriptor.as_raw_fd(), std::ptr::null(), 0,
+                    &mut event, 1, std::ptr::null())
+            };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("wait for execution exit kqueue");
+            }
+            anyhow::ensure!(ready == 1 && event.flags & libc::EV_ERROR == 0
+                && event.ident == self.pid as libc::uintptr_t && event.fflags & libc::NOTE_EXIT != 0,
+                "execution kqueue produced an unreadable exit notification");
+            return Ok(());
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn wait(self) -> Result<()> {
+        anyhow::bail!("kernel execution exit subscriptions are unavailable on this platform")
+    }
+}
+
+/// Fallback only for an owned child's unavailable/failed subscription. Do not consume its wait
+/// status here: Child::try_wait and the retained Exited mark remain the single status owner.
+fn wait_owned_child_exit(pid: u32) -> Result<()> {
+    loop {
+        // SAFETY: waitid initializes this plain C status record; P_PID targets only our child,
+        // and WNOWAIT leaves its status available to this runtime's normal nonblocking reaper.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut status, libc::WEXITED | libc::WNOWAIT)
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            // A concurrent observer can have already consumed and persisted this exact child.
+            return Ok(());
+        }
+        return Err(error).context("wait for exact owned child without consuming status");
+    }
 }
 
 fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128) -> String {
@@ -2290,29 +2369,43 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn owned_reap_regression_nonowning_terminal_observer() {
-        owned_reap_regression(false, false, false);
+        owned_reap_regression(false, false, RegressionReaper::Subscription);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn owned_reap_regression_receipt_write_retry() {
-        owned_reap_regression(true, false, false);
+        owned_reap_regression(true, false, RegressionReaper::Subscription);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn owned_reap_regression_replacement_receipt_is_fenced() {
-        owned_reap_regression(false, true, false);
+        owned_reap_regression(false, true, RegressionReaper::Subscription);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn owned_reap_regression_terminal_shortcut_reaps_first() {
-        owned_reap_regression(false, false, true);
+        owned_reap_regression(false, false, RegressionReaper::Observer);
     }
 
     #[cfg(target_os = "linux")]
-    fn owned_reap_regression(fail_write: bool, replace: bool, observe_owner: bool) {
+    #[test]
+    fn owned_reap_regression_exact_child_wait_fallback() {
+        owned_reap_regression(false, false, RegressionReaper::ExactChildWait);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy, PartialEq)]
+    enum RegressionReaper {
+        Subscription,
+        Observer,
+        ExactChildWait,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn owned_reap_regression(fail_write: bool, replace: bool, mode: RegressionReaper) {
         use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
         use std::os::unix::ffi::OsStrExt as _;
         use std::os::unix::fs::PermissionsExt as _;
@@ -2320,7 +2413,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("exec");
         let owner = ExecRuntime::new(state.clone(), root.path().join("logs"));
-        let owner = if observe_owner { owner.without_background_reaper() } else { owner };
+        let owner = if mode == RegressionReaper::Subscription {
+            owner
+        } else {
+            owner.without_background_reaper()
+        };
         let observer = ExecRuntime::new(state.clone(), root.path().join("logs"));
         let release_path = root.path().join("release");
         let release_name = std::ffi::CString::new(release_path.as_os_str().as_bytes()).unwrap();
@@ -2340,6 +2437,14 @@ mod tests {
         // Freeze only the owner's map. A different runtime can cancel and publish terminal
         // containment, but cannot consume the parent's wait status.
         let children = owner.owned_children.lock().unwrap();
+        if mode == RegressionReaper::ExactChildWait {
+            let mut fallback = owner.clone();
+            fallback.reap_automatically = true;
+            fallback.start_owned_reaper(
+                OwnedChildKey::new("work", &generation),
+                Err(std::io::Error::from_raw_os_error(libc::ENOSYS).into()),
+            );
+        }
         observer.stop_if("work", Some(&generation.generation_id)).unwrap();
         let mut event = libc::pollfd {
             fd: exited.as_raw_fd(), events: libc::POLLIN, revents: 0,
@@ -2368,7 +2473,7 @@ mod tests {
             fs::set_permissions(&state, fs::Permissions::from_mode(0o500)).unwrap();
         }
         drop(children);
-        if observe_owner {
+        if mode == RegressionReaper::Observer {
             let Some(ExecObservation::Exited(ended)) = owner.observe("work").unwrap() else {
                 panic!("owner must observe the terminal receipt");
             };
