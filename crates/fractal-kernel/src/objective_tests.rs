@@ -130,11 +130,11 @@ fn the_fractal_ci_objectives_are_declarable_over_workflow_run_claims() {
     let objectives = parse_document(FRACTAL_CI).unwrap();
     assert_eq!(
         objectives.iter().map(|objective| objective.name.as_str()).collect::<Vec<_>>(),
-        ["fractal/merge-latency", "fractal/ci-critical-path", "fractal/flakes"]
+        ["fractal/ci-critical-path", "fractal/flakes"]
     );
     assert!(objectives.iter().all(Objective::declarable));
     let run = |at: &str| Event { kind: "github.workflow-run".into(), at: Some(at.into()) };
-    for (objective, start, event) in [(&objectives[0], "created_at", "merge_group"), (&objectives[1], "started_at", "pull_request")] {
+    for (objective, start, event) in [(&objectives[0], "started_at", "pull_request")] {
         let Indicator::Interval(interval) = &objective.indicator else { panic!("{} is an interval", objective.name) };
         assert_eq!(interval.subject_prefix, "github-workflow-run/compoundingtech/fractal/");
         assert_eq!((&interval.start, &interval.stop), (&run(start), &(run("completed_at"), None)));
@@ -144,7 +144,7 @@ fn the_fractal_ci_objectives_are_declarable_over_workflow_run_claims() {
             [only("workflow", &["Workspace CI"]), only("event", &[event]), only("conclusion", &["success"]), only("attempt", &["1"])]
         );
     }
-    let Indicator::Count(count) = &objectives[2].indicator else { panic!("flakes is a count") };
+    let Indicator::Count(count) = &objectives[1].indicator else { panic!("flakes is a count") };
     assert_eq!((count.event.as_str(), count.at.as_str()), ("github.workflow-run", "completed_at"));
     assert_eq!(count.only, [only("workflow", &["Workspace CI"])]);
     assert_eq!(count.excludes, [Exclude { field: "flakes".into(), values: vec!["0".into()] }]);
@@ -241,4 +241,43 @@ fn a_nonsensical_count_is_refused_never_defaulted() {
         assert!(message.contains(says), "{says:?} not in {message:?}");
     }
     assert!(!one(&COUNT.replace("factory/work-throughput", "throughput")).unwrap().declarable());
+}
+
+// Exact TS objectiveNode fixture: the native grammar is the declaration boundary.
+const GITHUB_MEASURED: &str = r#"objective "delivery/ready-to-merged" {
+  about "Final ready to merge, measured without a target"
+  indicator "github-ready-to-merged" {
+    source "github-source/test"
+    roster "github-scope/test"
+    timezone "America/New_York"
+    cut "watermark"
+    measurement "only"
+  }
+}"#;
+
+#[test]
+fn github_measurement_parses_without_an_invented_target() {
+    let objective = one(GITHUB_MEASURED).unwrap();
+    assert!(objective.declarable());
+    assert!(objective.targets.is_empty());
+    assert!(objective.window.is_none());
+    let Indicator::GithubReadyToMerged(config) = objective.indicator else { panic!() };
+    assert_eq!(config.source, "github-source/test");
+    assert_eq!(config.roster, "github-scope/test");
+    assert!(config.measured_only);
+    assert!(config.as_of_watermark);
+}
+
+#[test]
+fn github_target_policy_is_explicit_and_count_only() {
+    let targeted = GITHUB_MEASURED.replace("measurement \"only\"", "measurement \"targeted\"");
+    assert!(one(&targeted).is_err());
+    let count = targeted.replace("github-ready-to-merged", "github-merged-count");
+    assert!(one(&count).is_err());
+    let count = count.replacen("\n}", "\n  target \"per-hour\" min=7\n}", 1);
+    assert_eq!(one(&count).unwrap().target("per-hour", false).unwrap().bound, Bound::Min(7.0));
+    assert!(one(&count.replace("min=7", "max=7")).is_err());
+    assert!(one(&GITHUB_MEASURED.replace("    cut \"watermark\"\n", "")).is_err());
+    assert!(one(&GITHUB_MEASURED.replace("    source \"github-source/test\"", "    source \"\"")).is_err());
+    assert!(one(&GITHUB_MEASURED.replacen("\n}", "\n  target \"p95\" within=\"5m\"\n}", 1)).is_err());
 }

@@ -531,3 +531,59 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
     }),
   )
 })
+
+describe('native source-backed GitHub objectives', () => {
+  const native = {
+    source: 'github-source/test',
+    roster: 'github-scope/test',
+    timezone: 'America/New_York',
+    cut: 'watermark',
+    measurement: 'only',
+  } as const
+
+  it('lowers the exact measured-only fixture accepted by the native reader', () => {
+    expect(render({
+      name: 'delivery/ready-to-merged',
+      about: 'Final ready to merge, measured without a target',
+      indicator: Fractal.indicator.githubReadyToMerged(native),
+      targets: [],
+    })).toBe(`version 2
+objective "delivery/ready-to-merged" {
+  about "Final ready to merge, measured without a target"
+  indicator "github-ready-to-merged" {
+    source "github-source/test"
+    roster "github-scope/test"
+    timezone "America/New_York"
+    cut "watermark"
+    measurement "only"
+  }
+}
+`)
+  })
+
+  it('keeps merged-count target values policy-owned and omits author filters', () => {
+    const text = render({
+      name: 'delivery/merged',
+      about: 'All-author merged PRs',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, cut: 'now', measurement: 'targeted' }),
+      targets: [{ stat: 'per-hour', min: 7 }],
+    })
+    expect(text).toContain('indicator "github-merged-count"')
+    expect(text).toContain('target "per-hour" min=7')
+    expect(text).not.toContain('only "author"')
+  })
+
+  it('rejects a hidden default target, a latency target and an implicit cut', () => {
+    const base = { name: 'delivery/merged', about: 'Merged', targets: [] } as const
+    expect(() => render({ ...base, indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }) })).toThrow('needs one per-hour minimum')
+    expect(() => render({
+      ...base,
+      indicator: Fractal.indicator.githubReadyToMerged(native),
+      targets: [{ stat: 'p95', within: '5m' }],
+    })).toThrow('neither targets')
+    expect(() => Fractal.objective({
+      ...base,
+      indicator: { ...Fractal.indicator.githubMergedCount(native), cut: undefined },
+    } as unknown as ObjectiveInput)).toThrow('cut must be')
+  })
+})

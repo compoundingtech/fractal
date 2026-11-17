@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Capture bounded GitHub lifecycle history in claims and measure rolling merges and final ready cycles",
+  "replay": {"status": "changed", "detail": "Admitted source-sequenced capture commits publish at most four normalized fact references; staging is invisible. Corrections supersede revisions. Versioned plugin replay cursors bind finite coverage snapshots to source, generation, grant and scope."},
+  "schema": {"status": "changed", "detail": "Adds bounded github.fact.observed, github.capture.committed, github.capture.authority and github.capture.fenced kinds plus native github-source and effective-dated github-scope declarations. These facts are durable; operational mirror content remains disposable."},
+  "rules": {"status": "changed", "detail": "A selected fenced source authority acquires all authors through existing repository observers and shared HTTP budget. Unknown or incomplete history never becomes a successful objective evaluation. No default roster or throughput/latency policy is installed."},
+  "compatibility": {"status": "changed", "detail": "Configured plugin pull reads use canonical normalized claims with operational mirror supplements and report incomplete projection explicitly. Adds non-client-v0 replay and trusted-local owning-person authority operations. Native DSL supports GitHub rolling counts and measured-only final-ready-to-merged latency; retires the proxy merge-latency declaration."},
+  "downtime": {"status": "none", "detail": "No live source is enabled by installing this change. Local capture indexes rebuild incrementally from claims; ordinary daemon restart is sufficient to load code."},
+  "manual": {"status": "changed", "detail": "Activation requires explicit owning-person grant admission, source selection, effective-dated scope, repository observers, private-replication admission and credential routing. Source declarations create neither observers nor grants. Transfers fence the old member before selecting a successor."},
+  "recovery": {"status": "changed", "detail": "Retain durable capture claims and backups. Disposable projection loss is replayable; facts staged before a failed publication stay invisible. Do not remove external ledgers until every consumer migrates. Older binaries cannot acquire the new source contract; fence acquisition before binary rollback."}
+}

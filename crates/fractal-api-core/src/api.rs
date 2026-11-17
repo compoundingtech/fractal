@@ -121,6 +121,8 @@ mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
 mod exec_only;
+mod github_capture;
+mod github_capture_authority;
 mod github_plugin;
 mod github_watch;
 pub mod harness_events;
@@ -1060,6 +1062,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", get(github_plugin::pull))
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
         .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
+        .route("/v1/plugins/github/capture/v1/replay", get(github_capture::replay))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/authority/root", post(github_capture_authority::root))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/authority/successor", post(github_capture_authority::successor))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/fence", post(github_capture_authority::fence))
         .route("/v1/work/done", post(work::done_person_step))
         .route("/v1/work/override", post(work::override_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))

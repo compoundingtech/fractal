@@ -1,7 +1,7 @@
 # Objectives
 
-An objective is a target for something Fractal measures, with an error budget and an optional
-response when it is missed. There is one concept and one KDL kind, `objective`. Fractal ships its
+An objective declares something Fractal measures, with an explicit target and optional response
+when it is missed, or an explicitly measured-only native indicator. There is one concept and one KDL kind, `objective`. Fractal ships its
 own objectives (request latency, the store, CPU) and a fleet declares more with `fractal apply`,
 like agents, missions and accounts. Both are read the same way: `fractal slo ls`, `fractal slo
 explain ID` and `fractal slo chart ID`.
@@ -75,6 +75,74 @@ named as the table's rows say (`sql-statement`, `transaction`, `writer-hold`, `c
 
 These keep the meanings they had as built-in targets: a p99 is missed in a window when more than
 1% of its samples are over, and a max when any one is.
+
+### Source-backed GitHub measurements
+
+`github-merged-count` and `github-ready-to-merged` read the canonical committed GitHub projection,
+not an independent acquisition loop or the generic earliest-claim-wins count/interval evaluator.
+Their TypeScript constructors are `Fractal.indicator.githubMergedCount` and
+`Fractal.indicator.githubReadyToMerged`. Each requires authored `source` and `roster` subject
+references, an IANA `timezone`, explicit `cut: 'now' | 'watermark'`, and
+`measurement: 'only' | 'targeted'`. There are no default hosts, repository lists or target values.
+
+Root acquisition and membership declarations use `Fractal.githubSource` and
+`Fractal.githubScope` (also named package exports). They return KDL nodes for `emit` or
+`fractalKdl`, using the native schema declaration reader's fields:
+
+- `githubSource({ name, host, generation, authorityGrant, repositories, enabled,
+  checkpointEveryMs, replicatePrivate })`: repositories are unique `owner/name` locators;
+  the cadence is at least 60,000 ms. Both booleans and the grant reference are explicit.
+  This declaration does not create an observer, admit a grant, or activate acquisition.
+  Each repository still needs an observer on the admitted acquisition member.
+- `githubScope({ name, revision, repositories: [{ repositoryId, fromMs, untilMs? }] })`:
+  repository IDs are stable GitHub node IDs, not locators. Membership is half-open
+  `[fromMs, untilMs)`, with an explicit version and authored Unix-millisecond start.
+  Same-repository intervals may touch but cannot overlap. An authored activation start
+  establishes prospective membership, not historical coverage. Builders reject unsafe
+  JavaScript integers rather than rounding native timestamps.
+
+Private policy belongs in its owning declaration source, not the built-in daemon objectives.
+It must supply the source identity, authority reference, effective-dated versioned roster and
+timezone before declaring source-backed objectives. A throughput policy of at least twenty
+merges per rolling hour is `target "per-hour" min=20`; true ready-to-merged remains
+`measurement "only"` without targets. Neither repository discovery nor another workflow's
+roster establishes that policy or its historical effective dates.
+
+```kdl
+objective "delivery/ready-to-merged" {
+  about "Final ready to merge, measured without a target"
+  indicator "github-ready-to-merged" {
+    source "github-source/test"
+    roster "github-scope/test"
+    timezone "America/New_York"
+    cut "watermark"
+    measurement "only"
+  }
+}
+```
+
+Merged count is distinct repository/PR identities across **all authors**, in exactly
+`[cut - 1 hour, cut)`, under the versioned roster's effective membership at each merge.
+`measurement "targeted"` requires one policy-authored `target "per-hour" min=NUMBER`.
+Ready-to-merged is measured-only: the sample begins at the final proven draft-to-ready
+transition before merge, or at creation only with explicit created-ready proof. Complete
+lifecycle coverage must extend back to creation. A draft transition resets the cycle;
+queue entry, head push and the first-ever ready event are not proxies.
+
+`measurement "only"` requires no targets and forbids `on-breach`; it never implies a target
+or green verdict. The native SLO row exposes `verdict: "measured-only"` while retaining
+`status: "no-data"` for existing verdict consumers. Missing coverage, members, PR images
+or lifecycle proof are unknown, never met. A completely covered empty count is a real zero.
+Corrections and retractions replace previous projection images and therefore revise previous
+counts and cycles.
+
+The native SLO measurement evidence contains fourteen civil-day bars, including partial today,
+with timezone, measured bounds and full calendar end bounds. Day lengths honor DST. It also
+carries source identity/generation, projection and roster revisions, the coverage frontier and
+source lag. `cut "now"` preserves the current cut and marks lagging acquisition unknown while
+retaining observed partial samples. `cut "watermark"` explicitly measures as of the trustworthy
+source frontier; it does not disguise that older cut as now. These indicators own their rolling
+hour/calendar windows and take no generic `window`.
 
 ### Interval over claims
 
@@ -190,10 +258,6 @@ Fractal's Workspace CI objectives are declared, not shipped, in
 repository's poller writes, one per completed run ([plugins](plugins.md#the-graph-kinds)). Every
 member evaluates them from the replicated claims, so each reads the same rows:
 
-- `fractal/merge-latency/p50` and `/p95`: an interval over successful first-attempt merge group
-  runs, from `created_at` (the group entered the queue) to `completed_at` (its run went green), at
-  most 10 minutes over a day. It is a proxy for entering the queue until merging: the wait before
-  GitHub creates the group's run and the merge after it are not counted.
 - `fractal/ci-critical-path/p95`: an interval over successful first-attempt pull request runs,
   from `started_at` to `completed_at`, at most 13 minutes over a day. A rerun restarts its start
   and reruns only some jobs, so only a first attempt measures the run.
@@ -202,6 +266,10 @@ member evaluates them from the replicated claims, so each reads the same rows:
   row is missed exactly when any flake is seen; it counts runs, not flaky tests. Pull request runs
   of every conclusion are recorded, so a flaky test in a failed or cancelled pull request run counts
   too (the shipped `flakes` row it replaces read only successful pull request runs).
+
+The obsolete `fractal/merge-latency` workflow-run proxy is no longer declared. It did not
+measure ready-to-merged latency; source-backed lifecycle measurement above is the replacement,
+and requires an authored source and effective-dated roster rather than inferred history.
 
 Each names its owner in `on-breach`. Publish the file with `fractal apply slo/fractal-ci.kdl`
 once every member runs a build that knows `only` and the `github.workflow-run` kind.
