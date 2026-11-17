@@ -26,7 +26,7 @@ it('PlainComposer honors sendDisabled for pointer, keyboard and form submission 
   const render = (disabled: boolean) => act(async () => root.render(<EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><Composer disabled={disabled} /></EmbraceRuntimeProvider>))
   try {
     await render(true)
-    const button = [...host.querySelectorAll('button')].find(row => row.textContent === 'Send')!
+    const button = host.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!
     const input = host.querySelector('textarea')!
     expect(button.getAttribute('aria-disabled')).toBe('true')
     expect(button.disabled).toBe(false)
@@ -43,7 +43,7 @@ it('PlainComposer honors sendDisabled for pointer, keyboard and form submission 
 
     // Positive controls prove the same real pointer, keyboard and form paths are live when permitted.
     await render(false)
-    await act(async () => [...host.querySelectorAll('button')].find(row => row.textContent === 'Send')!.click())
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click())
     expect(submit).toHaveBeenCalledTimes(1)
     input.focus()
     await act(async () => userEvent.keyboard('{Enter}'))
