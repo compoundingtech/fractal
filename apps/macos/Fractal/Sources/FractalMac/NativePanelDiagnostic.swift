@@ -67,11 +67,14 @@ import ObjectiveC.runtime
     }
     var failures = 0, samples = 0, opens = 0
     var heights = Set<Int>(), counts = Set<Int>()
+    var epoch = 0, epochSamples = [Int: Int](), closedEpochs = Set<Int>()
+    var homeHeights = [Int: CGFloat]()
     try? await Task.sleep(for: .seconds(1))
     for i in 0..<180 {
       if [0, 70, 73, 120, 123].contains(i) {
         guard let status = NSApp.windows.first(where: { $0.className.contains("NSStatusBarWindow") }) else { fatalError("Missing native status window") }
         toggle(status); opens += 1
+        if [0, 73, 123].contains(i) { epoch += 1 }
       }
       switch i {
       case 15, 45, 95, 145: model.open(.objectives)
@@ -81,19 +84,24 @@ import ObjectiveC.runtime
       default: break
       }
       counts.insert(model.asks.count)
+      if !model.isPanelVisible && [71, 72, 121, 122].contains(i) { closedEpochs.insert(epoch) }
       for w in NSApp.windows where w.isVisible && w.className.contains("MenuBarExtraWindow") {
         guard model.isPanelVisible, content.height > 0,
           let status = NSApp.windows.first(where: { $0.className.contains("NSStatusBarWindow") }) else { continue }
         let gap = status.frame.minY - (w.frame.maxY - content.minY)
         samples += 1; heights.insert(Int(content.height.rounded()))
+        epochSamples[epoch, default: 0] += 1
+        if model.route == .home { homeHeights[model.asks.count] = content.height }
         if abs(gap - 2) > 1 { failures += 1 }
-        log("sample", window: w, fields: ["gap": gap, "route": String(describing: model.route), "asks": model.asks.count])
+        log("sample", window: w, fields: ["gap": gap, "route": String(describing: model.route), "asks": model.asks.count, "epoch": epoch])
       }
       try? await Task.sleep(for: .seconds(1))
     }
     center.removeObserver(observer)
-    let pass = failures == 0 && samples >= 30 && heights.count >= 3 && opens == 5 && counts.contains(19) && counts.contains(3)
-    log("probe.result", fields: ["pass": pass, "failures": failures, "samples": samples, "heights": heights.sorted(), "counts": counts.sorted()])
+    let shrank = (homeHeights[19] ?? 0) > (homeHeights[3] ?? .infinity) + 1
+    let lifecycle = closedEpochs == Set([1, 2]) && (1...3).allSatisfy { epochSamples[$0, default: 0] >= 5 }
+    let pass = failures == 0 && samples >= 30 && heights.count >= 3 && opens == 5 && shrank && lifecycle && [19, 14, 40, 3].allSatisfy { homeHeights[$0] != nil }
+    log("probe.result", fields: ["pass": pass, "failures": failures, "samples": samples, "heights": heights.sorted(), "counts": counts.sorted(), "closedEpochs": closedEpochs.sorted(), "epochSamples": epochSamples.map { ["epoch": $0.key, "samples": $0.value] }, "homeHeights": homeHeights.map { ["asks": CGFloat($0.key), "height": $0.value] }])
     if !pass { exit(1) }
     NSApp.terminate(nil)
   }
