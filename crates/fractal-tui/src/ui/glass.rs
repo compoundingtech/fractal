@@ -6028,6 +6028,9 @@ mod tests {
         let _ = screen(&ui);
         assert!(ui.frame.borrow().panes.iter().any(|pane| pane.key == "chat:agent/b"), "the conversation shows");
         ui.read_presented_conversations(&timelines);
+        assert!(badge(&ui).unread, "unknown foreground is not presentation evidence");
+        ui.input_event(crossterm::event::Event::FocusGained);
+        ui.read_presented_conversations(&timelines);
         assert!(!badge(&ui).unread);
         assert!(ui.world.unread.is_empty());
     }
@@ -6056,6 +6059,7 @@ mod tests {
         let now = Instant::now();
         ui.show_tab(1);
         ui.effects.clear();
+        ui.input_event(crossterm::event::Event::FocusGained);
         for at in [60_000, 90_000] {
             let timelines = presented_read_timeline(&mut ui, at);
             let _ = screen(&ui);
@@ -6096,6 +6100,9 @@ mod tests {
         ui.set_world(next);
         ui.show_tab(1);
         let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "unknown foreground cannot advance reads");
+        ui.input_event(crossterm::event::Event::FocusGained);
         ui.read_presented_conversations(&timelines);
         assert!(ui.reads.unread("agent/b", Some(90_000)), "stale presented prose cannot consume the roster update");
 

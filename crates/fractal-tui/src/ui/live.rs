@@ -5249,6 +5249,8 @@ mod tests {
         );
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert!(ui.visible_messages().is_empty(), "a headless draw does not prove foreground");
+        ui.input_event(crossterm::event::Event::FocusGained);
         let shown = ui.visible_messages();
         assert!(shown.contains("message/reply"));
         assert!(
