@@ -42,6 +42,13 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
                     rows.push(max_latency(&format!("{name}/{kind}"), about, label, max, &target[kind]));
                 }
             }
+            "writer-hold" => rows.push(max_latency(
+                name,
+                about,
+                "holds of the store's writer",
+                target["max_ms"].as_f64(),
+                &target["windows"],
+            )),
             "cpu" => rows.extend(cpu(about, target)),
             "database" => rows.push(database(about, target)),
             _ if target["min_percent"].is_number() => rows.push(share(name, about, target)),
@@ -672,6 +679,45 @@ mod tests {
         assert_eq!(by_id(&rows, "transaction/write")["remaining_percent"], 0.0);
         assert_eq!(by_id(&rows, "transaction/write")["status"], "missed");
         assert_eq!(by_id(&rows, "transaction/writer_hold")["status"], "no-data");
+    }
+
+    #[test]
+    fn writer_hold_uses_its_max_target_and_all_or_nothing_budget() {
+        for (samples, p99, over, status, remaining, current) in [
+            (1000, 123.0, 4, "missed", json!(0.0), "max 500 ms over 1000 samples"),
+            (1000, 123.0, 0, "met", json!(100.0), "max 124 ms over 1000 samples"),
+            (0, 0.0, 0, "no-data", Value::Null, "no samples"),
+        ] {
+            let mut measured = windows(samples, p99, over);
+            if over > 0 {
+                for window in WINDOWS {
+                    measured[window]["max_ms"] = json!(500.0);
+                }
+            }
+            let report = json!({"targets": [{
+                "name": "writer-hold", "about": "Holds of the store's writer", "max_ms": 300,
+                "windows": measured,
+            }]});
+            let rows = rows(&report, &[], 0, 0);
+            let row = by_id(&rows, "writer-hold");
+            assert_eq!(row["target"], "max ≤ 300 ms");
+            assert_eq!(row["current"], current);
+            assert_eq!(row["status"], status);
+            assert_eq!(row["remaining_percent"], remaining);
+        }
+    }
+
+    #[test]
+    fn writer_hold_is_missed_when_only_a_short_window_has_an_overrun() {
+        let mut measured = windows(1000, 123.0, 0);
+        measured["5m"] = window(100, 400.0, 1);
+        let report = json!({"targets": [{
+            "name": "writer-hold", "max_ms": 300, "windows": measured,
+        }]});
+        let rows = rows(&report, &[], 0, 0);
+        let row = by_id(&rows, "writer-hold");
+        assert_eq!(row["status"], "missed");
+        assert_eq!(row["remaining_percent"], 100.0);
     }
 
     #[test]
