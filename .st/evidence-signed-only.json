@@ -1,7 +1,0 @@
-{
-  "about": "Pull requests opened by these GitHub accounts are pre-signed (scripts/st-test --all --push origin) and never run the heavy checks in CI: an enforced check with no valid signature for its tree fails with what to do instead (scripts/ci-evidence-gate, refusal). Read from BASE, so a pull request cannot take itself off the list or enable queue reuse. merge_group is off until conditional post-merge hosted proof is deployed; same-tree permits full-tier evidence for the exact queue tree, with the BASE skip policy's keys, commands, inputs and lanes. Other merge groups run hosted CI; invalid evidence never refuses a merge group.",
-  "merge_group": "off",
-  "openers": [
-    "myobie"
-  ]
-}
