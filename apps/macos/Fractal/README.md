@@ -24,9 +24,24 @@ collection, but `FractalClient` has no typed attention or availability stream.
   on Back; with Reduce Motion it fades in. VoiceOver focus moves to the page title
   and back to the row or tile that opened it. Closing the panel returns it to the
   top level.
+- **Inbox tabs** split the inbox into Asks, Updates and Notices, each with its
+  count; `InboxKind` classifies on wire fields only, never titles. Asks are every
+  open request (`Role.ask`); updates are `update.type` `update` sent by an agent
+  (`requester_id` `agent/…`); every other update is a notice, such as the runtime's
+  `daemon/runtime` word that an ask ended (`update.about` `step-run/…`). The home
+  label's line carries the three as plain text tabs (no added height) and the capped
+  rows follow the selected one; More opens the full inbox on that tab. The full
+  inbox puts its Activity overview above a segmented All · Asks · Updates · Notices
+  control; Asks group under `AskGroup` sub-headers (decisions, choices, feedback,
+  questions, then reviews, prompts and forms answered in Fractal), and All lists
+  each kind under its own label. Both surfaces open on Asks and return to it when
+  the panel closes. Gallery scenarios `inbox-tabs-*` cover home, each page tab, an
+  empty tab, and both with and without activity.
 - **Inbox activity** counts arrival and resolution claims in the generic Fractal
   series response, grouped by ask/update type. Arrivals stack above the axis and
-  resolutions below, with asks in the stronger tone. The home label carries a
+  resolutions below, with asks in the stronger tone, on one scale for every tab:
+  the selected tab's series stays full and the other fades (notices count as
+  updates; All keeps both full). The home label carries a
   fixed-height 14-day strip; the full inbox adds a 14-day daily / 24-hour hourly
   picker and per-bucket hover values. Missing activity data keeps the home label
   and full inbox Activity section visible with an explicit unavailable notice,

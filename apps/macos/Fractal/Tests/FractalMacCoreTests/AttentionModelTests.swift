@@ -12,7 +12,8 @@ final class AttentionModelTests: XCTestCase {
 
   func testFreshReadPublishesAsksUpdatesAndObjectives() async {
     let ask = Fixture.record()
-    let update = Fixture.record(id: "attention/update", update: UpdateNote(about: "deploy", summary: "Done"))
+    let update = Fixture.record(
+      id: "attention/update", update: UpdateNote(about: "deploy", summary: "Done"), requesterID: "agent/deployer")
     let gate = Fixture.record(id: "attention/gate", kind: "human-gate", actions: ["review.approve"])
     let ignored = Fixture.record(id: "attention/closed", state: "resolved")
     let adapter = FakeAdapter(attention: [.success(.init(records: [ask, update, gate, ignored], canAnswer: true))], slo: [.success(slo)])
@@ -248,7 +249,8 @@ final class AttentionModelTests: XCTestCase {
     let snoozedAsk = Fixture.record(id: "attention/later", from: "release-captain", urgent: true, snoozedUntil: now + 3600)
     let urgent = Fixture.record(id: "attention/now", from: "observability", urgent: true)
     let update = Fixture.record(
-      id: "attention/update", update: UpdateNote(about: "run/1", summary: nil), snoozedUntil: now + 1800)
+      id: "attention/update", update: UpdateNote(about: "run/1", summary: nil), snoozedUntil: now + 1800,
+      requesterID: "agent/runner")
     let page = AttentionPage(records: [snoozedAsk, urgent, update], canAnswer: true, canControl: true)
     let lines = Lines()
     let speech = SpeechCoordinator(output: ScriptedSpeech(), clock: { [now] in now }, log: { lines.append($0) })
@@ -517,6 +519,32 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertTrue(model.attachments.isEmpty, "and so are the images only its page named")
     model.open(.objectives)
     XCTAssertNil(model.receipt, "moving on clears the receipt")
+  }
+
+  func testTheModelListsEachInboxKindAndBothTabsReturnToAsksWhenThePanelCloses() async {
+    let decision = Fixture.record(id: "attention/decision", request: Fixture.decision())
+    let agentUpdate = Fixture.record(
+      id: "attention/landed", update: UpdateNote(about: "message/1", summary: nil), requesterID: "agent/deployer")
+    let ended = Fixture.record(
+      id: "attention/ended", update: UpdateNote(about: "step-run/ask-1", summary: nil), requesterID: "daemon/runtime")
+    let page = AttentionPage(records: [ended, decision, agentUpdate], canAnswer: true)
+    let model = AttentionModel(adapter: FakeAdapter(attention: [.success(page)], slo: [.success(slo)]))
+    await model.refresh(now: now)
+
+    XCTAssertEqual(model.inbox(.asks), [decision])
+    XCTAssertEqual(model.updates, [agentUpdate])
+    XCTAssertEqual(model.notices, [ended])
+    XCTAssertEqual(model.openAskCount, 1, "notices ask nothing")
+    XCTAssertEqual(model.glanceTab, .asks)
+    XCTAssertEqual(model.inboxTab, .asks)
+
+    model.glanceTab = .notices
+    model.inboxTab = .all
+    await model.setPanelVisible(true)
+    XCTAssertEqual(model.glanceTab, .notices, "the tabs hold while the panel is open")
+    await model.setPanelVisible(false)
+    XCTAssertEqual(model.glanceTab, .asks)
+    XCTAssertEqual(model.inboxTab, .asks)
   }
 }
 

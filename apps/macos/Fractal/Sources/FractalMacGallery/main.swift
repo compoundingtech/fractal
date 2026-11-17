@@ -81,7 +81,8 @@ let out = URL(fileURLWithPath: outArgument, isDirectory: true)
 try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-let panels = scenarios + glanceScenarios + pageScenarios + historyScenarios + speechScenarios + inboxActivityScenarios + inboxActivityUnavailableScenarios
+let panels = scenarios + glanceScenarios + pageScenarios + historyScenarios + speechScenarios + inboxActivityScenarios
+  + inboxActivityUnavailableScenarios + inboxTabScenarios
 
 if arguments.first == "--capture" {
   // Captures put a backdrop and the panel on the real screen: only with the person's consent,
@@ -153,7 +154,7 @@ for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
     guard
       let png = await PanelSnapshot.png(
         model: model, build: GalleryBuild.identity, appearance: appearance.value,
-        scrollHeight: scenario.id.hasPrefix("glance-") || scenario.id.hasPrefix("inbox-activity-")
+        scrollHeight: ["glance-", "inbox-activity-", "inbox-tabs-home"].contains(where: scenario.id.hasPrefix)
           ? PanelSnapshot.compactScrollHeight : .infinity,
         inboxActivityPeriod: scenario.inboxActivityPeriod),
       let bitmap = NSBitmapImageRep(data: png)
