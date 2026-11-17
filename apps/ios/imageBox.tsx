@@ -3,7 +3,8 @@
 // in words that it is loading or why it cannot be shown, and opens on a tap to zoom (pinch, Close)
 // and to share or save through the person's own apps. The words come from imageView.ts.
 import { Component, createRef, useEffect, useMemo, useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, Share, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { Image, Pressable, ScrollView, Share, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { OwnedModal } from './ownedPresentationNative';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { imageLabel, imageWords, type ImageFacts } from './imageView';
 import { ConversationImageViewport, VisibleConversationImage, type VisibleImageState } from './visibleConversationImages';
@@ -69,7 +70,7 @@ export function ImageZoom({ uri, label, onClose }: { uri: string; label: string;
   const insets = useSafeAreaInsets();
   const [shareFailed, setShareFailed] = useState('');
   const { palette } = useTextAppearance();
-  return <Modal visible animationType="fade" presentationStyle="fullScreen" onRequestClose={onClose}>
+  return <OwnedModal visible animationType="fade" presentationStyle="fullScreen" onRequestClose={onClose}>
     <View style={{ flex: 1, backgroundColor: palette.crust }}>
       <View style={[styles.bar, { paddingTop: insets.top + 6, backgroundColor: palette.mantle }]}>
         <Pressable accessibilityRole="button" onPress={onClose} hitSlop={10}><T bold color={theme.accent}>Close</T></Pressable>
@@ -83,7 +84,7 @@ export function ImageZoom({ uri, label, onClose }: { uri: string; label: string;
         <Image accessibilityLabel={label} source={{ uri }} style={{ width, height: height - insets.top - insets.bottom - 48 }} resizeMode="contain" />
       </ScrollView>
     </View>
-  </Modal>;
+  </OwnedModal>;
 }
 
 // An image a message carries, read from Fractal (from the owner of the message, through Fractal) only while

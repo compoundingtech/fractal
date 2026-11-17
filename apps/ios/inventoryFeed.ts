@@ -1,4 +1,4 @@
-import { applyWindow, plainMessage, type CollectionFrame, type CollectionStream, type CollectionWindow, type Snapshot } from '../../clients/typescript/fractal-client';
+import { applyWindow, isResourceCollectionFrame, plainMessage, type CollectionFrame, type CollectionStream, type CollectionWindow, type Snapshot } from '../../clients/typescript/fractal-client';
 import { inventoryRows, type InventoryLists, type InventoryName } from '@fractal/views';
 
 export type InventoryHandlers<K extends InventoryName> = {
@@ -67,7 +67,7 @@ export class InventoryFeed {
     if (!('id' in frame) || typeof frame.id !== 'string') return false;
     const follow = this.held.get(frame.id);
     if (!follow || !this.granted) return false;
-    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection !== 'ordered-memberships') {
+    if (isResourceCollectionFrame(frame) && (frame.kind === 'snapshot' || frame.kind === 'changes')) {
       const next = applyWindow(follow.window, frame);
       if (!next) { this.subscribe(frame.id, follow); return true; }
       follow.window = next; follow.issue = '';
