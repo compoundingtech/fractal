@@ -23,7 +23,7 @@ export interface IosOutboxRepository extends OutboxRepository<PreparedPacket> {
   observeTimeline(id: string, identity: string): Promise<void>;
   discard(id: string): Promise<void>;
   cleanup(now: number, deleteAttachment: (reference: string) => Promise<void>): Promise<void>;
-  importLegacyStart(entry: LegacyStartRecovery): Promise<void>;
+  importLegacyStart(entry: LegacyStartRecovery): Promise<boolean>;
   legacyStarts(): Promise<readonly (LegacyStartRecovery | OutboxCorruptRecovery)[]>;
 }
 
@@ -182,8 +182,15 @@ export const createSqliteOutboxRepository = (
   return {
     scope,
     async importLegacyStart(entry) {
-      await executor.run(`INSERT INTO outbox_legacy_starts (principal_id, deployment_id, member_id, id, content_json)
-        VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING;`, [...parameters, entry.id, JSON.stringify(entry)]);
+      const encoded = JSON.stringify(entry);
+      return executor.transaction(async sql => {
+        await sql.run(`INSERT INTO outbox_legacy_starts (principal_id, deployment_id, member_id, id, content_json)
+          VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING;`, [...parameters, entry.id, encoded]);
+        const stored = await sql.get<{ content_json: string | null }>(`SELECT content_json FROM outbox_legacy_starts WHERE ${filter} AND id = ?;`, [...parameters, entry.id]);
+        // Exact encoding includes both serializedDraft and text, plus discovery metadata.
+        // A conflict (including a discarded tombstone) never authorizes source deletion.
+        return stored?.content_json === encoded;
+      });
     },
     async legacyStarts() {
       const rows = await executor.all<{ id: string; content_json: string }>(`SELECT id, content_json FROM outbox_legacy_starts WHERE ${filter} AND content_json IS NOT NULL;`, parameters);

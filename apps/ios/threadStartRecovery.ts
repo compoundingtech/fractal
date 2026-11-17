@@ -26,7 +26,7 @@ export const savedThreadStarts = (cache: ReadonlyMap<string, string>): readonly 
 /** Commit packetless metadata before removing the exact old draft/discovery pair. */
 export const importSavedThreadStarts = async (
   cache: Map<string, string>, current: () => boolean,
-  commit: (entry: LegacyStartRecovery) => Promise<void>, save: () => Promise<void>,
+  commit: (entry: LegacyStartRecovery) => Promise<boolean>, save: () => Promise<void>,
 ): Promise<void> => {
   for (const start of savedThreadStarts(cache)) {
     const key = `thread-draft/start/${start.target}`, discoveryKey = startRecoveryKey(start.target);
@@ -35,7 +35,8 @@ export const importSavedThreadStarts = async (
     let text: unknown;
     try { text = JSON.parse(serializedDraft)?.text; } catch { continue; }
     if (typeof text !== 'string') continue;
-    await commit({ id: `legacy-start/${start.target}`, message: { kind: 'start', target: start.target, title: start.title, origin: start.origin }, text, serializedDraft });
+    const retained = await commit({ id: `legacy-start/${start.target}`, message: { kind: 'start', target: start.target, title: start.title, origin: start.origin }, text, serializedDraft });
+    if (!retained) continue; // Keep newer source drafts when the deterministic import id is occupied.
     if (!current() || cache.get(key) !== serializedDraft || cache.get(discoveryKey) !== discovery) continue;
     cache.delete(key); cache.delete(discoveryKey);
     try { await save(); }

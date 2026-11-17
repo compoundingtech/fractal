@@ -9,6 +9,7 @@ import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeO
 import { prepareMessageSendPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import { createSqliteOutboxRepository, migrateOutboxDatabase, OutboxCorruptionError, withOutboxTransaction } from './outboxSqlite.ts';
 import { restoreBoundAttempt } from './outboxBinding.ts';
+import { importSavedThreadStarts, startRecoveryKey } from './threadStartRecovery.ts';
 
 const scope = { principalId: 'profile/avery', deploymentId: '["host/original","key/original"]', memberId: 'member/original' };
 const intent = () => ({ text: 'Original text', attachments: [{ reference: 'spool/original', contentHash: 'sha256:original', mediaType: 'image/png' }] });
@@ -288,13 +289,50 @@ test('legacy Start import commits packetless metadata once; discard prevents rei
   const store = await sqliteFactory(t), repo = store.repository(scope);
   const entry = { id: 'legacy-start/thread/original', message: { kind: 'start', target: 'thread/original', title: 'Original',
     origin: { agentId: 'agent/dotfiles/manager', sourceId: 'notice/original', episode: 'episode/original' } }, text: 'saved text', serializedDraft: '{\"text\":\"saved text\"}' };
-  await repo.importLegacyStart(entry);
+  assert.equal(await repo.importLegacyStart(entry), true);
   await store.reopen();
   const reopened = store.repository(scope);
-  await reopened.importLegacyStart({ ...entry, text: 'later changed' });
+  assert.equal(await reopened.importLegacyStart(entry), true);
+  assert.equal(await reopened.importLegacyStart({ ...entry, text: 'later changed' }), false);
+  assert.equal(await reopened.importLegacyStart({ ...entry, serializedDraft: '{"text":"later changed"}' }), false);
   assert.deepEqual(await reopened.legacyStarts(), [entry]);
   assert.deepEqual(await reopened.list(), []);
   await reopened.discard(entry.id);
-  await reopened.importLegacyStart(entry);
+  assert.equal(await reopened.importLegacyStart(entry), false);
   assert.deepEqual(await reopened.legacyStarts(), []);
 });
+
+for (const sequence of ['edit-during-import', 'edit-after-failed-save']) {
+  test(`SQLite legacy Start migration retains newer source on second pass: ${sequence}`, async t => {
+    const store = await sqliteFactory(t), repo = store.repository(scope);
+    const start = { target: 'thread/original', title: 'Original', origin: {
+      agentId: 'agent/dotfiles/manager', sourceId: 'notice/original', episode: 'episode/original',
+    } };
+    const key = 'thread-draft/start/' + start.target, discoveryKey = startRecoveryKey(start.target);
+    const original = JSON.stringify({ text: 'original', quote: { id: 'message/original' } });
+    const newer = JSON.stringify({ text: 'later edit', quote: { id: 'message/later' } });
+    const discovery = JSON.stringify(start), cache = new Map([[key, original], [discoveryKey, discovery]]);
+    let saves = 0;
+    if (sequence === 'edit-during-import') {
+      await importSavedThreadStarts(cache, () => true, async entry => {
+        const retained = await repo.importLegacyStart(entry);
+        cache.set(key, newer);
+        return retained;
+      }, async () => { saves++; });
+    } else {
+      await assert.rejects(importSavedThreadStarts(cache, () => true,
+        entry => repo.importLegacyStart(entry), async () => { throw new Error('source save failed'); }), /source save failed/);
+      assert.equal(cache.get(key), original);
+      cache.set(key, newer);
+    }
+    await store.reopen();
+    const reopened = store.repository(scope);
+    await importSavedThreadStarts(cache, () => true, entry => reopened.importLegacyStart(entry), async () => { saves++; });
+    assert.equal(cache.get(key), newer);
+    assert.equal(cache.get(discoveryKey), discovery);
+    assert.equal(saves, 0);
+    const [retained] = await reopened.legacyStarts();
+    assert.equal(retained.serializedDraft, original);
+    assert.equal(retained.text, 'original');
+  });
+}

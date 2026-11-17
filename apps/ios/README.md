@@ -84,8 +84,11 @@ There is no exclusion/seal protocol, and no claim to reconcile every lost receip
 Storage failure preserves drafts and recovery, with a retry-later storage action.
 Saved Start metadata remains packetless unknown. Protected-profile migration commits
 its original text/title/origin/target and serialized draft before removing the exact
-old source; import/discard is idempotent. Legacy profiles keep the warning/saved-copy
-reader. Neither path fabricates an original packet, identity or dispatch permission.
+old source; import/discard is idempotent. A conflicting saved import never authorizes
+source deletion: the stored text, serialized draft and discovery metadata must match
+exactly. Newer conflicting content stays in the original draft rather than creating
+another recovery identity for the same legacy Start. Legacy profiles keep the
+warning/saved-copy reader. Neither path fabricates an original packet, identity or dispatch permission.
 
 The common conversation frame owns keyboard avoidance and the composer dock; it accepts each
 context's existing history viewport unchanged. Common message heading/body presentation retains
