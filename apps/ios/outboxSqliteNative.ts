@@ -3,7 +3,6 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { createSqliteOutboxRepository, migrateOutboxDatabase, withOutboxTransaction } from './outboxSqlite.ts';
 import type { IosOutboxRepository, OutboxSqlExecutor, OutboxSqlSession } from './outboxSqlite.ts';
 import type { OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
-import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import FractalOutboxFiles from './modules/fractal-outbox-files/index.ts';
 import { acceptProtectedOutboxIntent, openProtectedOutboxStorage, readOutboxAttachment, requireProtectedOutboxStorage, OutboxStorageProtectionError, outboxStorageOperation } from './outboxSpool.ts';
 import type { OutboxHash } from './outboxSpool.ts';
@@ -67,6 +66,8 @@ export const openNativeOutbox = async (scope: OutboxScope, authorize: (scope: Ou
       // All acceptance/transition writes require the live, original client's identity.
       const repository: IosOutboxRepository = {
         scope: storage.scope, read: id => storage.read(id), list: () => storage.list(),
+        importLegacyStart: entry => storage.importLegacyStart(entry),
+        legacyStarts: () => storage.legacyStarts(),
         uploads: id => storage.uploads(id),
         saveUploads: (id, attachments) => { authorize(storage.scope); return storage.saveUploads(id, attachments); },
         observeTimeline: (id, identity) => { authorize(storage.scope); return storage.observeTimeline(id, identity); },

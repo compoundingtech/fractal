@@ -73,9 +73,9 @@ for (const message of messages) test(`${message.kind}: durable intent precedes p
 test('images are privately spooled before intent acceptance, with draft snapshot unchanged', async t => {
   const f = await fixture(t), runtime = f.runtime();
   const images = [{ key: 'image', base64: Buffer.from('bytes').toString('base64'), bytes: 5, mediaType: 'image/png' }];
-  const context = metadata(messages[0]);
+  const context = metadata({ ...messages[0] });
   const accepted = runtime.accept('action/image', 'draft', images, context);
-  images[0].base64 = 'later edit'; context.message.to = 'agent/changed';
+  images[0].base64 = 'later edit'; context.message.to = 'person/ada';
   await accepted; await runtime.settled();
   assert.deepEqual(f.events.slice(0, 3), ['spool', 'intent', 'prepare']);
   assert.equal((await f.repository.read('action/image')).packet.parameters.to, 'agent/dotfiles/manager');

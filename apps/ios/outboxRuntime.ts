@@ -72,7 +72,7 @@ export class OutboxRuntime {
     // No discovery, upload, fence, signing or POST is allowed before this barrier.
     await this.owner.acceptIntent(id, text, images, captured);
     this.issue = '';
-    await this.refresh();
+    try { await this.refresh(); } catch (error) { this.signalIssue(error); }
     this.launch(id);
     return { how: 'accepted', outboxId: id };
   }
@@ -184,7 +184,8 @@ export class OutboxRuntime {
   private async refresh(): Promise<void> {
     const entries = await this.owner.repository.list();
     const restored = restoreOutboxEntries(entries);
-    this.attempts.project(entries.map((entry, index) => {
+    const legacy = await this.owner.repository.legacyStarts();
+    const rows = entries.map((entry, index) => {
       const recovery = restored[index];
       if (entry._tag === 'corrupt') {
         return { id: entry.id, phase: 'unconfirmed' as const, draft: { id: entry.id, images: 0, member: this.owner.repository.scope.memberId,
@@ -200,7 +201,14 @@ export class OutboxRuntime {
         draft: { id: record.id, message: intent?.message, text: record.intent.text, images: record.intent.attachments.length,
           member: this.owner.repository.scope.memberId, state, status: this.notices.get(record.id) ?? (intent ? status : 'Recovery context unavailable; delivery unknown.'),
           canCheck: !!intent && 'packet' in record } };
-    }));
+    });
+    this.attempts.project([...rows, ...legacy.map(entry => '_tag' in entry
+      ? { id: entry.id, phase: 'unconfirmed' as const, draft: { id: entry.id, images: 0, member: this.owner.repository.scope.memberId,
+        state: 'corrupt' as const, status: entry.status, canCheck: false } }
+      : { id: entry.id, phase: 'unconfirmed' as const,
+        draft: { id: entry.id, message: entry.message, text: entry.text, images: 0, member: this.owner.repository.scope.memberId,
+          state: 'legacy' as const, status: 'Delivery unknown after restart. Saved Start metadata has no original packet; it cannot be sent or checked.',
+          canCheck: false } })]);
   }
   async close(): Promise<void> {
     this.stopped = true;

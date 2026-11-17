@@ -20,6 +20,7 @@ import { threadReadErrorText as errorText, threadEditScope, threadDraftKey, thre
 import type { ThreadEditResult } from '../threadEdits';
 import { ThreadStartContextReader } from '../threadStartContext';
 import { savedThreadStarts, startRecoveryKey, type SavedThreadStart } from '../threadStartRecovery';
+import { OutboxRecovery, confirmRecoveryDiscard } from '../outboxRecovery.tsx';
 import { threadClock, threadExactTime, threadRelativeTime } from '../threadClock';
 import { visibleThreadMessages, type ThreadBounds } from '../threadVisibility';
 import { measureThreadBounds, measureThreadViewport, threadViewportChanged, ThreadViewport, useThreadViewports } from '../threadViewport';
@@ -549,7 +550,7 @@ export function InboxThread({ sourceId, origin, initialTitle, onOpen, pendingSco
   const retained = pendingScope ? threadDeliveries?.get(pendingScope) : undefined;
   const restored = pendingScope && !retained && draftCache
     ? savedThreadStarts(draftCache.current).find(start => threadStartAttemptScope(start.origin, start.target) === pendingScope) : undefined;
-  if (restored) return <RestoredThreadStart start={restored} />;
+  if (restored) return <RestoredThreadStart start={restored} onOpen={onOpen} />;
   const shownOrigin = pendingScope ? retained?.start?.origin : origin;
   if (!shownOrigin) return <T dim>Thread context is unavailable for this Inbox item.</T>;
   return <InboxThreadStart key={pendingScope ?? threadStartScope(shownOrigin)} client={threadClient}
@@ -570,7 +571,7 @@ function HistoryStart({ episode, title }: { episode: RequestHistoryItem['key']; 
     onOpen={(id, title) => navigation.navigate('Thread', { id, title })} showHistory={false} canStart />;
 }
 
-function RestoredThreadStart({ start }: { start: SavedThreadStart }) {
+function RestoredThreadStart({ start, onOpen }: { start: SavedThreadStart; onOpen: OpenThread }) {
   const { draftCache, saveDrafts } = useStore();
   const [discarded, setDiscarded] = useState(false);
   if (discarded) return null;
@@ -581,13 +582,12 @@ function RestoredThreadStart({ start }: { start: SavedThreadStart }) {
     <T dim>Delivery status unknown after restart. This saved draft cannot retry the original send. Copy it into a new Start to send a separate message; the original may already have arrived.</T>
     {draft.quote ? <T dim>Quoted · {draft.quote.from} · {draft.quote.text}</T> : null}
     <T selectable>{draft.text}</T>
+    <Button label="Open conversation" onPress={() => onOpen(start.target, start.title)} />
     <Button label="Copy message" onPress={() => { void Clipboard.setStringAsync(draft.text); }} />
-    <Button label="Discard saved draft" onPress={() => {
-      draftCache.current.delete(key);
-      draftCache.current.delete(startRecoveryKey(start.target));
-      saveDrafts();
-      setDiscarded(true);
-    }} />
+    <Button label="Discard saved draft" onPress={() => confirmRecoveryDiscard(() => {
+      draftCache.current.delete(key); draftCache.current.delete(startRecoveryKey(start.target));
+      saveDrafts(); setDiscarded(true);
+    })} />
   </View>;
 }
 
@@ -603,9 +603,11 @@ export function PendingInboxThreads({ onOpen }: { onOpen: OpenThread }) {
   if (draftCache) for (const start of savedThreadStarts(draftCache.current)) {
     if (!pending.has(start.target)) pending.set(start.target, { ...start, scope: threadStartAttemptScope(start.origin, start.target) });
   }
-  if (!pending.size) return null;
+  const recovery = <OutboxRecovery starts onOpen={onOpen} />;
+  if (!pending.size) return recovery;
   return <View style={{ padding: 12, gap: 6 }}>
     <T bold>Unconfirmed thread starts</T>
+    {recovery}
     {[...pending.values()].map(start => <View key={start.scope} style={{ gap: 4 }}>
       <T dim>Original recipient · {start.origin.agentId}</T>
       <InboxThread sourceId={start.origin.sourceId} pendingScope={start.scope} initialTitle={start.title} onOpen={onOpen} />
@@ -826,7 +828,7 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
   const tabBarHeight = useContext(BottomTabBarHeightContext) ?? 0;
-  const navigation = useNavigation();
+  const navigation = useNavigation<NativeStackNavigationProp<StackParams>>();
   const viewports = useThreadViewports();
   const messageViews = useRef(new Map<string, View>());
   const [quote, setQuote] = useState<ThreadMessage>();
@@ -984,10 +986,11 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
   // history; embedded threads keep the same elements inline, in reading order. Request history
   // follows the thread's own controls, outside every measured message row.
   const requestHistory = thread ? <RequestHistory client={client} threadId={thread.id} StartAction={HistoryStart} /> : null;
-  if (frame) return frame(<View style={{ gap: 6 }}>{earlier}{rows}{newer}{history}{markRead}{renameField}{editStatus}{threadButtons}{requestHistory}</View>,
+  const recovery = id ? <OutboxRecovery thread={id} onOpen={(id, title) => navigation.navigate('Thread', { id, title })} /> : null;
+  if (frame) return frame(<View style={{ gap: 6 }}>{recovery}{earlier}{rows}{newer}{history}{markRead}{renameField}{editStatus}{threadButtons}{requestHistory}</View>,
     flashLine || closedHint || composer || unavailable ? <View style={{ gap: 6 }}>{flashLine}{closedHint}{composer}{unavailable}</View> : undefined);
   return <View style={{ gap: 6, paddingBottom: 8 }}>
-    {earlier}{rows}{newer}{history}{markRead}{closedHint}{composer}{unavailable}{flashLine}{renameField}{editStatus}{threadButtons}{requestHistory}
+    {recovery}{earlier}{rows}{newer}{history}{markRead}{closedHint}{composer}{unavailable}{flashLine}{renameField}{editStatus}{threadButtons}{requestHistory}
   </View>;
 }
 
@@ -1127,7 +1130,7 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
     // must neither persist its text for the next owner nor clear their typing.
     if (start && !thread && (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration)) return;
     if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
-    if (next.how === 'sent') {
+    if (next.how === 'sent' || next.how === 'accepted') {
       if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
       if (start && !thread) {
         start.onAccepted(sentTarget.current!);

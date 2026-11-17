@@ -21,6 +21,9 @@ export type OutboxRecoveryRow = {
   status: string;
   canCheck: boolean;
 };
+export type LegacyStartRecovery = {
+  id: string; message: Extract<OutboxMessage, { kind: 'start' }>; text: string; serializedDraft: string;
+};
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const fields = (value: unknown, keys: readonly string[]): boolean =>

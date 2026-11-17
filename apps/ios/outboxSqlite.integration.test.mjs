@@ -121,15 +121,15 @@ contracts('SQLite', sqliteFactory);
 
 test('SQLite migrates empty schema once, rejects future version without resetting data', async t => {
   const store = await sqliteFactory(t), { db, executor } = store.connection();
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
   assert.equal(db.prepare('PRAGMA synchronous').get().synchronous, 2);
   await store.repository(scope).commit(preparing());
   await migrateOutboxDatabase(executor);
   assert.equal((await store.repository(scope).list()).length, 1);
-  db.exec('PRAGMA user_version = 3;');
+  db.exec('PRAGMA user_version = 4;');
   await assert.rejects(migrateOutboxDatabase(executor), OutboxCorruptionError);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM outbox_records').get().count, 1);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 4);
 });
 
 test('SQLite file reopen retains intent/ready packets and restores dispatched work to unknown', async t => {
@@ -282,4 +282,19 @@ test('SQLite spool deletion queue survives failure/reopen; explicit pending disc
   await reopened.commit(preparing('attempt/pending'));
   await reopened.discard('attempt/pending');
   await reopened.cleanup(now + 100 * 86400_000, async () => assert.fail('unknown files are not authorized for deletion'));
+});
+
+test('legacy Start import commits packetless metadata once; discard prevents reimport after restart', async t => {
+  const store = await sqliteFactory(t), repo = store.repository(scope);
+  const entry = { id: 'legacy-start/thread/original', message: { kind: 'start', target: 'thread/original', title: 'Original',
+    origin: { agentId: 'agent/dotfiles/manager', sourceId: 'notice/original', episode: 'episode/original' } }, text: 'saved text', serializedDraft: '{\"text\":\"saved text\"}' };
+  await repo.importLegacyStart(entry);
+  await store.reopen();
+  const reopened = store.repository(scope);
+  await reopened.importLegacyStart({ ...entry, text: 'later changed' });
+  assert.deepEqual(await reopened.legacyStarts(), [entry]);
+  assert.deepEqual(await reopened.list(), []);
+  await reopened.discard(entry.id);
+  await reopened.importLegacyStart(entry);
+  assert.deepEqual(await reopened.legacyStarts(), []);
 });

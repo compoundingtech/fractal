@@ -61,16 +61,27 @@ image tray and dictation occupy capability slots; threads supply quote/removal a
 while retaining their canonical recipient policy. The shared component does not add thread
 attachments or choose send authority.
 
-`conversationAttempts.ts` owns process-lifetime draft snapshots, send/result phases and guarded
-original-retry ownership for both contexts. Ordinary rows adapt its results to image restoration,
-the warned Send as new action and transcript reconciliation; thread deliveries project the same
-controller into the existing client-scoped ledger, retaining independent Start attempt keys and
-Start/Reply completion fences. `conversationPresentation.tsx` supplies common recovery feedback;
-wording and available recovery actions remain context capabilities. Signed packet/member retention,
-receipt checks and prior-unknown dominance still come from the existing fractal-client delivery
-helpers and the stricter `sendStart` adapter, not from a new transport or certainty policy.
-Draft text/quote formats remain separate. There is no durable packet/outbox or original retry after
-process restart; saved Start discovery metadata remains only a warning and saved-copy capability.
+`conversationAttempts.ts` is the common subscription/row controller, not a certainty
+policy. For protected profiles, chat, Start and reply accept immutable intent/spool
+before clearing the submitted draft, prepare and persist the complete signed packet,
+then commit the one-shot dispatch marker before a single POST. Their recovery rows
+are projections of SQLite/shared-core state, not retry closures or text matching.
+Legacy profiles without a verified persisted issuer tuple keep the existing
+nonpersistent delivery paths and receive the one-time re-pair notice; the notice is
+also explained in connection settings. No protection is silently inferred from a pin.
+Draft formats, ordinary images/dictation/rich tools, thread text/quote, and each
+context's separate viewport/read/paging semantics remain unchanged.
+On launch/foreground, never-dispatched work can resume on its original authorized
+member. Dispatched work restores unknown and is never automatically replayed.
+Recovery offers Check status, Open conversation, Copy and warned local Discard;
+damaged entries expose only status and Discard. Check status uses exact authoritative
+timeline identities only; absent/unsupported lookup remains unknown, not not-applied.
+There is no exclusion/seal protocol, and no claim to reconcile every lost receipt.
+Storage failure preserves drafts and recovery, with a retry-later storage action.
+Saved Start metadata remains packetless unknown. Protected-profile migration commits
+its original text/title/origin/target and serialized draft before removing the exact
+old source; import/discard is idempotent. Legacy profiles keep the warning/saved-copy
+reader. Neither path fabricates an original packet, identity or dispatch permission.
 
 The common conversation frame owns keyboard avoidance and the composer dock; it accepts each
 context's existing history viewport unchanged. Common message heading/body presentation retains
@@ -180,7 +191,7 @@ Native I/O, locked/unreadable storage and database-open failures instead raise
 They do not manufacture corruption rows or erase recovery records. Root and spool
 directories use `completeUntilFirstUserAuthentication`, including existing roots;
 actual first-unlock/lock behavior still requires native verification.
-The factory is not connected to production sending. Normal Expo local-module
+The factory is connected to protected production chat/Start/reply. Normal Expo local-module
 autolinking/prebuild/Pods and a rebuilt installed binary are still required; no
 generated native files were hand-edited. JS fake-bridge and Node SQLite tests do
 not establish native compilation, actual backup exclusion or installed crash proof.
@@ -194,9 +205,9 @@ without changing pairing identity. Persisted-scope records remain visible throug
 `restoreBoundEntries`, which uses the core `restoreOutboxEntries` (including corrupt
 discard-only recovery entries); they are never silently moved, re-signed or sent.
 `openNativeOutbox` requires the store's live authorization callback for acceptance
-and transition writes and exposes it for future status/dispatch owners to check
-immediately before network work. Those owners are not implemented by this step;
-ordinary legacy sending is unchanged. Neither URL nor `host_id` can grant binding.
+and transition writes; the runtime repeats it before preparation, status reads and
+dispatch on the original client. Ordinary legacy sending is unchanged. Neither URL
+nor `host_id` can grant issuer binding.
 The native opener snapshots/freezes the requested scope before awaiting storage;
 every write guard and exposed authorization check uses the repository's immutable
 scope, never the caller-owned object. Mutating that object cannot change which
@@ -208,8 +219,9 @@ single POST. It delegates every certainty transition to the shared core, and pro
 records through the existing `ConversationAttempts` controller. Restart can resume
 never-dispatched preparation/ready packets; dispatched work restores unknown without
 signing or sending again. Check status only reads the original authoritative timeline
-for an exact derived identity. Absence remains unknown. This runtime adapter does not
-yet change screen send callsites in this commit.
+for an exact derived identity. Absence remains unknown. Screen sends distinguish
+durable local acceptance from server-confirmed delivery; accepted content stays in
+the recovery projection until its terminal retention rules allow deletion.
 
 The core exports a reference repository but no reusable runnable contract suite.
 One iOS contract suite covers the same acceptance, CAS, immutable snapshot and scope

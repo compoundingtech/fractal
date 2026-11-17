@@ -25,8 +25,8 @@ public final class FractalOutboxFilesModule: Module {
         try self.verifyFile(destination, hash: name)
       } else {
         let temporary = spool.appendingPathComponent(".\(UUID().uuidString).partial")
-        // Only unaccepted temporary files are removed here. Final hash-named files have no
-        // delete API: orphan/terminal cleanup belongs to the later retention implementation.
+        // Acceptance removes only unaccepted temporary files. Final files are removed
+        // separately after JS proves terminal retention and absence of live references.
         defer { try? FileManager.default.removeItem(at: temporary) }
         try bytes.write(to: temporary, options: .withoutOverwriting)
         try FileManager.default.setAttributes([.posixPermissions: 0o600, .protectionKey: FileProtectionType.complete], atPath: temporary.path)

@@ -1,8 +1,9 @@
-import { isAllowedOutboxTransition } from '../../clients/typescript/fractal-client/outbox.ts';
-import type { OutboxEntry, OutboxRecord, OutboxRepository, OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
+import { isAllowedOutboxTransition, restoreOutboxEntries } from '../../clients/typescript/fractal-client/outbox.ts';
+import type { OutboxCorruptRecovery, OutboxEntry, OutboxRecord, OutboxRepository, OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import { ActionRequest, ActionResult, decodeUnknownSync } from '../../clients/typescript/fractal-client/Schema.generated.ts';
 import type { AttachmentInput } from '../../clients/typescript/fractal-client/Models.generated.ts';
+import type { LegacyStartRecovery } from './outboxMessage.ts';
 
 export type SqlValue = string | number | null;
 export interface OutboxSqlSession {
@@ -22,6 +23,8 @@ export interface IosOutboxRepository extends OutboxRepository<PreparedPacket> {
   observeTimeline(id: string, identity: string): Promise<void>;
   discard(id: string): Promise<void>;
   cleanup(now: number, deleteAttachment: (reference: string) => Promise<void>): Promise<void>;
+  importLegacyStart(entry: LegacyStartRecovery): Promise<void>;
+  legacyStarts(): Promise<readonly (LegacyStartRecovery | OutboxCorruptRecovery)[]>;
 }
 
 /** Preserve the original failure even if rollback itself fails. Caller serializes access. */
@@ -113,7 +116,15 @@ export const migrateOutboxDatabase = async (executor: OutboxSqlExecutor): Promis
   await executor.exec('PRAGMA synchronous = FULL;');
   await executor.transaction(async sql => {
     const version = await sql.get<{ user_version: number }>('PRAGMA user_version;', []);
-    if (version?.user_version === 2) return;
+    if (version?.user_version === 3) return;
+    if (version?.user_version === 2) {
+      await sql.exec(`CREATE TABLE outbox_legacy_starts (
+        principal_id TEXT NOT NULL, deployment_id TEXT NOT NULL, member_id TEXT NOT NULL,
+        id TEXT NOT NULL, content_json TEXT,
+        PRIMARY KEY (principal_id, deployment_id, member_id, id)
+      ); PRAGMA user_version = 3;`);
+      return;
+    }
     if (version?.user_version !== 0 && version?.user_version !== 1) throw new OutboxCorruptionError();
     if (version.user_version === 0) await sql.exec(`CREATE TABLE outbox_records (
       principal_id TEXT NOT NULL,
@@ -134,7 +145,12 @@ export const migrateOutboxDatabase = async (executor: OutboxSqlExecutor): Promis
         PRIMARY KEY (principal_id, deployment_id, member_id, id)
       );
       CREATE TABLE outbox_spool_deletions (reference TEXT PRIMARY KEY);
-      PRAGMA user_version = 2;`);
+      CREATE TABLE outbox_legacy_starts (
+        principal_id TEXT NOT NULL, deployment_id TEXT NOT NULL, member_id TEXT NOT NULL,
+        id TEXT NOT NULL, content_json TEXT,
+        PRIMARY KEY (principal_id, deployment_id, member_id, id)
+      );
+      PRAGMA user_version = 3;`);
     // Existing terminal records get a fresh retention interval, never immediate deletion.
     await sql.run("UPDATE outbox_records SET terminal_at = ? WHERE state IN ('delivered', 'not-applied');", [Date.now()]);
   });
@@ -165,6 +181,28 @@ export const createSqliteOutboxRepository = (
   };
   return {
     scope,
+    async importLegacyStart(entry) {
+      await executor.run(`INSERT INTO outbox_legacy_starts (principal_id, deployment_id, member_id, id, content_json)
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING;`, [...parameters, entry.id, JSON.stringify(entry)]);
+    },
+    async legacyStarts() {
+      const rows = await executor.all<{ id: string; content_json: string }>(`SELECT id, content_json FROM outbox_legacy_starts WHERE ${filter} AND content_json IS NOT NULL;`, parameters);
+      return rows.map(row => {
+        try {
+          const value: unknown = JSON.parse(row.content_json);
+          if (!object(value) || value.id !== row.id || typeof value.text !== 'string' || typeof value.serializedDraft !== 'string'
+            || !object(value.message) || value.message.kind !== 'start' || typeof value.message.target !== 'string'
+            || typeof value.message.title !== 'string' || !object(value.message.origin)
+            || typeof value.message.origin.agentId !== 'string' || typeof value.message.origin.sourceId !== 'string'
+            || typeof value.message.origin.episode !== 'string') throw new OutboxCorruptionError();
+          return value as LegacyStartRecovery;
+        } catch {
+          const [corrupt] = restoreOutboxEntries([{ _tag: 'corrupt', id: row.id }]);
+          if (corrupt._tag === 'corrupt') return corrupt;
+          throw new OutboxCorruptionError();
+        }
+      });
+    },
     async uploads(id) {
       const row = await executor.get<{ uploads_json: string }>(`SELECT uploads_json FROM outbox_records WHERE ${filter} AND id = ?;`, [...parameters, id]);
       if (!row) throw new OutboxCorruptionError();
@@ -202,6 +240,7 @@ export const createSqliteOutboxRepository = (
       await executor.transaction(async sql => {
         const row = await sql.get<Row>(`SELECT ${columns} FROM outbox_records WHERE ${filter} AND id = ?;`, [...parameters, id]);
         if (row) await remove(sql, row, Date.now());
+        await sql.run(`UPDATE outbox_legacy_starts SET content_json = NULL WHERE ${filter} AND id = ?;`, [...parameters, id]);
       });
     },
     async cleanup(now, deleteAttachment) {

@@ -196,12 +196,13 @@ function signedStartTransport(h) {
     return new Response(JSON.stringify(receipt), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } });
   const text = storeSource.text;
-  const a = text.indexOf('    startThread(thread: string,');
-  const b = text.indexOf('    replyToThread(', a);
+  const a = text.indexOf('    async startThread(thread: string,');
+  const b = text.indexOf('    async replyToThread(', a);
   const { outputText } = ts.transpileModule(`exports.action = { ${text.slice(a, b)} }.startThread;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
   const ports = {
+    acceptOutbox: async () => undefined,
     signingKeyRef: { current: 'profile/exact' }, threadStartAttemptScope: attemptScope,
     trackThreadDelivery: (_scope, _target, send) => send(),
     readPhoneSigning: async () => ({ person: 'person/avery' }),

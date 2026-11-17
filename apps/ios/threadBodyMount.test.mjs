@@ -56,6 +56,7 @@ function compile(file, name, next, dependencies) {
   const b = next === null ? text.length : text.indexOf(`\n${next}`, a);
   assert.ok(a >= 0 && b > a, `${name} in ${file}`);
   dependencies = {
+    OutboxRecovery: 'OutboxRecovery',
     ConversationComposer: props => compile('./conversationComposer.tsx', 'ConversationComposer', null, dependencies)(props),
     ConversationFeedback: props => compile('./conversationPresentation.tsx', 'ConversationFeedback', null, dependencies)(props),
     ConversationMessage: props => compile('./conversationPresentation.tsx', 'ConversationMessage', null, dependencies)(props), ...dependencies };

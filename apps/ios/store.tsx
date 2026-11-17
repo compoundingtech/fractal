@@ -17,6 +17,12 @@ import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalK
 import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, requirePairingAdvertisement, validatePairingTrust, verifyPairing, type PairingAdvertisement } from './pairingProof';
 import { outboxProfileMode, requireOutboxAuthorization } from './outboxBinding';
 import type { OutboxScope } from '../../clients/typescript/fractal-client/outbox';
+import { openNativeOutbox } from './outboxSqliteNative.ts';
+import { OutboxRuntime } from './outboxRuntime.ts';
+import type { OutboxAccepted, OutboxMessage, OutboxMessageMetadata, OutboxMessageIntent } from './outboxMessage.ts';
+import { prepareMessageSendPacket, prepareThreadStartPacket, prepareThreadReplyPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
+import { importSavedThreadStarts } from './threadStartRecovery.ts';
+import type { DeviceSignature } from '../../clients/typescript/fractal-client/Models.generated.ts';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
@@ -64,7 +70,7 @@ export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 /** The exact request and its original member's transport; never rebound on failover. */
 export type MessageRequest = BoundAction<Parameters<FractalClient['messageSend']>[0]>;
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
-export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
+export type Sent = { how: 'sent' } | OutboxAccepted | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
 const URL_KEY = 'st3.gateway.url', ORDER_KEY = 'st3.tabs.order.resources-v1', CREDENTIAL_KEY = 'st3.device.credential';
 // The enrolled signing key's public half, the person it signs as and its grant chain (the private
@@ -114,7 +120,7 @@ async function readPhoneSigning(profileKey: string): Promise<PhoneSigning | unde
 }
 
 /** `parameters` for message.send `id`, signed with this phone's key when it has an enrolled one. */
-async function signMessage<P extends { to: string; content: string; session_id?: string; tags?: string[] }>(id: string, parameters: P, profileKey = PROFILE_KEY): Promise<P> {
+async function signMessage<P extends { to: string; content: string; session_id?: string; tags?: string[] }>(id: string, parameters: P, profileKey = PROFILE_KEY): Promise<P & { signature?: DeviceSignature }> {
   const signing = await readPhoneSigning(profileKey);
   if (!signing) return parameters;
   const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, id, { encoding: Crypto.CryptoEncoding.HEX });
@@ -685,6 +691,158 @@ function useAppStore(proof?: FabricProfile) {
       currentIdentity ? capsRef.current : null), scope);
   };
 
+  const [outbox, setOutbox] = useState<OutboxRuntime | undefined>();
+  const [outboxIssue, setOutboxIssue] = useState('');
+  const [outboxEpoch, setOutboxEpoch] = useState(0);
+  const outboxOpening = useRef<Promise<OutboxRuntime> | undefined>(undefined);
+  const outboxRef = useRef<OutboxRuntime | undefined>(undefined);
+  const outboxGeneration = useRef(0);
+  const ensureOutbox = async (): Promise<OutboxRuntime | undefined> => {
+    if (proof) return;
+    const profileKey = signingKeyRef.current, memberId = outboxMemberRef.current;
+    const admissionEpoch = outboxGeneration.current;
+    const raw = await SecureStore.getItemAsync(profileKey);
+    if (admissionEpoch !== outboxGeneration.current || liveOutboxClient.current !== client
+      || profileKey !== signingKeyRef.current || memberId !== outboxMemberRef.current) {
+      throw new Error('The original pairing changed before acceptance. Your draft is kept.');
+    }
+    const profile: PhoneProfile | undefined = raw ? JSON.parse(raw) : undefined;
+    const mode = outboxProfileMode(profile ?? {}, memberId, capsClient.current === client ? capsRef.current : null);
+    if (mode.mode !== 'bound') {
+      const noticeKey = `st3.outbox.legacy-notice.${profileKey}`;
+      if (!await AsyncStorage.getItem(noticeKey)) {
+        await AsyncStorage.setItem(noticeKey, 'seen');
+        Alert.alert('Crash-safe sending', 'Re-pair to enable crash-safe sending.');
+      }
+      return;
+    }
+    const existing = outboxRef.current;
+    if (existing && JSON.stringify(existing.owner.repository.scope) === JSON.stringify(mode.scope)) return existing;
+    if (outboxOpening.current) return outboxOpening.current;
+    const epoch = outboxGeneration.current;
+    const opening = (async () => {
+      const owner = await openNativeOutbox(mode.scope, authorizeProtectedOutbox);
+      if (!client || epoch !== outboxGeneration.current || profileKey !== signingKeyRef.current || memberId !== outboxMemberRef.current) {
+        await owner.close(); throw new Error('The original pairing changed. Your draft is kept.');
+      }
+      const original = client;
+      const originalFabric = selected.route.kind === 'fabric' ? carrier.snapshot : null;
+      const originalSigning = profile?.signing;
+      const authorizeIntent = (intent: OutboxMessageIntent | undefined): void => {
+        authorizeProtectedOutbox(owner.repository.scope);
+        if (!intent || !originalSigning || liveOutboxClient.current !== original
+          || (originalFabric && carrier.snapshot !== originalFabric)
+          || intent.binding.profileSlot !== profileKey || intent.binding.person !== originalSigning.person
+          || intent.binding.sessionActor !== capsRef.current?.session_actor) throw new Error('Re-pair or reconnect the original member to inspect this recovery entry.');
+      };
+      const runtime = new OutboxRuntime(owner, {
+        authorize: authorizeIntent,
+        sha256: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))),
+        errorText,
+        changed: () => setThreadRefresh(value => value + 1),
+        prepare: async (record, intent) => {
+          authorizeIntent(intent);
+          const signing = await readPhoneSigning(profileKey);
+          if (!signing || signing.person !== intent.binding.person || signing.key !== intent.binding.signingKey) {
+            throw new Error('The original signing key changed before preparation. Copy this recovery content into a new explicit send.');
+          }
+          const message = intent.message, id = record.id;
+          if (message.kind === 'chat') {
+            const attachments = [...await owner.repository.uploads(id)];
+            for (let index = attachments.length; index < intent.attachments.length; index++) {
+              authorizeIntent(intent);
+              const attachment = intent.attachments[index];
+              if (attachment.mediaType !== 'image/png' && attachment.mediaType !== 'image/jpeg'
+                && attachment.mediaType !== 'image/gif' && attachment.mediaType !== 'image/webp') {
+                throw new Error('Unsupported stored image type; recovery content is kept.');
+              }
+              const bytes = await owner.readAttachment(attachment.reference);
+              authorizeIntent(intent);
+              const kept = (await original.uploadBlob(bytes, attachment.mediaType)).value;
+              attachments.push({ blob: kept.blob, media_type: attachment.mediaType, ...(attachment.name ? { name: attachment.name } : {}) });
+              await owner.repository.saveUploads(id, attachments);
+            }
+            const unsigned = { to: message.to, content: intent.text, ...(message.sessionId ? { session_id: message.sessionId } : {}),
+              ...(message.tags?.length ? { tags: [...message.tags] } : {}), ...(attachments.length ? { attachments } : {}) };
+            const parameters = await signMessage(id, unsigned, profileKey);
+            if (!parameters.signature || parameters.signature.key !== intent.binding.signingKey) throw new Error('The original signing key changed. Recovery content is kept without dispatch.');
+            authorizeIntent(intent);
+            return prepareMessageSendPacket({ id, idempotency_key: id, fence: await sendFences(lastSnapshot.current, fence)(), parameters });
+          }
+          if (message.kind === 'start') {
+            const context = (await original.threadStartContext(message.origin.sourceId, message.origin.episode)).value;
+            if (context.start_recipient.agent_id !== message.origin.agentId) throw new Error('The Start recipient changed. Your original recovery content is kept; refresh and send a new explicit Start.');
+            const { signature } = await signThreadMessage(id, signing, { content: intent.text, from: signing.person,
+              to: message.origin.agentId, thread_id: message.target, title: message.title,
+              thread_origin_source: message.origin.sourceId, thread_origin_episode: message.origin.episode });
+            authorizeIntent(intent);
+            return prepareThreadStartPacket({ id, idempotency_key: id, fence: await fence(), parameters: {
+              target_id: message.target, agent_id: message.origin.agentId, origin: { source_id: message.origin.sourceId, episode: message.origin.episode },
+              title: message.title, content: intent.text, signature } });
+          }
+          const { signature } = await signThreadMessage(id, signing, { content: intent.text, from: signing.person, to: message.agentId,
+            thread_id: message.target, ...(message.quoteId ? { thread_quote_id: message.quoteId } : {}) });
+          authorizeIntent(intent);
+          return prepareThreadReplyPacket({ id, idempotency_key: id, fence: await fence(), parameters: {
+            target_id: message.target, content: intent.text, ...(message.quoteId ? { thread_quote_id: message.quoteId } : {}), signature } });
+        },
+        post: packet => { owner.authorize(); return original.submitAction(packet); },
+        timeline: async (record, intent) => {
+          authorizeIntent(intent);
+          const message = intent.message;
+          if (message.kind !== 'chat') {
+            const identity = 'packet' in record ? record.expectedIdentities[0] : undefined;
+            if (!identity) return [];
+            const page = await original.threadTimeline(message.target, { around: identity });
+            return page.value.items.filter(event => event.kind === 'message').map(event => event.id);
+          }
+          if (!message.sessionId) throw new Error('This server has no non-mutating exact-status lookup for this message. Delivery remains unknown.');
+          const page = await original.timelineList(message.sessionId, { limit: 200 });
+          return page.value.items.flatMap(entry => entry.type === 'message' ? [entry.body.message_id] : []);
+        },
+      });
+      outboxRef.current = runtime; setOutbox(runtime); setOutboxIssue('');
+      const draftOwner = draftsOwner.current, draftEpoch = draftGeneration.current;
+      if (draftsReady) await importSavedThreadStarts(draftCache.current,
+        () => epoch === outboxGeneration.current && draftsOwner.current === draftOwner && draftGeneration.current === draftEpoch,
+        entry => owner.repository.importLegacyStart(entry), () => localDrafts.save(draftOwner, draftCache.current));
+      await runtime.restore();
+      return runtime;
+    })();
+    outboxOpening.current = opening;
+    try { return await opening; }
+    finally { if (outboxOpening.current === opening) outboxOpening.current = undefined; }
+  };
+  const acceptOutbox = async (message: OutboxMessage, text: string, images: readonly Picked[] = []): Promise<OutboxAccepted | undefined> => {
+    const runtime = await ensureOutbox();
+    if (!runtime) return;
+    const identity = outboxIdentity.current;
+    const signing = identity?.profile.signing;
+    if (!identity || !signing || !capsRef.current?.session_actor) throw new Error('Waiting for the verified original member. Your draft is kept.');
+    const metadata: OutboxMessageMetadata = { message, acceptedAt: Date.now(), binding: {
+      profileSlot: identity.profileKey, person: signing.person, signingKey: signing.key, sessionActor: capsRef.current.session_actor } };
+    return runtime.accept(actionId(), text, images, metadata);
+  };
+  useEffect(() => {
+    const generation = ++outboxGeneration.current;
+    const previous = outboxRef.current;
+    outboxRef.current = undefined; outboxOpening.current = undefined; setOutbox(undefined);
+    if (previous) void previous.close().catch(error => setOutboxIssue(errorText(error)));
+    if (!proof && client && capsClient.current === client) {
+      void ensureOutbox().catch(error => { if (generation === outboxGeneration.current) setOutboxIssue(errorText(error)); });
+    }
+    return () => { outboxGeneration.current++; };
+  }, [client, caps?.issuer, caps?.issuer_key, outboxEpoch]);
+  useEffect(() => {
+    const listener = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        const runtime = outboxRef.current;
+        if (runtime) void runtime.restore(); else setOutboxEpoch(value => value + 1);
+      }
+    });
+    return () => listener.remove();
+  }, []);
+
   useEffect(() => {
     setSync(undefined); setSyncStale(false);
     if (!client || status !== 'online' || proofRef.current) return;
@@ -1209,7 +1367,7 @@ function useAppStore(proof?: FabricProfile) {
       return result.how === 'unconfirmed' && retry ? { how: 'unconfirmed', retry: async () => finish(await retry()) } : result;
     };
     return finish(await active.send(scope, { target, start, submitted }, send, result => {
-      if (result.how === 'sent') onSent?.();
+      if (result.how === 'sent' || result.how === 'accepted') onSent?.();
       if (result.how !== 'unconfirmed') active.remove(scope);
     }));
   }
@@ -1242,7 +1400,11 @@ function useAppStore(proof?: FabricProfile) {
     refreshThreads() {
       setThreadRefresh(previous => previous + 1);
     },
-    startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
+    async startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
+      try {
+        const accepted = await acceptOutbox({ kind: 'start', target: thread, origin: { ...origin }, title }, content);
+        if (accepted) return accepted;
+      } catch (error) { return { how: 'failed', error: errorText(error) }; }
       const signingProfile = signingKeyRef.current;
       return trackThreadDelivery(threadStartAttemptScope(origin, thread), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
         const signing = await readPhoneSigning(signingProfile);
@@ -1257,7 +1419,18 @@ function useAppStore(proof?: FabricProfile) {
         } }) };
       }), undefined, { origin: { ...origin }, title }, { text: content });
     },
-    replyToThread(thread: ThreadSummary, content: string, quoteId?: string): Promise<ThreadEditResult> {
+    async replyToThread(thread: ThreadSummary, content: string, quoteId?: string): Promise<ThreadEditResult> {
+      try {
+        const owner = draftsOwner.current, saved = draftCache.current.get(threadDraftKey(thread.id));
+        const accepted = await acceptOutbox({ kind: 'reply', target: thread.id, agentId: thread.agent_id, ...(quoteId ? { quoteId } : {}) }, content);
+        if (accepted) {
+          if (draftsOwner.current === owner && draftCache.current.get(threadDraftKey(thread.id)) === saved) {
+            draftCache.current.delete(threadDraftKey(thread.id));
+            if (!proof) void localDrafts.save(owner, draftCache.current);
+          }
+          return accepted;
+        }
+      } catch (error) { return { how: 'failed', error: errorText(error) }; }
       const signingProfile = signingKeyRef.current;
       const draftOwner = draftsOwner.current;
       const draftKey = threadDraftKey(thread.id);
@@ -1539,9 +1712,14 @@ function useAppStore(proof?: FabricProfile) {
       return { text: markdownSource(answer.text), complete: answer.complete };
     },
     /** Send Fractal to an agent, as the Fractal terminal UI does: fenced to a fresh snapshot, once more if it moved. */
-    async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
+    async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = [], onAccepted?: () => void): Promise<Sent> {
       if (!client || !uploader) return { how: 'failed', error: 'not connected' };
       if (status !== 'online' || (proof && !proof.ready)) return { how: 'failed', error: 'offline' };
+      try {
+        const accepted = await acceptOutbox({ kind: 'chat', to, ...(sessionId ? { sessionId } : {}), ...(tags ? { tags: [...tags] } : {}) }, content, images);
+        if (accepted) { onAccepted?.(); return accepted; }
+      } catch (error) { return { how: 'failed', error: errorText(error) }; }
+      onAccepted?.(); // Legacy/unprotected sends retain the existing nonpersistent draft behavior.
       const signingProfile = signingKeyRef.current;
       // A closed loopback listener's port may be reused by a later dial. Never use
       // that address after its original carrier snapshot has been replaced.
@@ -1739,6 +1917,7 @@ function useAppStore(proof?: FabricProfile) {
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, urlDraftProfileRevision, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     authorizeProtectedOutbox,
+    outbox, outboxIssue, retryOutbox: () => setOutboxEpoch(value => value + 1),
     error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client, draftsOwner, draftGeneration,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, threadEdits, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,

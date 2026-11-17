@@ -1,4 +1,4 @@
-export type AttemptOutcome = { how: 'sent' | 'failed' | 'unconfirmed' };
+export type AttemptOutcome = { how: 'sent' | 'accepted' | 'failed' | 'unconfirmed' };
 export type ConversationAttempt<TDraft, TResult extends AttemptOutcome> = {
   id: string;
   draft: TDraft;
@@ -50,7 +50,7 @@ export class ConversationAttempts<TDraft, TResult extends AttemptOutcome> {
     const retry = original ? () => this.rows.find(row => row.id === previous.id)?.retry === retry
       ? this.run(settled, original, onSettled) : Promise.resolve(result) : undefined;
     const settled: ConversationAttempt<TDraft, TResult> = { id: previous.id, draft: previous.draft,
-      phase: result.how === 'sent' ? 'confirmed' : result.how, result, retry };
+      phase: result.how === 'sent' || result.how === 'accepted' ? 'confirmed' : result.how, result, retry };
     // A detached/reset owner cannot recreate an attempt removed while transport was pending.
     this.publish(this.rows.map(row => row.id === previous.id ? settled : row));
     onSettled?.(result);

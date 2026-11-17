@@ -45,7 +45,7 @@ test('ordinary capabilities and thread quote routing remain production adapters,
   assert.match(ordinary, /ImagePicker\.launchImageLibraryAsync/);
   assert.match(ordinary, /Clipboard\.getImageAsync/);
   assert.match(ordinary, /startDictation/);
-  assert.match(ordinary, /actions\.send\(agent\.id, text, agent\.current_session_id \?\? undefined, tags, sending\)/);
+  assert.match(ordinary, /actions\.send\(agent\.id, text, agent\.current_session_id \?\? undefined, tags, sending, accepted\)/);
   assert.match(ordinary, /<EntryView/);
   assert.match(ordinary, /<MailImageView/);
   assert.match(ordinary, /subagentSession/);

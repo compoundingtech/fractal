@@ -99,6 +99,7 @@ export function FleetScreen() {
         {carrierInfo.route.fellBack && carrierInfo.route.why ? <T color={theme.waiting}>{carrierInfo.route.why}</T> : null}
         {carrierInfo.issue ? <T color={theme.fault}>{carrierInfo.issue}</T> : null}
         <NotificationsSetting />
+        <T dim>Older pairings use nonpersistent sending. Re-pair to enable crash-safe sending; this also requires an updated app with protected storage.</T>
         <Button label="re-pair this device" onPress={actions.repairDevice} />
         <Button label="forget this device" color={theme.red} onPress={() => Alert.alert('Forget this device?', 'You will need to pair again.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Forget', style: 'destructive', onPress: () => void actions.forget() }])} />
       </View>
