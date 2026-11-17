@@ -743,8 +743,8 @@ fn review_decision_reuse(verdict: &str) -> BTreeSet<String> {
         assert_eq!(answers.len(), 1);
         assert_eq!(answers[0].body["fields"]["verdict"], verdict);
         // Field gates also emit machine gate.result claims (one config result per
-        // run). Count every person/delegate or request-bound decision, not those
-        // unrelated predicate results, and reject extra or mismatched human answers.
+        // run). Count every person-authored, agent-authored or request-bound decision,
+        // excluding unrelated predicate results; reject extra or mismatched human answers.
         let decisions = changes.iter().filter(|change| change.kind == "gate.result")
             .map(|change| (change, serde_json::from_str::<Value>(&change.body).unwrap()))
             .filter(|(change, body)| {
