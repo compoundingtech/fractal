@@ -58,3 +58,32 @@ let inboxActivityUnavailableScenarios: [Scenario] = [false, true].map { page in
     return result
   }
 }
+
+let inboxActivityUnsplitScenarios: [Scenario] = [false, true].map { page in
+  Scenario(
+    id: "inbox-activity-unsplit-\(page ? "page" : "home")",
+    title: "Inbox activity · unsplit · \(page ? "page" : "home")",
+    description: "Person-work arrivals and resolutions without inferred ask/update types."
+  ) { now in
+    let content = Content(now: now)
+    let activities = Dictionary(uniqueKeysWithValues: InboxActivity.Period.allCases.map { period in
+      let seconds = Double(period.bucketSeconds)
+      let buckets = (0..<period.bucketCount).map { index in
+        InboxActivity.Bucket(
+          start: now - Double(period.bucketCount - index) * seconds,
+          end: now - Double(period.bucketCount - index - 1) * seconds,
+          arrivals: .init(unclassified: (index * 7 + 3) % 19),
+          resolutions: .init(unclassified: (index * 5 + 1) % 17))
+      }
+      return (period, InboxActivity(period: period, buckets: buckets, isClassified: false))
+    })
+    let fractal = FixtureFractal(
+      page: AttentionPage(records: content.asks + [content.update], canAnswer: true, canControl: true),
+      slo: content.calmSlo, histories: content.calmHistories, availability: content.present,
+      activity: activities)
+    let result = model(fractal)
+    await result.refresh(now: now)
+    if page { result.open(.inbox) }
+    return result
+  }
+}

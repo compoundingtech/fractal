@@ -57,7 +57,7 @@ struct InboxActivityHistogram: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
         HStack {
-          Text("Activity").font(.subheadline.weight(.semibold))
+          Text("Inbox").font(.subheadline.weight(.semibold))
           Spacer()
           Picker("Activity period", selection: Binding(get: { period }, set: { picked = $0 })) {
             ForEach(InboxActivity.Period.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -68,9 +68,11 @@ struct InboxActivityHistogram: View {
         if let activity = model.inboxActivity[period]?.value {
           HStack(spacing: 12) {
             Text("↑ In  ↓ Out")
-            Label("Asks", systemImage: "square.fill").foregroundStyle(Color.accentColor)
-            Label("Updates", systemImage: "square.fill").foregroundStyle(
-              Color.accentColor.opacity(0.45))
+            if activity.isClassified {
+              Label("Asks", systemImage: "square.fill").foregroundStyle(Color.accentColor)
+              Label("Updates", systemImage: "square.fill").foregroundStyle(
+                Color.accentColor.opacity(0.45))
+            }
           }.font(.caption).foregroundStyle(.secondary)
           GeometryReader { geometry in
             InboxActivityBars(activity: activity, hovered: hovered)
@@ -102,8 +104,7 @@ struct InboxActivityHistogram: View {
         } else {
           VStack(alignment: .leading, spacing: 6) {
             Text("Activity unavailable").font(.caption.weight(.medium))
-            Text("Fractal has not supplied arrival and resolution history for asks and updates.")
-              .font(.caption)
+            Text("Could not load activity from Fractal.").font(.caption)
           }
           .foregroundStyle(.secondary)
           .frame(maxWidth: .infinity, minHeight: 158, alignment: .leading)
@@ -120,6 +121,9 @@ struct InboxActivityHistogram: View {
     let bucket = activity.buckets[hovered]
     let date = bucket.start.formatted(
       activity.period == .days ? .dateTime.month(.abbreviated).day() : .dateTime.hour().minute())
+    if !activity.isClassified {
+      return "\(date) · In: \(bucket.arrivals.total)\nOut: \(bucket.resolutions.total)"
+    }
     return
       "\(date) · In: \(bucket.arrivals.asks) asks, \(bucket.arrivals.updates) updates\nOut: \(bucket.resolutions.asks) asks, \(bucket.resolutions.updates) updates"
   }
@@ -133,10 +137,12 @@ private struct InboxActivityBars: View {
     HistoryBars(
       buckets: activity.buckets.map { bucket in
         [
+          .init(value: Double(bucket.arrivals.unclassified), color: .accentColor),
           .init(value: Double(bucket.arrivals.asks), color: .accentColor),
           .init(value: Double(bucket.arrivals.updates), color: .accentColor.opacity(0.45)),
           .init(value: -Double(bucket.resolutions.asks), color: .accentColor),
           .init(value: -Double(bucket.resolutions.updates), color: .accentColor.opacity(0.45)),
+          .init(value: -Double(bucket.resolutions.unclassified), color: .accentColor),
         ]
       },
       maximum: Double(
@@ -146,7 +152,9 @@ private struct InboxActivityBars: View {
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(
       activity.buckets.map {
-        "\($0.start.formatted(date: .abbreviated, time: .shortened)): in \($0.arrivals.asks) asks, \($0.arrivals.updates) updates; out \($0.resolutions.asks) asks, \($0.resolutions.updates) updates"
+        activity.isClassified
+          ? "\($0.start.formatted(date: .abbreviated, time: .shortened)): in \($0.arrivals.asks) asks, \($0.arrivals.updates) updates; out \($0.resolutions.asks) asks, \($0.resolutions.updates) updates"
+          : "\($0.start.formatted(date: .abbreviated, time: .shortened)): in \($0.arrivals.total); out \($0.resolutions.total)"
       }.joined(separator: "; "))
   }
 }

@@ -24,16 +24,17 @@ collection, but `FractalClient` has no typed attention or availability stream.
   on Back; with Reduce Motion it fades in. VoiceOver focus moves to the page title
   and back to the row or tile that opened it. Closing the panel returns it to the
   top level.
-- **Inbox activity** counts arrival and resolution claims in the generic Fractal
-  series response, grouped by ask/update type. Arrivals stack above the axis and
-  resolutions below, with asks in the stronger tone. The home label carries a
-  fixed-height 14-day strip; the full inbox adds a 14-day daily / 24-hour hourly
-  picker and per-bucket hover values. Missing activity data keeps the home label
-  and full inbox Activity section visible with an explicit unavailable notice,
-  never a fabricated zero chart. Failed reads retain the last chart with an offline
-  notice. Live history requires Fractal's typed arrival and resolution producers;
-  the current live adapter does not supply it. Gallery scenarios
-  `inbox-activity-{busy,quiet,unavailable}-{home,page}` exercise both appearances at 360 pt.
+- **Inbox activity** reads generic Fractal series: arrivals select `work.person-asked`,
+  and resolutions select `work.person-done` plus `work.person-cancelled`. These are
+  fleet-wide person-work claim counts, not the current inbox population or complete
+  lifecycle coverage of every inbox row source. The live chart is unsplit: no
+  classification is inferred from nested answers or subject names. Arrivals draw
+  above the axis and resolutions below. The home label carries a fixed-height
+  14-day strip; the full inbox adds a 14-day daily / 24-hour hourly picker and
+  per-bucket hover values. Missing data keeps an explicit unavailable notice,
+  never fabricated zeros; failed reads retain the last chart with an offline notice.
+  Typed fixture histories also exercise the ask/update rendering. Gallery scenarios
+  `inbox-activity-{busy,quiet,unsplit,unavailable}-{home,page}` cover both appearances.
 - **Asks** are classified by the wire kind and offered actions. Person steps
   are answered on their page: a decision's or
   choice's named answers (recommended first; request-changes takes words), a

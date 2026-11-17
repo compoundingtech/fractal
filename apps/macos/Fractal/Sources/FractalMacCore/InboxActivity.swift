@@ -12,10 +12,12 @@ public struct InboxActivity: Sendable, Equatable {
   public struct Counts: Sendable, Equatable {
     public var asks: Int
     public var updates: Int
-    public var total: Int { asks + updates }
-    public init(asks: Int = 0, updates: Int = 0) {
+    public var unclassified: Int
+    public var total: Int { asks + updates + unclassified }
+    public init(asks: Int = 0, updates: Int = 0, unclassified: Int = 0) {
       self.asks = asks
       self.updates = updates
+      self.unclassified = unclassified
     }
   }
 
@@ -35,9 +37,11 @@ public struct InboxActivity: Sendable, Equatable {
 
   public let period: Period
   public let buckets: [Bucket]
-  public init(period: Period, buckets: [Bucket]) {
+  public let isClassified: Bool
+  public init(period: Period, buckets: [Bucket], isClassified: Bool = true) {
     self.period = period
     self.buckets = buckets
+    self.isClassified = isClassified
   }
 }
 
