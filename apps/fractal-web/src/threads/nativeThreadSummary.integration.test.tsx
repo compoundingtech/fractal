@@ -209,8 +209,12 @@ it('an expanded 41st thread follows exact summary changes without list refresh a
     expect(closed).toEqual([older.id, older.id])
     expect(host.querySelector('[data-body]')).toBeNull()
     await press('Threads')
-    expect(exact.has(older.id)).toBe(true)
+    // apps/ios/README.md:160–162: collapsing the section releases its selected reading placement.
+    expect(exact.has(older.id)).toBe(false)
+    expect(host.querySelector('[data-body]')).toBeNull()
     expect(header('Remote renamed older thread')).not.toBeNull()
+    // Still a collection member, it returns collapsed; explicit row activation starts a new placement.
+    await press('Remote renamed older thread')
     // A refusal clears the previously authorized exact body; it never falls
     // back to older context metadata for lifecycle actions.
     await act(async () => exact.get(older.id)!.onIssue('Access revoked', true))
