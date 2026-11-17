@@ -3232,7 +3232,7 @@ async fn prepare_start_context(
     fixture: &mut Fixture,
     root: &Path,
 ) -> (String, Value) {
-    use fractal_daemon::AttentionListStore as _;
+    use fractal_daemon::{AttentionListStore as _, PersonWorkStore as _};
     use fractal_daemon::api::client_v0::{ClientSession, assistant};
 
     const AGENT: &str = "agent/bench/cost/start-context";
