@@ -44,7 +44,9 @@ test('missing, truncated, noncanonical and conflicting fingerprint input refuses
 });
 
 test('phone verifies real Rust CBOR hashes, Ed25519 signatures and the separately supplied pin', async () => {
-  await verifyPairing(session(), vector.device_key, vector.fingerprint, crypto);
+  assert.deepEqual(await verifyPairing(session(), vector.device_key, vector.fingerprint, crypto), {
+    issuer: vector.proofs[1].body.fields.issuer, issuerKey: vector.proofs[1].body.fields.issuer_key,
+  });
 });
 
 test('a self-consistent chain accepted without a pin fails against independent trust', async () => {

@@ -72,7 +72,7 @@ const SIGNING_KEY = 'st3.device.signing';
 // signing key together. Old separate credential/signing entries remain readable until re-pair.
 const PROFILE_KEY = 'st3.device.profile';
 type PhoneSigning = DeviceKey & { handle?: string };
-type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string; routing?: PairingRouting };
+type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string; routing?: PairingRouting; profileId?: string; pairingIssuer?: { issuer: string; issuerKey: string }; outboxNoticeSeen?: boolean };
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
 // Notifications: off by default, stored only on this phone. APNs tokens are never persisted here.
@@ -1000,13 +1000,14 @@ function useAppStore(proof?: FabricProfile) {
       const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage, ...fabricFields });
       consumed = true; deviceId = result.value.device_id;
       if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');
-      await verifyPairing(result.value, made.key, pin, {
+      const pairingIssuer = await verifyPairing(result.value, made.key, pin, {
         hash: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))),
         verify: verifyGrantSignature,
       });
       const signs = result.value.scopes.includes('control.messages');
       const routing = member ? undefined : pairingCommitRouting({ carrier: carrierChoice, members: fabricMemberList }, !!pairDraft?.scanned);
       const next: PhoneProfile = { url: gateway, credential: result.value.credential,
+        profileId: Crypto.randomUUID(), ...(pairingIssuer ? { pairingIssuer } : {}),
         ...(!member && (pairDraft?.scanned || old?.routing) ? { routing } : {}),
         ...(pin ? { personRootFingerprint: pin } : {}),
         ...(signs ? { signing: { key: made.key, storage: made.storage, handle: made.handle, person: result.value.person_id, chain: result.value.device_key_chain! } } : {}),

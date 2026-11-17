@@ -126,6 +126,26 @@ into a current Inbox Start to deliberately send a separate message with a fresh
 UUID/key and current recipient; the warning explains the original may have arrived.
 Recovery acceptance/discard touches only that attempt's draft, not later typing.
 
+Fresh pairing saves the verified root-grant issuer and issuer key with a new local
+profile incarnation in the same secure profile write. Renewal preserves that
+incarnation only when its verified authority tuple matches. `outboxBinding.ts`
+maps profile ID to `principalId`, the original member to `memberId`, and the exact
+JSON two-string tuple `[issuer, issuerKey]` to `deploymentId`. JSON escaping and
+ordered tuple parsing make this encoding injective; concatenation and URLs do not.
+This tuple identifies the host authority, **not a distinct store incarnation**.
+The person-root fingerprint pins a different key and cannot reconstruct the tuple.
+
+The binding adapter exposes legacy profiles as `unprotected`, with one-time
+re-pair notice state; acknowledging the notice confers no binding. A mismatched or
+unavailable binding returns unknown access feedback without reading/rebinding the
+repository. The shared client owns restoration/CAS state transitions and packets.
+This is a JS contract boundary only: delivery has **not** switched to a durable
+outbox, and the notice is not yet wired into the UI. No crash-safe sending is
+claimed. The approved next native work requires `expo-sqlite` 57.0.3 and a narrow
+`NSURLIsExcludedFromBackupKey` bridge with readback; neither is added by this step.
+Protected storage failures must reject acceptance and keep the draft, never fall
+back to legacy sending; that delivery integration remains outside this step.
+
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
 measured message text stably visible for 500 ms in the focused, foreground view.
 The body must have full width, its trailing end visible, and visible height of at
