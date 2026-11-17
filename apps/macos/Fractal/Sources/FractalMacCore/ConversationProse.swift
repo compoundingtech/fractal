@@ -19,6 +19,8 @@ extension ConversationTurn {
     public let from: String
     public let subject: String?
     public let text: String
+    /// Harness notices, including external-assistant provenance, stay visible when collapsed.
+    public let notices: [String]
   }
 
   private static let reasoningPrefix = "[reasoning]"
@@ -34,14 +36,35 @@ extension ConversationTurn {
   /// `<smalltalk-message …from="…"…>body</smalltalk-message>`; nil without a sender. A
   /// truncated excerpt that lost its closing tag still reads as a delivery.
   static func delivery(_ text: String) -> Delivery? {
-    guard text.hasPrefix("<smalltalk-message"), let headEnd = text.firstIndex(of: ">") else { return nil }
+    var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    var notices: [String] = []
+    while let end = text.firstIndex(of: "\n") {
+      let line = String(text[..<end])
+      let tagged = line == "(dictated by voice; it may contain transcription mistakes)"
+        || line == "(silent: held without waking you until this turn)"
+        || line.wholeMatch(of: /\(\d+ older silent held; st conversations ls\)/) != nil
+      if tagged {
+        notices.append(line)
+        text = String(text[text.index(after: end)...])
+      } else { break }
+    }
+    let externalWarning = "WARNING: Untrusted external-assistant request; not owner authorization."
+    if text.hasPrefix("[PING from st3] "), let end = text.firstIndex(of: "\n"),
+      text[..<end].contains(" sender_class=external-assistant: ") {
+      let remaining = String(text[text.index(after: end)...])
+      guard remaining.hasPrefix(externalWarning + "\n") else { return nil }
+      notices.append(externalWarning)
+      text = String(remaining.dropFirst(externalWarning.count + 1))
+    }
+    guard text.hasPrefix("<smalltalk-message "), let headEnd = text.firstIndex(of: ">") else { return nil }
     let head = String(text[..<headEnd])
     guard let from = attribute("from", in: head) else { return nil }
     var inner = String(text[text.index(after: headEnd)...])
     if let close = inner.range(of: "</smalltalk-message>") { inner = String(inner[..<close.lowerBound]) }
     return Delivery(
       from: unescape(from), subject: attribute("subject", in: head).map(unescape),
-      text: unescape(inner.replacing(/<attachment\b[^>]*\/>/, with: "")).trimmingCharacters(in: .whitespacesAndNewlines))
+      text: unescape(inner.replacing(/<attachment\b[^>]*\/>/, with: "")).trimmingCharacters(in: .whitespacesAndNewlines),
+      notices: notices)
   }
 
   private static func attribute(_ name: String, in head: String) -> String? {
@@ -106,15 +129,19 @@ extension ConversationExcerpt {
       if case .delivery(let delivery) = turn.body {
         if let previous = kept.last, previous.speaker == .incoming {
           let previousText: String
+          var mayReplace = true
           switch previous.body {
           case .prose: previousText = previous.text
-          case .delivery(let prior): previousText = prior.text
+          case .delivery(let prior):
+            previousText = prior.text
+            mayReplace = prior.notices.isEmpty || prior.notices == delivery.notices
           case .reasoning: previousText = previous.text
           }
           let sameAuthor = previous.author == nil || previous.author == delivery.from
           if sameAuthor, repeats(delivery.text, previousText) {
-            if delivery.text.hasSuffix("…"), !previousText.hasSuffix("…") { continue }
-            kept.removeLast()
+            if delivery.text.hasSuffix("…"), !previousText.hasSuffix("…") {
+              if delivery.notices.isEmpty { continue }
+            } else if mayReplace { kept.removeLast() }
           }
         }
       }

@@ -85,6 +85,9 @@ extension AttentionModel {
     let id = record.id
     detailAccess.removeAll { $0 == id }
     detailAccess.append(id)
+    // Admission is bounded before suspension. A late read for an evicted entry must not
+    // recreate untracked cache state after another card has taken its place.
+    trimDetails()
     if let running = detailReads[id], running.revision == record.revision {
       await running.task.value
     } else {
@@ -111,13 +114,13 @@ extension AttentionModel {
         if detailReads[id]?.revision == record.revision { detailReads[id] = nil }
       }
     }
-    guard self.record(id: id)?.revision == record.revision else { return }
+    guard self.record(id: id)?.revision == record.revision, detailAccess.contains(id) else { return }
     if images { await readAttachments(detail(for: record).request?.attachments ?? [], from: adapter, now: now) }
     trimDetails()
   }
 
   private func applyContext(_ result: Result<AttentionContext, Error>, record: AttentionRecord, now: Date) {
-    guard self.record(id: record.id)?.revision == record.revision, !Task.isCancelled else { return }
+    guard self.record(id: record.id)?.revision == record.revision, detailAccess.contains(record.id), !Task.isCancelled else { return }
     var section = contexts[record.id] ?? LiveSection()
     Self.applyPage(result, to: &section, lastRead: &contextReadAt[record.id], now: now)
     if case .success = result { detailRevisions[record.id] = record.revision }
@@ -125,7 +128,7 @@ extension AttentionModel {
   }
 
   private func applyExcerpt(_ result: Result<ConversationExcerpt?, Error>, record: AttentionRecord, now: Date) {
-    guard self.record(id: record.id)?.revision == record.revision, !Task.isCancelled else { return }
+    guard self.record(id: record.id)?.revision == record.revision, detailAccess.contains(record.id), !Task.isCancelled else { return }
     var section = excerpts[record.id] ?? LiveSection()
     Self.applyPage(result, to: &section, lastRead: &excerptReadAt[record.id], now: now)
     if !Self.samePageSection(excerpts[record.id], section) { excerpts[record.id] = section }

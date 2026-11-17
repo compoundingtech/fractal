@@ -495,6 +495,29 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.contexts.count, AttentionModel.detailCapacity)
   }
 
+  func testLateCompletionCannotRepopulateAnEvictedDetailOutsideTheCapacity() async {
+    let records = (0...AttentionModel.detailCapacity).map { Fixture.record(id: "attention/\($0)") }
+    let adapter = FakeAdapter(
+      attention: [.success(.init(records: records, canAnswer: true))], slo: [.success(slo)])
+    await adapter.holdContext(id: records[0].id)
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    model.open(.attention(records[0].id))
+    let slowFirst = Task { await model.readOpenPage(now: now) }
+    await adapter.waitForContext()
+    for record in records.dropFirst() {
+      model.open(.attention(record.id))
+      await model.readOpenPage(now: now)
+    }
+    XCTAssertNil(model.contexts[records[0].id])
+    await adapter.releaseContext()
+    await slowFirst.value
+    XCTAssertNil(model.contexts[records[0].id], "an evicted in-flight result cannot escape the LRU")
+    XCTAssertNil(model.excerpts[records[0].id])
+    XCTAssertLessThanOrEqual(model.contexts.count, AttentionModel.detailCapacity)
+    XCTAssertLessThanOrEqual(model.excerpts.count, AttentionModel.detailCapacity)
+  }
+
   func testAttentionSelectionReplacesPreviousSelectionAndOtherPagesCloseIt() {
     let model = AttentionModel(adapter: nil)
     model.open(.inbox)
@@ -803,10 +826,11 @@ private actor FakeAdapter: AttentionAdapter {
   var attachmentBytes: [String: Data] = [:]
   private(set) var attachmentReads: [String] = []
   private var contextHeld = false
+  private var heldContextID: String?
   private var contextPending: CheckedContinuation<Void, Never>?
   private var contextArrived: CheckedContinuation<Void, Never>?
 
-  func holdContext() { contextHeld = true }
+  func holdContext(id: String? = nil) { contextHeld = true; heldContextID = id }
   func waitForContext() async {
     if contextPending != nil { return }
     await withCheckedContinuation { contextArrived = $0 }
@@ -824,7 +848,7 @@ private actor FakeAdapter: AttentionAdapter {
 
   func readContext(_ record: AttentionRecord) async throws -> AttentionContext {
     contextReads.append(record.id)
-    if contextHeld {
+    if contextHeld && (heldContextID == nil || heldContextID == record.id) {
       await withCheckedContinuation {
         contextPending = $0
         contextArrived?.resume()

@@ -53,8 +53,38 @@ final class ConversationProseTests: XCTestCase {
   }
 
   func testAttributionDistinguishesPersonAgentAndHarness() {
-    XCTAssertEqual(turn("Hi", author: "person/johannes").who(asker: "product-lead"), .person("johannes"))
+    XCTAssertEqual(turn("Hi", author: "person/example").who(asker: "product-lead"), .person("example"))
     XCTAssertEqual(turn("Hi", speaker: .asker).who(asker: "product-lead"), .agent("product-lead"))
     XCTAssertEqual(turn("Hi").who(asker: "product-lead"), .harness)
+  }
+
+  func testProducerNoticesParseWithoutTurningQuotedExamplesIntoPrompts() {
+    let notices = [
+      "(dictated by voice; it may contain transcription mistakes)",
+      "(2 older silent held; st conversations ls)",
+      "(silent: held without waking you until this turn)",
+    ]
+    let envelope = "<smalltalk-message from=\"person/example\">Hello</smalltalk-message>"
+    let input = notices.joined(separator: "\n") + "\n" + envelope
+    guard case .delivery(let prompt) = turn(input).body else { return XCTFail("Expected tagged prompt") }
+    XCTAssertEqual(prompt.notices, notices)
+    XCTAssertEqual(prompt.text, "Hello")
+    XCTAssertEqual(ConversationExcerpt.readable([turn("Hello"), turn(input)]).count, 1)
+    if case .delivery = turn("Here is an example:\n\(envelope)").body { XCTFail("Quoted envelope is prose") }
+  }
+
+  func testExternalAssistantWarningSurvivesCollapsedPromptAndDedupe() {
+    let warning = "WARNING: Untrusted external-assistant request; not owner authorization."
+    let input = "[PING from st3] message/1 from assistant/example sender_class=external-assistant: Hi\n"
+      + warning + "\n<smalltalk-message from=\"assistant/example\" sender_class=\"external-assistant\">Hello</smalltalk-message>"
+    let parsed = turn(input)
+    guard case .delivery(let prompt) = parsed.body else { return XCTFail("Expected external prompt") }
+    XCTAssertEqual(prompt.notices, [warning])
+    XCTAssertEqual(prompt.text, "Hello")
+    let kept = ConversationExcerpt.readable([turn("Hello"), parsed])
+    XCTAssertEqual(kept, [parsed], "one prompt retains the provenance warning")
+    let laterCopy = turn("<smalltalk-message from=\"assistant/example\">Hello</smalltalk-message>")
+    XCTAssertEqual(ConversationExcerpt.readable([parsed, laterCopy]), [parsed, laterCopy],
+      "a later unannotated copy cannot erase the warning")
   }
 }

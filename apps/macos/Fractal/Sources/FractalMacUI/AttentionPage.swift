@@ -792,6 +792,12 @@ private struct DeliveryChip: View {
       .buttonStyle(.plain)
       .help(delivery.subject.map { "\($0)\nFrom \(delivery.from)" } ?? "From \(delivery.from)")
       .accessibilityHint(open ? "Hides the prompt" : "Shows the prompt")
+      ForEach(Array(delivery.notices.enumerated()), id: \.offset) { _, notice in
+        Text(notice)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
       if open {
         CappedText(text: ConversationLinks.shortened(delivery.text))
           .foregroundStyle(.secondary)
