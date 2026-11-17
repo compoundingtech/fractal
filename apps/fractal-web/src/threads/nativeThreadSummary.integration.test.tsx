@@ -10,6 +10,7 @@ import * as Native from '@fractal/client/schema/read'
 import type { Snapshot, ThreadSummary } from '@fractal/client/schema/read'
 import { Schema } from 'effect'
 import * as UnreadVisit from '../../../ios/unreadVisit.ts'
+import fixture from '../data/subjectReadPort.gateway.fixtures.json'
 
 // Exercise the production native paging, exact-summary hooks and JSX with real
 // React mount/update/cleanup. Only native hosts and the timeline body are ports;
@@ -122,11 +123,14 @@ function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) =>
     entry, React.useMemo, React.useRef, React.useCallback, useFocusEffect, () => navigation, () => ({ key: 'route/native-summary' }),
     { currentState: 'active' }, actions.UnreadVisitController, UnreadVisit.unreadVisit,
   )
+  // ContextThreadList consumes ownership at apps/ios/screens/Threads.tsx:243,273.
+  // Reuse the existing session actor at subjectReadPort.gateway.fixtures.json:21.
+  const draftGeneration = { current: 0 }
   const Component = production({
     reminderFromSummary: UnreadVisit.reminderFromSummary, useUnreadVisitEntry: entry.useUnreadVisitEntry,
     useRef: React.useRef, useState: React.useState, useCallback: React.useCallback, useMemo: React.useMemo, useEffect: React.useEffect,
     useFocusEffect: (callback: React.EffectCallback) => React.useEffect(callback, [callback]),
-    useStore: () => ({ threadRefresh: 0, feed }), useWindowDimensions: () => ({ height: 800 }),
+    useStore: () => ({ threadRefresh: 0, feed, actor: fixture.capabilities.value.session_actor, draftGeneration }), useWindowDimensions: () => ({ height: 800 }),
     useTextAppearance: () => ({ palette: {}, color: (value: string) => value }),
     useTitleLines: () => 2, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 40, View, ScrollView: View, Pressable, T: Text,
     ThreadViewport: ({ children }: { children: React.ReactNode }) => children, ThreadBody: Body,
@@ -161,6 +165,7 @@ it('an expanded 41st thread follows exact summary changes without list refresh a
   }
   try {
     await view.render()
+    expect(host.textContent).toContain('Threads')
     await press('Threads')
     expect(host.textContent).not.toContain('Review 40')
     await press('More threads')
@@ -204,8 +209,12 @@ it('an expanded 41st thread follows exact summary changes without list refresh a
     expect(closed).toEqual([older.id, older.id])
     expect(host.querySelector('[data-body]')).toBeNull()
     await press('Threads')
-    expect(exact.has(older.id)).toBe(true)
+    // apps/ios/README.md:160–162: collapsing the section releases its selected reading placement.
+    expect(exact.has(older.id)).toBe(false)
+    expect(host.querySelector('[data-body]')).toBeNull()
     expect(header('Remote renamed older thread')).not.toBeNull()
+    // Still a collection member, it returns collapsed; explicit row activation starts a new placement.
+    await press('Remote renamed older thread')
     // A refusal clears the previously authorized exact body; it never falls
     // back to older context metadata for lifecycle actions.
     await act(async () => exact.get(older.id)!.onIssue('Access revoked', true))
@@ -213,9 +222,10 @@ it('an expanded 41st thread follows exact summary changes without list refresh a
     expect(host.textContent).toContain('Access revoked')
   } finally {
     await view.unmount()
-    expect(exact.size).toBe(0)
-    expect(closed).toEqual([older.id, older.id, older.id])
   }
+  // Cleanup must not hide an earlier mount failure behind a secondary close-count assertion.
+  expect(exact.size).toBe(0)
+  expect(closed).toEqual([older.id, older.id, older.id])
 })
 
 it('caches the exact REST summary of an expanded older thread when no live feed serves the client', async () => {

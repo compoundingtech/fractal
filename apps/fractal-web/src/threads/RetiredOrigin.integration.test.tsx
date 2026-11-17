@@ -11,6 +11,7 @@ import { expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
+import startRefusalWire from '../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json'
 import { LiveInboxThreads, LiveResolvedInboxThreads, LiveThreadPane } from './LiveThreads.tsx'
 import { gatewayThreads, type ThreadSource } from './threadSource.ts'
 
@@ -43,23 +44,12 @@ const fallbackRecipient = {
 const context = (url: URL, start_recipient: object) => Response.json({ ...base, value: {
   kind: 'thread-start-context', source_id: url.searchParams.get('source_id'), episode: url.searchParams.get('episode'), start_recipient,
 } })
-const refusal = (code: string, status: number) => Response.json({
-  api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refused',
-  code, message: 'The requested recipient is unavailable.', retryable: false, details: {},
-}, { status })
 
-// Serialized client-v0 error bodies at e16690bb: threads.rs:184–198 maps responsibility absence to
-// api/client_v0.rs:803–809 stale-fence. api.rs:579–588,2007–2020 wraps fields/applied/retryable.
-// Recipient retirement: inbox.rs:57–60 → retirements.rs:81–89 → model.rs:2809–2825;
-// thread_fence_tests.rs:1131–1143 proves both preview and POST return 409 recipient-retired.
-const startRefusalWire = {
-  'stale-fence': '{"api_version":"fractal.client.v0","error_version":"fractal.client.error.v0","request_id":"request/stale","code":"stale-fence","message":"this Inbox source has no configured responsible agent","retryable":false,"details":{}}',
-  'recipient-retired': '{"api_version":"fractal.client.v0","error_version":"fractal.client.error.v0","request_id":"request/retired","code":"recipient-retired","message":"Retired: recipient `agent/workshop/atlas` refuses this first send","retryable":false,"details":{"applied":"none","refusal":{"variant":"Retired","recipient":"agent/workshop/atlas"}},"applied":"none"}',
-} as const
-const wireRefusal = (code: keyof typeof startRefusalWire) => new Response(startRefusalWire[code], { status: 409, headers: { 'content-type': 'application/json' } })
+// Whole canonical envelopes from cc060eea; never infer application certainty from the code.
+const wireRefusal = (code: keyof typeof startRefusalWire) => Response.json(startRefusalWire[code], { status: 409 })
 
-it.each(Object.values(startRefusalWire))('decodes a real serialized server 409 error body through the generated contract', body => {
-  expect(() => Schema.decodeUnknownSync(Schema.fromJsonString(Write.ErrorEnvelope))(body)).not.toThrow()
+it.each(Object.values(startRefusalWire))('decodes a golden server 409 envelope through the generated contract', body => {
+  expect(() => Write.decodeUnknownSync(Write.ErrorEnvelope)(body)).not.toThrow()
 })
 const decodeAction = Schema.decodeUnknownSync(Schema.fromJsonString(Write.ActionRequest))
 type Action = Extract<Write.ActionRequest, { type: 'thread.start' | 'thread.reply' }>
@@ -198,7 +188,7 @@ it('keeps the real recipient-retired preview terminal with no target, Retry or s
     await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient="retired"]')).not.toBeNull())
     const notice = view.host.querySelector('[data-start-recipient="retired"]')
     expect(notice?.textContent).toContain('The recipient is retired, so no thread can start here.')
-    expect(notice?.textContent).toContain('Retired: recipient `agent/workshop/atlas` refuses this first send')
+    expect(notice?.textContent).toContain(startRefusalWire['recipient-retired'].message)
     expect(view.button('Retry')).toBeUndefined()
     expect(view.button('Start thread')).toBeUndefined()
     expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
@@ -218,45 +208,82 @@ it('offers no Start and names no recipient on a source without the preview reade
   } finally { await view.dispose() }
 })
 
-it('reads the recipient again after a mismatch, keeps the draft and refusal, and sends to the new recipient only when pressed again', async () => {
-  // How many actions had been sent when each preview read reached Fractal.
-  const readsAfter: number[] = []
+it.each(['stale-snapshot'] as const)('retains the original signed Start when golden %s has no applied metadata', async code => {
   const view = await mount(<LiveInboxThreads alert={ask} />, {
-    preview: (url, actions) => {
-      readsAfter.push(actions.length)
-      return context(url, actions.length === 0 ? originalRecipient : fallbackRecipient)
-    },
-    action: (action, actions) => actions.length === 1 ? refusal('not-found', 404) : receipt(action),
+    preview: (url, actions) => context(url, actions.length === 0 ? originalRecipient : configuredRecipient),
+    action: (action, actions) => actions.length === 1 ? wireRefusal(code) : receipt(action),
   })
   try {
     await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
     await act(async () => view.button('Start thread')?.click())
-    expect(view.host.querySelector('[data-start-recipient="original"] [data-start-recipient-id]')?.textContent).toBe(original)
-    await view.type('Is the checklist complete?')
+    await view.type('Keep the original signed intent.')
     await act(async () => view.button('Send')?.click())
-    await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient-changed]')).not.toBeNull())
-    expect(view.host.querySelector('[data-start-recipient-changed]')?.textContent).toBe('The recipient changed to harbor. Nothing has been sent; review the recipient and send again.')
-    expect(view.host.querySelector('[data-start-recipient="fallback"] [data-start-recipient-id]')?.textContent).toBe(fallback)
-    expect(view.host.querySelector('[role="alert"]')?.textContent).toContain("Couldn't start this thread.")
-    expect(view.host.querySelector('textarea')?.value).toBe('Is the checklist complete?')
-    // Reading the new recipient never sends on its own.
+    await vi.waitFor(() => expect(view.button('Retry thread start')).toBeDefined())
     await view.settle()
     expect(view.actions).toHaveLength(1)
-    expect(startParameters(view.actions[0])?.agent_id).toBe(original)
-    // The composer never reads the preview itself. After the refused Start the source reads the exact key twice: once,
-    // awaited, so the refusal surfaces beside the new recipient, and once more when the settled write invalidates every
-    // projection. Both follow the one refused send, and nothing reads it again while the draft waits for review.
-    expect(readsAfter).toEqual([0, 1, 1])
-    expect(view.previews.every(url => url.searchParams.get('source_id') === ask.source_id && url.searchParams.get('episode') === episode)).toBe(true)
-    await act(async () => view.button('Send')?.click())
+    await act(async () => view.button('Retry thread start')?.click())
     await vi.waitFor(() => expect(view.actions).toHaveLength(2))
-    expect(startParameters(view.actions[1])?.agent_id).toBe(fallback)
-    expect(view.actions[1]?.id).not.toBe(view.actions[0]?.id)
-    expect(view.actions[1]?.parameters.target_id).not.toBe(view.actions[0]?.parameters.target_id)
+    expect(view.actions[1]).toEqual(view.actions[0])
+    expect(startParameters(view.actions[1])?.agent_id).toBe(original)
   } finally { await view.dispose() }
 })
 
-it.each(['changed', 'refused', 'retired'] as const)('visibly rereads after a real stale-fence POST and requires explicit confirmation when %s', async next => {
+it.each(['outer', 'details'] as const)('keeps unknown dominant over golden retirement none in %s metadata and a later unassigned none', async location => {
+  const golden = startRefusalWire['recipient-retired']
+  const uncertain = location === 'outer'
+    ? { ...golden, applied: 'unknown' }
+    : { ...golden, details: { ...golden.details, applied: 'unknown' } }
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    preview: (url, actions) => context(url, actions.length === 0 ? originalRecipient : configuredRecipient),
+    action: (action, actions) => actions.length === 1 ? Response.json(uncertain, { status: 409 })
+      : actions.length === 2 ? wireRefusal('recipient-unassigned') : receipt(action),
+  })
+  try {
+    await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
+    await act(async () => view.button('Start thread')?.click())
+    await view.type('Preserve the ambiguous action.')
+    await act(async () => view.button('Send')?.click())
+    await vi.waitFor(() => expect(view.button('Retry thread start')).toBeDefined())
+    await view.settle()
+    expect(view.actions).toHaveLength(1)
+    await act(async () => view.button('Retry thread start')?.click())
+    await vi.waitFor(() => expect(view.actions).toHaveLength(2))
+    await view.settle()
+    expect(view.button('Retry thread start')).toBeDefined()
+    expect(view.actions[1]).toEqual(view.actions[0])
+    await act(async () => view.button('Retry thread start')?.click())
+    await vi.waitFor(() => expect(view.actions).toHaveLength(3))
+    expect(view.actions[2]).toEqual(view.actions[0])
+    expect(startParameters(view.actions[2])?.agent_id).toBe(original)
+  } finally { await view.dispose() }
+})
+
+it('treats golden unassigned applied:none as a definitive blocked setup refusal with no further sends', async () => {
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    preview: (url, actions) => actions.length === 0 ? context(url, originalRecipient) : wireRefusal('recipient-unassigned'),
+    action: () => wireRefusal('recipient-unassigned'),
+  })
+  try {
+    await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
+    await act(async () => view.button('Start thread')?.click())
+    await view.type('Keep the refused setup draft.')
+    await act(async () => view.button('Send')?.click())
+    await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient="unassigned"]')).not.toBeNull())
+    expect(view.host.querySelector('[role="alert"]')?.textContent).toContain("Couldn't start this thread.")
+    expect(view.button('Retry')).toBeUndefined()
+    expect(view.button('Retry thread start')).toBeUndefined()
+    expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
+    expect(view.host.querySelector('textarea')?.value).toBe('Keep the refused setup draft.')
+    const reads = view.previews.length
+    await act(async () => view.button('Send')?.click())
+    await view.settle()
+    expect(view.previews).toHaveLength(reads)
+    expect(view.actions).toHaveLength(1)
+    expect(startParameters(view.actions[0])?.agent_id).toBe(original)
+  } finally { await view.dispose() }
+})
+
+it.each(['changed', 'refused', 'retired'] as const)('visibly rereads after golden applied:none retirement and requires explicit confirmation when %s', async next => {
   let release!: () => void
   let pendingRead: Promise<Response> | undefined
   const view = await mount(<LiveInboxThreads alert={ask} />, {
@@ -266,11 +293,11 @@ it.each(['changed', 'refused', 'retired'] as const)('visibly rereads after a rea
         const { promise, resolve } = Promise.withResolvers<Response>()
         pendingRead = promise
         release = () => resolve(next === 'changed' ? context(url, configuredRecipient)
-          : wireRefusal(next === 'retired' ? 'recipient-retired' : 'stale-fence'))
+          : wireRefusal(next === 'retired' ? 'recipient-retired' : 'recipient-unassigned'))
       }
       return pendingRead.then(response => response.clone())
     },
-    action: (action, actions) => actions.length === 1 ? wireRefusal('stale-fence') : receipt(action),
+    action: (action, actions) => actions.length === 1 ? wireRefusal('recipient-retired') : receipt(action),
   })
   try {
     await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
@@ -299,7 +326,10 @@ it.each(['changed', 'refused', 'retired'] as const)('visibly rereads after a rea
       if (next === 'retired') {
         expect(view.host.querySelector('[data-start-recipient="retired"]')).not.toBeNull()
         expect(view.button('Retry')).toBeUndefined()
-      } else expect(view.host.textContent).toContain('this Inbox source has no configured responsible agent')
+      } else {
+        expect(view.host.querySelector('[data-start-recipient="unassigned"]')).not.toBeNull()
+        expect(view.button('Retry')).toBeUndefined()
+      }
       await act(async () => view.button('Send')?.click())
       await view.settle()
       expect(view.actions).toHaveLength(1)
@@ -308,14 +338,31 @@ it.each(['changed', 'refused', 'retired'] as const)('visibly rereads after a rea
 })
 
 it('fails closed on the real GET stale-fence body without inventing an unconfigured state', async () => {
-  const view = await mount(<LiveInboxThreads alert={notice} />, { preview: () => wireRefusal('stale-fence') })
+  const view = await mount(<LiveInboxThreads alert={notice} />, { preview: () => wireRefusal('stale-snapshot') })
   try {
-    await vi.waitFor(() => expect(view.host.textContent).toContain('this Inbox source has no configured responsible agent'))
+    await vi.waitFor(() => expect(view.host.textContent).toContain(startRefusalWire['stale-snapshot'].message))
     expect(view.button('Start thread')).toBeUndefined()
     expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
     expect(view.host.querySelector('textarea')).toBeNull()
     expect(view.host.querySelector('[data-start-recipient="retired"]')).toBeNull()
     await view.settle()
+    expect(view.actions).toHaveLength(0)
+  } finally { await view.dispose() }
+})
+
+it('shows a blocked setup refusal for generated recipient-unassigned without Retry, sends or a refresh loop', async () => {
+  const view = await mount(<LiveInboxThreads alert={notice} />, { preview: () => wireRefusal('recipient-unassigned') })
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient="unassigned"]')).not.toBeNull())
+    expect(view.host.textContent).toContain('No recipient is configured. Set up a responsible agent before starting a thread.')
+    expect(view.host.textContent).not.toContain('The recipient is retired')
+    expect(view.button('Retry')).toBeUndefined()
+    expect(view.button('Start thread')).toBeUndefined()
+    expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()
+    expect(view.host.querySelector('textarea')).toBeNull()
+    const reads = view.previews.length
+    await view.settle()
+    expect(view.previews).toHaveLength(reads)
     expect(view.actions).toHaveLength(0)
   } finally { await view.dispose() }
 })
