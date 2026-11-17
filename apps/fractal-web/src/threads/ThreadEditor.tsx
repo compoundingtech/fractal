@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { useAtom } from '@effect/atom-react'
 import { DraftMessageComposer } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DraftMessageComposer.tsx'
+import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
 import { unreachableSend, type ThreadRefusal, type ThreadSendResult, type ThreadSource } from './threadSource.ts'
 
@@ -40,6 +41,7 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
   }
   return <>
     {shownError === undefined ? null : <ThreadRefusalAlert refusal={shownError} />}
+    {pending ? <SystemNotice kind="loading" scope="inline" title="Sending…" /> : null}
     <DraftMessageComposer label={label} draft={draft.content} onDraftChange={content => setDraft(current => ({ ...current, content }))}
       onSubmit={() => { void submit() }} pending={pending} maxContentBytes={8192}
       {...(inputRef === undefined ? {} : { inputRef })}

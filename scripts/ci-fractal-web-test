@@ -784,6 +784,8 @@ threads_pairing_closure = [
     "apps/fractal-web/src/threads/MarkedUnreadThreads.tsx",
     "apps/fractal-web/src/threads/markedUnreadPages.ts",
     "apps/fractal-web/src/threads/meaningfulGeometry.ts",
+    "apps/fractal-web/src/threads/RelatedRequests.tsx",
+    "apps/fractal-web/src/threads/requestHistoryPages.ts",
     "apps/fractal-web/src/threads/ThreadEditor.tsx",
     "apps/fractal-web/src/threads/ThreadPanel.tsx",
     "apps/fractal-web/src/threads/ThreadRefusalAlert.tsx",

@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as Atom from 'effect/reactivity/Atom'
 import { useAtomValue } from '@effect/atom-react'
 import { meaningfulBodyRegion, overlap, type ReadableRect } from './meaningfulGeometry.ts'
+import { threadAnchorAttribute, threadAnchorSelector, threadReadEligibleAttribute } from './threadAnchor.ts'
 
 export interface ForegroundSnapshot {
   readonly foreground: boolean
@@ -41,9 +42,10 @@ export const foregroundVisibility = (container: HTMLElement | null, active: bool
   const measure = () => {
     const candidates: VisibleCandidate[] = []
     if (!foreground()) return candidates
-    for (const row of container.querySelectorAll<HTMLElement>('[data-thread-message]')) {
+    for (const row of container.querySelectorAll<HTMLElement>(threadAnchorSelector)) {
+      if (!row.hasAttribute(threadReadEligibleAttribute)) continue
       const body = row.querySelector<HTMLElement>('[data-thread-message-content]')
-      const id = row.getAttribute('data-thread-message')
+      const id = row.getAttribute(threadAnchorAttribute)
       if (body === null || id === null || !body.isConnected || !body.textContent?.trim() || !shown(body)) continue
       const rect = body.getBoundingClientRect()
       const style = getComputedStyle(body)
@@ -84,7 +86,7 @@ export const foregroundVisibility = (container: HTMLElement | null, active: bool
   const intersections = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(refresh, { threshold: [0, 1] })
   const resize = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(refresh)
   const sync = () => {
-    const elements = new Set<Element>([container, ...container.querySelectorAll('[data-thread-message], [data-thread-message-content]')])
+    const elements = new Set<Element>([container, ...container.querySelectorAll(`${threadAnchorSelector}, [data-thread-message-content]`)])
     for (let ancestor = container.parentElement; ancestor !== null; ancestor = ancestor.parentElement) elements.add(ancestor)
     const panel = container.closest('[data-thread-panel]')
     for (const element of panel?.querySelectorAll('[data-thread-read-heading], [data-thread-composer], [data-testid="conversation-composer-dock"], textarea, form') ?? []) elements.add(element)
@@ -94,7 +96,7 @@ export const foregroundVisibility = (container: HTMLElement | null, active: bool
   }
   const mutations = new MutationObserver(sync)
   mutations.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true,
-    attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'style', 'class', 'data-thread-message', 'data-thread-message-content'] })
+    attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'style', 'class', threadAnchorAttribute, threadReadEligibleAttribute, 'data-thread-message-content'] })
   for (const type of ['focus', 'blur', 'resize']) window.addEventListener(type, restart)
   document.addEventListener('visibilitychange', restart)
   document.addEventListener('scroll', restart, true)

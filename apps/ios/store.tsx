@@ -1116,10 +1116,10 @@ function useAppStore(proof?: FabricProfile) {
         setThreadRefresh(previous => previous + 1);
       }
       if (result.how === 'sent') return { ...result, snapshot: acceptedSnapshot };
-      // r3 stale-recipient admission is a definitive not-found with no append.
-      // Refresh the canonical preview; never rewrite or replay its signed intent to a new agent.
+      // Definitive admission refusals invalidate the preview, never the original signed intent.
+      // stale-fence has no declared reason field: reread canonical context without message parsing.
       const refreshStartContext = kind === 'start' && result.error instanceof ClientError
-        && (result.error.status === 404 || result.error.response.code === 'recipient-retired');
+        && (result.error.status === 404 || result.error.response.code === 'recipient-retired' || result.error.response.code === 'stale-fence');
       return { how: 'failed', error: threadActionErrorText(result.error), ...(refreshStartContext ? { refreshStartContext: true as const } : {}) };
     };
     return finish(await sendBoundAction(member, {
