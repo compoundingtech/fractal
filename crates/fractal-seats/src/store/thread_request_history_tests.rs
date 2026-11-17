@@ -277,7 +277,7 @@ fn request_history_duplicate_receipts_and_late_predecessor_membership_converge()
 fn request_history_current_custom_origin_has_explicit_unsupported_marker() {
     let (store, _, _) = fixture();
     store.configure_thread_write_rollout([]);
-    let manifest = serde_json::from_str(include_str!("../../../../examples/fractal/custom-review.json")).unwrap();
+    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9ce35b9b6628 owner=fractal_seats::store::thread_request_history_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/fractal/custom-review.json")).unwrap();
     store.register_custom_kind(&crate::store::custom::RegistrationRequest {
         manifest, actor: AGENT.into(),
     }).unwrap();

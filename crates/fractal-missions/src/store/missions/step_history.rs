@@ -57,7 +57,10 @@ fn retained_events(
          JOIN batches ON batches.id=claims.batch_id ORDER BY CANONICAL_ASC(claims)",
         CLAIMS_PER_KIND_LIMIT + 1,
     ));
-    let mut statement = conn.prepare(&sql).map_err(internal)?;
+    let mut statement = conn.prepare(
+        /* sqlite-large-value: allow-for-now lv-h4563bdfd1a41 owner=fractal_missions::store::missions::step_history TODO=trace-statement-and-value-representation */
+        &sql
+    ).map_err(internal)?;
     let mut rows = statement.query(params![source, cut]).map_err(internal)?;
     let mut events = Vec::new();
     let mut counts = BTreeMap::<String, usize>::new();

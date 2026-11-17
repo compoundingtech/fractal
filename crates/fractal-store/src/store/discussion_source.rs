@@ -94,7 +94,7 @@ pub fn qualify_batch(connection: &Connection, person: &str, keys: &[SourceEpisod
          LEFT JOIN step_runs step ON step.subject=json_extract(input.value,'$.source_id')
          WHERE NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=opening.id AND state='repaired')"
     ));
-    let mut statement = connection.prepare(&sql).map_err(internal)?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc47c843b6e24 owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
     let mut rows = statement.query([input]).map_err(internal)?;
     while let Some(row) = rows.next().map_err(internal)? {
         let index: usize = row.get(0).map_err(internal)?;
@@ -225,7 +225,7 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
            AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY CAST(input.key AS INTEGER), {order}"
     );
-    let mut statement = connection.prepare(&sql).map_err(internal)?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he4c4feee0f53 owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
     let mut rows = statement.query([input]).map_err(internal)?;
     let mut states = BTreeMap::<usize, State>::new();
     let mut result = BTreeMap::new();
@@ -234,7 +234,7 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
         let index: usize = row.get(0).map_err(internal)?;
         let key = &keys[index];
         if !key.episode.starts_with("run-generation/") || result.contains_key(&index) { continue; }
-        if !states.contains_key(&index) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = states.entry(index) {
             let generation: String = row.get(1).map_err(internal)?;
             let revision: String = row.get(2).map_err(internal)?;
             let body: String = row.get(3).map_err(internal)?;
@@ -288,7 +288,7 @@ fn authored_sources(connection: &Connection, person: &str, keys: &[SourceEpisode
                 crate::mission::parent_step_path(&mission, &path)
                     .map(|parent| format!("step-run/{generation}/{parent}"))
                     .or_else(|| historical.parent_step_run.clone()).unwrap_or_default());
-            states.insert(index, State {
+            entry.insert(State {
                 generation: format!("run-generation/{generation}"), revision, recipient,
                 current_recipient: row.get(7).map_err(internal)?, attempt: 1, epoch: None,
                 status: "pending".into(), evidence: vec![row.get(4).map_err(internal)?,
@@ -411,7 +411,7 @@ fn carried_ready_epoch(connection: &Connection, carry: &str, wanted_attempt: u64
     let mut seen = BTreeSet::new();
     for _ in 0..MAX_PROOF_CLAIMS {
         if !seen.insert(carry.clone()) { return Ok(None); }
-        let mut statement = connection.prepare(&sql).map_err(internal)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf94cc9554b5c owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
         let mut rows = statement.query([&carry]).map_err(internal)?;
         let mut attempt = 1;
         let mut status = String::from("pending");
@@ -485,7 +485,7 @@ fn inputs_preflight(connection: &Connection, key: &SourceEpisode) -> Result<bool
     if key.source_id.is_empty() || key.source_id.len() > 512
         || key.episode.is_empty() || key.episode.len() > 512 { return Ok(false); }
     let mut statement = connection.prepare(
-        "WITH RECURSIVE subjects(subject) AS (
+        /* sqlite-large-value: allow-for-now lv-he9e177bb34b5 owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ "WITH RECURSIVE subjects(subject) AS (
            SELECT ?1 UNION SELECT subject FROM claims WHERE id=?2
            UNION SELECT 'mission-run/' || step.run_id FROM step_runs step WHERE step.subject=?1
            UNION SELECT 'run-generation/' || step.generation_id FROM step_runs step WHERE step.subject=?1
@@ -545,7 +545,7 @@ fn notice_snapshots(connection: &Connection, input: &str)
            AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY CANONICAL_DESC(claims)"
     );
-    let mut statement = connection.prepare(&sql).map_err(internal)?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hef0e1c1afcc5 owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
     let claims = statement.query_map([input], claim_from_row).map_err(internal)?;
     let mut snapshots = BTreeMap::<String, Vec<ClaimRecord>>::new();
     for claim in claims {
@@ -563,7 +563,7 @@ fn notice_source(connection: &Connection, key: &SourceEpisode, person: &str,
 {
     let notice = &fractal_schema::notice::manifests()[1];
     for snapshot in snapshots {
-        let fields = custom::fields(&snapshot);
+        let fields = custom::fields(snapshot);
         let source = fields.get("source_id").and_then(Value::as_str).unwrap_or_default();
         if key.source_id != source || snapshot.accepted_at_unix_ms > at { continue; }
         let Some((hash, manifest, state)) = custom::registration(connection, &snapshot.subject).map_err(internal)? else { continue };
@@ -588,7 +588,7 @@ fn notice_source(connection: &Connection, key: &SourceEpisode, person: &str,
         evidence.extend(owner.map(|owner| owner.claim_id));
         // The snapshot history was metadata-admitted before hydration. Resolve one
         // canonical exact reference rather than materializing every historical body.
-        let latest: Option<String> = connection.query_row(&canonical_sql(
+        let latest: Option<String> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd93815b8fb9e owner=fractal_store::store::discussion_source TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT claims.id FROM claims WHERE claims.subject=?1
              AND claims.kind IN ('custom.attention.snapshot-created','custom.attention.snapshot-updated')
              AND json_extract(claims.body,'$.fields._registration')=?2
