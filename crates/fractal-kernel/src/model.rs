@@ -922,6 +922,12 @@ pub struct ResourceLaneSpec {
     pub capacity: Option<fractal_runtime::Capacity>,
     pub coverage: ResourceLaneCoverage,
     pub admission_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "fractal_runtime::RequestClass::is_agent")]
+    pub class: fractal_runtime::RequestClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<fractal_runtime::DiskRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io: Option<fractal_runtime::IoClass>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

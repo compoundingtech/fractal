@@ -425,6 +425,36 @@ all other fixed seeds trim. The per-seed and majority trim-coverage assertions r
 `outcome: "abandoned"` fields on existing native effect receipt kinds. No kind is
 added. Versions 1 through 32 remain byte-identical. Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v33.json`;
-do not hand-edit it. The simulation and audit reports select v33. Ordinary effect
+do not hand-edit it. Ordinary effect
 draws retain their explicit immutable binding and confirmation-evidence mapping;
 human resolution is exercised by focused effect API and reconciliation tests.
+
+`claims-v34.json` adds `mission-run.gate-carried` and the native continuity bindings
+on human requests and carried steps. Versions 1 through 33 remain byte-identical.
+Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v34.json`;
+do not hand-edit it. The simulation and audit reports select v34. The targeted
+`the_corpus_generates_valid_native_continuity_inputs` assertion checks current
+continuity specs and validates generated inputs, in addition to the complete
+registry-kind inventory guard.
+
+The v34 fixed-seed characterization in
+[hosted run 43977692983](https://github.com/compoundingtech/fractal/actions/runs/43977692983)
+observed seed 2 converge without an initial checkpoint trim, then trim on every
+modern node after the old build's excusal and the next cut. Its only failure was
+the obsolete v33 initial-trim expectation; the three reported attempts agreed.
+Seed 179 retained its existing initial non-trim behavior and passed its required
+continuation; the other fixed seeds passed their initial-trim assertions.
+The exact v34 `NEVER_TRIMS` set is therefore `[2, 179]`, not a waiver of checkpoint
+coverage: each named seed must still converge, match the exact initial-trim
+expectation, and trim on every modern node in the continuation. The maximum of
+three non-trimming fixed seeds, majority trim coverage, replay comparisons,
+tombstone verification, and deliberate-corruption checks remain unchanged.
+
+The input snapshot adds kinds and fields, and coherent native review generation
+now fills the complete request tuple instead of independently drawing invalid
+empty heads and partial tuples. Both affect consumption of the schedule's shared
+seeded random stream, so an older corpus's exact trim set is not transferable.
+The v34 filename is used in diagnostics as well as the audit summary.
+For a wider characterization, use a fresh `CONVERGENCE_REPORT_DIR` and the existing
+`fixed_sweep` workflow above; retain the source and binary hashes with its outcomes.

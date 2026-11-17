@@ -299,8 +299,15 @@ pub struct AgentsPublication {
     pub has_more: bool,
 }
 
+pub(crate) fn deserialize_error_applied<'de,D:serde::Deserializer<'de>>(deserializer:D)->std::result::Result<Option<Value>,D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ErrorEnvelope {
+    /// Raw application metadata: missing and explicit null remain distinct for safe classification.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_error_applied")]
+    pub applied: Option<Value>,
     pub api_version: String,
     pub error_version: String,
     pub request_id: String,
@@ -362,6 +369,9 @@ pub enum ErrorCode {
     UnsupportedCapability,
     PeerTooOld,
     ValidationFailed,
+    UnknownObjective,
+    InvalidSeries,
+    UnsupportedObjectiveSeries,
     IdempotencyConflict,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
@@ -1182,6 +1192,40 @@ pub struct SloHistory {
     pub until_ms: u64,
     pub samples: u64,
     pub steps: Vec<Option<f64>>,
+}
+/// A half-open count histogram, not percentiles.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Series {
+    pub from: u64,
+    pub to: u64,
+    pub bucket_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
+    pub buckets: Vec<SeriesBucket>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SeriesBucket {
+    pub start: u64,
+    pub end: u64,
+    pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<SeriesGroup>>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SeriesGroup {
+    pub value: serde_json::Value,
+    pub count: u64,
+}
+/// Select a declared objective or explicit kinds; grouping and prefixes require explicit kinds.
+#[derive(Clone, Debug)]
+pub struct SeriesQuery {
+    pub objective: Option<String>,
+    pub kinds: Vec<String>,
+    pub subject_prefix: Option<String>,
+    pub group_by: Option<String>,
+    pub from: u64,
+    pub to: u64,
+    pub bucket_seconds: u64,
 }
 /// Token spend over a period, one row per agent, mission run, step, model, account and host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

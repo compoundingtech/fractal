@@ -498,6 +498,13 @@ impl Heard {
 /// may select one exact agent. An older daemon ignores the selector and answers with the fleet.
 pub const EXACT_AGENT_SELECTOR_CAPABILITY: &str = "collection.agents.exact-selector";
 
+impl ActionResult {
+    /// Raw Rust model fields are strings: completion requires the tag, status and original ID.
+    pub fn completed_for(&self,original_id:&str)->bool {
+        self.kind=="action-result" && self.status==ActionStatus::Completed && self.action_id==original_id
+    }
+}
+
 impl Capabilities {
     /// Whether this daemon granted capability `id` at `version` or newer.
     pub fn grants(&self, id: &str, version: u32) -> bool {
@@ -1015,19 +1022,31 @@ impl ClientError {
         matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
     }
 
-    /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
-    /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
-    /// with the same key, again). Any other answer, or none, says nothing.
+    /// Merge raw outer and legacy details application metadata without mutating either.
+    /// Missing metadata says nothing; only literal "none" in every present location yields
+    /// "none". Any other present value, including null or a conflict, yields "unknown".
     pub fn applied(&self) -> Option<&str> {
         match self {
-            ClientError::Api(_, _, envelope) => envelope.details.get("applied").and_then(|value| value.as_str()),
-            _ => None,
+            ClientError::Api(_,_,envelope)=>{
+                let outer=envelope.applied.as_ref();
+                let legacy=envelope.details.get("applied");
+                if outer.into_iter().chain(legacy).any(|value|value.as_str()!=Some("none")) {Some("unknown")}
+                else if outer.is_some()||legacy.is_some() {Some("none")}
+                else {None}
+            }
+            _=>None,
         }
     }
 
-    /// Whether the request may have been taken without the person hearing so: its answer was lost
-    /// (a transport failure, a deadline) or st said `applied: "unknown"`. A request in this state is
-    /// repeated unchanged, never rebuilt with a new key.
+    /// A first attempt was refused before application. Callers with earlier ambiguous delivery
+    /// must keep that history and replay the original request, regardless of this attempt's refusal.
+    pub fn not_applied(&self)->bool {
+        self.applied()!=Some("unknown") && (self.applied()==Some("none") || matches!(self,ClientError::Api(ErrorCode::StaleFence|ErrorCode::RateLimited,..)))
+    }
+
+    /// A transport failure or explicit/malformed application metadata may leave delivery unknown.
+    /// False is not a nonapplication guarantee. Earlier ambiguity remains caller state even if a
+    /// later attempt is refused; repeat only the original request and key to recover its receipt.
     pub fn outcome_unknown(&self) -> bool {
         matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
     }
@@ -1193,6 +1212,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::UnknownObjective
+        | ErrorCode::InvalidSeries
+        | ErrorCode::UnsupportedObjectiveSeries
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
         | ErrorCode::AttentionDismissUnsupported
@@ -1742,7 +1764,7 @@ impl Client {
             return Err(ClientError::Api(
                 code.clone(),
                 message.clone(),
-                Box::new(ErrorEnvelope {
+                Box::new(ErrorEnvelope { applied: None,
                     api_version: response.api_version,
                     error_version: "st3.client.error.v0".into(),
                     request_id: response.request_id,
@@ -2002,6 +2024,19 @@ impl Client {
         };
         self.get(&format!("/v1/client/events{suffix}")).await
     }
+    /// Submit an already typed action unchanged for explicit receipt recovery on this client.
+    pub async fn submit_action(&self,request:&ActionRequest)->Result<Envelope<ActionResult>,ClientError> {
+        self.action_internal(request).await
+    }
+    /// Prepare the signed message body once; explicit checks keep its identity, signature and fence.
+    pub fn prepare_message_send(&self,id:impl Into<String>,idempotency_key:impl Into<String>,fence:Fence,mut parameters:MessageSendParameters)->Result<ActionRequest,ClientError> {
+        let idempotency_key=idempotency_key.into();
+        if parameters.signature.is_none() && let Some(device)=&self.signing_device {
+            parameters.signature=Some(device.sign_message(&idempotency_key,&parameters).map_err(|error|ClientError::Protocol(error.to_string()))?);
+        }
+        ActionRequest::message_send(id,idempotency_key,fence,parameters).map_err(|error|ClientError::Protocol(error.to_string()))
+    }
+
     async fn action_internal(
         &self,
         request: &ActionRequest,
@@ -2919,7 +2954,7 @@ impl Client {
                 }
             };
             if let (404, Some(operation)) = (status, unsupported) {
-                let error = ErrorEnvelope {
+                let error = ErrorEnvelope { applied: None,
                     api_version: "st3.client.v0".into(), error_version: "st3.client.error.v0".into(),
                     request_id: String::new(), code: ErrorCode::UnsupportedCapability,
                     message: format!("this server does not support {operation}; upgrade the server"),
@@ -2928,7 +2963,7 @@ impl Client {
                 return Err(ClientError::Api(error.code.clone(), error.message.clone(), Box::new(error)));
             }
             if status == 404 && bytes.is_empty() && path.starts_with("/v1/client/launches/") {
-                let error = ErrorEnvelope {
+                let error = ErrorEnvelope { applied: None,
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: String::new(),
@@ -2967,6 +3002,8 @@ impl Client {
 fn core_api_error(bytes: &[u8]) -> Option<ErrorEnvelope> {
     #[derive(Deserialize)]
     struct Core {
+        #[serde(default,deserialize_with="crate::generated::deserialize_error_applied")]
+        applied: Option<serde_json::Value>,
         code: ErrorCode,
         message: String,
         #[serde(default)]
@@ -2975,7 +3012,7 @@ fn core_api_error(bytes: &[u8]) -> Option<ErrorEnvelope> {
         details: std::collections::BTreeMap<String, serde_json::Value>,
     }
     let core: Core = serde_json::from_slice(bytes).ok()?;
-    Some(ErrorEnvelope {
+    Some(ErrorEnvelope { applied: core.applied,
         api_version: "st3.v1".into(),
         error_version: String::new(),
         request_id: core.request_id,
@@ -3629,7 +3666,7 @@ mod tests {
         ClientError::Api(
             code.clone(),
             message.into(),
-            Box::new(ErrorEnvelope {
+            Box::new(ErrorEnvelope { applied: None,
                 api_version: "st3.client.v0".into(),
                 error_version: "st3.client.error.v0".into(),
                 request_id: "request/test".into(),
@@ -4963,4 +5000,46 @@ mod observer_tests {
         assert!(OBSERVER.get().is_none());
         assert!(RequestGuard::begin(&Method::GET, "/v1/client/usage?since_ms=1").is_none());
     }
+    #[test]
+    fn error_application_certainty_preserves_presence_and_fails_closed_on_conflicts_or_malformed_values() {
+        let samples=[None,Some(serde_json::json!("none")),Some(serde_json::json!("unknown")),Some(serde_json::Value::Null),Some(serde_json::json!(true)),Some(serde_json::json!(12)),Some(serde_json::json!([])),Some(serde_json::json!({"future":"value"}))];
+        for outer in &samples {for inner in &samples {
+            let mut raw=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/test","code":"stale-fence","message":"fixture","retryable":false,"details":{}});
+            if let Some(value)=outer {raw["applied"]=value.clone();}
+            if let Some(value)=inner {raw["details"]["applied"]=value.clone();}
+            let envelope:ErrorEnvelope=serde_json::from_value(raw).unwrap();
+            assert_eq!(&envelope.applied,outer);
+            assert_eq!(envelope.details.get("applied"),inner.as_ref());
+            let encoded=serde_json::to_value(&envelope).unwrap();
+            assert_eq!(encoded.get("applied"),outer.as_ref());
+            let present=outer.iter().chain(inner.iter()).collect::<Vec<_>>();
+            let expected=if present.is_empty(){None}else if present.iter().any(|value|value.as_str()!=Some("none")){Some("unknown")}else{Some("none")};
+            let error=ClientError::Api(ErrorCode::StaleFence,"fixture".into(),Box::new(envelope));
+            assert_eq!(error.applied(),expected);
+            assert_eq!(error.not_applied(),expected!=Some("unknown"));
+            assert_eq!(error.outcome_unknown(),expected==Some("unknown"));
+            let ClientError::Api(_,_,preserved)=error else {unreachable!()};
+            assert_eq!(&preserved.applied,outer);
+            assert_eq!(preserved.details.get("applied"),inner.as_ref());
+        }}
+    }
+    #[test]
+    fn core_route_error_fallback_preserves_outer_uncertainty_too() {
+        for applied in [serde_json::json!("unknown"),serde_json::Value::Null,serde_json::json!(false)] {
+            let bytes=serde_json::to_vec(&serde_json::json!({"code":"stale-fence","message":"fixture","applied":applied,"details":{"applied":"none"}})).unwrap();
+            let envelope=core_api_error(&bytes).unwrap();
+            assert_eq!(envelope.applied,Some(applied));
+            let error=ClientError::Api(ErrorCode::StaleFence,"fixture".into(),Box::new(envelope));
+            assert_eq!(error.applied(),Some("unknown"));assert!(!error.not_applied());
+        }
+    }
+
+    #[test]
+    fn completed_receipt_requires_original_id_status_and_kind() {
+        for (kind,status,id,expected) in [("action-result","completed","action/original",true),("other","completed","action/original",false),("action-result","accepted","action/original",false),("action-result","rejected","action/original",false),("action-result","unknown","action/original",false),("action-result","completed","action/other",false)] {
+            let receipt:ActionResult=serde_json::from_value(serde_json::json!({"kind":kind,"status":status,"action_id":id,"operation_id":"operation/test","affected_ids":[],"snapshot_id":"snapshot/test"})).unwrap();
+            assert_eq!(receipt.completed_for("action/original"),expected);
+        }
+    }
+
 }

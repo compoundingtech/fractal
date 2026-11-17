@@ -17,6 +17,12 @@ export interface LaneOptions {
   readonly maxMembers?: number
   /** Bytes, charged by the host accountant; not a client-side semaphore. */
   readonly capacity?: { readonly cores: number; readonly memory: number }
+  /** Host-wide strict priority; FIFO within a class. Defaults to agent. */
+  readonly class?: 'landing' | 'check' | 'agent'
+  /** Peak additional bytes reserved on the filesystem containing path until retirement. */
+  readonly disk?: { readonly bytes: number; readonly path: string }
+  /** Uses a host-policy IO slot as well as the ordinary memory/CPU accountant. */
+  readonly io?: 'heavy'
   readonly coverage?: 'logical' | 'enforced'
   readonly admissionTimeout?: DurationInput
 }

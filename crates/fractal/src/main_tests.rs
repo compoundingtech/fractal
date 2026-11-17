@@ -1,4 +1,29 @@
 #[test]
+fn series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets() {
+    let cli = Cli::try_parse_from([
+        "fractal", "series", "--objective", "factory/work-throughput", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!((args.objective.as_deref(), args.from, args.to, args.bucket_seconds), (Some("factory/work-throughput"), 1000, 4000, 86_400));
+    let cli = Cli::try_parse_from([
+        "fractal", "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+        "--subject-prefix", "custom/acme/inbox/", "--group-by", "type", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!(args.kind, ["custom.acme.arrived", "custom.acme.resolved"]);
+    assert_eq!(args.group_by.as_deref(), Some("type"));
+    for args in [
+        vec!["fractal", "series", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--group-by", "type", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--from", "1000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--to", "4000"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
 fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
     for (subcommand, transport) in [("add", "fabric"), ("remove", "fabric"), ("prefer", "tailscale")] {
         for actor in ["agent/example", "agent/other", "person/example"] {
@@ -753,7 +778,7 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
     let api = fractal_client::ClientError::Api(
         fractal_client::ErrorCode::StaleFence,
         "the client snapshot changed before the action was submitted".into(),
-        Box::new(fractal_client::ErrorEnvelope {
+        Box::new(fractal_client::ErrorEnvelope { applied: None,
             api_version: "st3.client.v0".into(),
             error_version: "st3.client.error.v0".into(),
             request_id: "request/test".into(),
@@ -3689,6 +3714,12 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
             .is_some_and(|command| command.is_hide_set()),
         "the expert ST3 channel lifecycle must remain callable but hidden"
     );
+    assert!(
+        command
+            .find_subcommand("resource-payload")
+            .is_some_and(|command| command.is_hide_set()),
+        "the admitted shell payload entry point must remain callable but hidden"
+    );
 
     for legacy in [
         "claude",
@@ -3741,6 +3772,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
         ("claims", CLAIMS_SOURCE),
+        ("continuity", /* sqlite-large-value: allow-for-now lv-h3eca7c6c5a2f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("continuity_cli.rs")),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
@@ -3751,6 +3783,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("resources", /* sqlite-large-value: allow-for-now lv-h588676c0bda2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("resources_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
         ("source", SOURCE_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
@@ -3805,11 +3838,19 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         "EvalArgs",
         "GraphArgs",
     ] {
-        assert!(
-            !cli_source.contains(&format!("struct {command_type}"))
-                && !cli_source.contains(&format!("enum {command_type}")),
-            "legacy CLI type {command_type} remains compiled"
-        );
+        for (name, source) in std::iter::once(("main", main_source))
+            .chain(command_files.iter().copied())
+        {
+            // Only the native finite-shell command owns this new ExecArgs type.
+            // The removed top-level exec handler/type stays forbidden everywhere else;
+            // every other legacy type and every legacy handler is still scanned here.
+            let native_exec_args = name == "resources" && command_type == "ExecArgs";
+            assert!(
+                (native_exec_args || !source.contains(&format!("struct {command_type}")))
+                    && !source.contains(&format!("enum {command_type}")),
+                "legacy CLI type {command_type} remains compiled in {name}"
+            );
+        }
     }
 
     let server_source = /* sqlite-large-value: allow-for-now lv-h62a14b16df0b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../fractal-api-core/src/api.rs");

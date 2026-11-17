@@ -79,6 +79,8 @@ pub struct Config {
     /// means `off`: such a seat starts without one. Seats without a declaration never change.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lanes: Option<Lanes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finite_resources: Option<fractal_runtime::host::FinitePolicy>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     /// Tailnet login admitted for browser pairing; absent disables browser pairing.
@@ -858,6 +860,7 @@ impl Default for Config {
             unlaned_seat: None,
             seat_admission: None,
             lanes: None,
+            finite_resources: None,
             person: None,
             browser_pairing_login: None,
             pairing_legacy_allowances: Vec::new(),

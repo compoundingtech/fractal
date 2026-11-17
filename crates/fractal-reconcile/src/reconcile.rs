@@ -72,6 +72,7 @@ pub mod seat_admission;
 mod seat_admission_queue;
 mod resource_lanes;
 mod program_resources;
+mod shell_resources;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -1478,6 +1479,7 @@ pub struct Reconciler<R = NativeRuntime> {
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
+    shell_exec_watches: Mutex<BTreeSet<String>>,
     seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
     pub wait_for_test_starts: AtomicBool,
@@ -1626,6 +1628,7 @@ pub struct Reconciler<R = NativeRuntime> {
     disk_paths: Vec<PathBuf>,
     /// When the disk stage last read free space, and whether its episode raised an item.
     disk_check: Mutex<(Option<u128>, bool)>,
+    disk_observations: Mutex<BTreeMap<u64, crate::disk::DiskSpace>>,
     disk_check_every_ms: u128,
     /// When the fault stage last sent faults to their owning agents.
     fault_delivery: Mutex<Option<u128>>,
@@ -1756,6 +1759,7 @@ impl Reconciler<NativeRuntime> {
             event_notify,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
@@ -1838,6 +1842,7 @@ impl Reconciler<NativeRuntime> {
             disk_probe: Some(Arc::new(crate::disk::disk_space)),
             disk_paths: vec![state_dir.to_path_buf()],
             disk_check: Mutex::new((None, false)),
+            disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: DISK_CHECK_EVERY_MS,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: FAULT_DELIVERY_EVERY_MS,
@@ -1953,6 +1958,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         self
     }
 
+    /// Install the host's finite disk/IO policy without creating another accountant.
+    pub fn with_finite_resources(mut self, policy: Option<fractal_runtime::host::FinitePolicy>) -> Self {
+        self.seat_admission.finite_policy = policy.unwrap_or_default();
+        self
+    }
+
     /// Admission by fit against a host of the test's choosing, without the process-wide switch.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_lane_host(mut self, lanes: Option<seat_admission::LaneHost>) -> Self {
@@ -1980,6 +1991,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
@@ -2062,6 +2074,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             disk_probe: None,
             disk_paths: Vec::new(),
             disk_check: Mutex::new((None, false)),
+            disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: 0,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: 0,
@@ -2739,11 +2752,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         // One reading per filesystem, named by the first path on it. A workspace that does not
         // exist yet has no filesystem to read.
         let mut filesystems = BTreeMap::<u64, (PathBuf, crate::disk::DiskSpace)>::new();
-        for path in self.disk_paths.iter().cloned().chain(workspaces) {
+        let finite = self.store.resource_memberships_for_host(&self.host)?;
+        let finite_paths = finite.iter()
+            .filter(|member| matches!(member.state.as_str(), "queued" | "admitted" | "launched" | "retiring" | "uncertain"))
+            .filter_map(|member| member.request.disk.as_ref().map(|disk| PathBuf::from(&disk.path)));
+        for path in self.disk_paths.iter().cloned().chain(workspaces).chain(finite_paths)
+            .chain(self.seat_admission.finite_policy.disk_floors.keys().cloned()) {
             if let Ok(space) = probe(&path) {
                 filesystems.entry(space.filesystem).or_insert((path, space));
             }
         }
+        let mut observations = self.disk_observations.lock().unwrap_or_else(PoisonError::into_inner);
+        if observations.len() != filesystems.len()
+            || filesystems.iter().any(|(mount, (_, space))| observations.get(mount) != Some(space))
+        {
+            observations.clear();
+            observations.extend(filesystems.iter().map(|(mount, (_, space))| (*mount, *space)));
+            self.incremental.touch("host-lane-disk");
+            self.signal_changed();
+        }
+        drop(observations);
         if filesystems.is_empty() {
             return Ok(());
         }
@@ -3233,6 +3261,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _observation_capture = self.store.capture_runtime_observations()?;
         let pty_snapshot = PassPtySnapshot::new();
         self.reconcile_start_jobs_with_snapshot(&pty_snapshot)?;
+        self.reconcile_shell_resources()?;
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -16644,6 +16673,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("attempt".into(), Value::from(attempt)),
         ]);
+        let (binding, original_request) = self.store.human_gate_continuity(run, subject, &fields)?;
+        fields.insert("continuity".into(), binding);
         let request_hash = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&fields)?));
         let operation = format!(
             "gate-operation/{}/{}",
@@ -16651,7 +16682,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &request_hash[..24]
         );
         fields.insert("operation".into(), Value::String(operation.clone()));
-        let request = self.store.append_claim(&ClaimInput {
+        let request = if let Some(original) = original_request { original } else { self.store.append_claim(&ClaimInput {
             subject: operation.clone(),
             kind: "gate.requested".into(),
             actor: None,
@@ -16663,7 +16694,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject,
                 &request_hash[..24]
             )),
-        })?;
+        })? };
         // The reviewer's answer, read by the rule that takes an answered review off the
         // reviewers' list: a later result on the operation (another actor's, an unbound one)
         // cannot hide it and leave a gate nobody can answer.
