@@ -656,6 +656,12 @@ identifiers on Retry. Replies continue to use the existing thread's stored
 participants, regardless of later routing policy. Storybook's
 `Fractal/App/Threads/Start recipient` covers every state.
 
+While a first send is pending, the draft remains visible and read-only with a
+`Sending…` status. Send is focusable but announced as disabled using
+`aria-disabled`; pointer and keyboard activation cannot submit another request.
+This preserves the composer's existing focusable, explained blocked-control
+convention rather than removing the control from the keyboard sequence.
+
 ## Independent resolved Inbox discussions
 
 Resolved Inbox asks, authored steps and typed notices retain the same Start

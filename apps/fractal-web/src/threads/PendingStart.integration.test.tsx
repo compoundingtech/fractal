@@ -7,6 +7,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
+import { userEvent } from 'storybook/test'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { observed, type Feed } from '../data/source.ts'
@@ -119,7 +120,16 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
     expect(host.querySelector('textarea')).toBe(input)
     expect(input?.value).toBe(content)
     expect(input?.readOnly).toBe(true)
-    expect(host.querySelector('button[aria-label="Send"]')?.getAttribute('aria-disabled')).toBe('true')
+    const sendButton = host.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!
+    expect(sendButton.getAttribute('aria-disabled')).toBe('true')
+    expect([...host.querySelectorAll('[role="status"]')].some(row => row.textContent === 'Sending…')).toBe(true)
+    await act(async () => sendButton.click())
+    expect(writes).toHaveLength(1)
+    sendButton.focus()
+    expect(document.activeElement).toBe(sendButton)
+    await act(async () => userEvent.keyboard('{Enter} '))
+    expect(document.activeElement).toBe(sendButton)
+    expect(writes).toHaveLength(1)
     expect(button('Retry thread start')).toBeUndefined()
     await act(async () => loseFirst())
     await vi.waitFor(() => expect(button('Retry thread start')?.disabled, host.textContent ?? '').toBe(false))
