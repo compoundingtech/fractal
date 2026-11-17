@@ -172,9 +172,14 @@ on iOS), not a purgeable cache. Before SQLite opens, the optional native files
 module creates and excludes both this directory and its `spool` subdirectory from
 backup, then reads each flag back using fresh resource-value URLs. The JS gate
 requires both read-backs and the exact SQLite directory; missing module, mismatched
-path, false flag or opener failure raises `OutboxStorageProtectionError` with mode
+path or a false flag raises `OutboxStorageProtectionError` with mode
 `unprotected-storage` and `keepDraft: true`, never legacy-send fallback. SQLite
 loads only after that gate so older installed binaries fail closed.
+Native I/O, locked/unreadable storage and database-open failures instead raise
+`OutboxStorageUnavailableError` (`storage-unavailable`, retry later, draft kept).
+They do not manufacture corruption rows or erase recovery records. Root and spool
+directories use `completeUntilFirstUserAuthentication`, including existing roots;
+actual first-unlock/lock behavior still requires native verification.
 The factory is not connected to production sending. Normal Expo local-module
 autolinking/prebuild/Pods and a rebuilt installed binary are still required; no
 generated native files were hand-edited. JS fake-bridge and Node SQLite tests do

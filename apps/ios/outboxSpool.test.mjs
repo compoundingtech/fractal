@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createMemoryOutboxRepository } from '../../clients/typescript/fractal-client/testSupport.ts';
-import { acceptProtectedOutboxIntent, readOutboxAttachment, requireProtectedOutboxStorage, openProtectedOutboxStorage, OutboxStorageProtectionError } from './outboxSpool.ts';
+import { acceptProtectedOutboxIntent, readOutboxAttachment, requireProtectedOutboxStorage, openProtectedOutboxStorage, OutboxStorageProtectionError, OutboxStorageUnavailableError, outboxStorageOperation } from './outboxSpool.ts';
+import { createSqliteOutboxRepository, OutboxCorruptionError } from './outboxSqlite.ts';
 
 const directory = '/private/app/Documents/SQLite/fractal-outbox';
 const scope = { principalId: 'profile/avery', deploymentId: '["host/original","key/original"]', memberId: 'member/original' };
 const sha256 = async bytes => new Uint8Array(createHash('sha256').update(bytes).digest());
 const image = (text = 'original bytes') => ({ key: text, base64: Buffer.from(text).toString('base64'), bytes: Buffer.byteLength(text), mediaType: 'image/png', name: 'private.png' });
 const unavailable = error => error instanceof OutboxStorageProtectionError && error.mode === 'unprotected-storage' && error.keepDraft === true;
+const retryLater = error => error instanceof OutboxStorageUnavailableError && error.mode === 'storage-unavailable' && error.retryLater && error.keepDraft && !(error instanceof OutboxCorruptionError);
 
 // Fake bridge exercises JS policy only. Actual Swift file flags/sync require the later build.
 const setup = () => {
@@ -36,7 +38,7 @@ test('repository open requires both backup exclusion read-backs before opening S
   const t = setup();
   assert.equal(await openProtectedOutboxStorage(t.bridge, async proof => { t.events.push('open'); assert.equal(proof.databaseDirectory, directory); return 'opened'; }), 'opened');
   assert.deepEqual(t.events, ['read-back', 'open']);
-  for (const bridge of [undefined, null, { ...t.bridge, prepareStorage: async () => { throw new Error('native unavailable'); } }]) {
+  for (const bridge of [undefined, null]) {
     await assert.rejects(openProtectedOutboxStorage(bridge, async () => assert.fail('must not open')), unavailable);
   }
   for (const field of ['databaseExcludedFromBackup', 'spoolExcludedFromBackup']) {
@@ -79,7 +81,7 @@ test('same content reuses a content-hash file; no delete API or automatic orphan
   await acceptProtectedOutboxIntent(t.repository, t.bridge, directory, sha256, 'attempt/second', 'second', [image()]);
   assert.equal(t.files.size, 1);
   t.repository.commit = async () => { throw new Error('disk full'); };
-  await assert.rejects(acceptProtectedOutboxIntent(t.repository, t.bridge, directory, sha256, 'attempt/failed', 'keep draft', [image('orphan retained')]), unavailable);
+  await assert.rejects(acceptProtectedOutboxIntent(t.repository, t.bridge, directory, sha256, 'attempt/failed', 'keep draft', [image('orphan retained')]), retryLater);
   assert.equal(t.files.size, 2);
   assert.equal(await t.repository.read('attempt/failed'), undefined);
 });
@@ -91,7 +93,7 @@ test('partial write, wrong descriptor, commit refusal and storage failure retain
     if (failure === 'descriptor') t.bridge.writeAttachment = async () => ({ reference: 'spool/wrong', contentHash: 'sha256:wrong', bytes: 0 });
     if (failure === 'commit') t.repository.commit = async () => false;
     if (failure === 'throw') t.repository.commit = async () => { throw new Error('transaction failure'); };
-    await assert.rejects(acceptProtectedOutboxIntent(t.repository, t.bridge, directory, sha256, 'attempt/original', draft.text, draft.images), unavailable);
+    await assert.rejects(acceptProtectedOutboxIntent(t.repository, t.bridge, directory, sha256, 'attempt/original', draft.text, draft.images), failure === 'write' || failure === 'throw' ? retryLater : unavailable);
     assert.deepEqual(draft, before);
     assert.equal(await t.repository.read('attempt/original'), undefined);
   }
@@ -125,5 +127,23 @@ test('authored native module registers backup read-back and immutable spool with
   assert.match(swift, /Darwin.link\(source, target\)/);
   assert.match(swift, /handle.synchronize\(\)/);
   assert.doesNotMatch(swift, /AsyncFunction\("delete/);
+  assert.match(swift, /protectionKey: FileProtectionType.completeUntilFirstUserAuthentication/);
+  assert.match(swift, /setAttributes\(\[.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication\]/);
   // Static source assertions are NOT native compilation, flag readback or crash proof.
+});
+
+test('locked native storage, SQLite open and read failures are retry-later, never damaged recovery rows', async () => {
+  const t = setup(), locked = new Error('Operation not permitted while locked');
+  await assert.rejects(openProtectedOutboxStorage({ ...t.bridge, prepareStorage: async () => { throw locked; } },
+    async () => assert.fail('locked storage must not open')), error => retryLater(error) && error.cause === locked);
+  await assert.rejects(openProtectedOutboxStorage(t.bridge, async () => { throw locked; }),
+    error => retryLater(error) && error.cause === locked);
+  const failedRead = () => outboxStorageOperation(async () => { throw locked; });
+  const repository = createSqliteOutboxRepository({ all: failedRead, get: failedRead }, scope);
+  await assert.rejects(repository.list(), retryLater);
+  await assert.rejects(repository.read('attempt/original'), retryLater);
+  const record = await acceptProtectedOutboxIntent(t.repository, t.bridge, directory, sha256, 'attempt/original', 'draft', [image()]);
+  t.bridge.readAttachment = async () => { throw locked; };
+  await assert.rejects(readOutboxAttachment(t.bridge, directory, sha256, record.intent.attachments[0].reference), retryLater);
+  assert.deepEqual(await t.repository.read(record.id), record);
 });

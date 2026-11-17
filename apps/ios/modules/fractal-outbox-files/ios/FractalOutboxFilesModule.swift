@@ -59,9 +59,11 @@ public final class FractalOutboxFilesModule: Module {
     let spool = root.appendingPathComponent("spool", isDirectory: true)
     for original in [root, spool] {
       try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true,
-        attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.complete])
+        attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
       let attributes = try original.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
       guard attributes.isDirectory == true && attributes.isSymbolicLink != true else { throw failure("Invalid private outbox directory") }
+      // Upgrade existing roots too; createDirectory attributes only apply on creation.
+      try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], atPath: original.path)
       var url = original
       var values = URLResourceValues()
       values.isExcludedFromBackup = true // NSURLIsExcludedFromBackupKey

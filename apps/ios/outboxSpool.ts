@@ -27,12 +27,31 @@ export class OutboxStorageProtectionError extends Error {
   }
 }
 
+/** Transient access/open failure is not evidence that a stored row is damaged. */
+export class OutboxStorageUnavailableError extends Error {
+  readonly mode = 'storage-unavailable';
+  readonly keepDraft = true;
+  readonly retryLater = true;
+  constructor(cause?: unknown) {
+    super('Storage unavailable, retry later. Your draft and recovery records are kept.', { cause });
+    this.name = 'OutboxStorageUnavailableError';
+  }
+}
+
+export const outboxStorageOperation = async <TResult>(operation: () => Promise<TResult>): Promise<TResult> => {
+  try { return await operation(); }
+  catch (error) {
+    if (error instanceof OutboxStorageUnavailableError || error instanceof OutboxStorageProtectionError) throw error;
+    throw new OutboxStorageUnavailableError(error);
+  }
+};
+
 export const requireProtectedOutboxStorage = async (
   bridge: OutboxFilesBridge | null | undefined, databaseDirectory?: string,
 ): Promise<OutboxStorageProtection> => {
   if (!bridge) throw new OutboxStorageProtectionError();
   try {
-    const proof = await bridge.prepareStorage();
+    const proof = await outboxStorageOperation(() => bridge.prepareStorage());
     if (proof.databaseExcludedFromBackup !== true || proof.spoolExcludedFromBackup !== true
       || !proof.databaseDirectory || (databaseDirectory !== undefined && proof.databaseDirectory !== databaseDirectory)
       || proof.spoolDirectory !== `${proof.databaseDirectory}/spool`) {
@@ -40,7 +59,7 @@ export const requireProtectedOutboxStorage = async (
     }
     return Object.freeze({ ...proof });
   } catch (error) {
-    if (error instanceof OutboxStorageProtectionError) throw error;
+    if (error instanceof OutboxStorageProtectionError || error instanceof OutboxStorageUnavailableError) throw error;
     throw new OutboxStorageProtectionError(error);
   }
 };
@@ -53,8 +72,8 @@ export const openProtectedOutboxStorage = async <TResult>(
 ): Promise<TResult> => {
   try { return await open(await requireProtectedOutboxStorage(bridge)); }
   catch (error) {
-    if (error instanceof OutboxStorageProtectionError) throw error;
-    throw new OutboxStorageProtectionError(error);
+    if (error instanceof OutboxStorageProtectionError || error instanceof OutboxStorageUnavailableError) throw error;
+    throw new OutboxStorageUnavailableError(error);
   }
 };
 const contentHash = async (bytes: Uint8Array, sha256: OutboxHash): Promise<string> => {
@@ -80,7 +99,7 @@ export const acceptProtectedOutboxIntent = async (
       const bytes = decodeBase64(image.base64);
       if (bytes.length > MAX_BYTES || bytes.length !== image.bytes) throw new OutboxStorageProtectionError();
       const hash = await contentHash(bytes, sha256);
-      const stored = await bridge.writeAttachment(image.base64, hash);
+      const stored = await outboxStorageOperation(() => bridge.writeAttachment(image.base64, hash));
       if (stored.contentHash !== hash || stored.reference !== referenceFor(hash) || stored.bytes !== bytes.length) {
         throw new OutboxStorageProtectionError();
       }
@@ -89,10 +108,10 @@ export const acceptProtectedOutboxIntent = async (
     }
     const intent: OutboxIntent = Object.freeze({ text, attachments: Object.freeze(attachments) });
     const record = createOutboxRecord(id, intent);
-    if (!await repository.commit(record)) throw new OutboxStorageProtectionError();
+    if (!await outboxStorageOperation(() => repository.commit(record))) throw new OutboxStorageProtectionError();
     return record;
   } catch (error) {
-    if (error instanceof OutboxStorageProtectionError) throw error;
+    if (error instanceof OutboxStorageProtectionError || error instanceof OutboxStorageUnavailableError) throw error;
     throw new OutboxStorageProtectionError(error);
   }
 };
@@ -103,7 +122,7 @@ export const readOutboxAttachment = async (
 ): Promise<Uint8Array> => {
   if (!/^spool\/[a-f0-9]{64}$/.test(reference)) throw new OutboxStorageProtectionError();
   await requireProtectedOutboxStorage(bridge, databaseDirectory);
-  const bytes = decodeBase64(await bridge.readAttachment(reference));
+  const bytes = decodeBase64(await outboxStorageOperation(() => bridge.readAttachment(reference)));
   if (bytes.length > MAX_BYTES || reference !== referenceFor(await contentHash(bytes, sha256))) {
     throw new OutboxStorageProtectionError();
   }

@@ -5,19 +5,19 @@ import type { OutboxSqlExecutor, OutboxSqlSession } from './outboxSqlite.ts';
 import type { OutboxScope, OutboxRepository } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import FractalOutboxFiles from './modules/fractal-outbox-files/index.ts';
-import { acceptProtectedOutboxIntent, openProtectedOutboxStorage, readOutboxAttachment, OutboxStorageProtectionError } from './outboxSpool.ts';
+import { acceptProtectedOutboxIntent, openProtectedOutboxStorage, readOutboxAttachment, OutboxStorageProtectionError, outboxStorageOperation } from './outboxSpool.ts';
 import type { OutboxHash } from './outboxSpool.ts';
 import type { Picked } from './images.ts';
 
 const arrayBufferBacked = (bytes: Uint8Array): bytes is Uint8Array<ArrayBuffer> => bytes.buffer instanceof ArrayBuffer;
 
 const sessionFor = (database: SQLiteDatabase): OutboxSqlSession => ({
-  exec: sql => database.execAsync(sql),
-  run: (sql, parameters) => database.runAsync(sql, [...parameters]),
+  exec: sql => outboxStorageOperation(() => database.execAsync(sql)),
+  run: (sql, parameters) => outboxStorageOperation(() => database.runAsync(sql, [...parameters])),
   get: async <TRow>(sql: string, parameters: readonly (string | number | null)[]) =>
-    (await database.getFirstAsync<TRow>(sql, [...parameters])) ?? undefined,
+    (await outboxStorageOperation(() => database.getFirstAsync<TRow>(sql, [...parameters]))) ?? undefined,
   all: <TRow>(sql: string, parameters: readonly (string | number | null)[]) =>
-    database.getAllAsync<TRow>(sql, [...parameters]),
+    outboxStorageOperation(() => database.getAllAsync<TRow>(sql, [...parameters])),
 });
 
 const executorFor = (database: SQLiteDatabase): OutboxSqlExecutor & { close(): Promise<void> } => {
