@@ -1,17 +1,20 @@
 /** Native root declarations; matches fractal-schema's github_capture_declarations reader. */
 import { node, type Node } from './kdl.ts'
 
-export interface GithubSourceInput {
+interface GithubSourceSettings {
   readonly name: string
   readonly host: string
   readonly generation: number
-  /** Reference to an explicitly admitted grant; declaring a source never creates a grant. */
-  readonly authorityGrant: string
   readonly repositories: readonly string[]
-  readonly enabled: boolean
   readonly checkpointEveryMs: number
   readonly replicatePrivate: boolean
 }
+
+/** Disabled configuration can precede authority admission; enabling requires its grant. */
+export type GithubSourceInput = GithubSourceSettings & (
+  | { readonly enabled: false; readonly authorityGrant?: string }
+  | { readonly enabled: true; readonly authorityGrant: string }
+)
 
 export interface GithubScopeMember {
   /** Stable GitHub repository node ID, not an owner/name locator. */
@@ -44,7 +47,8 @@ export const githubSource = (input: GithubSourceInput): Node => {
   if (!/^[a-z0-9.-]+$/u.test(input.host) || input.host.length > 255) throw new TypeError('github-source host must be a lowercase hostname')
   integer(input.generation, 'github-source generation')
   if (input.generation === 0) throw new TypeError('github-source generation must be positive')
-  nonempty(input.authorityGrant, 'github-source authorityGrant')
+  if (input.enabled && input.authorityGrant === undefined) throw new TypeError('enabled github-source requires authorityGrant')
+  if (input.authorityGrant !== undefined) nonempty(input.authorityGrant, 'github-source authorityGrant')
   integer(input.checkpointEveryMs, 'github-source checkpointEveryMs')
   if (input.checkpointEveryMs < 60_000) throw new TypeError('github-source checkpointEveryMs must be at least 60000')
   if (typeof input.enabled !== 'boolean' || typeof input.replicatePrivate !== 'boolean') throw new TypeError('github-source requires explicit enabled and replicatePrivate booleans')
@@ -54,7 +58,7 @@ export const githubSource = (input: GithubSourceInput): Node => {
   return node({ name: 'github-source', args: [input.name], children: [
     node({ name: 'host', args: [input.host] }),
     node({ name: 'generation', args: [input.generation] }),
-    node({ name: 'authority-grant', args: [input.authorityGrant] }),
+    ...(input.authorityGrant === undefined ? [] : [node({ name: 'authority-grant', args: [input.authorityGrant] })]),
     ...input.repositories.map((repository) => node({ name: 'repository', args: [repository] })),
     node({ name: 'enabled', args: [input.enabled] }),
     node({ name: 'checkpoint-every-ms', args: [input.checkpointEveryMs] }),

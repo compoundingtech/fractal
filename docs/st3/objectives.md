@@ -89,10 +89,12 @@ Root acquisition and membership declarations use `Fractal.githubSource` and
 `Fractal.githubScope` (also named package exports). They return KDL nodes for `emit` or
 `fractalKdl`, using the native schema declaration reader's fields:
 
-- `githubSource({ name, host, generation, authorityGrant, repositories, enabled,
+- `githubSource({ name, host, generation, authorityGrant?, repositories, enabled,
   checkpointEveryMs, replicatePrivate })`: repositories are unique `owner/name` locators;
-  the cadence is at least 60,000 ms. Both booleans and the grant reference are explicit.
-  This declaration does not create an observer, admit a grant, or activate acquisition.
+  the cadence is at least 60,000 ms. Both booleans are explicit. A disabled source
+  can omit `authorityGrant` and publish before authority admission; enabling requires
+  a nonempty admitted grant reference in both the TypeScript type and native validation.
+  This declaration creates neither an observer nor a grant.
   Each repository still needs an observer on the admitted acquisition member.
 - `githubScope({ name, revision, repositories: [{ repositoryId, fromMs, untilMs? }] })`:
   repository IDs are stable GitHub node IDs, not locators. Membership is half-open
@@ -102,8 +104,9 @@ Root acquisition and membership declarations use `Fractal.githubSource` and
   JavaScript integers rather than rounding native timestamps.
 
 Private policy belongs in its owning declaration source, not the built-in daemon objectives.
-It must supply the source identity, authority reference, effective-dated versioned roster and
-timezone before declaring source-backed objectives. A throughput policy of at least twenty
+It supplies source identity, effective-dated versioned roster and timezone before
+declaring source-backed objectives, and selects an admitted authority before enabling
+acquisition. A throughput policy of at least twenty
 merges per rolling hour is `target "per-hour" min=20`; true ready-to-merged remains
 `measurement "only"` without targets. Neither repository discovery nor another workflow's
 roster establishes that policy or its historical effective dates.

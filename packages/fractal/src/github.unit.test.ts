@@ -3,7 +3,7 @@ import { Fractal, emit, githubScope, githubSource } from './index.ts'
 import type { GithubScopeInput, GithubSourceInput } from './github.ts'
 
 const source: GithubSourceInput = {
-  name: 'sample', host: 'github.com', generation: 1, authorityGrant: 'grant/sample',
+  name: 'sample', host: 'github.com', generation: 1,
   repositories: ['acme/widgets'], enabled: false, checkpointEveryMs: 60_000, replicatePrivate: false,
 }
 const scope: GithubScopeInput = {
@@ -17,18 +17,26 @@ describe('native GitHub root declarations', () => {
     expect(Fractal.githubScope).toBe(githubScope)
   })
 
-  it('renders every explicit acquisition setting without admitting a grant or enabling acquisition', () => {
+  it('renders disabled acquisition settings before any authority grant exists', () => {
     expect(emit([githubSource(source)])).toBe(`version 2
 github-source "sample" {
   host "github.com"
   generation 1
-  authority-grant "grant/sample"
   repository "acme/widgets"
   enabled #false
   checkpoint-every-ms 60000
   replicate-private #false
 }
 `)
+  })
+
+  it('requires an admitted grant when enabling but permits a selected grant while disabled', () => {
+    expect(() => Reflect.apply(githubSource, undefined, [{ ...source, enabled: true }]))
+      .toThrow('enabled github-source requires authorityGrant')
+    expect(emit([githubSource({ ...source, enabled: true, authorityGrant: 'grant/sample' })]))
+      .toContain('authority-grant "grant/sample"')
+    expect(emit([githubSource({ ...source, authorityGrant: 'grant/sample' })]))
+      .toContain('authority-grant "grant/sample"')
   })
 
   it('renders effective half-open membership intervals and an explicit revision', () => {
