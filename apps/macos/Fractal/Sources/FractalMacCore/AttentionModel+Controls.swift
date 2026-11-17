@@ -28,6 +28,7 @@ extension AttentionModel {
     }
     for record in rowsInPanel.values { await markSeen(record) }
     await readOpenPage()
+    await warmDetails()
   }
 
   /// A card's row is in the panel (or reached a new revision there): seen if the panel is visible.

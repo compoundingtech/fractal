@@ -5,12 +5,11 @@ import XCTest
 @testable import FractalMacCore
 @testable import FractalMac
 
-/// A card's page as the adapter reads it from a scripted client-v0 member: the row again with its
-/// whole request, the work step, the asker's timeline, and GitHub state for its subjects.
+/// The list carries the full request; page reads only enrich it with work and subject state.
 final class AttentionContextAdapterTests: XCTestCase {
   let controls = AttentionControlAdapterTests()
 
-  func testThePageReadsTheRowAgainAndItsWorkStep() async throws {
+  func testThePageUsesTheListRequestWithoutReadingTheRowAgain() async throws {
     let request = #"""
       ,"request":{"version":1,"type":"decision","question":"Ship **it**?","why_person":"Your Mac.",
        "summary":" ","reasons":["green"," "],"recommendation":{"answer":"ship","reason":"Reversible."},
@@ -24,12 +23,12 @@ final class AttentionContextAdapterTests: XCTestCase {
        "last_progress":"Waiting for the go-ahead.","progress_at":"2026-10-19T11:59:00Z","attempt":1,"readiness_epoch":1,
        "blockers":[],"goals":["Ship"],"constraints":[]}
       """#
-    let adapter = controls.adapter([(200, controls.envelope(row)), (200, controls.envelope(work))])
-    let record = Fixture.record()
+    let adapter = controls.adapter([(200, controls.envelope(work))])
+    let record = try snapshot(row)
 
     let context = try await adapter.readContext(record)
 
-    XCTAssertEqual(ScriptedMember.requests.map(\.path), ["/v1/client/attention/attention/one", "/v1/client/work/step-run/7"])
+    XCTAssertEqual(ScriptedMember.requests.map(\.path), ["/v1/client/work/step-run/7"])
     let read = try XCTUnwrap(context.request)
     XCTAssertEqual(read.question, "Ship **it**?")
     XCTAssertEqual(read.whyPerson, "Your Mac.")
@@ -53,12 +52,17 @@ final class AttentionContextAdapterTests: XCTestCase {
       {"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"req/2",
        "code":"forbidden","message":"read.projections is not granted","retryable":false,"details":{}}
       """#
-    let adapter = controls.adapter([(200, controls.envelope(row)), (403, refused)])
+    let adapter = controls.adapter([(403, refused)])
 
-    let context = try await adapter.readContext(Fixture.record())
+    let context = try await adapter.readContext(snapshot(row))
 
     XCTAssertNil(context.work)
     XCTAssertNotNil(context.workFailure)
+  }
+
+  private func snapshot(_ row: String) throws -> AttentionRecord {
+    let item = try JSONDecoder().decode(AttentionResource.self, from: Data(row.utf8))
+    return try FractalAttentionAdapter.record(item, fractalURL: Fixture.url)
   }
 
   /// A row whose request is about one subject.
@@ -78,13 +82,13 @@ final class AttentionContextAdapterTests: XCTestCase {
   func testAPullRequestsStateIsReadThroughTheGitHubPlugin() async throws {
     let subject = #"{"kind":"pull_request","label":"dotfiles#9344","url":"https://github.com/schickling/dotfiles/pull/9344","revision":"df686c"}"#
     let plugin = #"{"status":"found","stale":false,"item":{"state":"open","draft":false,"head_sha":"0123abcd"}}"#
-    let adapter = controls.adapter([(200, controls.envelope(row(about: subject))), (200, controls.envelope(plugin))])
+    let adapter = controls.adapter([(200, controls.envelope(plugin))])
 
-    let context = try await adapter.readContext(Fixture.record())
+    let context = try await adapter.readContext(snapshot(row(about: subject)))
 
     XCTAssertEqual(
       ScriptedMember.requests.map(\.path),
-      ["/v1/client/attention/attention/one", "/v1/client/plugins/github/schickling/dotfiles/pulls/9344"],
+      ["/v1/client/plugins/github/schickling/dotfiles/pulls/9344"],
       "a card that is not a step run reads no work step")
     XCTAssertEqual(context.request?.subjects.first?.status, .state("open", headChanged: true))
   }
@@ -92,10 +96,10 @@ final class AttentionContextAdapterTests: XCTestCase {
   func testAnIssueAnOlderMemberCannotReadShowsUnavailableAndKeepsTheRequest() async throws {
     let subject = #"{"kind":"issue","label":"dotfiles#9358","ref":"resource/github/schickling/dotfiles/issue/9358"}"#
     let adapter = controls.adapter([
-      (200, controls.envelope(row(about: subject))), (404, failure("not-found", "no route for plugins/github")),
+      (404, failure("not-found", "no route for plugins/github")),
     ])
 
-    let context = try await adapter.readContext(Fixture.record())
+    let context = try await adapter.readContext(snapshot(row(about: subject)))
 
     XCTAssertEqual(ScriptedMember.requests.last?.path, "/v1/client/plugins/github/schickling/dotfiles/issues/9358")
     XCTAssertEqual(context.request?.question, "Ship?", "the request shows without the subject's state")
@@ -134,6 +138,25 @@ final class AttentionContextAdapterTests: XCTestCase {
     } catch {
       XCTAssertEqual(String(describing: error), "no such session (not-found)")
     }
+  }
+
+  func testExcerptDeduplicatesDeliveryBeforeLimitingTurns() throws {
+    var items = (0..<ConversationExcerpt.turnLimit).map { index in
+      #"{"id":"e\#(index)","sequence":\#(index),"revision":1,"timestamp":"2026-10-19T11:50:00Z","role":"user","type":"content","final":true,"body":{"media_type":"text/plain","text":"Message \#(index)"}}"#
+    }
+    let last = ConversationExcerpt.turnLimit - 1
+    items.append(
+      #"{"id":"delivery","sequence":100,"revision":1,"timestamp":"2026-10-19T11:50:00Z","role":"user","type":"content","final":true,"body":{"media_type":"text/plain","text":"<smalltalk-message from=\"person/ada\">Message \#(last)</smalltalk-message>"}}"#)
+    let json = #"{"kind":"timeline","session_id":"session/1","items":[\#(items.joined(separator: ","))],"page":{"limit":40,"has_more":false}}"#
+    let page = try JSONDecoder().decode(TimelinePage.self, from: Data(json.utf8))
+
+    let excerpt = FractalAttentionAdapter.excerpt(page, conversationID: "agent/builder")
+
+    XCTAssertEqual(excerpt.turns.count, ConversationExcerpt.turnLimit)
+    XCTAssertEqual(excerpt.turns.first?.text, "Message 0", "a duplicate must not displace a readable turn")
+    guard case .delivery(let prompt) = excerpt.turns.last?.body else { return XCTFail("Expected one attributed prompt") }
+    XCTAssertEqual(prompt.text, "Message \(last)")
+    XCTAssertFalse(excerpt.hasEarlier, "a deduplicated prompt is not an earlier readable turn")
   }
 
   func testAnAttachmentIsReadAsABlobByTheStepRunCarryingIt() async throws {

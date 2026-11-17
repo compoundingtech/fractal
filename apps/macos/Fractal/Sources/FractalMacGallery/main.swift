@@ -175,7 +175,7 @@ for entry in variantScenarios where wanted.isEmpty || wanted.contains(entry.scen
     guard
       let png = await PanelSnapshot.png(
         model: model, build: GalleryBuild.identity, appearance: appearance.value, variant: entry.variant,
-        scrollHeight: PanelSnapshot.compactScrollHeight),
+        scrollHeight: entry.scrollHeight ?? PanelSnapshot.compactScrollHeight),
       let bitmap = NSBitmapImageRep(data: png)
     else { fail("could not render \(scenario.id) \(appearance.name)", code: 1) }
     let file = "\(scenario.id)-\(appearance.name).png"

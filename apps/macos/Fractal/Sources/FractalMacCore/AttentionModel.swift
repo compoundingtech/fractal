@@ -38,7 +38,7 @@ public protocol AttentionAdapter: Sendable {
   func submit(_ submission: WorkDoneSubmission) async throws
   /// Returns only once Fractal committed the control; throws `AnswerRefused` otherwise.
   func control(_ submission: AttentionControlSubmission) async throws
-  /// One card's detail as Fractal holds it now: the full request and the work it belongs to.
+  /// Enriches a card's list snapshot with current work and linked-subject state.
   func readContext(_ record: AttentionRecord) async throws -> AttentionContext
   /// The requesting agent's recent conversation (at most `ConversationExcerpt.turnLimit` turns),
   /// or nil when the card names no agent conversation.
@@ -119,13 +119,17 @@ public enum AnswerState: Sendable, Equatable {
   /// The page the person last went back from, so the page below returns VoiceOver focus to the
   /// row or tile that opened it; nil once another page opens or the panel closes.
   public internal(set) var backFrom: PanelRoute?
-  /// Each open card's detail and its asker's conversation, read when its page opens and again
-  /// on every refresh while it is open on screen; a failed read keeps the last one, marked stale.
+  /// Bounded detail enrichment and conversation cache, shared by opening and serial prefetch.
+  /// Stale reads keep their last content while revalidating; each section publishes independently.
   public internal(set) var contexts: [String: LiveSection<AttentionContext>] = [:]
   public internal(set) var excerpts: [String: LiveSection<ConversationExcerpt?>] = [:]
   // Successful identical polls advance freshness without invalidating page content.
   @ObservationIgnored var contextReadAt: [String: Date] = [:]
   @ObservationIgnored var excerptReadAt: [String: Date] = [:]
+  @ObservationIgnored var detailReads: [String: (revision: String, task: Task<Void, Never>)] = [:]
+  @ObservationIgnored var detailRevisions: [String: String] = [:]
+  @ObservationIgnored var detailAccess: [String] = []
+  @ObservationIgnored var isWarmingDetails = false
   /// Image attachments by SHA-256; content-addressed, so read once, and kept only while a
   /// kept context still names them.
   public internal(set) var attachments: [String: LiveSection<Data>] = [:]
@@ -218,8 +222,10 @@ public enum AnswerState: Sendable, Equatable {
         }
       }
     } while refreshAgain
-    // A page nobody sees is not polled: the panel re-reads it when it comes on screen.
-    if isPanelVisible { await readOpenPage(now: now) }
+    if isPanelVisible {
+      await readOpenPage(now: now)
+      await warmDetails(now: now)
+    }
     considerSpeech(now: now ?? .now)
   }
 
@@ -249,6 +255,7 @@ public enum AnswerState: Sendable, Equatable {
     snoozeClock = now ?? .now
     prune(page)
     scheduleSnoozeEnd()
+    keepDetails(page)
   }
 
   /// Histories follow the rows: when the rows cannot be read, neither section is current.
