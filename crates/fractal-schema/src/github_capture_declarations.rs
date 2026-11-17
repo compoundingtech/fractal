@@ -43,11 +43,16 @@ pub fn parse_source(node: &Value) -> Result<SourceDefinition, String> {
     let text = |key: &str| scalar.get(key).and_then(|value| value.as_str()).filter(|value| !value.is_empty()).map(str::to_owned).ok_or_else(|| format!("source needs {key} string"));
     let number = |key: &str| scalar.get(key).and_then(|value| value.as_u64()).ok_or_else(|| format!("source needs {key} integer"));
     let boolean = |key: &str| scalar.get(key).and_then(|value| value.as_bool()).ok_or_else(|| format!("source needs explicit {key} boolean"));
+    let enabled = boolean("enabled")?;
+    let authority_grant = scalar.get("authority-grant").map(|_| text("authority-grant")).transpose()?;
+    if enabled && authority_grant.is_none() {
+        return Err("enabled github-source requires an authority-grant".into());
+    }
     let definition = SourceDefinition {
         source: Source { host: text("host")?, id: id.to_owned(), generation: number("generation")? },
-        authority_grant: text("authority-grant")?,
+        authority_grant,
         repositories: repositories.into_iter().collect(),
-        enabled: boolean("enabled")?,
+        enabled,
         checkpoint_interval_ms: number("checkpoint-every-ms")?,
         replicate_private: boolean("replicate-private")?,
     };
@@ -105,5 +110,31 @@ mod tests {
         let duplicate = roster["children"][1].clone();
         roster["children"].as_array_mut().unwrap().push(duplicate);
         assert!(parse_roster(&roster).is_err());
+    }
+
+    #[test]
+    fn disabled_source_bootstraps_without_authority_but_enabling_requires_it() {
+        let mut source = json!({"name":"github-source","arguments":["sample"],"children":[
+            {"name":"host","arguments":["github.com"]},
+            {"name":"generation","arguments":[1]},
+            {"name":"repository","arguments":["acme/garden"]},
+            {"name":"enabled","arguments":[false]},
+            {"name":"checkpoint-every-ms","arguments":[60000]},
+            {"name":"replicate-private","arguments":[false]}
+        ]});
+        let disabled = parse_source(&source).unwrap();
+        assert_eq!(disabled.authority_grant, None);
+        assert!(serde_json::to_value(&disabled).unwrap().get("authority_grant").is_none());
+        source["children"][3]["arguments"] = json!([true]);
+        assert_eq!(parse_source(&source).unwrap_err(), "enabled github-source requires an authority-grant");
+        source["children"].as_array_mut().unwrap().push(json!({"name":"authority-grant","arguments":["grant-one"]}));
+        assert_eq!(parse_source(&source).unwrap().authority_grant.as_deref(), Some("grant-one"));
+        for invalid in [json!(""), json!(false), Value::Null] {
+            source["children"][6]["arguments"] = json!([invalid]);
+            assert!(parse_source(&source).is_err());
+            source["children"][3]["arguments"] = json!([false]);
+            assert!(parse_source(&source).is_err(), "disabled sources cannot use an invalid grant sentinel");
+            source["children"][3]["arguments"] = json!([true]);
+        }
     }
 }

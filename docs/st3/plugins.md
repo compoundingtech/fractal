@@ -57,7 +57,10 @@ unfenced writer. Corrected images explicitly supersede their previous revision.
 
 Capture runs inside the existing `github.repository` observer, sharing its HTTP/auth
 budget and continuation timer. A `github-source` declaration alone creates neither
-an observer nor an authority. Private replication requires explicit admission.
+an observer nor an authority. A disabled declaration may omit `authority-grant` and
+publish before grant admission. Enabling without a nonempty grant reference is a
+typed native validation error; select the admitted grant before acquisition starts.
+Private replication requires explicit admission.
 The current routing contract supports `github.com` through `https://api.github.com`;
 undeclared enterprise mappings fail closed rather than guessing a credential route.
 

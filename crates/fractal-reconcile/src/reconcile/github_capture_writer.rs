@@ -80,7 +80,7 @@ fn commit(store: &Store, connection: &mut Connection, definition: &SourceDefinit
     let source = projection_key(definition)?;
     let (sequence, predecessor) = current_head(connection,&source)?;
     let capture = CaptureCommit { version:VERSION,source:definition.source.clone(),epoch:grant.epoch,
-        authority_grant:definition.authority_grant.clone(),
+        authority_grant:selected_authority(definition)?.to_owned(),
         sequence:sequence.checked_add(1).context("source sequence overflow")?,predecessor,
         facts,checkpoint,coverage,observed_at_ms:now };
     let digest = capture.digest()?;
@@ -100,7 +100,8 @@ fn image_revision(connection: &Connection, definition: &SourceDefinition, image:
 }
 
 fn writer_grant(connection: &Connection, definition: &SourceDefinition, member: &str) -> Result<AuthorityGrant> {
-    let Some((grant,_)) = held::<AuthorityGrant>(connection,&definition.authority_grant,AUTHORITY_KIND)? else { anyhow::bail!("source authority grant is not present") };
+    let authority = selected_authority(definition)?;
+    let Some((grant,_)) = held::<AuthorityGrant>(connection,authority,AUTHORITY_KIND)? else { anyhow::bail!("source authority grant is not present") };
     ensure!(grant.source == definition.source && grant.member == member, "member is not the designated source authority");
     ensure!(authority_chain(connection,definition)?.is_some(), "source authority transfer dependencies are not ready");
     let mut statement = connection.prepare("SELECT record,origin FROM capture_v1_claims WHERE source=?1 AND kind=?2 LIMIT 129")?;
@@ -111,7 +112,7 @@ fn writer_grant(connection: &Connection, definition: &SourceDefinition, member: 
         let (record,origin) = row?;
         let receipt: FenceReceipt = serde_json::from_str(&record)?;
         ensure!(!(receipt.source == definition.source && receipt.epoch == grant.epoch
-            && receipt.authority_grant == definition.authority_grant
+            && receipt.authority_grant == authority
             && receipt.member == grant.member && receipt.member == origin),
             "the selected source writer has been fenced and cannot resume");
     }
@@ -174,6 +175,7 @@ impl GitHubCaptureLedger for GraphGitHubCaptureLedger {
                 }
             }
             let Some(definition) = selected else { return Ok(CaptureProgress { active:false,continue_after_ms:None }) };
+            let authority = selected_authority(&definition)?;
             validate_api_identity(&definition.source, api_base)?;
             let plugin = GithubPluginStore::shared(&self.state_dir)?;
             let source_work = work_handle(&self.state_dir,&definition.source)?;
@@ -184,7 +186,7 @@ impl GitHubCaptureLedger for GraphGitHubCaptureLedger {
                 if !ready(&self.store,&mut connection,&definition)? {
                     return Ok(CaptureProgress { active:true,continue_after_ms:Some(1000) });
                 }
-                if held::<AuthorityGrant>(&connection,&definition.authority_grant,AUTHORITY_KIND)?
+                if held::<AuthorityGrant>(&connection,authority,AUTHORITY_KIND)?
                     .is_some_and(|(grant,_)|grant.member != self.store.origin()) {
                     return Ok(CaptureProgress {active:false,continue_after_ms:None});
                 }
@@ -197,7 +199,7 @@ impl GitHubCaptureLedger for GraphGitHubCaptureLedger {
                 let previous = node_id.as_deref().map(|id|checkpoint(&connection,&definition,id)).transpose()?.flatten();
                 (grant,previous)
             };
-            if work.grant != definition.authority_grant { work.acquisitions.clear();work.grant=definition.authority_grant.clone(); }
+            if work.grant != authority { work.acquisitions.clear();work.grant=authority.to_owned(); }
             if !work.acquisitions.contains_key(repository) {
                 let previous: AcquisitionCheckpoint = previous.and_then(|checkpoint|checkpoint.cursor)
                     .map(|cursor|serde_json::from_str(&cursor)).transpose()?.unwrap_or_default();
@@ -247,14 +249,14 @@ fn page_repository(connection:&Connection,definition:&SourceDefinition,locator:&
 /// Serialize with acquisition, then durably stop the exact authority before a successor is admitted.
 pub async fn fence_source(store:&Store,state_dir:&Path,source_id:&str)->Result<ClaimRecord> {
     let definition=selected_source(store,source_id)?.context("source is not declared")?;
-    fence_source_checked(store,state_dir,source_id,&definition.source,&definition.authority_grant).await
+    fence_source_checked(store,state_dir,source_id,&definition.source,selected_authority(&definition)?).await
 }
 
 /// Fence only the generation and grant the operator inspected, including on retries.
 pub async fn fence_source_checked(store:&Store,state_dir:&Path,source_id:&str,
     expected_source:&Source,expected_grant:&str)->Result<ClaimRecord> {
     let definition=selected_source(store,source_id)?.context("source is not declared")?;
-    ensure!(&definition.source==expected_source && definition.authority_grant==expected_grant,
+    ensure!(&definition.source==expected_source && definition.authority_grant.as_deref()==Some(expected_grant),
         "source authority changed before fencing");
     let handle=work_handle(state_dir,&definition.source)?;
     let mut work=handle.lock().await;
@@ -263,7 +265,7 @@ pub async fn fence_source_checked(store:&Store,state_dir:&Path,source_id:&str,
     let plugin=GithubPluginStore::shared(state_dir)?;
     let mut connection=plugin.connection.lock().unwrap_or_else(PoisonError::into_inner);
     ensure!(ready(store,&mut connection,&definition)?,"source projection is catching up");
-    let grant=held::<AuthorityGrant>(&connection,&definition.authority_grant,AUTHORITY_KIND)?
+    let grant=held::<AuthorityGrant>(&connection,expected_grant,AUTHORITY_KIND)?
         .context("source authority grant is not present")?.0;
     ensure!(grant.source==definition.source && grant.member==store.origin(),
         "member is not the designated source authority");
@@ -274,10 +276,10 @@ pub async fn fence_source_checked(store:&Store,state_dir:&Path,source_id:&str,
     }
     writer_grant(&connection,&definition,store.origin())?;
     let receipt=FenceReceipt {version:VERSION,source:definition.source.clone(),member:store.origin().to_owned(),epoch:grant.epoch,
-        authority_grant:definition.authority_grant.clone(),final_commit:frontier,stopped_at_ms:now_ms()?};
+        authority_grant:expected_grant.to_owned(),final_commit:frontier,stopped_at_ms:now_ms()?};
     work.acquisitions.clear();
     let subject=format!("github-source/{}",definition.source.id);
-    let key=format!("github-fenced:{}:{}:{}",source_key(&definition.source)?,definition.authority_grant,grant.epoch);
+    let key=format!("github-fenced:{}:{}:{}",source_key(&definition.source)?,expected_grant,grant.epoch);
     let claim=append_record(store,subject,FENCED_KIND,&receipt,key)?;
     ingest(store,&mut connection)?;
     Ok(claim)
@@ -293,7 +295,7 @@ fn existing_fence(store:&Store,connection:&Connection,definition:&SourceDefiniti
         ensure!(count<=128,"source fencing history exceeds bounded admission read");
         let (id,record,origin)=row?;
         let receipt:FenceReceipt=serde_json::from_str(&record)?;
-        if receipt.source==definition.source && receipt.authority_grant==definition.authority_grant
+        if receipt.source==definition.source && Some(receipt.authority_grant.as_str())==definition.authority_grant.as_deref()
             && receipt.epoch==grant.epoch && receipt.member==grant.member && receipt.member==origin {
             ensure!(receipt.final_commit.as_deref()==frontier,"fenced frontier changed after writer stopped");
             return crate::store::claim_by_id_tx(&store.readers.get(),&id);

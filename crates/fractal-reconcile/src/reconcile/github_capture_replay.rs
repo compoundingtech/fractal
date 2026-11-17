@@ -125,7 +125,8 @@ pub fn capture_replay(
     }
     ensure!(!records.is_empty() || next.after == next.through, "capture replay frontier has no admitted rows");
     Ok(Some(CaptureReplayPage {
-        version: VERSION, source: definition.source, authority_grant: definition.authority_grant,
+        version: VERSION, source: definition.source,
+        authority_grant: definition.authority_grant.context("source has no selected authority grant")?,
         through_sequence: next.through, frontier: next.frontier.clone(), records, coverage,
         cursor: hex::encode(serde_json::to_vec(&next)?), snapshot_complete: next.after == next.through,
     }))

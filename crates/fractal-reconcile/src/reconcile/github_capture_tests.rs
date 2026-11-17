@@ -3,7 +3,7 @@ use super::*;
 fn definition() -> SourceDefinition {
     SourceDefinition {
         source: Source { host: "github.com".into(), id: "public-capture".into(), generation: 1 },
-        authority_grant: "grant-one".into(), repositories: vec!["repo".into()], enabled: true,
+        authority_grant: Some("grant-one".into()), repositories: vec!["repo".into()], enabled: true,
         checkpoint_interval_ms: 60_000, replicate_private: false,
     }
 }
@@ -115,7 +115,7 @@ fn fenced_successor_rebuilds_and_rejects_stale_epoch_tail() -> Result<()> {
         predecessor_grant: Some("grant-one".into()), final_predecessor_commit: Some("first".into()), fencing_receipt: Some("stop".into()),
     })?;
     let mut next = definition();
-    next.authority_grant = "grant-two".into();
+    next.authority_grant = Some("grant-two".into());
     let mut second = commit(2, Some("first"));
     second.epoch = 2;
     second.authority_grant = "grant-two".into();
@@ -131,7 +131,7 @@ fn missing_or_forged_fence_never_admits_successor() -> Result<()> {
     let db = database()?;
     root(&db)?;
     let mut next = definition();
-    next.authority_grant = "grant-two".into();
+    next.authority_grant = Some("grant-two".into());
     hold(&db, "grant-two", AUTHORITY_KIND, "operator", &AuthorityGrant {
         version: VERSION, source: definition().source, member: "member-two".into(), epoch: 2,
         predecessor_grant: Some("grant-one".into()), final_predecessor_commit: None, fencing_receipt: Some("stop".into()),

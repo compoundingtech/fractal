@@ -9,7 +9,7 @@ fn fixture() -> (Store, Connection, SourceDefinition, AuthorityGrant) {
     let grant = AuthorityGrant { version: VERSION, source: source.clone(), member: "node".into(), epoch: 1,
         predecessor_grant: None, final_predecessor_commit: None, fencing_receipt: None };
     let claim = append_record(&store, "github-source/example".into(), AUTHORITY_KIND, &grant, "example-grant".into()).unwrap();
-    let definition = SourceDefinition { source, authority_grant: claim.id, repositories: vec![LOCATOR.into()],
+    let definition = SourceDefinition { source, authority_grant: Some(claim.id), repositories: vec![LOCATOR.into()],
         enabled: true, checkpoint_interval_ms: 60_000, replicate_private: false };
     let mut connection = Connection::open_in_memory().unwrap();
     migrate(&connection).unwrap();
@@ -27,7 +27,7 @@ fn page() -> AcquisitionPage {
 }
 
 fn cached_work(definition: &SourceDefinition, checkpoint: AcquisitionCheckpoint) -> Work {
-    Work { grant: definition.authority_grant.clone(), acquisitions: BTreeMap::from([(LOCATOR.into(),
+    Work { grant: selected_authority(definition).unwrap().to_owned(), acquisitions: BTreeMap::from([(LOCATOR.into(),
         CaptureAcquisition::resume(RepositoryTarget { locator: LOCATOR.into(), node_id: Some("R_example".into()) }, checkpoint, 100))]) }
 }
 
@@ -119,10 +119,10 @@ fn writer_requires_exact_grant_source_member_and_fence_identity() {
     changed.source.generation += 1;
     assert!(writer_grant(&connection, &changed, "node").is_err());
     changed = definition.clone();
-    changed.authority_grant = "missing".into();
+    changed.authority_grant = Some("missing".into());
     assert!(writer_grant(&connection, &changed, "node").is_err());
     let exact = FenceReceipt { version: VERSION, source: definition.source.clone(), member: "node".into(),
-        epoch: grant.epoch, authority_grant: definition.authority_grant.clone(), final_commit: None, stopped_at_ms: 100 };
+        epoch: grant.epoch, authority_grant: selected_authority(&definition).unwrap().to_owned(), final_commit: None, stopped_at_ms: 100 };
     for index in 0..5 {
         let mut receipt = exact.clone();
         match index {
@@ -155,7 +155,7 @@ fn stopped_receipt_retry_returns_original_claim_and_requires_exact_frontier() {
     let (_, frontier) = current_head(&connection, &projection_key(&definition).unwrap()).unwrap();
     assert!(existing_fence(&store, &connection, &definition, &grant, frontier.as_deref()).unwrap().is_none());
     let receipt = FenceReceipt { version: VERSION, source: definition.source.clone(), member: "node".into(),
-        epoch: grant.epoch, authority_grant: definition.authority_grant.clone(),
+        epoch: grant.epoch, authority_grant: selected_authority(&definition).unwrap().to_owned(),
         final_commit: frontier.clone(), stopped_at_ms: 100 };
     let original = append_record(&store, "github-source/example".into(), FENCED_KIND, &receipt, "stopped-example".into()).unwrap();
     assert!(ready(&store, &mut connection, &definition).unwrap());
@@ -166,7 +166,7 @@ fn stopped_receipt_retry_returns_original_claim_and_requires_exact_frontier() {
     }
     assert!(existing_fence(&store, &connection, &definition, &grant, None).is_err());
     let mut other_grant = definition.clone();
-    other_grant.authority_grant = "another-root".into();
+    other_grant.authority_grant = Some("another-root".into());
     assert!(existing_fence(&store, &connection, &other_grant, &grant, frontier.as_deref()).unwrap().is_none());
     let receipts = store.claims_by_kinds_after(&[FENCED_KIND], None, 0, 128).unwrap();
     assert_eq!(receipts.claims.len(), 1);
@@ -207,13 +207,13 @@ github-source "example" {{
     checkpoint-every-ms 60000
     replicate-private #false
 }}
-"#, definition.authority_grant);
+"#, selected_authority(&definition).unwrap());
     crate::reconcile::tests::apply_source(&store, &source, "declare-example");
     let handle = work_handle(state.path(), &definition.source).unwrap();
     *handle.lock().await = cached_work(&definition, page().checkpoint);
     assert!(fence_source_checked(&store, state.path(), "example", &definition.source, "stale-grant").await.is_err());
     assert!(handle.lock().await.acquisitions.contains_key(LOCATOR));
-    let first = fence_source_checked(&store, state.path(), "example", &definition.source, &definition.authority_grant).await.unwrap();
+    let first = fence_source_checked(&store, state.path(), "example", &definition.source, selected_authority(&definition).unwrap()).await.unwrap();
     assert!(handle.lock().await.acquisitions.is_empty());
     let retry = fence_source(&store, state.path(), "example").await.unwrap();
     assert_eq!(retry.id, first.id);
@@ -222,7 +222,7 @@ github-source "example" {{
     let connection = plugin.connection.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(writer_grant(&connection, &definition, "node").is_err());
     let receipt: FenceReceipt = serde_json::from_value(first.body["fields"]["record"].clone()).unwrap();
-    assert_eq!(receipt.authority_grant, definition.authority_grant);
+    assert_eq!(Some(receipt.authority_grant), definition.authority_grant);
     assert_eq!(receipt.source, definition.source);
     assert_eq!(receipt.epoch, 1);
     assert_eq!(receipt.member, "node");
@@ -235,7 +235,7 @@ fn another_origin_cannot_fence_the_designated_member_by_naming_it() {
     let other = Store::open_memory("other").unwrap();
     other.bind_fleet("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();
     let receipt = FenceReceipt { version: VERSION, source: definition.source.clone(), member: "node".into(),
-        epoch: grant.epoch, authority_grant: definition.authority_grant.clone(), final_commit: None, stopped_at_ms: 100 };
+        epoch: grant.epoch, authority_grant: selected_authority(&definition).unwrap().to_owned(), final_commit: None, stopped_at_ms: 100 };
     append_record(&other, "github-source/example".into(), FENCED_KIND, &receipt, "foreign-fence".into()).unwrap();
     store.import_replication("other", &other.export_replication(0).unwrap()).unwrap();
     assert!(ready(&store, &mut connection, &definition).unwrap());
@@ -250,7 +250,7 @@ fn ingested_late_forks_remain_rejected_after_cache_restart() {
     let key = projection_key(&definition).unwrap();
     let head = current_head(&connection, &key).unwrap();
     let fork = CaptureCommit { version: VERSION, source: definition.source.clone(), epoch: grant.epoch,
-        authority_grant: definition.authority_grant.clone(), sequence: 1, predecessor: None,
+        authority_grant: selected_authority(&definition).unwrap().to_owned(), sequence: 1, predecessor: None,
         facts: vec![], checkpoint: None, coverage: vec![], observed_at_ms: 200 };
     append_record(&store, fork.subject().unwrap(), COMMIT_KIND, &fork, "late-fork".into()).unwrap();
     // Exercise ingestion's conflict queue, not a manually inserted conflict row.
@@ -274,15 +274,15 @@ fn successor_namespace_rebuilds_receipts_without_reusing_old_cache_rows() {
     let old_key = projection_key(&definition).unwrap();
     let old_head = current_head(&connection, &old_key).unwrap();
     let receipt = FenceReceipt { version: VERSION, source: definition.source.clone(), member: grant.member.clone(),
-        epoch: grant.epoch, authority_grant: definition.authority_grant.clone(),
+        epoch: grant.epoch, authority_grant: selected_authority(&definition).unwrap().to_owned(),
         final_commit: old_head.1.clone(), stopped_at_ms: 200 };
     let stopped = append_record(&store, "github-source/example".into(), FENCED_KIND, &receipt, "transfer-stop".into()).unwrap();
     let successor = AuthorityGrant { version: VERSION, source: definition.source.clone(), member: grant.member.clone(),
-        epoch: 2, predecessor_grant: Some(definition.authority_grant.clone()),
+        epoch: 2, predecessor_grant: definition.authority_grant.clone(),
         final_predecessor_commit: old_head.1.clone(), fencing_receipt: Some(stopped.id) };
     let selected = append_record(&store, "github-source/example".into(), AUTHORITY_KIND, &successor, "transfer-grant".into()).unwrap();
     let mut next = definition.clone();
-    next.authority_grant = selected.id;
+    next.authority_grant = Some(selected.id);
     let next_key = prepare_source(&mut connection, &next).unwrap();
     assert_ne!(old_key, next_key);
     assert_eq!(current_head(&connection, &next_key).unwrap(), (0, None));
@@ -316,4 +316,30 @@ fn coverage_publication_crash_never_certifies_uncommitted_checkpoint() {
     assert!(checkpoint(&rebuilt, &definition, "R_example").unwrap().unwrap().pass_complete);
     assert_eq!(current_head(&rebuilt, &projection_key(&definition).unwrap()).unwrap().0, 3);
     assert_eq!(store.claims_by_kinds_after(&[FACT_KIND], None, 0, 128).unwrap().claims.len(), 1);
+}
+
+#[tokio::test]
+async fn ungranted_disabled_source_has_no_writer_replay_or_fencing_authority() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    store.bind_fleet("018f6f0d-4a5d-7b8c-9d0e-123456789abc").unwrap();
+    crate::reconcile::tests::apply_source(&store, r#"version 2
+github-source "example" {
+    host "github.com"
+    generation 1
+    repository "acme/garden"
+    enabled #false
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+"#, "declare-disabled-example");
+    let state = tempfile::tempdir().unwrap();
+    let ledger = GraphGitHubCaptureLedger { store: Arc::clone(&store), state_dir: state.path().to_path_buf() };
+    // Disabled declarations are ignored before URL validation or authenticated acquisition.
+    let auth = GithubAuth::Local { token: Arc::new("test".into()), cache: None };
+    let progress = ledger.step("not an API URL", LOCATOR, &auth).await.unwrap();
+    assert!(!progress.active);
+    assert_eq!(progress.continue_after_ms, None);
+    assert!(capture_replay(&store, state.path(), "example", None, 1).unwrap().is_none());
+    assert!(fence_source(&store, state.path(), "example").await.is_err());
+    assert!(store.claims_by_kinds_after(&[FACT_KIND, COMMIT_KIND, FENCED_KIND], None, 0, 128).unwrap().claims.is_empty());
 }

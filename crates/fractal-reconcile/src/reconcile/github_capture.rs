@@ -140,7 +140,7 @@ struct Epoch { grant_id: String, member: String, final_sequence: Option<u64> }
 
 /// An admitted grant is an explicit chain with receipts from each stopped predecessor member.
 fn authority_chain(connection: &Connection, definition: &SourceDefinition) -> Result<Option<BTreeMap<u64, Epoch>>> {
-    let mut id = definition.authority_grant.clone();
+    let Some(mut id) = definition.authority_grant.clone() else { return Ok(None) };
     let mut epochs = BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut cutoff = None;
@@ -179,14 +179,18 @@ fn authority_chain(connection: &Connection, definition: &SourceDefinition) -> Re
     anyhow::bail!("authority grant chain exceeds its bounded depth")
 }
 
+fn selected_authority(definition: &SourceDefinition) -> Result<&str> {
+    definition.authority_grant.as_deref().context("source has no selected authority grant")
+}
+
 fn projection_key(definition: &SourceDefinition) -> Result<String> {
-    Ok(format!("{}:{}",source_key(&definition.source)?,definition.authority_grant))
+    Ok(format!("{}:{}",source_key(&definition.source)?,selected_authority(definition)?))
 }
 
 /// A changed authority gets a fresh rebuild namespace, never a synchronous history deletion.
 fn prepare_source(connection: &mut Connection, definition: &SourceDefinition) -> Result<String> {
     let key = projection_key(definition)?;
-    connection.execute("INSERT OR IGNORE INTO capture_v1_heads(source,grant_id,sequence,commit_id,error) VALUES(?1,?2,0,NULL,NULL)", params![key,definition.authority_grant])?;
+    connection.execute("INSERT OR IGNORE INTO capture_v1_heads(source,grant_id,sequence,commit_id,error) VALUES(?1,?2,0,NULL,NULL)", params![key,selected_authority(definition)?])?;
     Ok(key)
 }
 
@@ -287,6 +291,7 @@ fn advance(connection: &mut Connection, definition: &SourceDefinition) -> Result
 
 /// Refresh only bounded pages; callers never report a partially replayed index as covered.
 fn ready(store: &Store, connection: &mut Connection, definition: &SourceDefinition) -> Result<bool> {
+    if definition.authority_grant.is_none() { return Ok(false); }
     let caught_up = ingest(store, connection)?;
     let advanced = advance(connection, definition)?;
     Ok(caught_up && advanced)

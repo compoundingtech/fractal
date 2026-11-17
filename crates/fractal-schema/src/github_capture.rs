@@ -256,7 +256,9 @@ impl Roster {
 #[serde(deny_unknown_fields)]
 pub struct SourceDefinition {
     pub source: Source,
-    pub authority_grant: String,
+    /// Disabled declarations may be published before the operator admits a root grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_grant: Option<String>,
     pub repositories: Vec<String>,
     pub enabled: bool,
     pub checkpoint_interval_ms: u64,

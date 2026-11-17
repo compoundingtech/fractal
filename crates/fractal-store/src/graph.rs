@@ -6665,7 +6665,6 @@ mod github_configuration_tests {
 github-source "public-example" {
     host "github.com"
     generation 1
-    authority-grant "admitted-grant"
     repository "example/public"
     enabled #false
     checkpoint-every-ms 60000
@@ -6678,5 +6677,22 @@ github-scope "public-example" {
 "#, "member-one").unwrap();
         assert_eq!(intent.subjects["github-source/public-example"].kind, "github-source");
         assert_eq!(intent.subjects["github-scope/public-example"].kind, "github-scope");
+    }
+
+    #[test]
+    fn enabling_source_without_authority_is_a_typed_validation_error() {
+        let source = r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #true
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+"#;
+        assert_eq!(parse_intent(source, "member-one").unwrap_err().code, "invalid-github-source");
+        let disabled = source.replace("enabled #true", "enabled #false");
+        assert!(parse_intent(&disabled, "member-one").is_ok());
     }
 }

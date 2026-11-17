@@ -163,6 +163,36 @@ fn admission_checks_the_current_declaration_source_identity() {
     assert!(store.latest_claim(SUBJECT, Some(capture::AUTHORITY_KIND)).unwrap().is_none());
 }
 
+#[test]
+fn disabled_source_can_publish_before_root_admission_then_enable_exact_grant() {
+    let store = fixture();
+    let disabled = r#"version 2
+github-source "public-example" {
+    host "github.com"
+    generation 1
+    repository "example/public"
+    enabled #false
+    checkpoint-every-ms 60000
+    replicate-private #false
+}
+"#;
+    let intent = crate::graph::parse_intent(disabled, store.origin()).unwrap();
+    store.apply_internal(&intent, "bootstrap-disabled-source").unwrap();
+    let definitions = store.github_source_definitions().unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert!(!definitions[0].enabled);
+    assert_eq!(definitions[0].authority_grant, None);
+    assert!(store.latest_claim(SUBJECT, Some(capture::AUTHORITY_KIND)).unwrap().is_none());
+    let grant = append(&store, &root_grant()).unwrap();
+    assert_eq!(append(&store, &root_grant()).unwrap().id, grant.id);
+    // Root admission does not silently activate or rewrite the authored declaration.
+    assert_eq!(store.github_source_definitions().unwrap(), definitions);
+    declare(&store, &grant.id, 1);
+    let enabled = store.github_source_definitions().unwrap();
+    assert!(enabled[0].enabled);
+    assert_eq!(enabled[0].authority_grant.as_deref(), Some(grant.id.as_str()));
+}
+
 #[tokio::test]
 async fn fence_rejects_stale_grant_or_generation_without_writing_receipt() {
     let directory = tempfile::tempdir().unwrap();

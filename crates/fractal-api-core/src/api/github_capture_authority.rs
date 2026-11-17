@@ -176,7 +176,7 @@ fn validate_admission(connection: &Connection, subject: &str, grant: &AuthorityG
         let body: Value = serde_json::from_str(&desired.body).map_err(|error| refused(error.to_string()))?;
         let definition = capture::declarations::parse_source(&body).map_err(refused)?;
         if definition.source != grant.source { return Err(refused("declared source identity or generation differs")); }
-        if grant.predecessor_grant.as_ref().is_some_and(|prior| &definition.authority_grant != prior) {
+        if grant.predecessor_grant.as_ref().is_some_and(|prior| definition.authority_grant.as_ref() != Some(prior)) {
             return Err(refused("successor must replace the selected predecessor grant"));
         }
     }
