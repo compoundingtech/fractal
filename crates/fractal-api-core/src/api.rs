@@ -98,6 +98,7 @@ use crate::store::local_commits;
 pub mod wire_names;
 pub mod seat_freshness;
 mod host_holds;
+mod resources;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -513,7 +514,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -656,6 +657,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/internal/resources", get(resources::list))
+        .route("/v1/internal/resources/exec", post(resources::submit))
+        .route("/v1/internal/resources/{id}", get(resources::show))
+        .route("/v1/internal/resources/{id}/wait", post(resources::wait))
+        .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -843,6 +849,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/usage", get(operations::get_usage))
         .route("/v1/slo", get(operations::get_slo))
         .route("/v1/slo/history", get(operations::get_slo_history))
+        .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(records::get_claim))
         .route("/v1/reviews", get(records::list_reviews))
@@ -2103,6 +2110,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
+        | "unknown-objective"
+        | "invalid-series"
+        | "unsupported-objective-series"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
@@ -8359,6 +8369,11 @@ pub async fn guard_bound_request(
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        // Resource handlers bind submission to native ownership and scope inspection/control
+        // to that same owner. No other internal route (or method) admits bound callers.
+        if resources::allows_bound_request(request.method(), request.uri().path()) {
+            return Ok(request);
+        }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
@@ -8545,6 +8560,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
     });
     if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
         health["service_manager"] = supervisor;
@@ -12000,6 +12016,13 @@ fn accept_message_receipt_authorized(
         }
         _ => None,
     };
+    #[cfg(feature = "test-support")]
+    if let Some((record, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &record.operation_id, "after-intent").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after durable intent")));
+    }
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
     let subject = format!("message/{id}");
     let previous = state
@@ -12248,6 +12271,13 @@ fn accept_message_receipt_authorized(
                 "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
             ))
         })?;
+    }
+    #[cfg(feature = "test-support")]
+    if let Some((effect, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &effect.operation_id, "after-accept").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after provider acceptance")));
     }
     if let Some((effect, _, caller)) = effect.as_ref() {
         state.store.confirm_message_effect(effect, &record, caller).map_err(ApiError::bad)?;

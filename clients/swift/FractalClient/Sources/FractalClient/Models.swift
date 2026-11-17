@@ -410,6 +410,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case unsupportedCapability
     case peerTooOld
     case validationFailed
+    case unknownObjective
+    case invalidSeries
+    case unsupportedObjectiveSeries
     case idempotencyConflict
     case agentsPublicationRowTooLarge
     case attentionMigrated
@@ -504,6 +507,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "unsupported-capability": .unsupportedCapability
         case "peer-too-old": .peerTooOld
         case "validation-failed": .validationFailed
+        case "unknown-objective": .unknownObjective
+        case "invalid-series": .invalidSeries
+        case "unsupported-objective-series": .unsupportedObjectiveSeries
         case "idempotency-conflict": .idempotencyConflict
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
@@ -598,6 +604,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .unsupportedCapability: "unsupported-capability"
         case .peerTooOld: "peer-too-old"
         case .validationFailed: "validation-failed"
+        case .unknownObjective: "unknown-objective"
+        case .invalidSeries: "invalid-series"
+        case .unsupportedObjectiveSeries: "unsupported-objective-series"
         case .idempotencyConflict: "idempotency-conflict"
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
@@ -767,6 +776,9 @@ public struct MailBacklog: Codable, Sendable { public let count, thresholdMS: UI
 public struct SloList: Codable, Sendable { public let asOfUnixMS: UInt64; public let otelUiURL: String?; public let rows: [SloRow]; enum CodingKeys: String, CodingKey { case rows, asOfUnixMS = "as_of_unix_ms", otelUiURL = "otel_ui_url" } }
 public struct SloRow: Codable, Sendable { public let id, kind, about, target, current, window, status, explain: String; public let account: String?; public let remainingPercent: Double?; public let resetsAtUnixMS, measuredAtUnixMS, runsOutAtUnixMS: UInt64?; public let tone: String?; public let forecastUsedPercent: Double?; public let forecastBasisMinutes: UInt64?; enum CodingKeys: String, CodingKey { case id, kind, account, about, target, current, window, status, explain, tone, remainingPercent = "remaining_percent", resetsAtUnixMS = "resets_at_unix_ms", measuredAtUnixMS = "measured_at_unix_ms", forecastUsedPercent = "forecast_used_percent", forecastBasisMinutes = "forecast_basis_minutes", runsOutAtUnixMS = "runs_out_at_unix_ms" } }
 public struct SloHistory: Codable, Sendable { public let id: String; public let sinceMS, untilMS, samples: UInt64; public let steps: [Double?]; enum CodingKeys: String, CodingKey { case id, samples, steps, sinceMS = "since_ms", untilMS = "until_ms" } }
+public struct Series: Codable, Sendable { public let from, to, bucketSeconds: UInt64; public let groupBy: String?; public let buckets: [SeriesBucket]; enum CodingKeys: String, CodingKey { case from, to, buckets, bucketSeconds = "bucket_seconds", groupBy = "group_by" } }
+public struct SeriesBucket: Codable, Sendable { public let start, end, count: UInt64; public let groups: [SeriesGroup]? }
+public struct SeriesGroup: Codable, Sendable { public let value: JSONValue; public let count: UInt64 }
 public struct UsagePeriod: Codable, Sendable { public let sinceMS, untilMS: UInt64; public let rows: [UsageRow]; public let limits: [UsageLimit]?; public let accounts: [UsageAccount]?; public let agentMessages: AgentMessageEstimate?; enum CodingKeys: String, CodingKey { case rows, limits, accounts, sinceMS = "since_ms", untilMS = "until_ms", agentMessages = "agent_messages" } }
 public struct AgentMessageEstimate: Codable, Sendable { public let calibration: String?; public let source, method: String; public let fallbackLowMicrousd, fallbackHighMicrousd: UInt64; public let days: [AgentMessageDay]; enum CodingKeys: String, CodingKey { case calibration, source, method, days, fallbackLowMicrousd = "fallback_low_microusd", fallbackHighMicrousd = "fallback_high_microusd" } }
 public struct AgentMessageDay: Codable, Sendable { public let dayStartMS, sinceMS, untilMS, messages, calibratedMessages, lowMicrousd, highMicrousd, usageCostMicrousd, unpricedTokens: UInt64; public let unpricedResponses: UInt64?; public let lowPercent, highPercent: Double?; enum CodingKeys: String, CodingKey { case messages, dayStartMS = "day_start_ms", sinceMS = "since_ms", untilMS = "until_ms", calibratedMessages = "calibrated_messages", lowMicrousd = "low_microusd", highMicrousd = "high_microusd", usageCostMicrousd = "usage_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses", lowPercent = "low_percent", highPercent = "high_percent" } }

@@ -94,6 +94,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("mail-backlog.summary", "/v1/client/mail-backlog"),
     ("slo.list", "/v1/client/slo"),
     ("slo.history", "/v1/client/slo/history"),
+    ("series.read", "/v1/client/series"),
     ("usage.period", "/v1/client/usage"),
     ("usage-hub.quota", "/v1/client/usage/quota"),
     ("github-plugin.pull-request", "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}"),

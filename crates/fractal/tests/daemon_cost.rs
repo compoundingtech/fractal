@@ -192,6 +192,26 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
     ),
     (
+        "GET /v1/internal/resources",
+        "host-local operator inventory combines shell command history, native memberships, holds and the in-memory accountant, absent from generated claim-history cost stores; shell_resources::tests::durable_commands_are_queryable_without_becoming_second_admission_authority and api::resources ownership tests cover the transport/store boundary; populated host-local inventory and retained command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/exec",
+        "requires a real native invocation/attempt or local operator and connected-host resource authority, absent from generated cost stores; queues one host-local command without granting membership or releasing a payload; api::resources submission and nested-custody tests cover ownership and admission boundaries; command bytes, native owner validation and queue-write cost are not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/{id}",
+        "requires a durable host-local shell execution, absent from generated cost stores; reads the execution by primary key, then scans its host's memberships and operator holds for inspection; api::resources ownership tests cover disclosure, but host-local membership/hold history and command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/wait",
+        "event-driven long-poll over one host-local shell execution, not a finite JSON cost sample; each wake rereads the command by primary key and rechecks native ownership; api::resources::tests::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials covers wakeup ordering and disclosure; command-body and wakeup cost are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/cancel",
+        "requires a durable host-local shell execution and its authenticated owner or local operator, absent from generated cost stores; reads by primary key and sets only the queue row's cancel flag, leaving whole-tree retirement to the existing host authority; shell_resources::tests::cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot covers durable cancellation; command-body rewrite cost is not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
     ),
@@ -1015,6 +1035,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
     get("GET /v1/client/slo", "/v1/client/slo"),
     get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
+    get(
+        "GET /v1/client/series",
+        "/v1/client/series?objective=cost%2Fseries&from=1000&to=4000&bucket_seconds=1",
+    ),
     post("POST /v1/messages/cleanup", "/v1/messages/cleanup", |_, _| {
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
@@ -1156,6 +1180,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
     get("GET /v1/slo/history", "/v1/slo/history?id=cpu"),
+    get(
+        "GET /v1/series",
+        "/v1/series?kind=custom.cost.series-event&kind=custom.cost.series-other&subject_prefix=custom%2Fcost%2Fseries%2F&group_by=category&from=1000&to=4000&bucket_seconds=1",
+    ),
     get("GET /v1/reviews", "/v1/reviews"),
     get("GET /v1/attention", "/v1/attention"),
     get(
@@ -3203,6 +3231,40 @@ async fn paired_push(
     Ok(response)
 }
 
+/// Keep both series answers fixed while same-kind timestamp history outside the window grows.
+fn seed_series_reads(store: &Store, scale: f64) {
+    let intent = fractal_daemon::parse_intent(r#"version 2
+objective "cost/series" {
+  about "Cost fixture events"
+  indicator "count" {
+    subject-prefix "custom/cost/series/"
+    event "custom.cost.series-event" at="at"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, NODE).unwrap();
+    store.apply_internal(&intent, "cost-series-objective").unwrap();
+    let history = ((scale * 10_000.0).round() as usize).max(1);
+    for (name, kind, at) in [
+        ("first".to_owned(), "custom.cost.series-event", 1000),
+        ("second".to_owned(), "custom.cost.series-other", 2000),
+        ("boundary".to_owned(), "custom.cost.series-event", 4000),
+    ].into_iter().chain((0..history).map(|n| {
+        (format!("history-{n}"), "custom.cost.series-event", 10_000)
+    })) {
+        store.append_claim(&ClaimInput {
+            subject: format!("custom/cost/series/{name}"),
+            kind: kind.into(),
+            actor: None,
+            fields: BTreeMap::from([("at".into(), json!(at)), ("category".into(), json!("event"))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+}
+
 async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u64, u64)) -> Measured {
     let work_directory = tempfile::tempdir().unwrap();
     let root = work_directory.path();
@@ -3287,6 +3349,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     {
         let store = store.clone();
         tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_series_reads(&store, scale))
             .await
             .unwrap();
     }
@@ -3841,6 +3909,32 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                         && period["until_ms"].as_u64() == Some(usage_window.1)
                                         && period["rows"].as_array().is_some_and(Vec::is_empty),
                                     "the usage cost probe must answer its exact empty fixture period",
+                                );
+                            }
+                            if matches!(probe.route, "GET /v1/series" | "GET /v1/client/series") {
+                                let series = value.get("value").unwrap_or(&value);
+                                let grouped = probe.route == "GET /v1/series";
+                                let mut expected = json!({
+                                    "from": 1000, "to": 4000, "bucket_seconds": 1,
+                                    "buckets": [
+                                        {"start": 1000, "end": 2000, "count": 1},
+                                        {"start": 2000, "end": 3000, "count": if grouped { 1 } else { 0 }},
+                                        {"start": 3000, "end": 4000, "count": 0},
+                                    ],
+                                });
+                                if grouped {
+                                    expected["group_by"] = json!("category");
+                                    for bucket in expected["buckets"].as_array_mut().unwrap() {
+                                        bucket["groups"] = if bucket["count"] == 0 {
+                                            json!([])
+                                        } else {
+                                            json!([{"value": "event", "count": 1}])
+                                        };
+                                    }
+                                }
+                                anyhow::ensure!(
+                                    *series == expected,
+                                    "series cost probes must return their exact fixed, populated histogram",
                                 );
                             }
                             if probe.route == "POST /v1/internal/client-read/forward"

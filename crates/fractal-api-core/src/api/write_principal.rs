@@ -154,7 +154,14 @@ pub(super) async fn bind_request(
     {
         return Ok(request);
     }
-    if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX)
+    // Native resource handlers bind every command and control request to the verified owner.
+    // Keep normal principal derivation, pairing checks and scopes below; only their exact
+    // methods may pass the otherwise blanket internal-write refusal.
+    let native_resource_request = (
+        request.extensions().get::<BoundAgent>().is_some()
+            || request.extensions().get::<BoundRun>().is_some()
+    ) && resources::allows_bound_request(request.method(), request.uri().path());
+    if (request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) && !native_resource_request)
         || request.uri().path() == "/v1/repair/apply"
         || request.uri().path() == "/v1/replication/replay"
     {

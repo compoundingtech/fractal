@@ -22,6 +22,7 @@ pub mod deploy;
 pub mod host_holds;
 pub mod launch_freeze;
 pub mod resource_membership;
+pub mod shell_resources;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -254,6 +255,7 @@ use smallclaims::windows::holds;
 
 pub mod accounts;
 pub mod declared_objectives;
+pub mod objective_series;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
@@ -2922,6 +2924,7 @@ impl Store {
         host_holds::create_schema(&graph.connection.write())?;
         launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -2954,6 +2957,7 @@ impl Store {
         host_holds::create_schema(&graph.connection.write())?;
         launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -2991,6 +2995,7 @@ impl Store {
         host_holds::create_schema(&graph.connection.write())?;
         launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
