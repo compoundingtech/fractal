@@ -178,8 +178,13 @@ describe('verified browser outbox scope', () => {
     const items = await owner.recovery.list()
     expect(items).toContainEqual({ id: initial.id, status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] })
     expect(await repo.read(initial.id)).toEqual(dispatched)
-    const send = gatewayMessageSend(client, async () => { throw new Error('No snapshot on mismatch') }, { repository: async () => repo })
-    expect(await send({ _tag: 'Resend', idempotencyKey: initial.id, api_version: 'st3.client.v0', type: 'message.send', id: packet.id, parameters: { ...packet.parameters, tags: packet.parameters.tags ?? [], attachments: packet.parameters.attachments ?? [] } })).toMatchObject({ _tag: 'Refused', reason: 'ungranted' })
+    let snapshots = 0
+    const send = gatewayMessageSend(client, async () => { snapshots++; throw new Error('No snapshot on mismatch') }, { repository: async () => repo })
+    expect(await send({ _tag: 'Resend', idempotencyKey: initial.id, api_version: 'st3.client.v0', type: 'message.send', id: packet.id, parameters: { ...packet.parameters, tags: packet.parameters.tags ?? [], attachments: packet.parameters.attachments ?? [] } })).toMatchObject({
+      _tag: 'Refused', reason: 'retry-refused',
+      detail: 'Return to the original account and deployment to inspect or send this message.',
+    })
+    expect(snapshots).toBe(0)
     expect(await repo.read(initial.id)).toEqual(dispatched)
     expect(calls.every(path => path === '/v1/client/capabilities')).toBe(true)
     expect(scopeFromCapabilities(changed)).not.toEqual(repo.scope)
