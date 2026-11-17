@@ -3751,9 +3751,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/mission-runs/continuity/") {
-                    person.clone()
-                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
+                } else if path.starts_with("/v1/mission-runs/continuity/")
+                    || path.starts_with("/v1/client/")
+                    || path.starts_with("/v1/effects/")
+                {
                     person.clone()
                 } else {
                     client.clone()

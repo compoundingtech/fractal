@@ -732,8 +732,6 @@ fn review_decision_reuse(verdict: &str) -> BTreeSet<String> {
         let changes = side.store.changes_since(0, 0).unwrap().changes;
         assert_eq!(changes.iter().filter(|change| change.kind == "gate.requested").count(), 1,
             "the identical run and restart must reuse the standing decision without reasking");
-        assert_eq!(changes.iter().filter(|change| change.kind == "gate.result").count(), 1,
-            "reuse must not fabricate a second answer");
         let carried = changes.iter().filter(|change| change.kind == "step-run.carried").collect::<Vec<_>>();
         assert_eq!(carried.len(), 1);
         let body: Value = serde_json::from_str(&carried[0].body).unwrap();
@@ -744,6 +742,24 @@ fn review_decision_reuse(verdict: &str) -> BTreeSet<String> {
         let answers = side.store.claims_for(&request.subject, Some("gate.result")).unwrap();
         assert_eq!(answers.len(), 1);
         assert_eq!(answers[0].body["fields"]["verdict"], verdict);
+        // Field gates also emit machine gate.result claims (one config result per
+        // run). Count every person/delegate or request-bound decision, not those
+        // unrelated predicate results, and reject extra or mismatched human answers.
+        let decisions = changes.iter().filter(|change| change.kind == "gate.result")
+            .map(|change| (change, serde_json::from_str::<Value>(&change.body).unwrap()))
+            .filter(|(change, body)| {
+                change.actor.as_deref().is_some_and(|actor| actor.starts_with("person/") || actor.starts_with("agent/"))
+                    || body.pointer("/fields/request").is_some()
+            }).collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 1, "reuse must not fabricate a second human decision");
+        let (decision, decision_body) = &decisions[0];
+        assert_eq!(decision.actor.as_deref(), Some("person/example"));
+        assert_eq!(decision.subject, request.subject);
+        assert_eq!(decision_body["fields"]["request"], request.id);
+        assert_eq!(decision_body["fields"]["verdict"], verdict);
+        let authenticated = side.store.human_review_answer(&request.id).unwrap().unwrap();
+        assert_eq!(authenticated.id, answers[0].id,
+            "the sole original result must also be the authenticated standing decision");
         assert_eq!(body["evidence"], serde_json::json!([request.id, answers[0].id]));
         if verdict == "fail" {
             for change in &changes {

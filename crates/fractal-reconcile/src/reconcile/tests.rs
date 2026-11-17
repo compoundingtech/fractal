@@ -5330,7 +5330,7 @@ mission "self-assigned" state="ready" {
         let mut fields = request.body["fields"].as_object().unwrap().clone();
         assert_eq!(
             fields.remove("operation"),
-            Some(Value::String(operation.into()))
+            Some(Value::String(operation))
         );
         let fields: BTreeMap<_, _> = fields.into_iter().collect();
         assert_eq!(fields, expected);
