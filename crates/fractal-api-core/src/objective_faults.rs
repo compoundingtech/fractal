@@ -1,10 +1,11 @@
 //! A missed objective row is a fault for the reviewer its objective names.
 //!
-//! A declared objective's missed row, the API readiness objective's and the agents list request
-//! objective's each open one `operational.failure` on this member's `daemon/NODE` subject,
-//! addressed to that reviewer, an agent and never a person; it stays one episode until the row is
-//! met again, when an `operational.recovered` ends it. A row with no data neither opens nor ends
-//! one. With the reviewer not a live agent declaration, nothing opens.
+//! A declared objective's burning or exhausted budget row (or a legacy missed row), the API
+//! readiness objective's and the agents list request objective's each open one
+//! `operational.failure` on this member's `daemon/NODE` subject, addressed to that reviewer, an
+//! agent and never a person; it stays one episode until the row is met again, when an
+//! `operational.recovered` ends it. Unknown or ineligible evidence neither opens nor ends one.
+//! With the reviewer not a live agent declaration, nothing opens.
 //!
 //! It stays cheap: a check whose rows hold no met or missed objective it is asked about reads
 //! nothing, and one that does reads this member's objective faults once through the claims'
@@ -56,7 +57,7 @@ pub(crate) fn check_with_response(
             let id = row["id"].as_str().filter(|id| objectives.contains(*id))?;
             match row["status"].as_str()? {
                 "met" => Some((id, true, row)),
-                "missed" => Some((id, false, row)),
+                "missed" | "burning" | "exhausted" => Some((id, false, row)),
                 _ => None,
             }
         })
