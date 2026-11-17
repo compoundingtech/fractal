@@ -1232,9 +1232,10 @@ test('the marked unread list reads through the bounded unread client; typed erro
   const read = async (list, enabled = true) => {
     const state = hooks();
     let focus, calls = 0;
+    const reader = { listMarked: async maxPages => { calls++; assert.equal(maxPages, undefined, 'the client default bound applies'); return list; } };
     const hook = compile('useMarkedUnreadPage', 'type ThreadClient', {
       ...state, useRef: current => ({ current }), useCallback: fn => fn, useFocusEffect: effect => { focus = effect; },
-      useStore: () => ({ unreadClient: { listMarked: async maxPages => { calls++; assert.equal(maxPages, undefined, 'the client default bound applies'); return list; } } }),
+      useStore: () => ({ unreadClient: reader }),
       markedUnreadIssue, NO_THREADS: [], NO_SNAPSHOTS: new Map(),
     });
     state.reset(); hook(enabled, 0);

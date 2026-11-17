@@ -143,6 +143,10 @@ the shared thread body on that page (older history continues from it; Open threa
 shows the latest); unavailable and pending anchors show their notice and, with the
 current write grant, an explicit Clear reminder. Visible evidence counts whole
 rendered Markdown lines (up to two, including the last), never paragraph spacing.
+An expanded marked row owns its open reading context independently of list membership:
+clearing its reminder removes the real marker and list membership, not the open body,
+composer, draft, focus or scroll. Collapsing the row or section releases it. Owner,
+pairing/session, client and read-grant changes still remove the protected context.
 Loading wrappers (detail, Inbox start, expanded rows) start the
 visit entry with the same placement key before the body mounts, so a reminder that
 loads after entry is never captured. Focused node coverage lives beside the visit

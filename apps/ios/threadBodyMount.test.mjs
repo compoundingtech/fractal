@@ -52,7 +52,7 @@ const compilerOptions = { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.
 function compile(file, name, next, dependencies) {
   const text = source(file);
   const a = text.search(new RegExp(`function ${name}(?=[(<])`));
-  const b = text.indexOf(`\n${next}`, a);
+  const b = next === null ? text.length : text.indexOf(`\n${next}`, a);
   assert.ok(a >= 0 && b > a, `${name} in ${file}`);
   const { outputText } = ts.transpileModule(`${text.slice(a, b)}\nexports.value = ${name};`, { compilerOptions });
   const exports = {};
@@ -87,7 +87,7 @@ const viewports = [viewportRef];
 const threadViewport = load('./threadViewport.tsx', {
   react: React, 'react-native': { Keyboard: { metrics: () => undefined } }, './threadVisibility': threadVisibility,
 });
-const { useUnreadVisit } = load('./unreadVisitNative.ts', {
+const { useUnreadVisit, useUnreadVisitEntry } = load('./unreadVisitNative.ts', {
   react: React,
   'react-native': {
     AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
@@ -162,7 +162,7 @@ function deliveryStore(thread) {
     selected: { route: { kind: 'tailscale' } }, fabricMember: undefined, url: 'https://gateway.example', carrier: { snapshot: null },
     threadConnection: { current: member }, actionId: () => `action/ios-${++ids}`,
     fence: async revisions => ({ snapshot_id: `snapshot/${++fences}`, subject_revisions: revisions }),
-    actionReceiptCheck, sendBoundAction, resendBoundAction, setThreadRefresh: () => {}, ClientError,
+    actionReceiptCheck, sendBoundAction, resendBoundAction, setThreadRefresh: () => { store.threadRefresh++; changed(); }, ClientError,
     threadActionErrorText: error => error instanceof Error ? error.message : String(error),
     deliveriesByClient, setThreadDeliveryRevision: () => { store.threadDeliveries = new Map(ledger()); changed(); },
     unreadPorts, client: member, capsRef, capsClient: { current: member }, statusRef, unreadSupported, actions: store.actions,
@@ -183,19 +183,22 @@ const settle = async (turns = 12) => { for (let turn = 0; turn < turns; turn++) 
 const step = work => act(async () => { await work?.(); await settle(); });
 
 // The store provider rerenders consumers when its delivery revision changes.
-async function mountBody(harness, thread, page) {
-  const ThreadBody = compile('./screens/Threads.tsx', 'ThreadBody', 'type Quote', {
+function bodyComponent(useStore, useThreadPage, extra = {}) {
+  return compile('./screens/Threads.tsx', 'ThreadBody', 'type Quote', {
     useCallback: React.useCallback, useContext: React.useContext, useEffect: React.useEffect, useMemo: React.useMemo,
     useRef: React.useRef, useState: React.useState, useSyncExternalStore: React.useSyncExternalStore, BottomTabBarHeightContext,
-    useThreadPage: () => page, useWindowDimensions: () => ({ width: 400, height: 800 }),
+    useThreadPage, useWindowDimensions: () => ({ width: 400, height: 800 }),
     useSafeAreaInsets: () => ({ top: 0, left: 0, right: 0, bottom: 0 }), useHeaderHeight: () => 0,
     useNavigation: () => navigation, useThreadViewports: () => viewports,
     measureThreadBounds: threadViewport.measureThreadBounds, measureThreadViewport: threadViewport.measureThreadViewport,
     visibleThreadMessages: threadVisibility.visibleThreadMessages, renderedLineEvidence, THREAD_WINDOW_SIZE,
     threadEditScope, threadClock, threadExactTime, threadRelativeTime, reminderFromSummary, anchorPresentation, pendingUnreadAPI, useUnreadVisit,
     agentName: agent => agent.id, theme: {}, Markdown, ThreadActionFeedback, ...hosts,
-    useStore: () => React.useContext(StoreContext),
+    useStore, ...extra,
   });
+}
+async function mountBody(harness, thread, page) {
+  const ThreadBody = bodyComponent(() => React.useContext(StoreContext), () => page);
   const StoreContext = React.createContext(harness.store);
   function Store() {
     const [, setRevision] = React.useState(0);
@@ -398,3 +401,130 @@ test('initial mark and clear deliveries settle from the real unread server recei
     assert.equal(harness.ledger().size, 0, 'no unknown delivery remains after confirmation');
   }
 });
+
+// Compile the production collection, exact summary, seek, history and composer together.
+// Only native hosts and transport are ports; no substitute collection/body UI owns retention.
+async function mountMarkedList(harness, initial) {
+  let summary = initial, listReads = 0, summaryHandlers;
+  const StoreContext = React.createContext(harness.store);
+  const useStore = () => React.useContext(StoreContext);
+  const hooks = { useStore, useCallback: React.useCallback, useEffect: React.useEffect,
+    useMemo: React.useMemo, useRef: React.useRef, useState: React.useState,
+    useFocusEffect: callback => React.useEffect(() => callback(), [callback]) };
+  const appearance = () => ({ system: true, palette: {}, colors: {}, color: value => value });
+  const deps = { ...hooks, ...hosts, ClientError, THREAD_WINDOW_SIZE, reminderFromSummary, ACCESSIBILITY_FONT_SCALE: 1.3,
+    errorText: error => String(error), theme: {}, useTextAppearance: appearance,
+    useWindowDimensions: () => ({ height: 800, width: 400, fontScale: 1 }),
+    useThreadViewports: () => viewports, threadViewportChanged: threadViewport.threadViewportChanged,
+    ThreadViewport: ({ children }) => children, SystemText: ({ children }) => children,
+    ScrollView: host('ScrollView'), useUnreadVisitEntry,
+    NO_THREADS: [], NO_SNAPSHOTS: new Map(),
+  };
+  const build = (name, next) => compile('./screens/Threads.tsx', name, next, deps);
+  deps.sameHead = build('sameHead', '// The live window');
+  deps.useThreadPage = build('useThreadPage', '/** Typed read failures');
+  deps.unreadReadIssue = build('unreadReadIssue', 'function markedUnreadIssue');
+  deps.markedUnreadIssue = build('markedUnreadIssue', 'const NO_THREADS');
+  deps.useMarkedUnreadPage = build('useMarkedUnreadPage', 'type ThreadClient');
+  deps.useTitleLines = build('useTitleLines', 'export function AgentThreads');
+  deps.useThreadSummary = build('useThreadSummary', '/** Only whole rendered lines');
+  deps.threadSummaryLine = build('threadSummaryLine', '/** One thread row');
+  deps.ThreadRow = build('ThreadRow', 'export function InboxThread');
+  deps.ContextThreadHeader = build('ContextThreadHeader', 'function ExpandedContextThread');
+  const Field = ({ ref, value, onChangeText, ...props }) => React.createElement('input', {
+    ref, value, onInput: event => onChangeText(event.target.value), 'data-composer': true,
+  });
+  const composerDeps = { ...deps, Field, ThreadActionFeedback, AccessibilityInfo: { announceForAccessibility() {} },
+    threadDraftKey: id => `thread/${id}`, readThreadDraft: value => value ? JSON.parse(value) : { text: '' },
+    threadTextIssue: () => undefined };
+  composerDeps.ThreadComposeField = compile('./screens/Threads.tsx', 'ThreadComposeField', null, composerDeps);
+  const ThreadComposer = compile('./screens/Threads.tsx', 'ThreadComposer', 'function ThreadComposeField', composerDeps);
+  deps.ThreadBody = bodyComponent(useStore, deps.useThreadPage, { ThreadComposer });
+  deps.ThreadActionFeedback = ThreadActionFeedback;
+  deps.threadEditScope = threadEditScope;
+  deps.anchorPresentation = anchorPresentation;
+  deps.reminderClear = build('reminderClear', '/** One thread');
+  deps.useThreadEditing = build('useThreadEditing', 'type Quote');
+  deps.ClearReminder = build('ClearReminder', '/** An explicit clear');
+  deps.ReminderThreadBody = build('ReminderThreadBody', 'export function ThreadScreen');
+  deps.ExpandedContextThread = build('ExpandedContextThread', '/** A marked thread');
+  deps.ContextThreadList = build('ContextThreadList', 'function ContextThreadHeader');
+  const ThreadGroup = build('ThreadGroup', 'function ContextThreadList');
+  Object.assign(harness.store, {
+    threadClient: harness.member, draftCache: { current: new Map() }, draftsReady: true, saveDrafts() {},
+    feed: { belongsTo: client => client === harness.member,
+      followThreadSummary: (_id, handlers) => { summaryHandlers = handlers; return { close() {} }; } },
+  });
+  harness.store.threadActions.add('thread.reply');
+  const originalUnread = harness.store.unreadClient;
+  harness.store.unreadClient = { ...originalUnread,
+    listMarked: async () => { listReads++; return reminderFromSummary(summary) ? { kind: 'items', items: [summary] } : { kind: 'empty' }; },
+  };
+  harness.member.threadGet = async () => ({ value: summary });
+  harness.member.threadTimeline = async () => ({ value: { items: [{ ...message, thread_quote_id: null }], next_cursor: null, anchor: { state: 'current', message_id: message.id } } });
+  const clear = harness.member.threadClearUnread;
+  harness.member.threadClearUnread = async request => {
+    const result = await clear(request);
+    summary = { ...summary, unread_reminder: undefined };
+    summaryHandlers?.onWindow({ items: [summary], snapshot: { host_id: 'host/one', store_index: 2 } });
+    return result;
+  };
+  function Store() {
+    const [, update] = React.useState(0);
+    React.useEffect(() => { harness.onChange(() => update(value => value + 1)); return () => harness.onChange(() => {}); }, []);
+    return React.createElement(StoreContext.Provider, { value: { ...harness.store } },
+      React.createElement(ThreadGroup, { context: { marked_unread: true }, title: 'Marked unread', openThread() {} }));
+  }
+  const root = createRoot(document.getElementById('root'));
+  await step(() => root.render(React.createElement(Store)));
+  return { listReads: () => listReads, update: () => step(() => harness.setOnline(true)),
+    unmount: () => step(() => root.unmount()) };
+}
+
+for (const ending of ['collapse', 'owner', 'generation', 'read-grant']) {
+  test(`marked-list removal preserves the open native reading context until ${ending}`, async context => {
+    context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 });
+    frames.clear();
+    const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: reminder };
+    const harness = deliveryStore(thread);
+    harness.member.outcome = 'confirmed';
+    const view = await mountMarkedList(harness, thread);
+    const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel?.startsWith(label))?.props;
+    try {
+      await step(() => row('Marked unread').onPress());
+      await step(() => row('Review').onPress());
+      const body = await layOut(100);
+      const composer = document.querySelector('[data-composer]');
+      assert.ok(composer, 'the production composer mounted');
+      composer.focus();
+      body.scrollTop = 29;
+      await step(() => {
+        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+        setter.call(composer, 'Keep this draft');
+        composer.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      });
+      const before = view.listReads();
+      await step(() => { threadViewport.threadViewportChanged(viewportRef); flushFrames(); });
+      await step(() => { context.mock.timers.tick(500); flushFrames(); });
+      assert.equal(harness.member.sends.filter(send => send.kind === 'clear').length, 1);
+      assert.ok(view.listReads() > before, 'confirmed clear refreshed marked membership');
+      assert.equal(composer.value, 'Keep this draft');
+      assert.equal(JSON.parse(harness.store.draftCache.current.get(`thread/${thread.id}`)).text, 'Keep this draft');
+      assert.equal(document.querySelector('[data-collapsable="false"]'), body);
+      assert.equal(document.querySelector('[data-composer]'), composer);
+      assert.equal(document.activeElement, composer);
+      assert.equal(body.scrollTop, 29);
+      assert.equal(row('Review').accessibilityLabel.includes('marked unread reminder'), false);
+      assert.equal(mounted().some(({ type, props }) => type === 'T' && props.children === 'Marked unread'), false);
+      if (ending === 'collapse') await step(() => row('Review').onPress());
+      else {
+        if (ending === 'owner') harness.store.actor = 'person/ada';
+        if (ending === 'generation') harness.store.draftGeneration.current++;
+        if (ending === 'read-grant') harness.store.threadClient = undefined;
+        await view.update();
+      }
+      assert.equal(document.querySelector('[data-collapsable="false"]'), null);
+      assert.equal(document.querySelector('[data-composer]'), null);
+    } finally { await view.unmount(); }
+  });
+}
