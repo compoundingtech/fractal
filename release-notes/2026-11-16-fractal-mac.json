@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "The new bundle identity requests notification consent once. Installation, signing, launchd and speech-host caller authorization remain owned by dotfiles; preference state starts fresh under the new identity. App menu-bar assets resolve inside Contents/Resources so the bundle stays valid under strict code-signature verification; standalone SwiftPM tests and gallery use their module bundle."
+    "detail": "The new bundle identity requests notification consent once. Installation, signing, launchd and speech-host caller authorization remain owned by dotfiles; preference state starts fresh under the new identity."
   },
   "recovery": {
     "status": "changed",
