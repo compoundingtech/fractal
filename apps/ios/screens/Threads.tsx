@@ -1123,15 +1123,17 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
 
   const send = async (run: () => Promise<ThreadEditResult>) => {
     const submittedDraft = start && !thread ? JSON.stringify(draft) : undefined;
+    const submittedCache = draftCache.current.get(key);
     const submittedOwner = draftsOwner.current;
     const submittedGeneration = draftGeneration.current;
     const next = await run();
     // The shared map is reset in place on pairing/actor changes. An old send
     // must neither persist its text for the next owner nor clear their typing.
-    if (start && !thread && (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration)) return;
+    if ((start && !thread || next.how === 'accepted') && (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration)) return;
     if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
     if (next.how === 'sent' || next.how === 'accepted') {
-      if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
+      const sameAcceptedDraft = draftCache.current.get(key) === submittedCache || !!thread && !draftCache.current.has(key);
+      if (next.how === 'accepted' ? sameAcceptedDraft : !start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
       if (start && !thread) {
         start.onAccepted(sentTarget.current!);
       }

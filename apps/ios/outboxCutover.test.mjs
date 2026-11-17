@@ -85,3 +85,27 @@ test('production restoration/status paths retain separate authoritative paging a
   assert.match(source, /context.start_recipient.agent_id !== message.origin.agentId/);
   assert.match(source, /owner.repository.saveUploads\(id, attachments\)/);
 });
+
+test('accepted thread reply clears only its captured draft revision and never another owner or later quote/text', async () => {
+  const screen = readFileSync(new URL('./screens/Threads.tsx', import.meta.url), 'utf8');
+  const a = screen.indexOf('  const send = async (run:'), b = screen.indexOf('\n  return <View', a);
+  const { outputText } = ts.transpileModule(`${screen.slice(a, b)}; exports.send = send;`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } });
+  for (const change of ['none', 'later-edit', 'owner', 'generation']) {
+    const key = 'thread-draft/thread/original', initial = JSON.stringify({ text: 'submitted', quote: { id: 'message/quote' } });
+    const cache = new Map([[key, initial]]), owner = { current: 'original' }, generation = { current: 0 }, cleared = [];
+    let resolve;
+    const deps = { start: undefined, thread: { id: 'thread/original' }, draft: JSON.parse(initial), key,
+      draftCache: { current: cache }, draftsOwner: owner, draftGeneration: generation,
+      storeDraft: draft => cleared.push(draft), setFailure: () => {} };
+    const exports = {}; new Function('exports', ...Object.keys(deps), outputText)(exports, ...Object.values(deps));
+    const sending = exports.send(() => new Promise(done => { resolve = done; }));
+    assert.deepEqual(cleared, []);
+    if (change === 'none') cache.delete(key); // Store removed exactly the accepted original.
+    if (change === 'later-edit') cache.set(key, JSON.stringify({ text: 'later', quote: { id: 'message/later' } }));
+    if (change === 'owner') owner.current = 'other';
+    if (change === 'generation') generation.current++;
+    resolve(accepted); await sending;
+    assert.deepEqual(cleared, change === 'none' ? [{ text: '' }] : []);
+    if (change === 'later-edit') assert.match(cache.get(key), /message\/later/);
+  }
+});
