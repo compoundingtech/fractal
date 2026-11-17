@@ -730,10 +730,10 @@ async fn thread_request_history_returns_store_page_and_preserves_opaque_cursor()
 
     let mut fixture = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
     fixture.state.store.configure_thread_write_rollout([]);
-    let intent = crate::graph::parse_internal_intent(
+    let intent = crate::graph::parse_intent(
         r#"version 2
-agent "reads-codex" { workspace "/tmp"; command "true"; restart always; }
-"#, "assistant-history",
+agent "reads-codex" { workspace "/tmp"; harness "omp" {} }
+"#, fixture.state.store.origin(),
     ).unwrap();
     fixture.state.store.apply_internal(&intent, "assistant-history").unwrap();
     let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
