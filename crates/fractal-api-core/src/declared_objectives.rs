@@ -284,6 +284,7 @@ pub fn rows(store: &Store, now: u64, native_rows: &[Value]) -> anyhow::Result<Ve
                 );
                 let mut produced = Vec::new();
                 for source_row in native_rows {
+                    if source_row["kind"] != "objective" { continue; }
                     let Some(id) = source_row["id"].as_str() else { continue };
                     if !native_owns(source, id) { continue; }
                     let mut row = source_row.clone();
