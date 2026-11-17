@@ -443,6 +443,14 @@ impl Earlier {
     }
 }
 
+fn start_context_error(error: ClientError) -> String {
+    match error {
+        ClientError::Api(fractal_client::ErrorCode::RecipientRetired, ..) =>
+            "The recipient is retired. No discussion was started; your draft is kept.".into(),
+        error => thread_read_error(error),
+    }
+}
+
 pub(super) struct StartContextRead {
     pub item: String,
     pub key: String,
@@ -452,7 +460,7 @@ pub(super) struct StartContextRead {
 impl StartContextRead {
     pub(super) async fn read(&self, client: &Client) -> Result<Envelope<fractal_client::ThreadStartContext>, String> {
         client.thread_start_context(&self.origin.source_id, &self.origin.episode)
-            .await.map_err(thread_read_error)
+            .await.map_err(start_context_error)
     }
 }
 
@@ -1038,6 +1046,11 @@ impl Threads {
         }
     }
 
+    pub(super) fn start_source(&self, item: &str) -> Option<fractal_client::ThreadStartOrigin> {
+        let ThreadInterest::Inbox { source, episode } = &self.start_origin(item)?.context else { return None };
+        Some(fractal_client::ThreadStartOrigin { source_id: source.clone(), episode: episode.clone() })
+    }
+
     pub(super) fn start_context(&self, item: &str) -> Option<&Envelope<fractal_client::ThreadStartContext>> {
         let ThreadInterest::Inbox { source, episode } = &self.start_origin(item)?.context else { return None };
         self.start_contexts.get(item).filter(|context|
@@ -1048,8 +1061,7 @@ impl Threads {
         if !self.available || self.start_context_pending.contains_key(item) { return; }
         let Some(input) = self.start_input(item) else { return };
         if self.drafts.get(&input.key()).is_some_and(Draft::locked) { return; }
-        let Some(Origin { context: ThreadInterest::Inbox { source, episode }, .. }) = self.start_origin(item) else { return };
-        let origin = fractal_client::ThreadStartOrigin { source_id: source.clone(), episode: episode.clone() };
+        let Some(origin) = self.start_source(item) else { return };
         let key = uuid::Uuid::now_v7().to_string();
         self.start_contexts.remove(item);
         self.start_context_failures.remove(item);

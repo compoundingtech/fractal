@@ -685,7 +685,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut auto_shown = false;
     let mut auto_stale = true;
     let mut auto_reading = false;
-    let mut start_context_asked: Option<(u64, String, String)> = None;
+    let mut start_context_asked: Option<(u64, String, String, String)> = None;
     let mut legacy_requested = BTreeSet::new();
     // When each polled inventory first failed on this run of failures: a read that fails for a
     // moment (a daemon catching up) is not said; one that keeps failing is.
@@ -1613,13 +1613,13 @@ pub fn run(context: Context) -> Result<()> {
             _ => {}
         }
         let selected_start = match ui.main_pane() {
-            Pane::Home(Some(id)) if ui.threads.can_start(&id) => model.now.snapshot.as_ref()
-                .map(|snapshot| (resources_generation, snapshot.id.clone(), id)),
+            Pane::Home(Some(id)) if ui.threads.can_start(&id) => ui.threads.start_source(&id)
+                .map(|origin| (resources_generation, id, origin.source_id, origin.episode)),
             _ => None,
         };
         if selected_start != start_context_asked {
             start_context_asked = selected_start.clone();
-            if let Some((_, _, item)) = selected_start {
+            if let Some((_, item, _, _)) = selected_start {
                 ui.threads.request_start_context(&item);
             }
         }

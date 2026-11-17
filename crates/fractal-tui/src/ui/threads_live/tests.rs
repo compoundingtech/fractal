@@ -4133,3 +4133,49 @@ fn start_recipient_layout_evidence() {
     assert!(ui.threads.writes().is_empty(), "the refreshed recipient waits for the person's Send");
     println!("HARNESS recipient evidence: {}", dir.display());
 }
+
+#[test]
+fn unassigned_and_retired_start_refusals_are_visible_distinct_and_never_send_or_loop() {
+    let mut notices = Vec::new();
+    for (code, message, expected) in [
+        ("thread-responsibility-unassigned", "no configured responsible agent", "configured"),
+        ("recipient-retired", "recipient retired", "recipient is retired"),
+    ] {
+        let mut threads = observed_threads(ThreadState::Open);
+        let item = "attention/system-notice";
+        threads.saved_origins.insert(item.into(), origin(
+            ThreadInterest::Inbox { source: "notice/system".into(), episode: "claim/opening".into() },
+            None, "System notice",
+        ));
+        let pane = Pane::Home(Some(item.into()));
+        let mut texts = HashMap::new();
+        assert!(threads.begin(&pane.key(), item, &mut texts));
+        let read = take_start_context_read(&mut threads, item);
+        let envelope: fractal_client::ErrorEnvelope = serde_json::from_value(serde_json::json!({
+            "api_version":fractal_client::API_VERSION, "error_version":"st3.client.error.v0",
+            "request_id":"request/no-recipient", "code":code, "message":message,
+            "retryable":false, "applied":"none", "details":{}
+        })).unwrap();
+        let notice = start_context_error(ClientError::Api(
+            envelope.code.clone(), envelope.message.clone(), Box::new(envelope),
+        ));
+        assert!(notice.contains(expected), "{notice}");
+        threads.start_context_loaded(&read.item, &read.key, Err(notice.clone()));
+        let input = threads.start_input(item).unwrap();
+        texts.insert(input.key(), "Keep this message until there is a recipient.".into());
+        for _ in 0..3 {
+            threads.submit(&pane.key(), input.clone(), &mut texts);
+            assert!(threads.writes().is_empty());
+            assert!(threads.take_start_context_reads().is_empty(), "no retry loop after a refusal");
+            assert!(threads.start_context(item).is_none(), "no invented recipient");
+        }
+        let doc = threads.mount(&pane, 120, &edit::Cursor::default(), &super::super::demo::test_world(), &texts);
+        let visible = doc.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(visible.contains(&notice), "{visible}");
+        assert!(!visible.contains("New discussion to "), "{visible}");
+        assert_eq!(texts[&input.key()], "Keep this message until there is a recipient.");
+        notices.push(notice);
+    }
+    assert_ne!(notices[0], notices[1]);
+    assert!(!notices[0].contains("retired"));
+}
