@@ -12,6 +12,7 @@ use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
 use super::resource_sidebar::ArrangementV1 as _;
+use super::pane::Pane;
 use super::view::Load;
 use super::{AgentControl, Effect, Guard, Ui};
 use crate::feed::{self, Command, Inventories, Inventory, Window};
@@ -395,6 +396,8 @@ enum Fetched {
     ThreadWrite(u64, super::threads_live::Receipt),
     ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),
     ThreadSeek(u64, String, String, Result<fractal_client::ThreadTimelinePage, super::threads_live::SeekFailure>),
+    RequestHistory(u64, String, String, Result<fractal_client::RequestHistoryPage, String>),
+    ResolvedOrigin((u64, String, String), Result<fractal_client::Envelope<Resource>, String>),
     MarkedUnread(u64, u64, Result<Vec<fractal_client::Envelope<fractal_client::ThreadSummary>>, super::marked_unread::Failure>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
@@ -682,6 +685,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut auto_shown = false;
     let mut auto_stale = true;
     let mut auto_reading = false;
+    let mut resolved_origin_asked: Option<(u64, String, String)> = None;
     let mut legacy_requested = BTreeSet::new();
     // When each polled inventory first failed on this run of failures: a read that fails for a
     // moment (a daemon catching up) is not said; one that keeps failing is.
@@ -1190,6 +1194,20 @@ pub fn run(context: Context) -> Result<()> {
                         ui.flash_as(super::Severity::Error, error);
                     }
                 }
+                Fetched::ResolvedOrigin(key, result) => {
+                    if resolved_origin_asked.as_ref() == Some(&key)
+                        && key.0 == resources_generation
+                        && model.now.snapshot.as_ref().is_some_and(|snapshot| snapshot.id == key.1)
+                        && ui.closed.contains(&key.2)
+                        && let Ok(row) = result {
+                        ui.threads.resolved_origin(&key.2, &model.actor, &key.1, row);
+                    }
+                }
+                Fetched::RequestHistory(generation, id, key, page) => {
+                    if generation == resources_generation {
+                        ui.threads.request_history_loaded(&id, &key, page);
+                    }
+                }
                 Fetched::ThreadEarlier(generation, id, page) => {
                     if generation == resources_generation
                         && let Some(error) = ui.threads.earlier_loaded(&id, page) {
@@ -1595,6 +1613,24 @@ pub fn run(context: Context) -> Result<()> {
             }
             _ => {}
         }
+        // Recently closed cards are kept locally, but their Start authority is not.
+        // Re-read just the selected card at the current member/snapshot boundary.
+        let resolved = match ui.main_pane() {
+            Pane::Home(Some(id)) if ui.closed.contains(&id) => model.now.snapshot.as_ref()
+                .map(|snapshot| (resources_generation, snapshot.id.clone(), id)),
+            _ => None,
+        };
+        if resolved != resolved_origin_asked {
+            resolved_origin_asked = resolved.clone();
+            if let Some(key) = resolved {
+                let reader = client.clone();
+                let tx = fetched_tx.clone();
+                runtime.spawn(async move {
+                    let result = reader.attention_get(&key.2).await.map_err(|error| error.human());
+                    let _ = tx.send(Fetched::ResolvedOrigin(key, result));
+                });
+            }
+        }
         let wanted_threads = ui.threads.interests(&ui.main_pane());
         if wanted_threads != thread_interests {
             ui.threads.keep_windows(&wanted_threads);
@@ -1619,6 +1655,15 @@ pub fn run(context: Context) -> Result<()> {
             runtime.spawn(async move {
                 let result = seek.read(&reader).await;
                 let _ = tx.send(Fetched::ThreadSeek(generation, seek.id, seek.key, result));
+            });
+        }
+        for request in ui.threads.take_request_history_reads() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = request.read(&reader).await;
+                let _ = tx.send(Fetched::RequestHistory(generation, request.id, request.key, result));
             });
         }
         for earlier in ui.threads.take_earlier() {

@@ -15,6 +15,7 @@ pub enum Tap {
     CombineSavedDrafts(String),
     MessageHeader(String),
     Earlier(String),
+    RequestHistory { thread: String, first: bool },
     Toggle(String),
     Compose(String),
     Send(String),

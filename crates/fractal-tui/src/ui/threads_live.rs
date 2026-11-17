@@ -444,6 +444,27 @@ impl Earlier {
     }
 }
 
+/// One server-owned request-history page, never an accumulated client lifecycle fold.
+pub(super) struct RequestHistoryRead {
+    pub id: String,
+    pub key: String,
+    cursor: Option<String>,
+}
+
+impl RequestHistoryRead {
+    pub(super) async fn read(&self, client: &Client) -> Result<fractal_client::RequestHistoryPage, String> {
+        client.thread_request_history(&self.id, self.cursor.as_deref(), Some(20))
+            .await.map(|reply| reply.value).map_err(thread_read_error)
+    }
+}
+
+#[derive(Default)]
+struct RequestHistory {
+    page: Option<fractal_client::RequestHistoryPage>,
+    pending: Option<String>,
+    failure: Option<String>,
+}
+
 pub(super) struct Seek {
     pub id: String,
     pub key: String,
@@ -471,11 +492,14 @@ pub(super) struct Threads {
     access: ThreadAccess,
     origins: BTreeMap<String, Origin>,
     retained_origins: BTreeMap<String, Origin>,
+    resolved_origins: BTreeMap<String, (String, Origin)>,
     unread_items: BTreeSet<String>,
     sessions: BTreeMap<String, String>,
     lists: BTreeMap<ThreadInterest, Vec<String>>,
     summaries: BTreeMap<String, Envelope<ThreadSummary>>,
     histories: BTreeMap<String, History>,
+    request_history: BTreeMap<String, RequestHistory>,
+    request_history_reads: Vec<RequestHistoryRead>,
     earlier: Vec<Earlier>,
     failures: BTreeMap<ThreadInterest, String>,
     open: BTreeMap<String, BTreeSet<String>>,
@@ -573,11 +597,15 @@ impl Threads {
             self.marked_in_home = false;
             self.access = ThreadAccess::default();
             self.lists.clear();
+            self.origins.clear();
+            self.resolved_origins.clear();
             self.unread_items.clear();
             self.start_slot = None;
             self.summaries.clear();
             self.histories.clear();
             self.earlier.clear();
+            self.request_history.clear();
+            self.request_history_reads.clear();
             self.failures.clear();
             self.action_refusals.clear();
             self.focused = None;
@@ -935,7 +963,12 @@ impl Threads {
         let Some(snapshot) = &model.now.snapshot else {
             return;
         };
-        for item in model.attention() {
+        self.resolved_origins.retain(|_, (at, _)| *at == snapshot.id);
+        self.origins.extend(self.resolved_origins.iter().map(|(id, (_, origin))| (id.clone(), origin.clone())));
+        for item in model.now.items.iter().filter_map(|row| match row {
+            fractal_client::Resource::Attention(item) if item.person_id == model.actor => Some(item),
+            _ => None,
+        }) {
             if item.thread_unread == Some(true) {
                 self.unread_items.insert(item.header.id.clone());
             }
@@ -962,6 +995,22 @@ impl Threads {
                 },
             );
         }
+    }
+
+    /// Resolved cards leave Now: admit their origin through a fresh owner-authorized
+    /// attention read, never through the locally retained card's prose.
+    pub(super) fn resolved_origin(&mut self, id: &str, person: &str, at: &str, row: Envelope<fractal_client::Resource>) {
+        let fractal_client::Resource::Attention(item) = row.value else { return };
+        if item.header.id != id || item.person_id != person || item.episode.is_empty() || item.source_id.is_empty() {
+            return;
+        }
+        let Some(agent) = item.conversation_id.filter(|agent| agent.starts_with("agent/")) else { return };
+        let origin = Origin {
+            context: ThreadInterest::Inbox { source: item.source_id, episode: item.episode },
+            agent, title: item.title, snapshot: row.snapshot.id,
+        };
+        self.resolved_origins.insert(id.into(), (at.into(), origin.clone()));
+        self.origins.insert(id.into(), origin);
     }
 
     fn context(&self, pane: &Pane) -> Option<ThreadInterest> {
@@ -1029,6 +1078,8 @@ impl Threads {
             )
         };
         self.histories.retain(|id, _| held(id));
+        self.request_history.retain(|id, _| held(id));
+        self.request_history_reads.retain(|read| held(&read.id));
         self.summaries.retain(|id, _| {
             held(id)
                 || self.lists.values().any(|ids| ids.contains(id))
@@ -1151,9 +1202,11 @@ impl Threads {
                 ThreadInterest::Timeline(id) => {
                     self.histories.remove(id);
                     self.summaries.remove(id);
+                    self.request_history.remove(id);
                 }
                 ThreadInterest::Summary(id) => {
                     self.summaries.remove(id);
+                    self.request_history.remove(id);
                 }
                 _ => {}
             }
@@ -1632,6 +1685,9 @@ impl Threads {
             }
             let base = doc.lines.len();
             doc.append(shell_doc(rendered, host, id, base), 0);
+            if open && loaded {
+                self.request_history_panel(doc, host, id, width);
+            }
             if open {
                 self.panel_feedback(
                     doc,
@@ -1887,6 +1943,7 @@ impl Threads {
             thread::Tap::Close(id) => self.lifecycle(host, id, Mutation::Close),
             thread::Tap::Reopen(id) => self.lifecycle(host, id, Mutation::Reopen),
             thread::Tap::OpenTab(id) => return Some(id),
+            thread::Tap::RequestHistory { thread, first } => self.read_request_history(thread, first),
             thread::Tap::Earlier(id) => {
                 if let Some(page) = self.seek_pages.get(&id) {
                     let history = self.histories.entry(id.clone()).or_default();
@@ -2592,6 +2649,69 @@ impl Threads {
         self.pending_actions
             .insert(id, Delivery::new(write.clone()));
         self.writes.push(write);
+    }
+
+    fn request_history_panel(&self, doc: &mut Doc, host: &str, id: &str, width: usize) {
+        let history = self.request_history.get(id);
+        if let Some(page) = history.and_then(|history| history.page.as_ref()) {
+            super::request_history::render(doc, page, width);
+        } else {
+            doc.section("Related requests", None, width);
+        }
+        if history.is_some_and(|history| history.pending.is_some()) {
+            doc.line(Line::from(Span::styled("Loading related requests…", theme::dim())));
+            return;
+        }
+        if let Some(failure) = history.and_then(|history| history.failure.as_ref()) {
+            doc.wrap(&[text::run(failure, theme::dim())], width);
+        }
+        let more = history.and_then(|history| history.page.as_ref())
+            .is_some_and(|page| page.next_cursor.is_some());
+        if more {
+            doc.buttons(&[("", "Next related requests", Hit::Thread(host.into(),
+                thread::Tap::RequestHistory { thread: id.into(), first: false }), theme::SAPPHIRE)]);
+        }
+        doc.buttons(&[("", if history.and_then(|history| history.page.as_ref()).is_some() {
+            "Refresh related requests"
+        } else { "Load related requests" }, Hit::Thread(host.into(),
+            thread::Tap::RequestHistory { thread: id.into(), first: true }), theme::SAPPHIRE)]);
+    }
+
+    fn read_request_history(&mut self, id: String, first: bool) {
+        if !self.available || self.summary(&id).is_none() {
+            return;
+        }
+        let history = self.request_history.entry(id.clone()).or_default();
+        if history.pending.is_some() {
+            return;
+        }
+        let cursor = if first { None } else {
+            let Some(cursor) = history.page.as_ref().and_then(|page| page.next_cursor.clone()) else {
+                return;
+            };
+            Some(cursor)
+        };
+        let key = uuid::Uuid::now_v7().to_string();
+        // Do not retain potentially revoked content while obtaining fresh authorization.
+        history.page = None;
+        history.failure = None;
+        history.pending = Some(key.clone());
+        self.request_history_reads.push(RequestHistoryRead { id, key, cursor });
+    }
+
+    pub(super) fn take_request_history_reads(&mut self) -> Vec<RequestHistoryRead> {
+        std::mem::take(&mut self.request_history_reads)
+    }
+
+    pub(super) fn request_history_loaded(&mut self, id: &str, key: &str,
+        result: Result<fractal_client::RequestHistoryPage, String>) {
+        let Some(history) = self.request_history.get_mut(id) else { return };
+        if history.pending.as_deref() != Some(key) { return; }
+        history.pending = None;
+        match result {
+            Ok(page) => history.page = Some(page),
+            Err(reason) => { history.page = None; history.failure = Some(reason); }
+        }
     }
 
     pub(super) fn take_earlier(&mut self) -> Vec<Earlier> {

@@ -3424,3 +3424,96 @@ fn a_refused_thread_read_says_access_ended_with_the_reason() {
     );
     assert_eq!(threads.failures[&timeline], "it is gone: thread/worker");
 }
+
+fn request_history_page(cursor: Option<&str>) -> fractal_client::RequestHistoryPage {
+    fractal_client::RequestHistoryPage {
+        items: vec![], relations: vec![], source_episodes: vec![], boundary_items: vec![],
+        source_support: Some(fractal_client::HistorySourceSupport::PersonStep),
+        next_cursor: cursor.map(str::to_owned), complete: true,
+    }
+}
+
+#[test]
+fn request_history_pagination_is_explicit_bounded_and_keeps_the_server_cursor() {
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.read_request_history("thread/worker".into(), true);
+    threads.read_request_history("thread/worker".into(), true);
+    let mut reads = threads.take_request_history_reads();
+    assert_eq!(reads.len(), 1, "one request in flight, never an automatic page walk");
+    let first = reads.pop().unwrap();
+    assert!(first.cursor.is_none());
+    threads.request_history_loaded(&first.id, &first.key, Ok(request_history_page(Some("opaque/server-cursor"))));
+    assert!(threads.take_request_history_reads().is_empty());
+    threads.read_request_history(first.id.clone(), false);
+    assert!(threads.request_history[&first.id].page.is_none(), "old authorization is not shown during a fresh read");
+    let next = threads.take_request_history_reads().pop().unwrap();
+    assert_eq!(next.cursor.as_deref(), Some("opaque/server-cursor"));
+    threads.request_history_loaded(&next.id, &next.key, Ok(request_history_page(None)));
+    threads.read_request_history(next.id.clone(), false);
+    assert!(threads.take_request_history_reads().is_empty(), "a terminal page cannot fetch again");
+    threads.read_request_history(next.id.clone(), true);
+    assert!(threads.take_request_history_reads().pop().unwrap().cursor.is_none());
+}
+
+#[test]
+fn request_history_revocation_and_departure_discard_pages_and_late_results() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    threads.read_request_history(id.into(), true);
+    let read = threads.take_request_history_reads().pop().unwrap();
+    threads.failure(ThreadInterest::Summary(id.into()), Some(fractal_client::ErrorCode::Forbidden),
+        "access revoked".into(), true);
+    threads.request_history_loaded(id, &read.key, Ok(request_history_page(None)));
+    assert!(!threads.request_history.contains_key(id));
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.read_request_history(id.into(), true);
+    let read = threads.take_request_history_reads().pop().unwrap();
+    threads.keep_windows(&[]);
+    threads.request_history_loaded(id, &read.key, Ok(request_history_page(None)));
+    assert!(!threads.request_history.contains_key(id));
+}
+
+fn resolved_card(kind: &str, person: &str) -> Envelope<fractal_client::Resource> {
+    let item: fractal_client::Attention = serde_json::from_value(serde_json::json!({
+        "id":"attention/resolved", "kind":"attention", "revision":"claim/resolved",
+        "updated_at":"2026-11-17T00:00:00Z",
+        "attention_kind":kind, "source_kind":kind, "source_id":"step-run/resolved",
+        "person_id":person, "conversation_id":"agent/atlas", "episode":"original:1:1",
+        "title":"Original request", "detail":"Original text", "priority":"normal",
+        "state":"resolved", "requested_at":"2026-11-17T00:00:00Z",
+        "requester_id":null, "launch_id":null, "variant_id":null, "message_id":null,
+        "preview_token":null, "preview":null, "what":null, "because":null, "fix":null,
+        "review_mode":null, "mission_id":null, "mission_run_id":null, "step_run_id":null
+    })).unwrap();
+    Envelope { value: fractal_client::Resource::Attention(item), snapshot: snapshot(),
+        request_id:"request/resolved".into(), api_version:fractal_client::API_VERSION.into() }
+}
+
+#[test]
+fn resolved_asks_authored_steps_and_notices_start_independent_discussions() {
+    for kind in ["person-step", "authored-step", "notice"] {
+        let mut threads = observed_threads(ThreadState::Open);
+        let id = "attention/resolved";
+        threads.resolved_origin(id, "person/avery", "snapshot/now", resolved_card(kind, "person/avery"));
+        assert!(threads.can_start(id));
+        let input = threads.start_input(id).unwrap();
+        let first = threads.prepare_write("home:attention/resolved", &input, "First discussion", &Draft::default()).unwrap();
+        let second = threads.prepare_write("home:attention/resolved", &input, "Second discussion", &Draft::default()).unwrap();
+        let (Mutation::Start(a), Mutation::Start(b)) = (&first.mutation, &second.mutation) else { panic!("independent Starts") };
+        assert_ne!(a.target_id, b.target_id);
+        assert_ne!(first.key, second.key);
+        assert_eq!(a.origin, b.origin);
+        assert_eq!(a.agent_id, "agent/atlas", "an offline origin is not redirected by the TUI");
+        assert_eq!(b.agent_id, "agent/atlas");
+        assert_eq!(threads.summary("thread/worker").unwrap(), &summary(), "existing discussion is untouched");
+    }
+}
+
+#[test]
+fn retained_resolved_cards_never_supply_another_persons_start_authority() {
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.resolved_origin("attention/resolved", "person/avery", "snapshot/now", resolved_card("notice", "person/other"));
+    assert!(!threads.can_start("attention/resolved"));
+    threads.resolved_origin("attention/wrong", "person/avery", "snapshot/now", resolved_card("notice", "person/avery"));
+    assert!(!threads.can_start("attention/wrong"));
+}

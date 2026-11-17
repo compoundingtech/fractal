@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show related request history in native thread panels",
+  "replay": {"status": "none", "detail": "The TUI consumes the generated RequestHistoryPage without joining claims or folding lifecycle state."},
+  "schema": {"status": "none", "detail": "Uses the existing generated history read, with explicit 20-item pages and opaque server cursors."},
+  "rules": {"status": "none", "detail": "History is explanatory only. Each request keeps its exact source and episode, original payload or unavailable reason, and independently served status and answer. Relation reasons appear only with supplied endpoints."},
+  "compatibility": {"status": "changed", "detail": "Open thread panels offer Related requests, next page and refresh. Historical source links explicitly open the current source; retained document references stay pinned. Selected locally retained resolved Inbox cards obtain Start context from an authorized attention detail read rather than local card text. Each Start allocates its own target and idempotency key."},
+  "downtime": {"status": "none", "detail": "No migration."},
+  "manual": {"status": "required", "detail": "Retired-origin NEW fallback preview is pending the shared generated start_recipient/ThreadStartContext contract from the separate Phase B composition; this change does not infer or implement recipient redirection. Resolved-card Start availability depends on the backend serving authorized attention detail for that exact retained card."},
+  "recovery": {"status": "none", "detail": "Read failures clear history pages; departure, access revocation and member disconnect discard cached request history. Draft and unread behavior are unchanged."}
+}
