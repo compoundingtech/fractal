@@ -421,8 +421,21 @@ test('initial mark and clear deliveries settle from the real unread server recei
 
 // Compile the production collection, exact summary, seek, history and composer together.
 // Only native hosts and transport are ports; no substitute collection/body UI owns retention.
-async function mountMarkedList(harness, initial, inlineTwin) {
-  let summary = initial, listReads = 0, summaryHandlers;
+async function mountMarkedList(harness, initial, { inlineTwin, recentlyClosed = false } = {}) {
+  let summary = initial, listReads = 0, collectionHandlers, listRefused = false, revision = 1;
+  const summaryHandlers = new Map();
+  const others = [
+    { ...initial, id: 'thread/two', title: 'Other one' },
+    { ...initial, id: 'thread/three', title: 'Other two' },
+  ];
+  const members = () => [summary, ...others].filter(thread => recentlyClosed ? thread.state === 'closed' : !!reminderFromSummary(thread));
+  const refresh = () => { harness.store.threadRefresh++; harness.setOnline(true); };
+  const publish = next => {
+    summary = next;
+    const snapshot = { host_id: 'host/one', store_index: ++revision };
+    summaryHandlers.get(next.id)?.onWindow({ items: [next], snapshot });
+    collectionHandlers?.onWindow({ items: members(), snapshot });
+  };
   const StoreContext = React.createContext(harness.store);
   const useStore = () => React.useContext(StoreContext);
   const hooks = { useStore, useCallback: React.useCallback, useEffect: React.useEffect,
@@ -473,42 +486,50 @@ async function mountMarkedList(harness, initial, inlineTwin) {
   Object.assign(harness.store, {
     threadClient: harness.member, draftCache: { current: new Map() }, draftsReady: true, saveDrafts() {},
     feed: { belongsTo: client => client === harness.member,
-      followThreadSummaries: () => undefined, followThreadTimeline: () => undefined,
-      followThreadSummary: (_id, handlers) => { summaryHandlers = handlers; return { close() {} }; } },
+      followThreadSummaries: (_context, handlers) => { collectionHandlers = handlers; return { close: () => { collectionHandlers = undefined; } }; },
+      followThreadTimeline: () => undefined,
+      followThreadSummary: (id, handlers) => { summaryHandlers.set(id, handlers); return { close: () => { summaryHandlers.delete(id); } }; } },
   });
   harness.store.threadActions.add('thread.reply');
   const originalUnread = harness.store.unreadClient;
   harness.store.unreadClient = { ...originalUnread,
     listMarked: async () => {
       listReads++;
-      return { kind: 'items', items: [
-        ...(reminderFromSummary(summary) ? [summary] : []),
-        { ...initial, id: 'thread/two', title: 'Other one' },
-        { ...initial, id: 'thread/three', title: 'Other two' },
-      ] };
+      if (listRefused) return { kind: 'error', items: [], error: { kind: 'read-failed', reason: { kind: 'refused', code: 'forbidden' } } };
+      return { kind: 'items', items: members() };
     },
   };
-  harness.member.threadList = async () => ({ value: { items: [summary], next_cursor: null } });
-  harness.member.threadGet = async id => ({ value: id === inlineTwin?.id ? inlineTwin : summary });
+  harness.member.threadList = async () => {
+    if (listRefused) throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+      request_id: 'request/one', code: 'forbidden', message: 'Thread access was revoked.', retryable: false }, 403);
+    return { value: { items: recentlyClosed ? members() : [summary], next_cursor: null } };
+  };
+  harness.member.threadGet = async id => ({ value: id === inlineTwin?.id ? inlineTwin : id === summary.id ? summary : others.find(thread => thread.id === id) });
   harness.member.threadTimeline = async id => ({ value: {
-    items: [{ ...message, id: id === inlineTwin?.id ? 'message/two' : message.id,
-      content: id === inlineTwin?.id ? 'The independently started second message' : message.content, thread_quote_id: null }],
+    items: [{ ...message, id: id === initial.id ? message.id : id === inlineTwin?.id ? 'message/two' : `message/${id}`,
+      content: id === initial.id ? message.content : id === inlineTwin?.id ? 'The independently started second message' : `Reply in ${id}`, thread_quote_id: null }],
     next_cursor: null, anchor: { state: 'current', message_id: message.id },
   } });
   const clear = harness.member.threadClearUnread;
   harness.member.threadClearUnread = async request => {
     const result = await clear(request);
-    summary = { ...summary, unread_reminder: undefined };
-    summaryHandlers?.onWindow({ items: [summary], snapshot: { host_id: 'host/one', store_index: 2 } });
+    publish({ ...summary, unread_reminder: undefined });
     return result;
+  };
+  if (recentlyClosed) harness.store.threadActions.add('thread.reopen');
+  harness.store.actions.editThread = async (_thread, edit) => {
+    assert.equal(edit.kind, 'reopen');
+    publish({ ...summary, state: 'open' });
+    refresh();
+    return { how: 'sent' };
   };
   function Store() {
     const [, update] = React.useState(0);
     React.useEffect(() => { harness.onChange(() => update(value => value + 1)); return () => harness.onChange(() => {}); }, []);
     return React.createElement(StoreContext.Provider, { value: { ...harness.store } },
       React.createElement(React.Fragment, null,
-        React.createElement(ThreadGroup, { context: inlineTwin ? { origin_source: 'ask/one', origin_episode: 'episode/one' } : { marked_unread: true },
-          title: inlineTwin ? 'Threads' : 'Marked unread', openThread: () => navigate(false), excludeId: inlineTwin?.id }),
+        React.createElement(ThreadGroup, { context: inlineTwin ? { origin_source: 'ask/one', origin_episode: 'episode/one' } : recentlyClosed ? { recently_closed: true } : { marked_unread: true },
+          title: inlineTwin ? 'Threads' : recentlyClosed ? 'Recently closed' : 'Marked unread', openThread: () => navigate(false), excludeId: inlineTwin?.id }),
         inlineTwin ? React.createElement(InlineThread, { client: harness.member, id: inlineTwin.id, placement: 'inbox:one',
           refresh: harness.store.threadRefresh, embedded: true, onOpen: () => navigate(false),
           start: { target: inlineTwin.id, cacheKey: 'start/one', accepted: true, title: inlineTwin.title } }) : null));
@@ -516,6 +537,10 @@ async function mountMarkedList(harness, initial, inlineTwin) {
   const root = createRoot(document.getElementById('root'));
   await step(() => root.render(React.createElement(Store)));
   return { listReads: () => listReads, update: () => step(() => harness.setOnline(true)),
+    remoteClear: () => step(() => publish({ ...summary, unread_reminder: undefined })),
+    denySummary: id => step(() => summaryHandlers.get(id).onIssue('Thread access was revoked.', true)),
+    denyList: () => step(() => { listRefused = true; collectionHandlers?.onIssue('Thread access was revoked.', true); refresh(); }),
+    members,
     unmount: () => step(() => root.unmount()) };
 }
 
@@ -584,7 +609,7 @@ test('same-title accepted Inbox start is visibly and accessibly distinct; each r
   const original = { id: 'thread/one', title: 'Review', message_count: 1, state: 'open', unread: false };
   const next = { ...original, id: 'thread/two' };
   const harness = deliveryStore(original);
-  const view = await mountMarkedList(harness, original, next);
+  const view = await mountMarkedList(harness, original, { inlineTwin: next });
   const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel === label)?.props;
   const bodies = () => [...document.querySelectorAll('[data-collapsable="false"]')];
   try {
@@ -605,3 +630,70 @@ test('same-title accepted Inbox start is visibly and accessibly distinct; each r
     assert.equal(row('Review, 1 message, open, started here').accessibilityState.expanded, true);
   } finally { await view.unmount(); }
 });
+
+for (const change of ['explicit-clear', 'remote-clear', 'reopen']) for (const ending of ['owner-reset', 'exact-denial', 'collection-denial']) {
+  test(`${change} removes filter membership, not selected reading contexts; ${ending} still clears protected content`, async () => {
+    const recentlyClosed = change === 'reopen';
+    const thread = { id: 'thread/one', title: 'Review', message_count: 1, unread: true,
+      state: recentlyClosed ? 'closed' : 'open', unread_reminder: recentlyClosed ? undefined : reminder };
+    const harness = deliveryStore(thread);
+    harness.member.outcome = 'confirmed';
+    const view = await mountMarkedList(harness, thread, { recentlyClosed });
+    const row = label => mounted().find(({ type, props }) => type === 'Pressable' && props.accessibilityLabel?.startsWith(label))?.props;
+    const bodies = () => [...document.querySelectorAll('[data-collapsable="false"]')];
+    try {
+      await step(() => row(recentlyClosed ? 'Recently closed, 3' : 'Marked unread').onPress());
+      for (const title of ['Review', 'Other one', 'Other two']) await step(() => row(title).onPress());
+      const originalBodies = bodies();
+      const originalComposers = [...document.querySelectorAll('[data-composer]')];
+      assert.equal(originalBodies.length, 3);
+      assert.equal(originalComposers.length, 3);
+      const scroll = document.querySelector('[data-host="ScrollView"]');
+      const order = () => [...scroll.querySelectorAll('[data-host="Pressable"][aria-label]')]
+        .map(node => node.getAttribute('aria-label').split(',')[0]).filter(title => ['Review', 'Other one', 'Other two'].includes(title));
+      const composer = originalComposers[0];
+      composer.focus();
+      scroll.scrollTop = 61;
+      await step(() => {
+        Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(composer, 'An unfinished reply');
+        composer.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      });
+      if (change === 'remote-clear') {
+        const before = view.listReads();
+        await view.remoteClear();
+        assert.equal(view.listReads(), before, 'the exact summary stream alone updates marked membership, with no synthetic refresh');
+      }
+      else await press(recentlyClosed ? 'Reopen thread' : 'Clear reminder');
+      assert.deepEqual(view.members().map(member => member.id), ['thread/two', 'thread/three'], 'authoritative filtered membership excludes the changed thread');
+      assert.deepEqual(bodies(), originalBodies, 'all selected bodies retain their identity and order');
+      assert.deepEqual([...document.querySelectorAll('[data-composer]')], originalComposers);
+      assert.deepEqual(order(), ['Review', 'Other one', 'Other two']);
+      assert.equal(document.querySelector('[data-host="ScrollView"]'), scroll);
+      assert.equal(scroll.scrollTop, 61);
+      assert.equal(document.activeElement, composer);
+      assert.equal(composer.value, 'An unfinished reply');
+      assert.equal(JSON.parse(harness.store.draftCache.current.get(`thread/${thread.id}`)).text, 'An unfinished reply');
+      assert.equal(row('Review').accessibilityLabel.includes(', unread'), true, 'natural unread is unchanged by reminder clear or reopen');
+      assert.equal(row('Review').accessibilityLabel.includes('marked unread reminder'), false);
+      assert.deepEqual(harness.store.reads, [], 'explicit/remote clear never acknowledges unseen messages');
+      if (recentlyClosed) {
+        assert.ok(row('Recently closed, 2'), 'the count reports filter members, not retained open placements');
+        assert.equal(row('Review').accessibilityLabel.includes('closed'), false);
+      } else {
+        assert.equal(row('Marked unread').accessibilityLabel, 'Marked unread', 'no phantom marked count is added');
+        assert.equal(scroll.querySelector('[aria-label^="Review"]').textContent.includes('Marked unread'), false);
+        assert.equal(harness.member.sends.length, change === 'explicit-clear' ? 1 : 0);
+      }
+      if (ending === 'owner-reset') {
+        harness.store.draftGeneration.current++;
+        await view.update();
+      } else if (ending === 'exact-denial') await view.denySummary(thread.id);
+      else await view.denyList();
+      assert.equal(document.contains(originalBodies[0]), false);
+      assert.equal(document.contains(composer), false);
+      if (ending === 'exact-denial') {
+        assert.ok(document.contains(originalBodies[1]), 'denial of one exact thread does not revoke another');
+      } else assert.equal(bodies().length, 0);
+    } finally { await view.unmount(); }
+  });
+}

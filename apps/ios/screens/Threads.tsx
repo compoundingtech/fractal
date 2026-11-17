@@ -38,7 +38,7 @@ function sameHead<T extends { id: string }>(left: readonly T[], right: readonly 
 // older tail unless its first page still aligns with the live head.
 function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: number, follow?: FollowPage<T>) {
   const active = useRef<AbortController | null>(null);
-  const [result, setResult] = useState<{ read: ReadPage<T>; head: T[]; page: ThreadPage<T>; snapshots?: ReadonlyMap<string, Snapshot>; issue?: string }>();
+  const [result, setResult] = useState<{ read: ReadPage<T>; head: T[]; page: ThreadPage<T>; snapshots?: ReadonlyMap<string, Snapshot>; issue?: string; refused?: boolean }>();
   const [live, setLive] = useState<{ read: ReadPage<T>; follow: FollowPage<T>; window?: CollectionWindow<T>; snapshots?: ReadonlyMap<string, Snapshot>; issue?: string; refused?: boolean }>();
   const [loading, setLoading] = useState(true);
   const visible = result?.read === read ? result : undefined;
@@ -60,8 +60,9 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
     } catch (error) {
       if (!request.signal.aborted) {
         const canKeepPrior = !(error instanceof ClientError && [401, 403, 404, 409].includes(error.status));
-        setResult({ read, head: canKeepPrior && prior ? prior.head : [], page: canKeepPrior && prior ? prior.page : { items: [], next_cursor: null }, issue: errorText(error) });
-        if (error instanceof ClientError && [401, 403, 404].includes(error.status)) {
+        const refused = error instanceof ClientError && [401, 403, 404].includes(error.status);
+        setResult({ read, head: canKeepPrior && prior ? prior.head : [], page: canKeepPrior && prior ? prior.page : { items: [], next_cursor: null }, issue: errorText(error), refused });
+        if (refused) {
           setLive(previous => previous?.read === read ? { ...previous, window: undefined, refused: true, issue: errorText(error) } : previous);
         }
       }
@@ -138,6 +139,7 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
     items,
     snapshots,
     issue: visibleLive?.issue || visible?.issue,
+    refused: !!(visibleLive?.refused || visible?.refused),
     loading,
     replace,
     reload: () => void load(),
@@ -267,11 +269,12 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
   const expanded = owned?.items;
   // Only navigation/ownership exits release the reading placement, never a list refresh.
   useFocusEffect(useCallback(() => () => setOpened(undefined), [client, lifetime]));
-  const threads = page.items.filter(thread => thread.id !== excludeId && (!marked || !!reminderFromSummary(thread)));
-  if (marked && expanded) for (const thread of expanded.values()) {
+  const members = page.items.filter(thread => thread.id !== excludeId && (!marked || !!reminderFromSummary(thread)) && (!recentlyClosed || thread.state === 'closed'));
+  const threads = [...members];
+  if (expanded) for (const thread of expanded.values()) {
     if (thread.id !== excludeId && !threads.some(row => row.id === thread.id)) threads.push(thread);
   }
-  if (marked && owned?.items.size) {
+  if (owned?.items.size) {
     // Freeze the visit's row ordering: removing an open row from membership must
     // not move its body/composer below the remaining rows in the same ScrollView.
     const positions = new Map(owned.order.map((id, index) => [id, index]));
@@ -284,7 +287,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       return { ...previous, items: new Map(previous.items).set(thread.id, thread) };
     });
   }, [page.replace, client, lifetime]);
-  useEffect(() => { if (marked && markedPage.refused) setOpened(undefined); }, [marked, markedPage.refused]);
+  useEffect(() => { if (page.refused) setOpened(undefined); }, [page.refused]);
   const { height } = useWindowDimensions();
   const titleLines = useTitleLines();
   // A host that scrolls (mission, Inbox) lets the group grow taller; above a conversation it
@@ -310,13 +313,13 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
     });
   }, []);
   const appearance = useTextAppearance();
-  if (marked && markedPage.refused) return <ThreadReadIssue message={markedPage.issue!} />;
+  if (page.refused) return <ThreadReadIssue message={page.issue!} />;
   if (!threads.length && !page.issue && !page.more) return null;
   // The marked section adds no new count: each row's private marker is its only signal.
-  const count = marked ? undefined : `${threads.length}${page.more ? '+' : ''}`;
+  const count = marked ? undefined : `${members.length}${page.more ? '+' : ''}`;
   return <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.mantle }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: show }} onPress={() => { setShow(previous => !previous); if (show) setOpened(undefined); }}
-      accessibilityLabel={marked ? title : `${title}, ${threads.length}${page.more ? ' or more' : ''}`}
+      accessibilityLabel={marked ? title : `${title}, ${members.length}${page.more ? ' or more' : ''}`}
       accessibilityValue={{ text: show ? 'Expanded' : 'Collapsed' }} accessibilityHint={show ? 'Hides the threads' : 'Shows the threads'}
       style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12 }}>
       <T numberOfLines={titleLines} style={{ flex: 1 }}><T bold color={theme.accent}>{title}</T>{count ? <T dim> · {count}</T> : null}</T>
