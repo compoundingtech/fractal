@@ -1,7 +1,9 @@
+import { ConversationComposer } from '../conversationComposer';
+import { ConversationFeedback, ConversationFrame, ConversationMessage } from '../conversationPresentation';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type Ref } from 'react';
 import * as Crypto from 'expo-crypto';
 import * as Clipboard from 'expo-clipboard';
-import { AccessibilityInfo, findNodeHandle, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, findNodeHandle, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { BottomTabBarHeightContext } from '@react-navigation/bottom-tabs';
@@ -26,7 +28,7 @@ import { useUnreadVisit, useUnreadVisitEntry } from '../unreadVisitNative';
 import { pendingUnreadAPI, type UnreadAPI } from '../unreadActions';
 import type { UnreadList, UnreadReadError, UnreadSeek } from '../unreadClient';
 import { theme } from '../theme';
-import { Button, Field, Markdown, SystemScreen, SystemText, T, useSystemColors, useTextAppearance, type MarkdownLine } from '../ui';
+import { Button, Field, SystemScreen, SystemText, T, useSystemColors, useTextAppearance, type MarkdownLine } from '../ui';
 import { RequestHistory } from './RequestHistory';
 import { StartRecipientPreview } from './StartRecipientPreview';
 
@@ -460,14 +462,14 @@ function ThreadDetail({ client, id }: { client: ThreadClient; id: string }) {
     const hidden = Keyboard.addListener('keyboardWillHide', () => setKeyboard(false));
     return () => { shown.remove(); hidden.remove(); };
   }, []);
-  const frame: ThreadFrame = (content, dock) => <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
-    <ScrollView ref={viewport} style={{ flex: 1 }} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" refreshControl={refresh}
+  const frame: ThreadFrame = (content, dock) => ConversationFrame({
+    keyboardVerticalOffset: headerHeight,
+    children: <ScrollView ref={viewport} style={{ flex: 1 }} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive" refreshControl={refresh}
       onScroll={() => threadViewportChanged(viewport)} scrollEventThrottle={100} onLayout={() => threadViewportChanged(viewport)}
-      contentContainerStyle={{ padding: 12, gap: 8 }}>{content}</ScrollView>
-    {dock ? <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: keyboard ? 8 : Math.max(insets.bottom, 8), borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator, backgroundColor: colors.background }}>
-      {dock}
-    </View> : null}
-  </KeyboardAvoidingView>;
+      contentContainerStyle={{ padding: 12, gap: 8 }}>{content}</ScrollView>,
+    composer: dock,
+    composerStyle: { paddingHorizontal: 12, paddingTop: 8, paddingBottom: keyboard ? 8 : Math.max(insets.bottom, 8), borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator, backgroundColor: colors.background },
+  });
   return <ThreadViewport viewport={viewport}><InlineThread client={client} id={id} placement={`thread:${id}`} refresh={threadRefresh} frame={frame} /></ThreadViewport>;
 }
 
@@ -776,15 +778,13 @@ function ThreadActionFeedback({ result, busy, onRetry }: { result?: ThreadEditRe
       `${result.action ? `Couldn't ${result.action} this thread. ` : ''}${result.error}`,
     );
   }, [result]);
-  if (result?.how === 'failed') return <View style={{ gap: 6 }}>
-    {result.action ? <T color={theme.waiting}>{`Couldn't ${result.action} this thread.`}</T> : null}
-    <T color={theme.waiting}>{result.error}</T>
-  </View>;
-  if (result?.how !== 'unconfirmed') return null;
-  return <View style={{ gap: 6 }}>
-    <T color={theme.waiting}>The original connection has not confirmed this change.</T>
-    <Button label="Retry original change" disabled={busy} onPress={onRetry} />
-  </View>;
+  if (result?.how !== 'failed' && result?.how !== 'unconfirmed') return null;
+  return ConversationFeedback({
+    color: theme.waiting,
+    heading: result.how === 'failed' && result.action ? `Couldn't ${result.action} this thread.` : undefined,
+    message: result.how === 'failed' ? result.error : 'The original connection has not confirmed this change.',
+    recovery: result.how === 'unconfirmed' ? { label: 'Retry original change', disabled: busy, onPress: onRetry } : undefined,
+  });
 }
 
 type ThreadMessage = Extract<ThreadTimelineEvent, { kind: 'message' }>;
@@ -933,10 +933,13 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
           if (action.nativeEvent.actionName === 'reply') reply?.();
           if (action.nativeEvent.actionName === 'markRead' && readHere) markVisibleRead();
         }}>
-        {returnHere ? <T color={theme.accent}>Marked unread · return here</T> : null}
-        <T bold>{name}<Text accessibilityElementsHidden importantForAccessibility="no"> · {age}</Text></T>
-        {event.thread_quote_id ? <T dim numberOfLines={1}>{quoted ? `Reply to ${actorLabel(quoted.actor_id)} · ${quoted.content}` : 'Reply to an earlier message'}</T> : null}
-        <View collapsable={false} onLayout={visit.refresh} ref={messageRef(event.id)}><Markdown text={event.content} selectable={!reply} onLines={lines => linesLaidOut(event.id, lines)} /></View>
+        {ConversationMessage({
+          before: returnHere ? <T color={theme.accent}>Marked unread · return here</T> : undefined,
+          heading: <>{name}<Text accessibilityElementsHidden importantForAccessibility="no"> · {age}</Text></>, headingBold: true,
+          beforeBody: event.thread_quote_id ? <T dim numberOfLines={1}>{quoted ? `Reply to ${actorLabel(quoted.actor_id)} · ${quoted.content}` : 'Reply to an earlier message'}</T> : undefined,
+          text: event.content, selectable: !reply, bodyRef: messageRef(event.id), onBodyLayout: visit.refresh,
+          onLines: lines => linesLaidOut(event.id, lines),
+        })}
       </Pressable>;
       return <ContextMenu key={event.id} title={exactTime} actions={readHere ? [
         ...(reply ? [{ id: 'reply', title: 'Reply to this message', run: reply }] : []),
@@ -1075,12 +1078,13 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   const [draft, setDraft] = useState(() => readThreadDraft(draftCache.current.get(key)));
   const touched = useRef(false);
   const appliedSelection = useRef(selectionVersion);
-  const [sending, setSending] = useState(false);
   const sentTarget = useRef<string | undefined>(undefined);
   const [failure, setFailure] = useState<ThreadEditResult>();
   // A Start's receipt belongs to its attempt (source, episode and new thread ID), never to the
   // shared origin: a first composer has none, so a handed-off attempt never blocks the next Start.
-  const delivery = threadDeliveries?.get(!thread && start ? id && start.origin ? threadStartAttemptScope(start.origin, id) : '' : id!);
+  const deliveryTarget = id ?? sentTarget.current;
+  const delivery = threadDeliveries?.get(!thread && start ? deliveryTarget && start.origin ? threadStartAttemptScope(start.origin, deliveryTarget) : '' : deliveryTarget!);
+  const sending = !!delivery && !delivery.retry;
   const feedback = delivery?.retry ? { how: 'unconfirmed' as const, retry: delivery.retry } : failure;
   // A fresh Start composes only once its StartContext names the recipient it signs.
   const enabled = canReply && status === 'online' && !sending && !delivery && (!!thread || !start || !!start.origin);
@@ -1119,37 +1123,33 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   }, [selectionVersion]);
 
   const send = async (run: () => Promise<ThreadEditResult>) => {
-    setSending(true);
     const submittedDraft = start && !thread ? JSON.stringify(draft) : undefined;
     const submittedOwner = draftsOwner.current;
     const submittedGeneration = draftGeneration.current;
-    try {
-      const next = await run();
-      // The shared map is reset in place on pairing/actor changes. An old send
-      // must neither persist its text for the next owner nor clear their typing.
-      if (start && !thread && (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration)) return;
-      if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
-      if (next.how === 'sent') {
-        if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
-        if (start && !thread) {
-          start.onAccepted(sentTarget.current!);
-        }
+    const next = await run();
+    // The shared map is reset in place on pairing/actor changes. An old send
+    // must neither persist its text for the next owner nor clear their typing.
+    if (start && !thread && (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration)) return;
+    if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
+    if (next.how === 'sent') {
+      if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
+      if (start && !thread) {
+        start.onAccepted(sentTarget.current!);
       }
-      setFailure(next.how === 'failed' ? next : undefined);
-      // Only after the owner/generation fences: reread the recipient, show it, and wait for a new
-      // explicit send. A handed-off attempt has no callback and is never retargeted.
-      if (next.how === 'failed' && next.refreshStartContext && start && !thread) start.onRecipientRefused?.();
-    } finally {
-      setSending(false);
     }
+    setFailure(next.how === 'failed' ? next : undefined);
+    // Only after the owner/generation fences: reread the recipient, show it, and wait for a new
+    // explicit send. A handed-off attempt has no callback and is never retargeted.
+    if (next.how === 'failed' && next.refreshStartContext && start && !thread) start.onRecipientRefused?.();
   };
 
   return <View style={{ gap: 6 }}>
-    {canReply && draft.quote ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+    {canReply ? <ThreadComposeField contextualTitle={contextualTitle} inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
+      before={draft.quote ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
       <T dim numberOfLines={1} style={{ flex: 1 }}>Replying to {draft.quote.from} · {draft.quote.text}</T>
       <Button label="Remove quote" disabled={!enabled} onPress={() => storeDraft({ text: draft.text })} />
     </View> : null}
-    {canReply ? <ThreadComposeField contextualTitle={contextualTitle} inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
+      after={issue ? <T color={theme.waiting} style={{ marginTop: 6 }}>{issue}</T> : null}
       onSend={() => {
         if (!enabled || !content || issue || !thread && (!start?.origin || start.accepted)) return;
         void send(() => {
@@ -1160,7 +1160,6 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
         });
       }} enabled={enabled} canSend={(!!thread || !start?.accepted) && !staleAttempt && !!content && !issue}
       autoFocus={!!start && !thread} onCancel={start && !thread && !start.accepted && !delivery && !sending ? start.onCancel : undefined} /> : null}
-    {canReply && issue ? <T color={theme.waiting}>{issue}</T> : null}
     {staleAttempt ? <View style={{ gap: 6 }}>
       <T dim>This send's recipient changed, so it cannot be retried. Copy the message into a new Start to send it separately.</T>
       <Button label="Copy message" onPress={() => { void Clipboard.setStringAsync(draft.text); }} />
@@ -1171,16 +1170,13 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   </View>;
 }
 
-function ThreadComposeField({ contextualTitle, inputRef, rowRef, onReveal, text, onChange, onSend, onCancel, enabled, canSend, autoFocus }: {
+function ThreadComposeField({ contextualTitle, inputRef, rowRef, onReveal, text, onChange, onSend, onCancel, enabled, canSend, autoFocus, before, after }: {
   contextualTitle?: string; inputRef?: Ref<TextInput>; rowRef?: Ref<View>; onReveal?: () => void; text: string; onChange: (text: string) => void; onSend: () => void;
-  onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean;
+  onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean; before?: ReactNode; after?: ReactNode;
 }) {
-  const label = contextualTitle ? `Message ${contextualTitle}` : 'Message thread';
-  return <View ref={rowRef} onLayout={onReveal} style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
-    {/* iOS appends the placeholder to the label only while empty; keep one name in both states. */}
-    <Field ref={inputRef} onFocus={onReveal} accessibilityLabel={text.length ? label : undefined} placeholder={label} value={text} editable={enabled}
-      onChangeText={onChange} multiline autoFocus={autoFocus} style={{ flex: 1 }} />
-    <Button label="Send" accessibilityLabel={contextualTitle ? `Send reply to ${contextualTitle}` : undefined} disabled={!enabled || !canSend} onPress={onSend} />
-    {onCancel ? <Button label="Cancel" disabled={!enabled} onPress={onCancel} /> : null}
-  </View>;
+  return ConversationComposer({
+    text, onChange, onSend, inputRef, rowRef, onReveal, enabled, canSend, autoFocus, onCancel, before, after,
+    label: contextualTitle ? `Message ${contextualTitle}` : 'Message thread',
+    sendAccessibilityLabel: contextualTitle ? `Send reply to ${contextualTitle}` : undefined,
+  });
 }

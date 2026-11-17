@@ -1,3 +1,4 @@
+import { ConversationAttempts } from './conversationAttempts';
 import { markdownSource } from '../../clients/typescript/fractal-client/markdown-text';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { AppState, unstable_batchedUpdates, View } from 'react-native';
@@ -173,7 +174,11 @@ export function threadStartAttemptScope(origin: Pick<ThreadStartOrigin, 'sourceI
 }
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
-type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult>; start?: ThreadStartPresentation };
+type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult>; start?: ThreadStartPresentation; submitted?: { text: string; quoteId?: string } };
+function threadDeliveryRows(attempts: ConversationAttempts<ThreadDelivery, ThreadEditResult> | undefined): Map<string, ThreadDelivery> {
+  return new Map(attempts?.getSnapshot().filter(attempt => attempt.phase === 'sending' || attempt.phase === 'unconfirmed')
+    .map(attempt => [attempt.id, { ...attempt.draft, retry: attempt.retry }]));
+}
 
 function actionId() { return `action/ios-${Crypto.randomUUID()}`; }
 function sentAs(outcome: DeliveryOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: sendRefusal(outcome.error) } : outcome; }
@@ -409,8 +414,8 @@ function useAppStore(proof?: FabricProfile) {
     capability.state === 'granted' && capability.id.startsWith('thread.')).map(capability => capability.id));
   const [threadRefresh, setThreadRefresh] = useState(0);
   const [threadDeliveryRevision, setThreadDeliveryRevision] = useState(0);
-  const deliveriesByClient = useRef(new WeakMap<FractalClient, Map<string, ThreadDelivery>>());
-  const threadDeliveries = useMemo(() => threadClient && new Map(deliveriesByClient.current.get(threadClient)), [threadClient, threadDeliveryRevision]);
+  const deliveriesByClient = useRef(new WeakMap<FractalClient, ConversationAttempts<ThreadDelivery, ThreadEditResult>>());
+  const threadDeliveries = useMemo(() => threadClient && threadDeliveryRows(deliveriesByClient.current.get(threadClient)), [threadClient, threadDeliveryRevision]);
   const editsByClient = useRef(new WeakMap<FractalClient, ThreadEdits>());
   const threadEdits = useMemo(() => {
     if (!threadClient) return undefined;
@@ -1146,34 +1151,26 @@ function useAppStore(proof?: FabricProfile) {
     }));
   }
 
-  async function trackThreadDelivery(scope: string, target: string, send: () => Promise<ThreadEditResult>, onSent?: () => void, start?: ThreadStartPresentation): Promise<ThreadEditResult> {
+  async function trackThreadDelivery(scope: string, target: string, send: () => Promise<ThreadEditResult>, onSent?: () => void, start?: ThreadStartPresentation, submitted?: ThreadDelivery['submitted']): Promise<ThreadEditResult> {
     if (!threadClient) return { how: 'failed', error: 'This connection cannot send thread messages.' };
-    let deliveries = deliveriesByClient.current.get(threadClient);
-    if (!deliveries) {
-      deliveries = new Map();
-      deliveriesByClient.current.set(threadClient, deliveries);
+    let attempts = deliveriesByClient.current.get(threadClient);
+    if (!attempts) {
+      attempts = new ConversationAttempts<ThreadDelivery, ThreadEditResult>(
+        result => result.how === 'unconfirmed' ? result.retry : undefined,
+        error => ({ how: 'failed', error: threadActionErrorText(error) }));
+      attempts.subscribe(() => setThreadDeliveryRevision(previous => previous + 1));
+      deliveriesByClient.current.set(threadClient, attempts);
     }
-    const active = deliveries;
-    if (active.has(scope)) return { how: 'failed', error: 'Resolve the earlier send before starting another.' };
-    const run = async (operation: () => Promise<ThreadEditResult>): Promise<ThreadEditResult> => {
-      active.set(scope, { target, start });
-      setThreadDeliveryRevision(previous => previous + 1);
-      let result: ThreadEditResult;
-      try { result = await operation(); }
-      catch (error) { result = { how: 'failed', error: threadActionErrorText(error) }; }
-      if (result.how === 'unconfirmed') {
-        const original = result.retry;
-        const retry = () => active.get(scope)?.retry === retry ? run(original) : Promise.resolve(result);
-        active.set(scope, { target, retry, start });
-        result = { how: 'unconfirmed', retry };
-      } else {
-        if (result.how === 'sent') onSent?.();
-        active.delete(scope);
-      }
-      setThreadDeliveryRevision(previous => previous + 1);
-      return result;
+    if (attempts.has(scope)) return { how: 'failed', error: 'Resolve the earlier send before starting another.' };
+    const active = attempts;
+    const finish = (result: ThreadEditResult): ThreadEditResult => {
+      const retry = active.getSnapshot().find(attempt => attempt.id === scope)?.retry;
+      return result.how === 'unconfirmed' && retry ? { how: 'unconfirmed', retry: async () => finish(await retry()) } : result;
     };
-    return run(send);
+    return finish(await active.send(scope, { target, start, submitted }, send, result => {
+      if (result.how === 'sent') onSent?.();
+      if (result.how !== 'unconfirmed') active.remove(scope);
+    }));
   }
 
   const actions = {
@@ -1217,7 +1214,7 @@ function useAppStore(proof?: FabricProfile) {
           target_id: thread, agent_id: origin.agentId, origin: { source_id: origin.sourceId, episode: origin.episode },
           title, content, signature,
         } }) };
-      }), undefined, { origin: { ...origin }, title });
+      }), undefined, { origin: { ...origin }, title }, { text: content });
     },
     replyToThread(thread: ThreadSummary, content: string, quoteId?: string): Promise<ThreadEditResult> {
       const signingProfile = signingKeyRef.current;
@@ -1236,7 +1233,7 @@ function useAppStore(proof?: FabricProfile) {
         if (draftsOwner.current !== draftOwner || draftCache.current.get(draftKey) !== sentDraft) return;
         draftCache.current.delete(draftKey);
         if (!proof) void localDrafts.save(draftOwner, draftCache.current);
-      });
+      }, undefined, { text: content, quoteId });
     },
     async saveUrl(value: string) {
       if (proof) { setError('Close the fabric proof to change the saved gateway.'); return; }

@@ -13,6 +13,7 @@ import * as threadVisibility from './threadVisibility.ts';
 import { applyVisitEffect, pendingUnreadAPI, UnreadVisitController } from './unreadActions.ts';
 import { unreadClient as bindUnreadClient, unreadSupported } from './unreadClient.ts';
 import { anchorPresentation, reminderFromSummary, unreadVisit } from './unreadVisit.ts';
+import { ConversationAttempts } from './conversationAttempts.ts';
 
 // react-dom decides whether it runs in a DOM when it is first loaded, so the document exists first.
 // React is loaded beside react-dom so both share one React instance.
@@ -54,6 +55,10 @@ function compile(file, name, next, dependencies) {
   const a = text.search(new RegExp(`function ${name}(?=[(<])`));
   const b = next === null ? text.length : text.indexOf(`\n${next}`, a);
   assert.ok(a >= 0 && b > a, `${name} in ${file}`);
+  dependencies = {
+    ConversationComposer: props => compile('./conversationComposer.tsx', 'ConversationComposer', null, dependencies)(props),
+    ConversationFeedback: props => compile('./conversationPresentation.tsx', 'ConversationFeedback', null, dependencies)(props),
+    ConversationMessage: props => compile('./conversationPresentation.tsx', 'ConversationMessage', null, dependencies)(props), ...dependencies };
   const { outputText } = ts.transpileModule(`${text.slice(a, b)}\nexports.value = ${name};`, { compilerOptions });
   const exports = {};
   new Function('exports', 'React', ...Object.keys(dependencies), outputText)(exports, React, ...Object.values(dependencies));
@@ -164,7 +169,9 @@ function deliveryStore(thread) {
     } };
   }
   const deliveriesByClient = { current: new WeakMap() };
-  const ledger = () => deliveriesByClient.current.get(member) ?? new Map();
+  const ledger = () => new Map(deliveriesByClient.current.get(member)?.getSnapshot()
+    .filter(attempt => attempt.phase === 'sending' || attempt.phase === 'unconfirmed')
+    .map(attempt => [attempt.id, { ...attempt.draft, retry: attempt.retry }]));
   const unreadPorts = { current: undefined };
   const store = {
     actor: 'person/one', data: { agents: [] }, status: 'online', threadRefresh: 0, threadDeliveries: new Map(), reads: [], unreadEnabled: true,
@@ -182,6 +189,7 @@ function deliveryStore(thread) {
     actionReceiptCheck, sendBoundAction, resendBoundAction, setThreadRefresh: () => { store.threadRefresh++; changed(); }, ClientError,
     threadActionErrorText: error => error instanceof Error ? error.message : String(error),
     deliveriesByClient, setThreadDeliveryRevision: () => { store.threadDeliveries = new Map(ledger()); changed(); },
+    ConversationAttempts,
     unreadPorts, client: member, capsRef, capsClient: { current: member }, statusRef, unreadSupported, actions: store.actions,
     // Only the lost-reply repeat waits; it need not take a real second here.
     setTimeout: callback => setImmediate(callback),
