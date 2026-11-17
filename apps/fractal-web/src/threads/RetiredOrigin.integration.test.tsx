@@ -132,6 +132,8 @@ it.each([
   { name: 'a typed system notice', element: <LiveInboxThreads alert={notice} />, sourceId: notice.source_id, recipient: configuredRecipient, basis: 'Configured recipient' },
   { name: 'a resolved authored step', element: <LiveResolvedInboxThreads sourceId="step-run/release/authored" episode={episode} title="Write the release notes" />,
     sourceId: 'step-run/release/authored', recipient: configuredRecipient, basis: 'Configured recipient' },
+  { name: 'an agent-requested run', element: <LiveResolvedInboxThreads sourceId="step-run/release/agent-requested" episode={episode} title="Check the release" />,
+    sourceId: 'step-run/release/agent-requested', recipient: originalRecipient, basis: 'Original recipient' },
 ])('starts $name with exactly the recipient Fractal’s preview names', async ({ element, sourceId, recipient, basis }) => {
   const view = await mount(element, { preview: url => context(url, recipient) })
   try {
@@ -176,12 +178,13 @@ it('previews a fallback recipient as new beside the retired original agent and s
   } finally { await view.dispose() }
 })
 
-it('refuses a recipient-retired item with Fractal’s reason and no default recipient', async () => {
-  const view = await mount(<LiveInboxThreads alert={ask} />, { preview: () => refusal('recipient-retired', 409) })
+it('refuses an unconfigured source with no original agent without claiming retirement or choosing a default', async () => {
+  const view = await mount(<LiveInboxThreads alert={notice} />, { preview: () => refusal('recipient-retired', 409) })
   try {
     await vi.waitFor(() => expect(view.host.querySelector('[data-start-recipient="retired"]')).not.toBeNull())
     const notice = view.host.querySelector('[data-start-recipient="retired"]')
-    expect(notice?.textContent).toContain('This item’s agent was retired and Fractal has no new recipient configured, so no thread can start here.')
+    expect(notice?.textContent).toContain('Fractal has no recipient configured for this item, so no thread can start here.')
+    expect(notice?.textContent).not.toContain('was retired')
     expect(notice?.textContent).toContain('The requested recipient is unavailable.')
     expect(view.button('Start thread')).toBeUndefined()
     expect(view.host.querySelector('[data-start-recipient-id]')).toBeNull()

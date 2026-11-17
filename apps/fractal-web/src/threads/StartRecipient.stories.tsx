@@ -140,7 +140,7 @@ const meta = {
   parameters: {
     layout: 'fullscreen',
     scenario: { _tag: 'contract-fixture', reason: 'Exact-key thread start previews decoded by the generated ThreadStartContext schema (original, configured, terminal-retirement fallback, recipient-retired refusal, loading, failure, no reader) and a one-time recipient mismatch served by a local source; no world slice models start recipients. No daemon writes.' },
-    docs: { description: { component: 'Before a first send any Inbox item names its exact recipient: the agent, its exact id and the basis Fractal selected it on. A fallback is labelled New recipient with the retired original agent and id on their own line; a retired agent without a configured fallback refuses with no default; a source without the preview offers no Start. When Fractal selects a different recipient after the draft opened, the draft and refusal stay and the person sends again explicitly.' } },
+    docs: { description: { component: 'Before a first send any Inbox item names its exact recipient: the agent, its exact id and the basis Fractal selected it on. A fallback is labelled New recipient with the retired original agent and id on their own line; an unconfigured source, with or without an original agent, refuses with no default; a source without the preview offers no Start. When Fractal selects a different recipient after the draft opened, the draft and refusal stay and the person sends again explicitly.' } },
   },
   args: { scheme: 'dark', viewport: 1440, scenario: 'original' },
   argTypes: {
@@ -236,7 +236,7 @@ export const MismatchReread: Story = {
   },
 }
 
-/** A retired agent with no configured fallback: Fractal's refusal, no Start and no default recipient. */
+/** An unconfigured source, including one with no original agent: Fractal's refusal, no Start and no default recipient. */
 export const UnconfiguredRefusal: Story = {
   args: { scenario: 'unconfigured' },
   play: async ({ canvasElement }) => {

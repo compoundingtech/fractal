@@ -641,12 +641,15 @@ item's `conversation_id` nor its `requester_id` is read for it, and a source
 without the preview reader shows a note and no Start.
 
 The Start row and the draft show the recipient's name, its exact agent id and
-its basis (`Original recipient`, `Configured recipient`). A terminal-retirement
-fallback is labelled `New recipient`; the retired original agent and its exact id
-appear on their own line. Runtime offline status never selects a fallback. An
-unconfigured fallback shows the `recipient-retired` refusal with no default
-agent and no Start; while the preview loads or after it fails there is no Start
-either, and a failed read offers Retry.
+its basis: `Original recipient` for a source agent or an agent-run requester;
+`Configured recipient` when no original agent exists, such as a person-requested
+run or a person-owned notice. A terminal-retirement fallback is labelled
+`New recipient`; the retired original agent and its exact id appear separately.
+Runtime offline status never selects a fallback. An unconfigured source is
+refused with `recipient-retired` and no default or Start, including when no
+original agent exists; the error alone never claims an agent retired.
+While the preview loads or after it fails there is no Start either, and a
+failed read offers Retry.
 
 If Start returns a recipient-mismatch 404, the source reads that exact preview
 again and returns the refusal; the draft stays, the changed recipient is called

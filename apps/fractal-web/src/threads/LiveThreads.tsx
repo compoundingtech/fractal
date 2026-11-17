@@ -209,8 +209,8 @@ function AgentName({ id }: { readonly id: string }) {
 type StartRecipientView =
   | { readonly _tag: 'Ready'; readonly recipient: ThreadStartRecipient }
   | { readonly _tag: 'Loading' }
-  /** The item's agent was retired and no new recipient is configured: there is no default to offer. */
-  | { readonly _tag: 'Retired'; readonly explanation?: string | undefined }
+  /** Fractal refused the recipient; its error does not prove an original agent existed. */
+  | { readonly _tag: 'NoRecipient'; readonly explanation?: string | undefined }
   /** This source cannot read a start preview, so it has no recipient to name. */
   | { readonly _tag: 'NoPreview' }
   | { readonly _tag: 'Unavailable'; readonly feed: Extract<Feed<never>, { readonly _tag: 'Unavailable' }> }
@@ -219,12 +219,12 @@ const startRecipientView = (feed: Feed<ThreadStartContext> | undefined): StartRe
   if (feed === undefined) return { _tag: 'NoPreview' }
   if (feed._tag === 'Waiting') return { _tag: 'Loading' }
   if (feed._tag === 'Observed') return { _tag: 'Ready', recipient: feed.value.start_recipient }
-  if (feed.code === 'recipient-retired') return { _tag: 'Retired', explanation: feed.explanation }
+  if (feed.code === 'recipient-retired') return { _tag: 'NoRecipient', explanation: feed.explanation }
   return { _tag: 'Unavailable', feed }
 }
 
 const idleStartContext = Atom.make<Feed<ThreadStartContext>>(waiting)
-const retiredNote = 'This item’s agent was retired and Fractal has no new recipient configured, so no thread can start here.'
+const unconfiguredNote = 'Fractal has no recipient configured for this item, so no thread can start here.'
 const noPreviewNote = 'This connection cannot preview a first-send recipient, so no thread can start here.'
 const noRecipientSend = 'There is no recipient for this thread right now, so nothing was sent.'
 
@@ -366,7 +366,7 @@ function StartRecipient({ recipient, lead }: { readonly recipient: ThreadStartRe
 function StartRecipientStatus({ recipient, onRetry }: { readonly recipient: Exclude<StartRecipientView, { readonly _tag: 'Ready' }>; readonly onRetry: () => void }) {
   switch (recipient._tag) {
     case 'Loading': return <SystemNotice kind="loading" scope="inline" title="Loading the recipient" />
-    case 'Retired': return <SystemNotice kind="error" scope="inline" title={retiredNote} data-start-recipient="retired"
+    case 'NoRecipient': return <SystemNotice kind="error" scope="inline" title={unconfiguredNote} data-start-recipient="retired"
       {...(recipient.explanation === undefined ? {} : { explanation: recipient.explanation })} />
     case 'NoPreview': return <p data-start-recipient="none" {...stylex.props(styles.note)}>{noPreviewNote}</p>
     // Reading again cannot qualify a source Fractal does not know for this person.
