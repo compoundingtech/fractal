@@ -451,8 +451,9 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
 }
 
 /// Named answers carry optional notes, and notes on the other named answers go with any answer
-/// as `option_notes`. Words alone answer only feedback or a custom choice; the server validates
-/// required text, including the changes on a request-changes answer, and every option note.
+/// as `option_notes`. Words alone answer feedback, or are Other on any decision or choice
+/// (`id` absent, whatever `custom` says) and must not be blank; the server validates required
+/// text, including the changes on a request-changes answer, and every option note.
 fn person_answer(
     request: Option<&fractal_client::StructuredRequest>,
     chosen: Option<String>,
@@ -474,12 +475,21 @@ fn person_answer(
     let Some(request) = request else {
         return Ok(None);
     };
-    let text = Some(words.trim().to_owned());
+    let text = words.trim();
     match request.entry_type.as_str() {
-        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text, option_notes })),
-        "choice" if request.custom => {
-            Ok(Some(fractal_client::PersonAnswerInput { id: None, text, option_notes }))
+        "feedback" => Ok(Some(fractal_client::PersonAnswerInput {
+            id: None,
+            text: Some(text.to_owned()),
+            option_notes,
+        })),
+        "decision" | "choice" if text.is_empty() => {
+            anyhow::bail!("Other needs your words: say what you want instead of these answers")
         }
+        "decision" | "choice" => Ok(Some(fractal_client::PersonAnswerInput {
+            id: None,
+            text: Some(text.to_owned()),
+            option_notes,
+        })),
         _ => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
     }
 }
@@ -1295,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn named_choice_answers_preserve_notes_without_enabling_custom_answers() {
+    fn named_choice_answers_preserve_notes_whatever_custom_says() {
         for custom in [false, true] {
             let request = person_request(
                 "choice",
@@ -1313,10 +1323,15 @@ mod tests {
     }
 
     #[test]
-    fn words_alone_do_not_infer_a_request_changes_answer() {
+    fn words_alone_on_a_decision_are_other_never_an_inferred_answer() {
         let request = decision_request();
-        assert!(person_answer(Some(&request), None, "rename it", Vec::new()).is_err());
-        assert!(person_answer(Some(&request), None, "", Vec::new()).is_err());
+        let other = person_answer(Some(&request), None, " rename it ", Vec::new()).unwrap().unwrap();
+        assert!(other.id.is_none(), "Other selects none of the named answers");
+        assert_eq!(other.text.as_deref(), Some("rename it"));
+        assert_eq!(serde_json::to_value(&other).unwrap(), serde_json::json!({"text":"rename it"}));
+        for blank in ["", " \n\t "] {
+            assert!(person_answer(Some(&request), None, blank, Vec::new()).is_err());
+        }
     }
 
     #[test]
@@ -1333,22 +1348,28 @@ mod tests {
     }
 
     #[test]
-    fn words_alone_answer_only_feedback_or_a_custom_choice() {
+    fn words_alone_answer_feedback_or_are_other_on_any_decision_or_choice() {
         let options = serde_json::json!([
             {"id": "works", "label": "Works", "consequence": "Done."}
         ]);
+        let decision = serde_json::json!([
+            {"id": "land", "label": "Land", "consequence": "Merged.", "outcome": "accept"}
+        ]);
         for request in [
             person_request("choice", true, options.clone()),
+            person_request("choice", false, options.clone()),
+            person_request("decision", true, decision.clone()),
+            person_request("decision", false, decision),
             person_request("feedback", false, serde_json::json!([])),
         ] {
             let answer = person_answer(Some(&request), None, " found it, works ", Vec::new())
                 .unwrap()
                 .unwrap();
-            assert!(answer.id.is_none());
+            assert!(answer.id.is_none(), "{}", request.entry_type);
             assert_eq!(answer.text.as_deref(), Some("found it, works"));
         }
         let fixed = person_request("choice", false, options);
-        assert!(person_answer(Some(&fixed), None, "words", Vec::new()).is_err());
+        assert!(person_answer(Some(&fixed), None, "  ", Vec::new()).is_err(), "Other needs words");
         assert!(person_answer(None, None, "notes", Vec::new()).unwrap().is_none());
     }
 
@@ -1372,12 +1393,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(serde_json::to_value(&plain).unwrap(), serde_json::json!({"id":"land","text":"Go."}));
-        let custom = person_request(
+        let other = person_request(
             "choice",
-            true,
+            false,
             serde_json::json!([{"id":"hold","label":"Hold","consequence":"Waits."}]),
         );
-        let answer = person_answer(Some(&custom), None, "my own way", notes()).unwrap().unwrap();
+        let answer = person_answer(Some(&other), None, "my own way", notes()).unwrap().unwrap();
         assert!(answer.id.is_none());
         assert_eq!(answer.option_notes.len(), 1);
     }

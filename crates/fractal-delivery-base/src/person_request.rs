@@ -99,7 +99,8 @@ pub struct StructuredRequest {
     pub subjects: Vec<RequestSubject>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<AnswerOption>,
-    /// A choice may also take a custom answer in the person's words.
+    /// Legacy wire hint: decisions and choices always take the person's own words.
+    /// Kept true in client views so existing clients also offer their custom-answer row.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom: bool,
     /// Images the person looks at to answer, completed by the daemon from the asker's uploads.
@@ -176,6 +177,9 @@ fn answer_id(id: &str) -> bool {
 /// message's attachments do, so a client reads it with the same blob route and the ask's step.
 pub fn client_view(request: &Value) -> Value {
     let mut view = request.clone();
+    if matches!(view.get("type").and_then(Value::as_str), Some("decision" | "choice")) {
+        view["custom"] = json!(true);
+    }
     if let Some(attachments) = view.get_mut("attachments").and_then(Value::as_array_mut) {
         for attachment in attachments {
             if let Some(sha256) = attachment.get("sha256").and_then(Value::as_str) {
@@ -339,9 +343,6 @@ impl StructuredRequest {
                         "a decision names one accept answer, one decline answer and at most one request_changes answer",
                     ));
                 }
-                if self.custom {
-                    return Err(invalid("only a choice takes a custom answer"));
-                }
             }
             RequestType::Choice => {
                 if !(2..=MAX_ANSWERS).contains(&self.answers.len()) {
@@ -495,29 +496,11 @@ impl StructuredRequest {
                 answer["text"] = json!(text);
                 return Ok(answer);
             }
-            (RequestType::Choice, None) => {
-                if !self.custom {
-                    return Err(FractalError::new(
-                        "answer-required",
-                        format!(
-                            "this choice needs one of its options: {}",
-                            self.answer_ids()
-                        ),
-                    ));
-                }
+            (RequestType::Decision | RequestType::Choice, None) => {
                 let text = text.ok_or_else(|| invalid_answer("a custom answer needs text"))?;
                 answer["outcome"] = json!("custom");
                 answer["text"] = json!(text);
                 return Ok(answer);
-            }
-            (RequestType::Decision, None) => {
-                return Err(FractalError::new(
-                    "answer-required",
-                    format!(
-                        "this decision needs one of its named answers: {}",
-                        self.answer_ids()
-                    ),
-                ));
             }
             (_, Some(id)) => {
                 let option = self
@@ -598,7 +581,7 @@ impl StructuredRequest {
             .iter()
             .map(|answer| answer.id.as_str())
             .collect::<Vec<_>>();
-        if self.request_type == RequestType::Choice && self.custom {
+        if matches!(self.request_type, RequestType::Decision | RequestType::Choice) {
             ids.push("or custom text");
         }
         ids.join(", ")
@@ -653,6 +636,46 @@ pub fn append_option_notes_summary(summary: &mut String, answer: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decisions_and_choices_always_take_other_even_for_existing_requests() {
+        for kind in ["decision", "choice"] {
+            for custom in [None, Some(false), Some(true)] {
+                let mut value = decision();
+                value["type"] = json!(kind);
+                if kind == "choice" {
+                    for option in value["answers"].as_array_mut().unwrap() {
+                        option.as_object_mut().unwrap().remove("outcome");
+                    }
+                }
+                if let Some(custom) = custom {
+                    value["custom"] = json!(custom);
+                }
+                // Projection upgrades already-open asks without rewriting their claims.
+                assert_eq!(client_view(&value)["custom"], true);
+                let (request, canonical) = StructuredRequest::parse(&value).unwrap();
+                assert_eq!(request.custom, custom.unwrap_or(false));
+                assert_eq!(canonical.get("custom").and_then(Value::as_bool), custom.filter(|flag| *flag));
+                // Exercise an old stored request, not just canonical input.
+                let stored: StructuredRequest = serde_json::from_value(value).unwrap();
+                let input = AnswerInput {
+                    id: None,
+                    text: Some("  Neither: reconsider the question.  ".into()),
+                    option_notes: vec![OptionNote { id: "land".into(), text: "Not approval.".into() }],
+                };
+                let answer = stored.answer(Some(&input), "").unwrap();
+                assert_eq!(answer, json!({
+                    "type": kind, "outcome": "custom", "text": "Neither: reconsider the question.",
+                    "option_notes": [{"id": "land", "text": "Not approval."}]
+                }));
+                for text in [None, Some("".into()), Some("  ".into()), Some("x".repeat(MAX_TEXT + 1))] {
+                    let input = AnswerInput { id: None, text, option_notes: Vec::new() };
+                    assert_eq!(stored.answer(Some(&input), "").unwrap_err().code, "invalid-person-answer");
+                }
+                assert_eq!(stored.answer(None, "yes").unwrap_err().code, "answer-required");
+            }
+        }
+    }
 
     fn decision() -> Value {
         json!({

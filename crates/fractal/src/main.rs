@@ -4671,7 +4671,7 @@ struct WorkDoneArgs {
     /// The ID of one of a structured request's named answers.
     #[arg(long, value_name = "ID")]
     answer: Option<String>,
-    /// Text for a structured request: feedback, a custom choice, or the changes requested.
+    /// Feedback, an Other answer (omit --answer), or a note on a named answer.
     #[arg(long)]
     text: Option<String>,
     #[arg(long)]
@@ -15927,9 +15927,10 @@ async fn run_schema(client: &Client, command: SchemaCommand, json_output: bool) 
 const STRUCTURED_REQUEST_HELP: &str = r##"A structured request as a JSON file (`-` reads stdin).
 
 A `decision` proposes one action: exactly one `accept` answer, one `decline` answer and at most
-one `request_changes` answer, each naming what happens next. A `choice` names 2 to 5 options,
-and `"custom": true` also takes the person's own words. `feedback` asks for text and has no
-answers. `why_person` says why no runtime fact or standing instruction settles it. Omit
+one `request_changes` answer, each naming what happens next. A `choice` names 2 to 5 options.
+Both always offer Other: the person's own words, not one of the listed answers. The legacy
+`custom` flag cannot disable it. `feedback` asks for text and has no answers.
+`why_person` says why no runtime fact or standing instruction settles it. Omit
 `recommendation` to make none. An `update` asks nothing: it names `about`, the person's own
 run or step or their message to you, and clears once read (`fractal work update` builds one). Subject kinds: pull_request, issue, document, mission, run,
 step, agent, host, commit, link; `revision` pins what was reviewed. `--attach FILE` shows the
@@ -15950,11 +15951,13 @@ person an image with the request (up to 4), as `fractal conversations send --att
      {"id": "revise", "label": "Request changes", "outcome": "request_changes",
       "consequence": "I make the changes and ask again."}]}
 
-The person answers with `fractal work done STEP --answer ID [--text TEXT]`; requesting changes,
-feedback and a custom choice need text. The resumed step's `person_answers` carries the answer
-as {"type", "outcome", "id", "label", "text", "option_notes"}; option_notes contains {id, text}
-notes on options not selected. Read it with `fractal work show STEP --json` and
-act on `id` and `outcome`, not on the words."##;
+The person answers with `fractal work done STEP --answer ID [--text TEXT]`, or chooses Other
+with `fractal work done STEP --text TEXT` (no --answer). Other, feedback and requesting changes
+need nonempty text. The resumed step's `person_answers` carries the answer as
+{"type", "outcome", "id", "label", "text", "option_notes"}; option_notes contains {id, text}
+notes on options not selected. Other has outcome "custom", text, and no id or label: it is
+a reframe, never approval or the nearest listed option. Read it with
+`fractal work show STEP --json` and act on `id` and `outcome`, not on the words."##;
 
 fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {
     use std::fmt::Write as _;

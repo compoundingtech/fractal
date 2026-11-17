@@ -277,13 +277,13 @@ export const PersonOverrideParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonOverrideParameters = typeof PersonOverrideParameters.Type
 export type PersonOverrideParametersEncoded = typeof PersonOverrideParameters.Encoded
 
-/** A named answer id for a decision or choice; text for feedback, a custom choice, or the changes requested. */
+/** A named answer id for a decision or choice, optionally with text; omit id and provide nonblank text for Other or feedback. Other always records outcome custom without id or label, never approval. */
 export const PersonAnswerInput = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   /** Notes about other named options. Omit when empty; requires person-answer-option-notes capability. */
   "option_notes": optionalKey(Schema.Array(PersonOptionNote)).annotate({ description: "Notes about other named options. Omit when empty; requires person-answer-option-notes capability." }),
   "text": optionalKey(Schema.String)
-}).annotate({ identifier: "PersonAnswerInput", description: "A named answer id for a decision or choice; text for feedback, a custom choice, or the changes requested." }))()
+}).annotate({ identifier: "PersonAnswerInput", description: "A named answer id for a decision or choice, optionally with text; omit id and provide nonblank text for Other or feedback. Other always records outcome custom without id or label, never approval." }))()
 export type PersonAnswerInput = typeof PersonAnswerInput.Type
 export type PersonAnswerInputEncoded = typeof PersonAnswerInput.Encoded
 

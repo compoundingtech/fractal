@@ -536,7 +536,7 @@ pub struct Drafts<'a> {
     pub editing: bool,
     pub confirm: Option<char>,
     /// The highlighted row on a structured request: a named answer, or `answers.len()` for the
-    /// custom answer entry. Enter acts on it.
+    /// Other row. Enter acts on it.
     pub answering: Option<usize>,
     /// The named answer (its id) the open note belongs to. Independent of the highlight: moving
     /// the highlight keeps the note bound to the answer it was written for.
@@ -757,8 +757,8 @@ fn structured_request(
         .as_ref()
         .map(|wanted| wanted.answer.as_str());
     let named = request.answers.len();
-    // Beside named answers a free answer is a row of its own; alone, words are the answer.
-    let custom_row = request.custom && named > 0;
+    // Beside named answers, Other is a row of its own; alone, words are the answer.
+    let other_row = offers_other(request) && named > 0;
     let has_text = drafts.text.is_some_and(|text| !text.is_empty());
     let editor_open = drafts.editing || has_text;
     // The answer the open note belongs to, whatever row is highlighted now.
@@ -773,7 +773,7 @@ fn structured_request(
         }
         match drafts.note_answer.as_deref() {
             Some(id) => request.answers.iter().position(|answer| answer.id == id),
-            None => custom_row.then_some(named),
+            None => other_row.then_some(named),
         }
     });
     if named > 0 {
@@ -803,7 +803,7 @@ fn structured_request(
             inner,
         );
     }
-    if custom_row {
+    if other_row {
         let mut tags: Vec<(&str, Color)> = Vec::new();
         if has_text && drafts.note_answer.is_none() {
             tags.push(("✎ draft", theme::LAVENDER));
@@ -811,9 +811,9 @@ fn structured_request(
         answer_row(
             card,
             Hit::Answer(named),
-            "Custom answer",
+            "Other…",
             &tags,
-            "write your own answer instead of these",
+            "none of these: say what you want instead",
             lifted == Some(named),
             inner,
         );
@@ -877,13 +877,19 @@ fn structured_request(
                 }
             }
             None => {
-                let (section, title, send) = if custom_row {
-                    ("custom answer", "Custom answer", "Send custom answer")
+                // Other answers in place of every named answer, so it needs the words.
+                let (section, title, send, hint) = if other_row {
+                    (
+                        "other",
+                        "Other: your answer",
+                        "Send Other",
+                        "say what you want instead of these · Enter sends it · Esc cancels",
+                    )
                 } else {
-                    ("in your own words", "Answer in words", "Send the answer")
+                    ("in your own words", "Answer in words", "Send the answer", "")
                 };
                 card.section(section, None, inner);
-                text_box(card, &format!("{title} to {from}"), drafts, "", inner);
+                text_box(card, &format!("{title} to {from}"), drafts, hint, inner);
                 if !choosing
                     && let Some(others) = noted_labels(request, &drafts.noted_answers, None)
                 {
@@ -931,7 +937,7 @@ fn structured_request(
         let others = noted_labels(request, &drafts.noted_answers, answer.map(|answer| answer.id.as_str()));
         let send = match (answer, others) {
             (None, Some(others)) => {
-                Some(format!("Enter writes a custom answer; your notes on {others} go with it."))
+                Some(format!("Enter writes Other; your notes on {others} go with it."))
             }
             (Some(answer), Some(others)) if required => Some(format!(
                 "Your notes on {others} go with “{}” once you write what should change.",
@@ -954,13 +960,13 @@ fn structured_request(
             card.wrap(&[text::run(send, theme::dim())], inner);
         }
         let enter = match answer {
-            None => "Write custom answer",
+            None => "Write Other",
             Some(_) if required => "Write your words",
             Some(_) => "Send this answer",
         };
         let mut buttons = vec![("enter", enter, Hit::Enter, theme::ACCENT)];
         if can_note(request, highlighted) {
-            buttons.push(("c", if answer.is_some() { "Add note" } else { "Write custom answer" }, Hit::Key('c'), theme::ACCENT));
+            buttons.push(("c", if answer.is_some() { "Add note" } else { "Write Other" }, Hit::Key('c'), theme::ACCENT));
         }
         buttons.push(("↑↓", "Another", Hit::Key('a'), theme::OVERLAY1));
         buttons.push(("esc", "Not now", Hit::Escape, theme::OVERLAY1));
@@ -986,7 +992,7 @@ fn structured_request(
             card.buttons(&buttons);
         }
     } else {
-        // A free answer is the custom row above: it is highlighted like any other answer.
+        // Other is the row above: it is highlighted like any other answer.
         let mut buttons = vec![("a", "Choose an answer", Hit::Key('a'), theme::ACCENT)];
         if drafts.confirm.is_some() {
             card.buttons_fit(&buttons, inner);
@@ -1007,16 +1013,24 @@ fn structured_request(
     }
 }
 
-/// Whether `c` opens a note for the highlighted row: a named answer, the custom answer entry,
-/// or, on a request without named answers, the words that are its answer.
+/// Whether `c` opens a note for the highlighted row: a named answer, the Other row, or, on a
+/// request without named answers, the words that are its answer.
 pub(super) fn can_note(
     request: &fractal_client::StructuredRequest,
     highlighted: Option<usize>,
 ) -> bool {
     let named = request.answers.len();
     highlighted.is_some_and(|index| index < named)
-        || (highlighted == Some(named) && request.custom)
-        || (named == 0 && (request.entry_type == "feedback" || request.custom))
+        || (highlighted == Some(named) && offers_other(request))
+        || (named == 0 && (request.entry_type == "feedback" || offers_other(request)))
+}
+
+/// Every decision and choice takes Other: the person's own words in place of its named answers,
+/// sent with no answer id, so nothing is selected. A note (`c` on a named answer) only adds
+/// context to that answer. `request.custom` is what older askers declared; it no longer decides.
+/// Feedback has no answers to set aside: words are already its answer.
+pub(super) fn offers_other(request: &fractal_client::StructuredRequest) -> bool {
+    matches!(request.entry_type.as_str(), "decision" | "choice")
 }
 
 /// The answers with a saved note, except `except`, in the request's order, as the send line
@@ -4370,7 +4384,7 @@ mod request_notes {
                 option("hold", "Hold it", Some("decline")),
                 option("revise", "Revise first", Some("request_changes")),
             ],
-            true,
+            false,
         )
     }
 
@@ -4378,7 +4392,7 @@ mod request_notes {
         request(
             "choice",
             vec![option("a", "Option A", None), option("b", "Option B", None)],
-            true,
+            false,
         )
     }
 
@@ -4414,7 +4428,7 @@ mod request_notes {
         vec![
             Case {
                 answering: Some(0),
-                shows: &["Custom answer", "Send this answer", "c  Add note", "Another"],
+                shows: &["Other…", "Send this answer", "c  Add note", "Another"],
                 ..case("decision accept highlighted", decision())
             },
             Case {
@@ -4474,31 +4488,36 @@ mod request_notes {
             },
             Case {
                 answering: Some(2),
-                shows: &["Custom answer", "Write custom answer"],
+                shows: &["Other…", "none of these: say what you want instead", "enter  Write Other", "c  Write Other"],
                 hides: &["Add note"],
-                ..case("choice custom highlighted", choice())
+                ..case("choice other highlighted", choice())
             },
             Case {
                 text: Some("neither"),
                 editing: true,
-                shows: &["CUSTOM ANSWER TO PLANNER", "Send custom answer", "✎ draft"],
-                hides: &["NOTE FOR"],
-                ..case("choice custom answer", choice())
+                shows: &["OTHER: YOUR ANSWER TO PLANNER", "Send Other", "✎ draft"],
+                hides: &["NOTE FOR", "◉ Option A", "◉ Option B"],
+                ..case("choice other answer", choice())
+            },
+            Case {
+                editing: true,
+                shows: &["OTHER: YOUR ANSWER TO PLANNER", "say what you want instead of these"],
+                ..case("decision other answer before any words", decision())
             },
             Case {
                 text: Some("neither"),
                 editing: true,
                 noted: &["a", "b"],
                 shows: &["Enter sends this answer, plus your notes on “Option A” and “Option B”."],
-                ..case("choice custom answer beside notes", choice())
+                ..case("choice other answer beside notes", choice())
             },
             Case {
                 answering: Some(3),
                 noted: &["ship", "hold", "revise"],
                 shows: &[
-                    "Enter writes a custom answer; your notes on “Ship it”, “Hold it” and “Revise first” go with it.",
+                    "Enter writes Other; your notes on “Ship it”, “Hold it” and “Revise first” go with it.",
                 ],
-                ..case("decision custom highlighted beside notes", decision())
+                ..case("decision other highlighted beside notes", decision())
             },
             Case {
                 answering: Some(0),
@@ -4520,12 +4539,12 @@ mod request_notes {
             Case {
                 editing: true,
                 shows: &["ANSWER IN WORDS TO PLANNER", "Send the answer"],
-                hides: &["Custom answer"],
+                hides: &["Other…"],
                 ..case("feedback answer in words", request("feedback", Vec::new(), false))
             },
             Case {
                 shows: &["c  Answer in words", "Dismiss: nothing to do"],
-                hides: &["Custom answer"],
+                hides: &["Other…"],
                 ..case("feedback resting", request("feedback", Vec::new(), false))
             },
             Case {
@@ -4609,7 +4628,7 @@ mod request_notes {
     }
 
     #[test]
-    fn the_custom_entry_is_its_own_answer_row_only_beside_named_answers() {
+    fn every_decision_and_choice_offers_other_beside_named_answers_whatever_custom_says() {
         let targets = |request: StructuredRequest| {
             render(&case("targets", request), 120)
                 .targets
@@ -4620,27 +4639,32 @@ mod request_notes {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(targets(decision()), [0, 1, 2, 3]);
-        let mut fixed = decision();
-        fixed.custom = false;
-        assert_eq!(targets(fixed), [0, 1, 2]);
-        assert!(targets(request("choice", Vec::new(), true)).is_empty());
+        for custom in [false, true] {
+            let mut decision = decision();
+            decision.custom = custom;
+            assert_eq!(targets(decision), [0, 1, 2, 3]);
+            let mut choice = choice();
+            choice.custom = custom;
+            assert_eq!(targets(choice), [0, 1, 2]);
+            assert!(targets(request("choice", Vec::new(), custom)).is_empty());
+        }
     }
 
     #[test]
     fn can_note_follows_the_highlighted_row() {
-        let decision = decision();
-        assert!(can_note(&decision, Some(0)));
-        assert!(can_note(&decision, Some(2)));
-        assert!(can_note(&decision, Some(3)), "the custom entry");
-        assert!(!can_note(&decision, Some(4)));
-        assert!(!can_note(&decision, None));
-        let mut fixed = decision.clone();
-        fixed.custom = false;
-        assert!(!can_note(&fixed, Some(3)));
+        for custom in [false, true] {
+            let mut decision = decision();
+            decision.custom = custom;
+            assert!(can_note(&decision, Some(0)));
+            assert!(can_note(&decision, Some(2)));
+            assert!(can_note(&decision, Some(3)), "the Other row");
+            assert!(!can_note(&decision, Some(4)));
+            assert!(!can_note(&decision, None));
+            assert!(can_note(&request("choice", Vec::new(), custom), None));
+            assert!(can_note(&request("decision", Vec::new(), custom), None));
+        }
         assert!(can_note(&request("feedback", Vec::new(), false), None));
-        assert!(can_note(&request("choice", Vec::new(), true), None));
-        assert!(!can_note(&request("choice", Vec::new(), false), None));
+        assert!(!can_note(&request("feedback", Vec::new(), false), Some(0)));
     }
 
     /// The answer rows, the refusal and the key bar of a card whose note stayed with “Ship it”
@@ -4669,7 +4693,7 @@ mod request_notes {
                 "○ Ship it  ✎ note  then Ship it",
                 "◉ Hold it  ✎ note  then Hold it",
                 "○ Revise first  needs your words  then Revise first",
-                "○ Custom answer  write your own answer instead of these",
+                "○ Other…  none of these: say what you want instead",
                 "✕ Not sent  the asker already closed this request",
                 " enter  Send this answer    c  Add note    ↑↓  Another    esc  Not now",
             ]

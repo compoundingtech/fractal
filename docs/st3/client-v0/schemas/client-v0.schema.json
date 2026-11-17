@@ -4058,7 +4058,7 @@
     },
     "StructuredRequest": {
       "type": "object", "additionalProperties": false, "required": ["version", "type", "question", "why_person"],
-      "description": "A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options; feedback asks for text.",
+      "description": "A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options. Both always offer Other, requiring free text and recording outcome custom without an id; feedback asks for text.",
       "properties": {
         "version": {"const": 1},
         "type": {"enum": ["decision", "choice", "feedback"]},
@@ -4069,7 +4069,7 @@
         "recommendation": {"type": "object", "additionalProperties": false, "required": ["answer", "reason"], "properties": {"answer": {"type": "string"}, "reason": {"type": "string"}}, "description": "Absent means no recommendation."},
         "subjects": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/RequestSubject"}},
         "answers": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/RequestAnswerOption"}},
-        "custom": {"type": "boolean", "description": "A choice also takes an answer in the person's own words."},
+        "custom": {"type": "boolean", "description": "Legacy display hint, always true for decisions and choices in client views. False or omission cannot disable Other; request authors should omit this field."},
         "attachments": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/Attachment"}, "description": "Images to look at, read with the blob route and the ask's step as the carrier (message=step-run/…)."}
       }
     },
@@ -4128,7 +4128,7 @@
     },
     "PersonAnswerInput": {
       "type": "object", "additionalProperties": false,
-      "description": "A named answer id for a decision or choice; text for feedback, a custom choice, or the changes requested.",
+      "description": "A named answer id for a decision or choice, optionally with text; omit id and provide nonblank text for Other or feedback. Other always records outcome custom without id or label, never approval.",
       "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "option_notes": {"type": "array", "items": {"$ref": "#/$defs/PersonOptionNote"}, "description": "Notes about other named options. Omit when empty; requires person-answer-option-notes capability."}}
     },
     "PersonAnswer": {

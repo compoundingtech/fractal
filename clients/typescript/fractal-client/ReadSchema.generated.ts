@@ -131,13 +131,13 @@ export const RequestSubject = /*#__PURE__*/ (() => Schema.Struct({
 export type RequestSubject = typeof RequestSubject.Type
 export type RequestSubjectEncoded = typeof RequestSubject.Encoded
 
-/** A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options; feedback asks for text. */
+/** A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options. Both always offer Other, requiring free text and recording outcome custom without an id; feedback asks for text. */
 export const StructuredRequest = /*#__PURE__*/ (() => Schema.Struct({
   "answers": optionalKey(Schema.Array(RequestAnswerOption).check(Schema.isMaxLength(5))),
   /** Images to look at, read with the blob route and the ask's step as the carrier (message=step-run/…). */
   "attachments": optionalKey(Schema.Array(Attachment).check(Schema.isMaxLength(4))).annotate({ description: "Images to look at, read with the blob route and the ask's step as the carrier (message=step-run/…)." }),
-  /** A choice also takes an answer in the person's own words. */
-  "custom": optionalKey(Schema.Boolean).annotate({ description: "A choice also takes an answer in the person's own words." }),
+  /** Legacy display hint, always true for decisions and choices in client views. False or omission cannot disable Other; request authors should omit this field. */
+  "custom": optionalKey(Schema.Boolean).annotate({ description: "Legacy display hint, always true for decisions and choices in client views. False or omission cannot disable Other; request authors should omit this field." }),
   "question": markdownBlockSchema(Schema.String.check(Schema.isMinCodePoints(1))),
   "reasons": optionalKey(Schema.Array(markdownInlineSchema(Schema.String)).check(Schema.isMaxLength(8))),
   /** Absent means no recommendation. */
@@ -148,7 +148,7 @@ export const StructuredRequest = /*#__PURE__*/ (() => Schema.Struct({
   "version": Schema.Literal(1),
   /** Why only this person can answer. */
   "why_person": markdownInlineSchema(Schema.String.check(Schema.isMinCodePoints(1))).annotate({ description: "Why only this person can answer." })
-}).annotate({ identifier: "StructuredRequest", description: "A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options; feedback asks for text." }))()
+}).annotate({ identifier: "StructuredRequest", description: "A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options. Both always offer Other, requiring free text and recording outcome custom without an id; feedback asks for text." }))()
 export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
 

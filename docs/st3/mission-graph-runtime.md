@@ -1344,8 +1344,10 @@ reconciler count an older ask's deadline from the same default.
 `fractal work ask --request FILE` (or `request` on the client `work.ask` action) adds a typed question
 to the ask. A `decision` proposes one action and names exactly one `accept` answer, one
 `decline` answer and at most one `request_changes` answer. A `choice` names two to five options;
-`custom: true` also accepts the person's own words. `feedback` asks for text. Every request has a
-`question` and `why_person`, and may carry a `summary`, up to eight `reasons`, a
+both always accept Other, a free-form answer in the person's own words. The legacy `custom`
+field is accepted but cannot disable Other; client views set it true for decisions and choices.
+Request authors should omit it. Stored claims are not rewritten; `feedback` already asks for text.
+Every answerable request has a `question` and `why_person`, and may carry a `summary`, up to eight `reasons`, a
 `recommendation` naming one of its answers, and `subjects` (pull requests, issues, documents,
 missions, runs, steps, agents, hosts, commits or links) whose `revision` pins what was reviewed.
 Each named answer has a stable `id`, a `label`, the `consequence` that follows, and optional
@@ -1355,12 +1357,14 @@ shows a complete example.
 ```sh
 fractal work done step-run/release/ask-ID --as person/operator --answer land
 fractal work done step-run/release/ask-ID --as person/operator --answer revise --text "Split the migration"
+fractal work done step-run/release/ask-ID --as person/operator --text "Neither; reconsider the scope"
 ```
 
-The person answers with a named `--answer ID`, adding `--text` where the answer needs words:
-requesting changes, a custom choice, or feedback. A reply in words alone does not answer a
-decision or a choice; `answer-required` lists the answer IDs. Feedback also accepts a plain
-`--summary`. The `work.person-done` claim records the typed
+The person answers with a named `--answer ID`, adding `--text` for requested changes or a note,
+or sends Other with `--text` and no `--answer`. Other requires non-blank text and records
+`outcome: custom`, with no `id` or `label`. It is a reframe, not approval, decline, or the
+nearest listed option. Plain `--summary` still never selects an option or submits Other;
+feedback also accepts a plain `--summary`. The `work.person-done` claim records the typed
 answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decline`,
 `request_changes`, `selected`, `custom`, `feedback` or `dismissed`. `--answer dismiss` (with an optional
 `--text` reason) sets any decision or choice aside without answering it: the asker is told the person

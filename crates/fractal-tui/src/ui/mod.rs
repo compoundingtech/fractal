@@ -4229,14 +4229,16 @@ impl Ui {
             self.answering = None;
             return false;
         };
-        let last = (request.answers.len() + usize::from(request.custom)).saturating_sub(1);
+        let other = screens::offers_other(&request);
+        let last = (request.answers.len() + usize::from(other)).saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.answering = Some(index.saturating_sub(1)),
             KeyCode::Down | KeyCode::Char('j') => self.answering = Some((index + 1).min(last)),
             KeyCode::Esc => self.answering = None,
             KeyCode::Char('c') => self.start_answer_note(),
             KeyCode::Enter => {
-                if index == request.answers.len() && request.custom {
+                // Other is words in place of the named answers: it opens its box, unbound to any.
+                if index == request.answers.len() && other {
                     self.start_answer_note();
                     return true;
                 }
@@ -5990,8 +5992,15 @@ impl Ui {
             _ => None,
         };
         let Some(mut draft) = draft else {
-            if self.structured_request().is_some() {
-                self.answer_errors.insert(id, "Write an answer before sending.".into());
+            // Unbound to a named answer, blank words are Other with nothing to say: never sent,
+            // and never turned into one of the named answers.
+            if let Some((_, request)) = self.structured_request() {
+                let error = if screens::offers_other(&request) && !request.answers.is_empty() {
+                    "Other needs your words: say what you want instead of these answers."
+                } else {
+                    "Write an answer before sending."
+                };
+                self.answer_errors.insert(id, error.into());
             } else {
                 self.flash("Write something first");
             }
@@ -6977,7 +6986,7 @@ impl Ui {
             Hit::Key('a') if self.answering.is_some() => {
                 let count = self
                     .structured_request()
-                    .map_or(0, |(_, request)| request.answers.len() + usize::from(request.custom));
+                    .map_or(0, |(_, request)| request.answers.len() + usize::from(screens::offers_other(&request)));
                 self.answering = self.answering.map(|index| (index + 1) % count.max(1));
             }
             Hit::Key(key) => {
@@ -8938,9 +8947,11 @@ mod tests {
         ui.open_home();
         ui.select(0);
         ui.click(Hit::Answer(1));
-        // Another goes to the next answer, round again, and does not start over at the first.
+        // Another goes to the next row, Other included, round again, and does not start over.
         ui.click(Hit::Key('a'));
         assert_eq!(ui.answering, Some(2));
+        ui.click(Hit::Key('a'));
+        assert_eq!(ui.answering, Some(3), "Other, though the request never declared custom");
         ui.click(Hit::Key('a'));
         assert_eq!(ui.answering, Some(0));
         ui.click(Hit::Key('a'));

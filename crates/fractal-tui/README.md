@@ -172,8 +172,10 @@ Inbox opens, when the alerts change and after an override is accepted, never on 
 that stopped at its limit says so, even when it found none.
 
 On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
-`✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends
-every note on the other named answers (a custom answer or a dismissal carries them too), and the
+`✎ note`, and notes stay with their answers as the highlight moves. Every decision and choice
+also ends with `Other…`, whatever the asker declared: its words answer in place of the named
+answers, so nothing is selected, and blank words are refused. Sending an answer also sends
+every note on the other named answers (Other or a dismissal carries them too), and the
 line above the keys names each one. A Fractal that does not advertise
 `person-answer-option-notes` is asked first and sent nothing: the card says why and keeps the
 answer and every note, instead of dropping the notes it cannot take.

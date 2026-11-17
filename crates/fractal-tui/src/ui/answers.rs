@@ -262,8 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_answer_carries_the_notes_on_named_answers() {
-        let mut ui = saved_notes(true);
+    fn other_carries_the_notes_on_named_answers() {
+        let mut ui = saved_notes(false);
         ui.click(Hit::Answer(2));
         press(&mut ui, KeyCode::Enter);
         assert!(ui.editing);
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_disabled_without_a_highlight_does_not_open_an_editor() {
+    fn c_without_a_highlight_does_not_open_an_editor() {
         let mut ui = note_request(None, false);
         press(&mut ui, KeyCode::Char('c'));
         assert!(!ui.editing);
@@ -324,8 +324,8 @@ mod tests {
     }
 
     #[test]
-    fn custom_answer_requires_its_distinct_entry() {
-        let mut ui = note_request(None, true);
+    fn other_requires_its_distinct_entry() {
+        let mut ui = note_request(None, false);
         press(&mut ui, KeyCode::Char('c'));
         assert!(!ui.editing);
         ui.click(Hit::Answer(2));
@@ -336,6 +336,36 @@ mod tests {
         assert!(matches!(&ui.effects[..], [Effect::Attention {
             answer: None, reason: Some(text), ..
         }] if text == "X"));
+    }
+
+    /// Other is on every decision and choice, whatever `custom` says. Its words replace the
+    /// named answers: a note written on one stays a note, and nothing is selected; blank words
+    /// are refused rather than sent.
+    #[test]
+    fn other_on_any_decision_or_choice_selects_no_answer_and_needs_words() {
+        for outcome in [Some("accept"), Some("decline"), None] {
+            for custom in [false, true] {
+                let mut ui = note_request(outcome, custom);
+                ui.click(Hit::Answer(0));
+                press(&mut ui, KeyCode::Char('c'));
+                press(&mut ui, KeyCode::Char('A'));
+                assert_eq!(ui.note_answers.get("attention/first").map(String::as_str), Some("yes"));
+                ui.click(Hit::Answer(2));
+                ui.click(Hit::Key('c'));
+                assert!(ui.editing);
+                assert!(!ui.note_answers.contains_key("attention/first"), "Other is bound to no answer");
+                ui.click(Hit::Enter);
+                assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+                assert!(ui.answer_errors["attention/first"].contains("Other needs your words"));
+                press(&mut ui, KeyCode::Char('X'));
+                ui.click(Hit::Enter);
+                assert!(matches!(&ui.effects[..], [Effect::Attention {
+                    action, answer: None, reason: Some(text), option_notes, ..
+                }] if action == "work.done" && text == "X"
+                    && option_notes == &[("yes".to_owned(), "A".to_owned())]),
+                    "{outcome:?} custom={custom}: {:?}", ui.effects);
+            }
+        }
     }
 
     #[test]
