@@ -6,7 +6,7 @@ fn closing(text: &str, marker: &str) -> Option<usize> {
     while at < text.len() {
         let rest = &text[at..];
         let c = rest.chars().next()?;
-        if c == '\\' {
+        if c == '\\' && marker != "`" {
             at += 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
         } else if c == '`' && marker != "`" {
             at += rest[1..].find('`').map_or(1, |end| end + 2);
@@ -96,11 +96,12 @@ fn literal(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with(['|', '#', '>', '<']) || trimmed.starts_with("![")
         || trimmed.contains("~~") || matches!(trimmed, "---" | "***" | "___")
-        || ["- [", "* ["].iter().any(|prefix| trimmed.starts_with(prefix))
+        || ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] "].iter().any(|prefix| trimmed.starts_with(prefix))
 }
 
 /// Block Markdown for ask prose. Safe text layout and link ranges reuse the conversation renderer.
 pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Line<'static>> {
+    let input = sanitize(input);
     let mut lines = Vec::new();
     let mut paragraph = String::new();
     let mut fence = false;
@@ -172,6 +173,9 @@ mod tests {
                 assert!(!lines.is_empty());
                 assert!(links.iter().all(|link| link.url.starts_with("http://") || link.url.starts_with("https://")));
                 if case["name"] == "unsupported" { assert!(links.is_empty()); }
+                if let Some(expected) = case["expected_text"].as_str() {
+                    assert_eq!(lines.iter().map(plain).collect::<String>(), expected);
+                }
             }
         }
     }
@@ -181,6 +185,7 @@ mod tests {
         let runs = inline_ask("**bold *italic* `literal *code*`** \\*escaped\\* *", Style::default(), &theme);
         assert!(runs.iter().any(|run| run.text == "italic" && run.style.add_modifier.contains(Modifier::BOLD | Modifier::ITALIC)));
         assert!(runs.iter().any(|run| run.text == "literal *code*"));
+        assert!(inline_ask("`C:\\`", Style::default(), &theme).iter().any(|run| run.text == "C:\\" && run.style.fg == Some(theme.teal)));
         for source in ["***both***", "**bold *both***", "*italic **both***"] {
             assert!(inline_ask(source, Style::default(), &theme).iter().any(|run| run.text == "both" && run.style.add_modifier.contains(Modifier::BOLD | Modifier::ITALIC)));
         }
