@@ -61,6 +61,7 @@ pub enum Admission { Queued { reason: String }, Admitted(Grant), Refused { code:
 #[serde(rename_all = "kebab-case")]
 pub enum RefusalCode {
     AdmissionExpired,
+    MissingProfile,
     UnsupportedCoverage,
     // Historical authoritative refusals remain readable; new records use `impossible`.
     #[serde(alias = "impossible-capacity")]
@@ -77,6 +78,7 @@ impl RefusalCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AdmissionExpired => "admission-expired",
+            Self::MissingProfile => "missing-profile",
             Self::UnsupportedCoverage => "unsupported-coverage",
             Self::Impossible => "impossible",
             Self::ClockUncertain => "clock-uncertain",
@@ -121,6 +123,8 @@ pub struct Fit {
     pub reserve_bytes: u64,
     pub fifo_predecessor: Option<String>,
     pub disk: Option<DiskFit>,
+    /// Fresh mount observations for queued predecessors, keyed by reservation path.
+    pub disk_mounts: BTreeMap<String, DiskFit>,
     pub heavy_io_slots: Option<u32>,
 }
 
@@ -253,6 +257,66 @@ fn admission(member: Membership) -> Admission {
     }
 }
 
+/// An aged head reserves by fencing new admissions, not by adding another held footprint.
+pub const BACKFILL_AGING_MS: u64 = 15 * 60 * 1000;
+
+fn resource_blocking(connection: &Connection, request: &LaneRequest, fit: &Fit, disk_fit: Option<DiskFit>) -> Result<Option<(BlockedBy, String)>> {
+    if !super::host_holds::blocking_tx(connection, &request.host, &request.name)?.is_empty() {
+        return Ok(Some((BlockedBy::Hold, "host held".into())));
+    }
+    let held: u32 = connection.query_row("SELECT count(*) FROM resource_memberships_v1
+        WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')",
+        rusqlite::params![request.host,request.name], |row| row.get(0))?;
+    let unprofiled_held: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1
+        WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')
+        AND json_extract(body,'$.request.capacity') IS NULL)",
+        rusqlite::params![request.host,request.name], |row| row.get(0))?;
+    if unprofiled_held {
+        return Ok(Some((BlockedBy::Holder, "existing unprofiled custody must retire before profiled admission".into())));
+    }
+    if held >= request.max_members { return Ok(Some((BlockedBy::Holder, "lane occupied".into()))); }
+    let finite_held: u64 = connection.query_row("SELECT coalesce(sum(memory),0) FROM resource_memberships_v1
+        WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')",
+        rusqlite::params![request.host,request.id], |row| row.get(0))?;
+    let holder_free = fit.room.map_or(0, |room| room.memory.saturating_sub(fit.held_bytes).saturating_sub(finite_held));
+    let outside_free = holder_free.saturating_sub(fit.outside_bytes);
+    let free = outside_free.saturating_sub(fit.reserve_bytes);
+    if request.capacity.is_some_and(|capacity| capacity.memory > holder_free) {
+        return Ok(Some((BlockedBy::Holder, "holder footprint prevents admission".into())));
+    }
+    if request.capacity.is_some_and(|capacity| capacity.memory > outside_free) {
+        return Ok(Some(if fit.psi_blocked {
+            (BlockedBy::Psi, format!("outside footprint prevents admission: {} bytes; PSI full >= 1% or observation unavailable; reclaim credit withheld", fit.outside_bytes))
+        } else {
+            (BlockedBy::Outside, format!("outside footprint prevents admission: {} bytes", fit.outside_bytes))
+        }));
+    }
+    if request.capacity.is_some_and(|capacity| capacity.memory > free) {
+        return Ok(Some((BlockedBy::Reserve, format!("host reserve prevents admission: {} bytes", fit.reserve_bytes))));
+    }
+    let mut disk_held = 0_u64;
+    let mut io_held = 0_u32;
+    if request.disk.is_some() || request.io.is_some() {
+        let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1
+            WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')")?;
+        for body in statement.query_map(rusqlite::params![request.host,request.id], |row| row.get::<_, String>(0))? {
+            let holder: Membership = serde_json::from_str(&body?)?;
+            if holder.request.io == Some(IoClass::Heavy) { io_held = io_held.saturating_add(1); }
+            if let (Some(disk), Some(mount)) = (&holder.request.disk, disk_fit)
+                && holder.disk_filesystem == Some(mount.filesystem)
+            { disk_held = disk_held.saturating_add(disk.bytes); }
+        }
+    }
+    if request.disk.as_ref().is_some_and(|disk| disk_fit.is_none_or(|mount|
+        u128::from(mount.available) < u128::from(mount.floor) + u128::from(disk_held) + u128::from(disk.bytes))) {
+        return Ok(Some((BlockedBy::Disk, "mount free-space floor or peak disk reservations prevent admission".into())));
+    }
+    if request.io == Some(IoClass::Heavy) && fit.heavy_io_slots.is_some_and(|slots| io_held >= slots) {
+        return Ok(Some((BlockedBy::Io, "host heavy IO slots occupied".into())));
+    }
+    Ok(None)
+}
+
 impl Store {
     pub fn resource_membership_record(&self, id: &str, owner: &Owner) -> Result<Membership> {
         let member = read(&self.readers.get(), id)?;
@@ -265,7 +329,12 @@ impl Store {
         let member = self.resource_membership_record(id, owner)?;
         if !matches!(member.state.as_str(), "queued" | "admitted") || member.payload_released_at.is_some() { return Ok(None); }
         let (elapsed, _) = self.resource_admission_elapsed(id, member.queued_at, now_ms);
-        Ok(member.request.admission_timeout_ms.map(|budget| budget.saturating_sub(elapsed)))
+        let aging = (member.state == "queued" && elapsed < BACKFILL_AGING_MS)
+            .then(|| BACKFILL_AGING_MS - elapsed);
+        Ok(match (member.request.admission_timeout_ms.map(|budget| budget.saturating_sub(elapsed)), aging) {
+            (Some(timeout), Some(aging)) => Some(timeout.min(aging)),
+            (timeout, aging) => timeout.or(aging),
+        })
     }
 
     pub fn resource_membership_for_grant(&self, grant: &Grant) -> Result<Membership> {
@@ -424,12 +493,22 @@ impl Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
-        let policy = serde_json::to_string(&(request.max_members, request.capacity, request.coverage))?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
-            rusqlite::params![request.host,request.name,policy])?;
-        let installed: String = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
-            rusqlite::params![request.host,request.name], |row| row.get(0))?;
-        anyhow::ensure!(installed == policy, "resource lane policy differs from host-installed policy");
+        if request.capacity.is_some() {
+            let policy = serde_json::to_string(&(request.max_members, request.capacity, request.coverage))?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
+                rusqlite::params![request.host,request.name,policy])?;
+            let installed: String = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                rusqlite::params![request.host,request.name], |row| row.get(0))?;
+            if installed != policy {
+                let previous: (u32, Option<Capacity>, Coverage) = serde_json::from_str(&installed)?;
+                anyhow::ensure!(previous == (request.max_members, None, request.coverage),
+                    "resource lane policy differs from host-installed policy");
+                // Earlier writers installed profile-less policies. Define the missing profile
+                // without changing their custody; resource_blocking drains those holders first.
+                transaction.execute("UPDATE resource_lane_policies_v1 SET policy=?3 WHERE host=?1 AND lane=?2",
+                    rusqlite::params![request.host,request.name,policy])?;
+            }
+        }
         let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1 WHERE id=?1)", [&request.id], |r| r.get(0))?;
         let mut member = if exists {
             let member = read(&transaction, &request.id)?;
@@ -451,7 +530,9 @@ impl Store {
         smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
         let (queue_elapsed, uncertain) = self.resource_admission_elapsed(&request.id, member.queued_at, now_ms);
         member.clock_uncertain |= uncertain || member.clock_epoch != epoch;
-        let refused = if request.coverage == Coverage::Enforced && !cfg!(target_os = "linux") {
+        let refused = if request.capacity.is_none() {
+            Some((RefusalCode::MissingProfile, "finite execution requires an explicit resource profile".to_owned()))
+        } else if request.coverage == Coverage::Enforced && !cfg!(target_os = "linux") {
             Some((RefusalCode::UnsupportedCoverage, "whole-tree resource enforcement requires Linux".to_owned()))
         } else if now_ms < member.queued_at {
             Some((RefusalCode::ClockUncertain, "queue clock moved backwards; admission requires reconciliation".into()))
@@ -473,57 +554,36 @@ impl Store {
             // Enqueue before inspecting the host-wide head, including first-time requests.
             // The same writer transaction owns ordering and every finite resource reservation.
             if !exists { write(&transaction, &member)?; }
-            // Same writer transaction as hold placement/resolution: no snapshot/subscription gap.
-            let holds = super::host_holds::blocking_tx(&transaction, &request.host, &request.name)?;
-            let held: u32 = transaction.query_row("SELECT count(*) FROM resource_memberships_v1
-                WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')", rusqlite::params![request.host,request.name], |r| r.get(0))?;
-            let head: Option<String> = transaction.query_row("SELECT id FROM resource_memberships_v1
+            let mut statement = transaction.prepare("SELECT body FROM resource_memberships_v1
                 WHERE host=?1 AND state='queued'
-                ORDER BY CASE coalesce(json_extract(body,'$.request.class'),'agent') WHEN 'landing' THEN 0 WHEN 'check' THEN 1 ELSE 2 END,rowid LIMIT 1",
-                [&request.host], |r| r.get(0)).optional()?;
-            let finite_held: u64 = transaction.query_row(
-                "SELECT coalesce(sum(memory),0) FROM resource_memberships_v1
-                 WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')",
-                rusqlite::params![request.host,request.id], |row| row.get(0))?;
-            let holder_free = fit.room.map_or(0, |room| room.memory.saturating_sub(fit.held_bytes).saturating_sub(finite_held));
-            let outside_free = holder_free.saturating_sub(fit.outside_bytes);
-            let free = outside_free.saturating_sub(fit.reserve_bytes);
-            let mut disk_held = 0_u64;
-            let mut io_held = 0_u32;
-            if request.disk.is_some() || request.io.is_some() {
-                let mut statement = transaction.prepare("SELECT body FROM resource_memberships_v1
-                    WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')")?;
-                let bodies = statement.query_map(rusqlite::params![request.host,request.id], |row| row.get::<_, String>(0))?;
-                for body in bodies {
-                    let holder: Membership = serde_json::from_str(&body?)?;
-                    if holder.request.io == Some(IoClass::Heavy) { io_held = io_held.saturating_add(1); }
-                    if let (Some(disk), Some(mount)) = (&holder.request.disk, fit.disk)
-                        && holder.disk_filesystem == Some(mount.filesystem)
-                    {
-                        disk_held = disk_held.saturating_add(disk.bytes);
-                    }
+                ORDER BY CASE coalesce(json_extract(body,'$.request.class'),'agent') WHEN 'landing' THEN 0 WHEN 'check' THEN 1 ELSE 2 END,rowid")?;
+            let queued = statement.query_map([&request.host], |row| row.get::<_, String>(0))?;
+            let mut predecessor = None;
+            for body in queued {
+                let earlier: Membership = serde_json::from_str(&body?)?;
+                if earlier.request.id == request.id { break; }
+                let (elapsed, uncertain) = self.resource_admission_elapsed(&earlier.request.id, earlier.queued_at, now_ms);
+                if earlier.request.class != request.class || uncertain || elapsed >= BACKFILL_AGING_MS {
+                    predecessor = Some((BlockedBy::Fifo, format!("class or aged predecessor: {}", earlier.request.id)));
+                    break;
+                }
+                let disk_fit = earlier.request.disk.as_ref().and_then(|disk|
+                    fit.disk_mounts.get(&disk.path).copied().or_else(||
+                        (request.disk.as_ref().is_some_and(|own| own.path == disk.path)).then_some(fit.disk).flatten()));
+                // Without a fresh observation we cannot prove a disk predecessor does not fit.
+                let unknown_disk = earlier.request.disk.is_some() && disk_fit.is_none();
+                if unknown_disk || resource_blocking(&transaction, &earlier.request, &fit, disk_fit)?.is_none() {
+                    predecessor = Some((BlockedBy::Fifo, format!("fitting predecessor: {}", earlier.request.id)));
+                    break;
                 }
             }
-            let blocking = if !holds.is_empty() { Some((BlockedBy::Hold, "host held".into())) }
-                else if held >= request.max_members { Some((BlockedBy::Holder, "lane occupied".into())) }
-                else if head.as_deref().is_some_and(|head| head != request.id) { Some((BlockedBy::Fifo, "FIFO predecessor".into())) }
-                else if let Some(predecessor) = &fit.fifo_predecessor { Some((BlockedBy::Fifo, format!("host fit FIFO predecessor: {predecessor}"))) }
-                else if request.capacity.is_some_and(|capacity| capacity.memory > holder_free) {
-                    Some((BlockedBy::Holder, "holder footprint prevents admission".into()))
-                } else if request.capacity.is_some_and(|capacity| capacity.memory > outside_free) {
-                    Some(if fit.psi_blocked {
-                        (BlockedBy::Psi, format!("outside footprint prevents admission: {} bytes; PSI full >= 1% or observation unavailable; reclaim credit withheld", fit.outside_bytes))
-                    } else {
-                        (BlockedBy::Outside, format!("outside footprint prevents admission: {} bytes", fit.outside_bytes))
-                    })
-                } else if request.capacity.is_some_and(|capacity| capacity.memory > free) {
-                    Some((BlockedBy::Reserve, format!("host reserve prevents admission: {} bytes", fit.reserve_bytes)))
-                } else if request.disk.as_ref().is_some_and(|disk| fit.disk.is_none_or(|mount|
-                    u128::from(mount.available) < u128::from(mount.floor) + u128::from(disk_held) + u128::from(disk.bytes))) {
-                    Some((BlockedBy::Disk, "mount free-space floor or peak disk reservations prevent admission".into()))
-                } else if request.io == Some(IoClass::Heavy) && fit.heavy_io_slots.is_some_and(|slots| io_held >= slots) {
-                    Some((BlockedBy::Io, "host heavy IO slots occupied".into()))
-                } else { None };
+            drop(statement);
+            let ordering = predecessor.or_else(|| fit.fifo_predecessor.as_ref()
+                .map(|id| (BlockedBy::Fifo, format!("host fit predecessor: {id}"))));
+            let blocking = match ordering {
+                Some(blocking) => Some(blocking),
+                None => resource_blocking(&transaction, request, &fit, fit.disk)?,
+            };
             member.reason = if let Some((blocked_by, reason)) = blocking {
                 member.blocked_by = Some(blocked_by);
                 reason
@@ -803,10 +863,13 @@ mod tests {
 
     fn request(id: &str) -> LaneRequest {
         LaneRequest { id: id.into(), name: "executor/activation".into(), host: "host-a".into(),
-            max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            max_members: 1, capacity: Some(Capacity { cores: 1, memory: 256 << 20 }), coverage: Coverage::Logical, admission_timeout_ms: None,
             class: RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: format!("mission-run/{id}"), step: format!("step-run/{id}"),
                 attempt: 1, invocation: Some(format!("invocation/{id}")) } }
+    }
+    fn test_fit() -> Fit {
+        Fit { room: Some(Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() }
     }
     fn fixture() -> Store {
         let store = Store::open_memory("host-a").unwrap();
@@ -814,7 +877,7 @@ mod tests {
         store
     }
     fn grant(store: &Store, request: &LaneRequest, now: u64) -> Grant {
-        match store.request_resource_membership(request, Fit::default(), now).unwrap() {
+        match store.request_resource_membership(request, test_fit(), now).unwrap() {
             Admission::Admitted(grant) => grant,
             other => panic!("expected admission: {other:?}"),
         }
@@ -828,23 +891,160 @@ mod tests {
         let store = fixture();
         let mut first = request("mount-one");
         first.disk = Some(DiskRequest { bytes: 80, path: "/one".into() });
-        let fit = Fit { disk: Some(DiskFit { filesystem: 1, available: 100, floor: 20 }), ..Fit::default() };
+        let fit = Fit { disk: Some(DiskFit { filesystem: 1, available: 100, floor: 20 }), ..test_fit() };
         assert!(matches!(store.request_resource_membership(&first, fit, 1).unwrap(), Admission::Admitted(_)));
         let mut other = request("mount-two");
         other.name = "another-lane".into();
         other.disk = Some(DiskRequest { bytes: 80, path: "/two".into() });
-        let fit = Fit { disk: Some(DiskFit { filesystem: 2, available: 100, floor: 20 }), ..Fit::default() };
+        let fit = Fit { disk: Some(DiskFit { filesystem: 2, available: 100, floor: 20 }), ..test_fit() };
         assert!(matches!(store.request_resource_membership(&other, fit, 2).unwrap(), Admission::Admitted(_)));
         let mut full = request("below-floor");
         full.name = "third-lane".into();
         full.disk = Some(DiskRequest { bytes: 0, path: "/three".into() });
-        let fit = Fit { disk: Some(DiskFit { filesystem: 3, available: 19, floor: 20 }), ..Fit::default() };
+        let fit = Fit { disk: Some(DiskFit { filesystem: 3, available: 19, floor: 20 }), ..test_fit() };
         assert!(matches!(store.request_resource_membership(&full, fit, 3).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&full.id, &full.owner).unwrap().blocked_by, Some(BlockedBy::Disk));
     }
 
+    fn sized_request(id: &str, memory: u64) -> LaneRequest {
+        let mut request = request(id);
+        request.name = id.into();
+        request.capacity = Some(Capacity { cores: 1, memory });
+        request
+    }
+
+    fn small_room() -> Fit {
+        Fit { room: Some(Capacity { cores: 8, memory: 100 }), ..test_fit() }
+    }
+
     #[test]
-    fn host_classes_are_strict_and_fifo_across_different_lanes() {
+    fn fitting_backfill_passes_until_the_head_ages_then_capacity_is_reserved_once() {
+        let store = fixture();
+        let holder = sized_request("holder", 60);
+        let head = sized_request("head", 80);
+        let later = sized_request("later", 20);
+        let last = sized_request("last", 10);
+        let Admission::Admitted(holder_grant) = store.request_resource_membership(&holder, small_room(), 1).unwrap()
+            else { panic!("holder fits"); };
+        assert!(matches!(store.request_resource_membership(&head, small_room(), 2).unwrap(), Admission::Queued { .. }));
+        store.advance_resource_admission_clock(&head.id, BACKFILL_AGING_MS / 2);
+        assert!(matches!(store.request_resource_membership(&later, small_room(), 3).unwrap(), Admission::Admitted(_)));
+        store.advance_resource_admission_clock(&head.id, BACKFILL_AGING_MS / 2);
+        assert!(matches!(store.request_resource_membership(&last, small_room(), 4).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&last.id, &last.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 80, "the aged reservation is a fence, not another memory holder");
+        let root = tempfile::tempdir().unwrap();
+        assert!(store.retire_resource_membership(&holder_grant, &holder.owner, &runtime(root.path()), 5).unwrap());
+        assert!(matches!(store.request_resource_membership(&head, small_room(), 6).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 100);
+    }
+
+    #[test]
+    fn cancelling_an_aged_head_releases_its_fence_for_the_next_ticket() {
+        let store = fixture();
+        let head = sized_request("head", 80);
+        let later = sized_request("later", 20);
+        let blocked = Fit { outside_bytes: 50, ..small_room() };
+        assert!(matches!(store.request_resource_membership(&head, blocked.clone(), 1).unwrap(), Admission::Queued { .. }));
+        let deadline = store.resource_admission_remaining(&head.id, &head.owner, 1).unwrap().unwrap();
+        assert!(deadline <= BACKFILL_AGING_MS && deadline > BACKFILL_AGING_MS / 2);
+        store.advance_resource_admission_clock(&head.id, BACKFILL_AGING_MS);
+        assert_eq!(store.resource_admission_remaining(&head.id, &head.owner, 2).unwrap(), None, "an aged head does not install a polling deadline");
+        assert!(matches!(store.request_resource_membership(&later, blocked.clone(), 2).unwrap(), Admission::Queued { .. }));
+        store.withdraw_resource_membership(&head.id, &head.owner, 3).unwrap();
+        assert!(matches!(store.request_resource_membership(&later, blocked, 4).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn backfill_never_crosses_class_priority() {
+        for lower in [RequestClass::Check, RequestClass::Agent] {
+            let store = fixture();
+            let mut head = sized_request("landing-head", 80);
+            head.class = RequestClass::Landing;
+            let mut later = sized_request("later", 20);
+            later.class = lower;
+            let fit = Fit { outside_bytes: 50, ..small_room() };
+            assert!(matches!(store.request_resource_membership(&head, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
+            assert!(matches!(store.request_resource_membership(&later, fit, 2).unwrap(), Admission::Queued { .. }));
+            assert_eq!(store.resource_membership_record(&later.id, &later.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
+        }
+    }
+
+    #[test]
+    fn missing_profile_is_typed_and_does_not_install_a_lane_default() {
+        let store = fixture();
+        let mut missing = request("missing");
+        missing.capacity = None;
+        assert!(matches!(store.request_resource_membership(&missing, test_fit(), 1).unwrap(),
+            Admission::Refused { code: RefusalCode::MissingProfile, .. }));
+        assert_eq!(serde_json::to_value(RefusalCode::MissingProfile).unwrap(), "missing-profile");
+        assert!(matches!(store.request_resource_membership(&request("profiled"), test_fit(), 2).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn an_oversize_head_without_holders_is_impossible_and_cannot_wedge_the_queue() {
+        let store = fixture();
+        let head = sized_request("oversize", 101);
+        assert!(matches!(store.request_resource_membership(&head, small_room(), 1).unwrap(),
+            Admission::Refused { code: RefusalCode::Impossible, .. }));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
+        assert!(matches!(store.request_resource_membership(&sized_request("next", 20), small_room(), 2).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn disk_and_heavy_io_blocked_heads_allow_fitting_backfill_before_aging() {
+        for disk_block in [false, true] {
+            let store = fixture();
+            let mut holder = sized_request("holder", 1);
+            holder.io = Some(IoClass::Heavy);
+            let mut head = sized_request("head", 1);
+            head.io = (!disk_block).then_some(IoClass::Heavy);
+            head.disk = disk_block.then(|| DiskRequest { bytes: 90, path: "/work".into() });
+            let mut fit = Fit { heavy_io_slots: Some(1), ..small_room() };
+            fit.disk_mounts.insert("/work".into(), DiskFit { filesystem: 1, available: 100, floor: 20 });
+            assert!(matches!(store.request_resource_membership(&holder, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
+            fit.disk = head.disk.as_ref().map(|_| fit.disk_mounts["/work"]);
+            assert!(matches!(store.request_resource_membership(&head, fit.clone(), 2).unwrap(), Admission::Queued { .. }));
+            fit.disk = None;
+            assert!(matches!(store.request_resource_membership(&sized_request("later", 1), fit, 3).unwrap(), Admission::Admitted(_)));
+        }
+    }
+
+    #[test]
+    fn profile_less_installed_policy_upgrades_after_reopen_without_releasing_old_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.sqlite");
+        let mut historical = request("historical");
+        historical.max_members = 2;
+        let historical_grant;
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch-a").unwrap();
+            historical_grant = grant(&store, &historical, 1);
+            let mut legacy = store.resource_membership_record(&historical.id, &historical.owner).unwrap();
+            legacy.request.capacity = None;
+            historical.capacity = None;
+            // Seed bytes written by the earlier profile-optional authority.
+            let connection = store.connection.write();
+            connection.execute("UPDATE resource_lane_policies_v1 SET policy=?1",
+                [serde_json::to_string(&(2_u32, None::<Capacity>, Coverage::Logical)).unwrap()]).unwrap();
+            connection.execute("UPDATE resource_memberships_v1 SET memory=0,body=?1 WHERE id=?2",
+                rusqlite::params![serde_json::to_string(&legacy).unwrap(),historical.id]).unwrap();
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        assert!(matches!(store.request_resource_membership(&historical, test_fit(), 2).unwrap(), Admission::Admitted(_)),
+            "an existing grant retains custody despite the new admission requirement");
+        let mut profiled = request("profiled");
+        profiled.max_members = 2;
+        assert!(matches!(store.request_resource_membership(&profiled, test_fit(), 3).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&profiled.id, &profiled.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
+        assert_eq!(store.resource_membership_record(&historical.id, &historical.owner).unwrap().grant, Some(historical_grant.clone()));
+        assert!(store.retire_resource_membership(&historical_grant, &historical.owner, &runtime(root.path()), 4).unwrap());
+        assert!(matches!(store.request_resource_membership(&profiled, test_fit(), 5).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn host_classes_are_strict_and_fitting_predecessors_keep_fifo_across_lanes() {
         let store = fixture();
         let mut requests: Vec<_> = [
             ("agent", RequestClass::Agent), ("check-first", RequestClass::Check),
@@ -857,7 +1057,7 @@ mod tests {
             candidate.capacity = Some(Capacity { cores: 1, memory: if class == RequestClass::Landing { 80 } else { 20 } });
             candidate
         }).collect();
-        let blocked = Fit { room: Some(Capacity { cores: 8, memory: 100 }), outside_bytes: 100, ..Fit::default() };
+        let blocked = Fit { room: Some(Capacity { cores: 8, memory: 100 }), outside_bytes: 100, ..test_fit() };
         for candidate in &requests {
             assert!(matches!(store.request_resource_membership(candidate, blocked.clone(), 1).unwrap(), Admission::Queued { .. }));
         }
@@ -865,11 +1065,13 @@ mod tests {
             .map(|member| member.request.id).collect();
         assert_eq!(order, ["landing-first", "landing-next", "check-first", "check-next", "agent"]);
         // A lower-class candidate fits on its own, but cannot bypass the landing head.
-        let partial = Fit { room: blocked.room, outside_bytes: 50, ..Fit::default() };
+        let partial = Fit { room: blocked.room, outside_bytes: 50, ..test_fit() };
         assert!(matches!(store.request_resource_membership(&requests[2], partial.clone(), 2).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&requests[2].id, &requests[2].owner).unwrap().blocked_by, Some(BlockedBy::Outside));
+        assert!(matches!(store.request_resource_membership(&requests[1], partial.clone(), 2).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&requests[1].id, &requests[1].owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
         assert!(matches!(store.request_resource_membership(&requests[0], partial, 2).unwrap(), Admission::Queued { .. }));
-        let fits = Fit { room: blocked.room, ..Fit::default() };
+        let fits = Fit { room: blocked.room, ..test_fit() };
         assert_eq!(store.resource_membership_record(&requests[0].id, &requests[0].owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
         for id in order {
             let index = requests.iter().position(|candidate| candidate.id == id).unwrap();
@@ -886,7 +1088,7 @@ mod tests {
         let store = fixture();
         let mut first = request("disk-first");
         first.disk = Some(DiskRequest { bytes: 60, path: "/work".into() });
-        let fit = Fit { disk: Some(DiskFit { filesystem: 7, available: 100, floor: 20 }), ..Fit::default() };
+        let fit = Fit { disk: Some(DiskFit { filesystem: 7, available: 100, floor: 20 }), ..test_fit() };
         let Admission::Admitted(first_grant) = store.request_resource_membership(&first, fit.clone(), 1).unwrap()
             else { panic!("first disk reservation fits"); };
         let mut next = request("disk-next");
@@ -906,14 +1108,14 @@ mod tests {
         let store = fixture();
         let mut first = request("heavy-first");
         first.io = Some(IoClass::Heavy);
-        let fit = Fit { heavy_io_slots: Some(1), ..Fit::default() };
+        let fit = Fit { heavy_io_slots: Some(1), ..test_fit() };
         assert!(matches!(store.request_resource_membership(&first, fit.clone(), 1).unwrap(), Admission::Admitted(_)));
         let mut next = request("heavy-next");
         next.name = "another-lane".into();
         next.io = Some(IoClass::Heavy);
         assert!(matches!(store.request_resource_membership(&next, fit, 2).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&next.id, &next.owner).unwrap().blocked_by, Some(BlockedBy::Io));
-        let larger_policy = Fit { heavy_io_slots: Some(2), ..Fit::default() };
+        let larger_policy = Fit { heavy_io_slots: Some(2), ..test_fit() };
         assert!(matches!(store.request_resource_membership(&next, larger_policy, 3).unwrap(), Admission::Admitted(_)));
     }
 
@@ -943,12 +1145,12 @@ mod tests {
             let store = fixture();
             let mut first = request("predecessor");
             first.capacity = Some(capacity);
-            let large_room = Fit { room: Some(Capacity { cores: 8, memory: 200 }), outside_bytes: 200, ..Fit::default() };
+            let large_room = Fit { room: Some(Capacity { cores: 8, memory: 200 }), outside_bytes: 200, ..test_fit() };
             assert!(matches!(store.request_resource_membership(&first, large_room, 1).unwrap(), Admission::Queued { .. }));
             let mut next = request("impossible");
             next.capacity = Some(capacity);
             let fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
-                fifo_predecessor: Some(first.id.clone()), ..Fit::default() };
+                fifo_predecessor: Some(first.id.clone()), ..test_fit() };
             let result = store.request_resource_membership(&next, fit, 2).unwrap();
             assert!(matches!(result, Admission::Refused { code: RefusalCode::Impossible, .. }));
             let member = store.resource_membership_record(&next.id, &next.owner).unwrap();
@@ -963,7 +1165,7 @@ mod tests {
         let store = fixture();
         let mut request = request("outside");
         request.capacity = Some(Capacity { cores: 1, memory: 60 });
-        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }), outside_bytes: 50, ..Fit::default() };
+        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }), outside_bytes: 50, ..test_fit() };
         assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
         let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
         assert_eq!(member.blocked_by, Some(BlockedBy::Outside));
@@ -983,7 +1185,7 @@ mod tests {
         let mut request = request("psi");
         request.capacity = Some(Capacity { cores: 1, memory: 60 });
         let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
-            outside_bytes: 50, psi_blocked: true, ..Fit::default() };
+            outside_bytes: 50, psi_blocked: true, ..test_fit() };
         assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
         let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
         assert_eq!(member.blocked_by, Some(BlockedBy::Psi));
@@ -1009,7 +1211,7 @@ mod tests {
         let mut request = request("psi-fit");
         request.capacity = Some(Capacity { cores: 1, memory: 60 });
         let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
-            held_bytes: 50, outside_bytes: 50, psi_blocked: true, ..Fit::default() };
+            held_bytes: 50, outside_bytes: 50, psi_blocked: true, ..test_fit() };
         assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
         fit.held_bytes = 0;
@@ -1024,7 +1226,7 @@ mod tests {
         let mut request = request("attribution");
         request.capacity = Some(Capacity { cores: 1, memory: 60 });
         let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
-            held_bytes: 50, outside_bytes: 50, reserve_bytes: 50, ..Fit::default() };
+            held_bytes: 50, outside_bytes: 50, reserve_bytes: 50, ..test_fit() };
         for (now, expected) in [(1, BlockedBy::Holder), (2, BlockedBy::Outside), (3, BlockedBy::Reserve)] {
             assert!(matches!(store.request_resource_membership(&request, fit.clone(), now).unwrap(), Admission::Queued { .. }));
             let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
@@ -1044,14 +1246,14 @@ mod tests {
     fn host_and_lane_fifo_are_distinct_from_holder_occupancy() {
         let store = fixture();
         let first = request("first");
-        let fit = Fit { fifo_predecessor: Some("seat/predecessor".into()), ..Fit::default() };
+        let fit = Fit { fifo_predecessor: Some("seat/predecessor".into()), ..test_fit() };
         assert!(matches!(store.request_resource_membership(&first, fit, 1).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&first.id, &first.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
         let next = request("next");
-        assert!(matches!(store.request_resource_membership(&next, Fit::default(), 2).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&next, test_fit(), 2).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&next.id, &next.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
         grant(&store, &first, 3);
-        assert!(matches!(store.request_resource_membership(&next, Fit::default(), 4).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&next, test_fit(), 4).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&next.id, &next.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
         store.withdraw_resource_membership(&next.id, &next.owner, 5).unwrap();
         assert_eq!(store.resource_membership_record(&next.id, &next.owner).unwrap().blocked_by, None);
@@ -1066,7 +1268,7 @@ mod tests {
         let first = grant(&store, &holder, 1);
         let contenders = (0..16).rev().map(|i| request(&format!("waiter-{i:02}"))).collect::<Vec<_>>();
         for contender in &contenders {
-            assert!(matches!(store.request_resource_membership(contender, Fit::default(), 2).unwrap(), Admission::Queued { .. }));
+            assert!(matches!(store.request_resource_membership(contender, test_fit(), 2).unwrap(), Admission::Queued { .. }));
         }
         store.withdraw_resource_membership(&contenders[3].id, &contenders[3].owner, 3).unwrap();
         assert!(store.retire_resource_membership(&first, &holder.owner, &runtime, 4).unwrap());
@@ -1089,7 +1291,7 @@ mod tests {
             receipt: Some("receipt/failure".into()),
         }).unwrap();
         let request = request("blocked");
-        assert!(matches!(store.request_resource_membership(&request, Fit::default(), 1).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&request, test_fit(), 1).unwrap(), Admission::Queued { .. }));
         assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().blocked_by, Some(BlockedBy::Hold));
         assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
         store.release_host_hold("person/operator", &ReleaseHostHold {
@@ -1111,8 +1313,8 @@ mod tests {
         let grant = grant(&store, &holder, 1);
         let mut waiting = request("waiting");
         waiting.admission_timeout_ms = Some(0);
-        store.request_resource_membership(&waiting, Fit::default(), 2).unwrap();
-        assert!(matches!(store.request_resource_membership(&waiting, Fit::default(), 12).unwrap(),
+        store.request_resource_membership(&waiting, test_fit(), 2).unwrap();
+        assert!(matches!(store.request_resource_membership(&waiting, test_fit(), 12).unwrap(),
             Admission::Refused { code: RefusalCode::AdmissionExpired, .. }));
         assert!(store.cancel_resource_membership(&grant, &waiting.owner, 13).is_err());
         let mut stale = grant.clone(); stale.generation = "stale".into();
@@ -1129,7 +1331,7 @@ mod tests {
         let runtime = runtime(root.path());
         let mut holder = request("child-holder");
         holder.capacity = Some(Capacity { cores: 1, memory: 1024 });
-        let fit = Fit { room: holder.capacity, ..Fit::default() };
+        let fit = Fit { room: holder.capacity, ..test_fit() };
         let Admission::Admitted(current) = store.request_resource_membership(&holder, fit.clone(), 1).unwrap() else {
             panic!("holder must acquire physical custody");
         };
@@ -1183,7 +1385,7 @@ mod tests {
             let record = store.resource_membership_for_grant(&current).unwrap();
             assert_eq!(record.state, "uncertain");
             assert_eq!(record.retired_at, None);
-            assert!(matches!(store.request_resource_membership(&request("blocked"), Fit::default(), 3).unwrap(), Admission::Queued { .. }));
+            assert!(matches!(store.request_resource_membership(&request("blocked"), test_fit(), 3).unwrap(), Admission::Queued { .. }));
         }
     }
 
@@ -1199,7 +1401,7 @@ mod tests {
         assert!(store.cancel_resource_membership(&old, &unknown.owner, 2).is_err());
         assert_eq!(store.recover_resource_memberships("host-a", &runtime, 3).unwrap(), 1);
         let successor = request("successor");
-        assert!(matches!(store.request_resource_membership(&successor, Fit::default(), 4).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&successor, test_fit(), 4).unwrap(), Admission::Queued { .. }));
         let recovered = store.resource_membership_record(&unknown.id, &unknown.owner).unwrap();
         assert_eq!(recovered.state, "uncertain");
         assert_eq!(recovered.grant.unwrap().authority_epoch, "epoch-b");
@@ -1212,9 +1414,9 @@ mod tests {
         let mut first = request("first");
         grant(&store, &first, 1);
         first.id = "different".into(); first.max_members = 2;
-        assert!(store.request_resource_membership(&first, Fit::default(), 2).is_err());
+        assert!(store.request_resource_membership(&first, test_fit(), 2).is_err());
         first.host = "host-b".into();
-        assert!(store.request_resource_membership(&first, Fit::default(), 2).is_err());
+        assert!(store.request_resource_membership(&first, test_fit(), 2).is_err());
         assert!(store.start_resource_authority("host-b", "epoch").is_err());
     }
 
@@ -1275,7 +1477,7 @@ mod tests {
         let mut holder = request("native-holder");
         holder.name = format!("resource-test-{}", uuid::Uuid::new_v4().simple());
         let current = grant(&store, &holder, wall());
-        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: None, require_enforced: false };
+        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity, require_enforced: false };
         store.prepare_resource_membership(&current, "holder").unwrap();
         let binding = fractal_runtime::ResourceExecutionBinding {
             membership_id: current.membership_id.clone(), generation: current.generation.clone(),
@@ -1295,7 +1497,7 @@ mod tests {
         let mut queued_at = Vec::new();
         for waiter in &waiters {
             queued_at.push(std::time::Instant::now());
-            assert!(matches!(store.request_resource_membership(waiter, Fit::default(), wall()).unwrap(), Admission::Queued { .. }));
+            assert!(matches!(store.request_resource_membership(waiter, test_fit(), wall()).unwrap(), Admission::Queued { .. }));
         }
         let cancel_started = std::time::Instant::now();
         store.cancel_resource_membership(&current, &holder.owner, wall()).unwrap();
@@ -1357,7 +1559,7 @@ mod tests {
         let incremental = crate::incremental::Incremental::default();
         incremental.observe(&store).unwrap();
         let gib = 1_u64 << 30;
-        let fit = Fit { room: Some(Capacity { cores: 4, memory: 4 * gib }), ..Fit::default() };
+        let fit = Fit { room: Some(Capacity { cores: 4, memory: 4 * gib }), ..test_fit() };
         let mut first = request("physical-first");
         first.capacity = Some(Capacity { cores: 2, memory: 3 * gib });
         let first_grant = match store.request_resource_membership(&first, fit.clone(), 1).unwrap() {
@@ -1392,7 +1594,7 @@ mod tests {
         request.admission_timeout_ms = Some(60_000);
         request.capacity = Some(Capacity { cores: 1, memory: 1024 });
         let grant = match store.request_resource_membership(&request,
-            Fit { room: Some(Capacity { cores: 2, memory: 4096 }), ..Fit::default() }, 100).unwrap() {
+            Fit { room: Some(Capacity { cores: 2, memory: 4096 }), ..test_fit() }, 100).unwrap() {
             Admission::Admitted(grant) => grant,
             other => panic!("{other:?}"),
         };
