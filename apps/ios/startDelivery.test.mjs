@@ -35,9 +35,8 @@ for (const key of ['stale-snapshot']) {
     const retried = await resendBoundAction(result.request);
     assert.equal(retried.how, 'unconfirmed', 'a later refusal cannot settle an earlier unknown delivery');
     assert.equal(retried.request, result.request);
-    assert.equal(sent.length, 2);
-    assert.equal(sent[1].parameters, packet.parameters);
-    assert.equal(sent[1].idempotency_key, packet.idempotency_key);
+    assert.equal(sent.length, 1, 'unknown never triggers a second POST, even through resendBoundAction');
+    assert.equal(sent[0], packet);
     assert.equal(builds, 1, 'never re-sign or rebuild an unknown Start');
   });
 }
