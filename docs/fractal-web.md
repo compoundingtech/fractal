@@ -669,6 +669,8 @@ The storage adapter itself performs no upload, signing, dispatch or retry.
 Only `grants.messageSend` authorizes the composer. An absent send port shows Unknown, and
 non-retryable refusals disable new submissions with their classified human-readable reason. Retryable send failures
 belong only to the failed row; they neither disable the next draft nor replace its footer help.
+This includes a pre-dispatch `retry-refused`: a row Retry may fail and later succeed
+without blocking another draft or adding a generic composer refusal.
 The data source owns the action
 fence and the idempotency key; the composer passes only `Send` or `Resend`. Cancel remains Unknown and disabled; no runtime signal is wired.
 The kit's optional `onRetrySend` prop is a callback seam, not regeneration or a send implementation.

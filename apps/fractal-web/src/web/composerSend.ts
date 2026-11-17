@@ -5,6 +5,9 @@ import type { AttachmentSendRequest, DataSource, Grants, SendImage } from '../da
 
 export type SendRefusal = { readonly reason: string }
 
+// Only these connection/acceptance refusals block new drafts; all delivery failures stay on their row.
+const composerRefusalReasons = ['ungranted', 'invalid', 'storage', 'identity-unavailable'] as const
+
 type AttachmentAdapter = NonNullable<NonNullable<ConversationRuntimeOptions['adapters']>['attachments']>
 type PendingAttachment = Parameters<AttachmentAdapter['send']>[0]
 type SendAttachment = AttachmentSendRequest['parameters']['attachments'][number]
@@ -129,8 +132,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
         ? { ...request, _tag: 'Send', ...(images === undefined || images.length === 0 ? {} : { images }) }
         : { ...request, _tag: 'Resend', idempotencyKey: retryKey })
       // Retryable send failures belong to the outbox row, not the next draft's availability.
-      if (result._tag === 'Refused' && result.reason !== 'failed' && result.reason !== 'unconfirmed'
-        && result.reason !== 'stale-fence' && result.reason !== 'snapshot-unavailable') onRefused({ reason: result.reason })
+      if (result._tag === 'Refused' && composerRefusalReasons.some(reason => reason === result.reason)) onRefused({ reason: result.reason })
       // assistant-ui restores the submitted text AND complete local attachments only for this rejection.
       if (result._tag === 'Refused' && (result.reason === 'storage' || result.reason === 'identity-unavailable')) throw new MessageNotSentError(sendFailureDetail(result.reason))
       confirmed = result._tag === 'Success' && result.value.status === 'completed'
