@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
 import { ownedPresentations } from '../ownedPresentation';
@@ -21,6 +21,8 @@ import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText,
 import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { ConversationComposer } from '../conversationComposer';
+import { ConversationAttempts } from '../conversationAttempts';
+import { ConversationFeedback } from '../conversationPresentation';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport } from '../visibleConversationImages';
@@ -43,7 +45,7 @@ const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
 // Keep both the original member binding and local images for an explicit new send.
-type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number; pickedImages?: Picked[] };
+type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; retryOriginal?: () => Promise<Sent>; resending?: boolean; images?: number; pickedImages?: Picked[] };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
 function nowClock() {
@@ -59,7 +61,7 @@ export function ConversationScreen(props: RootScreen<'Conversation'>) {
 
 function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
-  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
+  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, draftsOwner, draftGeneration, saveDrafts, actions, simpleOn } = useStore();
   // Native alert callbacks outlive the render that opened them. A new send must
   // use the selection at confirmation time, not the alert's captured client.
   const actionsRef = useRef(actions);
@@ -117,7 +119,15 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     return () => clearInterval(timer);
   }, [issue]);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
-  const [pending, setPending] = useState<Pending[]>([]);
+  const attempts = useMemo(() => new ConversationAttempts<Pending, Sent>(
+    result => result.how === 'unconfirmed' ? () => actions.resend(result.request) : undefined,
+    error => ({ how: 'failed', error: String(error) })), [target, draftsOwner.current, draftGeneration.current]);
+  const pendingAttempts = useSyncExternalStore(attempts.subscribe, attempts.getSnapshot);
+  const nextAttempt = useRef(0);
+  const pending = useMemo((): Pending[] => pendingAttempts.map(attempt => ({ ...attempt.draft,
+    failed: attempt.result?.how === 'failed' ? attempt.result.error : undefined,
+    unconfirmed: attempt.result?.how === 'unconfirmed' ? attempt.result.request : undefined,
+    retryOriginal: attempt.retry, resending: attempt.phase === 'sending' && !!attempt.result })), [pendingAttempts]);
   // Opened from search ("said in conversations"), the conversation arrives found.
   const [find, setFind] = useState(route.params.find ?? '');
   const [findOpen, setFinding] = useState(!!route.params.find);
@@ -269,7 +279,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   }, [unreadable, timeline.entries, names]);
   // A message Fractal has taken shows up in the conversation; the pending copy then gives way.
   useEffect(() => {
-    setPending(previous => previous.filter(item => item.failed || !entries.some(entry => entry.body.kind === 'mail' && entry.body.from === 'you' && entry.body.text.trim() === item.text.trim())));
+    attempts.retain(attempt => attempt.phase === 'failed' || !entries.some(entry => entry.body.kind === 'mail' && entry.body.from === 'you' && entry.body.text.trim() === attempt.draft.text.trim()));
   }, [entries]);
   const finding = findOpen && find.trim() !== '';
   const found = useMemo(() => finding ? entries.filter(entry => entryMatches(entry, find)) : entries, [entries, find, finding]);
@@ -304,8 +314,8 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     const text = (spoken ?? draft).trim();
     const sending = images;
     if (!agent || (!text && !sending.length)) return;
-    const item: Pending = { id: `pending-${Date.now()}`, text, at: nowClock(), pickedImages: sending, ...(sending.length ? { images: sending.length } : {}) };
-    setPending(previous => [...previous, item]);
+    const item: Pending = { id: `pending-${Date.now()}-${nextAttempt.current++}`, text, at: nowClock(), pickedImages: sending, ...(sending.length ? { images: sending.length } : {}) };
+    const submittedOwner = draftsOwner.current, submittedGeneration = draftGeneration.current;
     // The words sent from dictation include what was in the box, so it empties either way; a send that
     // does not go puts the text back, and one that Fractal acknowledged leaves it empty.
     emptyBox();
@@ -315,7 +325,8 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     list.current?.scrollToOffset({ offset: 0, animated: offset.current < 1200 });
     const tags = dictated || spoken !== undefined ? ['dictated'] : undefined;
     setDictated(false);
-    const sent = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
+    const sent = await attempts.send(item.id, item, () => actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending));
+    if (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration) return;
     setSendIssue('');
     // Images that did not go stay ready to send again.
     if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
@@ -329,7 +340,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       if (tags) setDictated(true);
       setDraft(restored);
       saveDrafts();
-      setPending(previous => previous.filter(candidate => candidate.id !== item.id));
+      attempts.remove(item.id);
       setSendIssue(`Not sent: ${sendReason(sent.error, false)}`);
       return;
     }
@@ -341,15 +352,12 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. Retry only contacts that original connection. Sending as new uses the current member and a new key, and may create a duplicate.`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Retry original', onPress: async () => {
-        setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
-        settle(item.id, await actions.resend(bound));
+        if (item.retryOriginal) settle(item.id, await item.retryOriginal());
       } },
       { text: 'Send as new', style: 'destructive', onPress: async () => {
-        setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
         const parameters = bound.request.parameters;
-        const sent = await actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages);
+        const sent = await attempts.sendAsNew(item.id, () => actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages));
         if (sent.how === 'failed') {
-          setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: false } : candidate));
           setSendIssue(`Not sent: ${sent.error}`);
         } else settle(item.id, sent);
       } },
@@ -357,9 +365,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   }
   // A sent message waits to show up in the conversation; one Fractal has not confirmed keeps its request.
   function settle(id: string, sent: Sent) {
-    setPending(previous => previous.map(candidate => candidate.id !== id ? candidate
-      : { ...candidate, resending: false, failed: sent.how === 'failed' ? sent.error : undefined, unconfirmed: sent.how === 'unconfirmed' ? sent.request : undefined }));
-    if (sent.how === 'sent') setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== id)), 60_000);
+    if (sent.how === 'sent') setTimeout(() => attempts.remove(id), 60_000);
   }
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
@@ -555,9 +561,11 @@ const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }:
     : rule.sending.text;
   const { color: paint } = useTextAppearance();
   return <View style={[styles.entry, styles.barred, { borderLeftColor: paint(c(tone ?? rule.sending_edge)) }]}>
-    <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
-    <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
-    {pending.unconfirmed ? <Button label="Resolve unconfirmed" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
+    <ConversationFeedback color={c(tone ?? rule.sending.color)}
+      message={<>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></>}
+      recovery={pending.unconfirmed ? { label: 'Resolve unconfirmed', color: c(rule.unconfirmed), disabled: !canSend || !!pending.resending, onPress: () => onSendAgain(pending) } : undefined}>
+      <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
+    </ConversationFeedback>
   </View>;
 });
 

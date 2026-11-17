@@ -11,6 +11,7 @@ import { anchorPresentation, reminderFromSummary } from './unreadVisit.ts';
 import { pendingUnreadAPI } from './unreadActions.ts';
 import { nativeVisitPorts } from './unreadVisitTestPorts.mjs';
 import { unreadClient as bindUnreadClient, unreadSupported } from './unreadClient.ts';
+import { ConversationAttempts } from './conversationAttempts.ts';
 
 const React = { createElement: (type, props, ...children) => ({ type, props, children: children.flat() }) };
 const find = (node, type) => findBy(node, candidate => candidate.type === type);
@@ -47,6 +48,7 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   // Components rendered as children stay inspectable without mounting a second hook scope.
   dependencies = { ThreadReadIssue: 'ThreadReadIssue', Text: 'Text', RequestHistory: 'RequestHistory', threadClock, threadExactTime, threadRelativeTime,
     ConversationComposer: props => compile('ConversationComposer', undefined, { View: 'View', Field: 'Field', Button: 'Button' }, './conversationComposer.tsx')(props),
+    ConversationFeedback: props => compile('ConversationFeedback', undefined, { View: dependencies.View ?? 'View', T: dependencies.T ?? 'T', Button: dependencies.Button ?? 'Button' }, './conversationPresentation.tsx')(props),
     HistoryStart: 'HistoryStart', StartRecipientPreview: 'StartRecipientPreview', ThreadStartContextReader: ReadyStartContext,
     Clipboard: { setStringAsync: async () => {} }, useMemo: create => create(), useEffect() {}, useFocusEffect() {}, useCallback: callback => callback,
     threadStartAttemptScope: attemptScope,
@@ -628,8 +630,8 @@ test('a lost Start receipt remains retryable after the source episode and agent 
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
   const exports = {};
-  new Function('exports', 'threadClient', 'deliveriesByClient', 'setThreadDeliveryRevision', 'errorText', outputText)(
-    exports, client, byClient, () => {}, String);
+  new Function('exports', 'threadClient', 'deliveriesByClient', 'setThreadDeliveryRevision', 'threadActionErrorText', 'ConversationAttempts', outputText)(
+    exports, client, byClient, () => {}, String, ConversationAttempts);
   let exactRetries = 0;
   const original = Object.freeze({ origin: { source_id: origin.sourceId, episode: origin.episode }, agent_id: origin.agentId, content: 'Original content', title: 'Original title', signature: 'original-signature', idempotency_key: 'original-key' });
   const observed = [];
@@ -637,7 +639,7 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   const scope = value => JSON.stringify([value.sourceId, value.episode]);
   await exports.track(attemptScope(origin, 'thread/original'), 'thread/original', async () => ({ how: 'unconfirmed', retry }), undefined,
     { origin: { ...origin }, title: original.title });
-  const ledger = byClient.current.get(client);
+  const ledger = new Map(byClient.current.get(client).getSnapshot().map(attempt => [attempt.id, { ...attempt.draft, retry: attempt.retry }]));
   const cache = { current: new Map() };
   const store = {
     threadClient: client, threadActions: new Set(['thread.start']), threadDeliveries: ledger,
@@ -673,7 +675,7 @@ test('a lost Start receipt remains retryable after the source episode and agent 
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(exactRetries, 1);
   assert.deepEqual(observed, [original]);
-  assert.equal(ledger.size, 0);
+  assert.equal(byClient.current.get(client).getSnapshot().length, 0);
 });
 
 test('Inbox recovery lists each independent pending attempt separately, including origins still listed', () => {
@@ -1630,9 +1632,9 @@ test('same-origin Starts have independent slots and action keys; first recovery 
     return { how: 'unconfirmed', retry: run };
   };
   new Function('exports', 'threadClient', 'deliveriesByClient', 'setThreadDeliveryRevision',
-    'threadActionErrorText', 'submitThreadAction', 'signingKeyRef', 'readPhoneSigning', 'signThreadMessage', outputText)(
+    'threadActionErrorText', 'submitThreadAction', 'signingKeyRef', 'readPhoneSigning', 'signThreadMessage', 'ConversationAttempts', outputText)(
     exports, client, byClient, () => {}, String, submit, { current: {} },
-    async () => ({ person: 'person/one' }), async key => ({ signature: `signature/${key}`, messageId: `message/${key}` }));
+    async () => ({ person: 'person/one' }), async key => ({ signature: `signature/${key}`, messageId: `message/${key}` }), ConversationAttempts);
   const origin = { sourceId: 'notice/same', episode: 'episode/same', agentId: 'agent/one' };
   const first = await exports.start('thread/first', origin, 'First', 'One');
   const second = await exports.start('thread/second', origin, 'Second', 'Two');
@@ -1642,13 +1644,13 @@ test('same-origin Starts have independent slots and action keys; first recovery 
   assert.notEqual(sent[0].id, sent[1].id);
   assert.notEqual(sent[0].idempotency_key, sent[1].idempotency_key);
   const ledger = byClient.current.get(client);
-  assert.deepEqual([...ledger.keys()], [attemptScope(origin, 'thread/first'), attemptScope(origin, 'thread/second')]);
+  assert.deepEqual(ledger.getSnapshot().map(attempt => attempt.id), [attemptScope(origin, 'thread/first'), attemptScope(origin, 'thread/second')]);
   assert.equal((await first.retry()).how, 'sent');
   assert.deepEqual(sent[2], sent[0], 'first recovery retains only its original signed intent and key');
-  assert.deepEqual([...ledger.keys()], [attemptScope(origin, 'thread/second')], 'only the first slot is released');
+  assert.deepEqual(ledger.getSnapshot().map(attempt => attempt.id), [attemptScope(origin, 'thread/second')], 'only the first slot is released');
   assert.equal((await second.retry()).how, 'sent');
   assert.deepEqual(sent[3], sent[1]);
-  assert.equal(ledger.size, 0);
+  assert.equal(ledger.getSnapshot().length, 0);
 });
 
 test('an unconfirmed first composer moves to separate recovery and leaves a fresh UUID-free Start available', () => {

@@ -1,4 +1,5 @@
 import { ConversationComposer } from '../conversationComposer';
+import { ConversationFeedback } from '../conversationPresentation';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type Ref } from 'react';
 import * as Crypto from 'expo-crypto';
 import * as Clipboard from 'expo-clipboard';
@@ -777,15 +778,13 @@ function ThreadActionFeedback({ result, busy, onRetry }: { result?: ThreadEditRe
       `${result.action ? `Couldn't ${result.action} this thread. ` : ''}${result.error}`,
     );
   }, [result]);
-  if (result?.how === 'failed') return <View style={{ gap: 6 }}>
-    {result.action ? <T color={theme.waiting}>{`Couldn't ${result.action} this thread.`}</T> : null}
-    <T color={theme.waiting}>{result.error}</T>
-  </View>;
-  if (result?.how !== 'unconfirmed') return null;
-  return <View style={{ gap: 6 }}>
-    <T color={theme.waiting}>The original connection has not confirmed this change.</T>
-    <Button label="Retry original change" disabled={busy} onPress={onRetry} />
-  </View>;
+  if (result?.how !== 'failed' && result?.how !== 'unconfirmed') return null;
+  return ConversationFeedback({
+    color: theme.waiting,
+    heading: result.how === 'failed' && result.action ? `Couldn't ${result.action} this thread.` : undefined,
+    message: result.how === 'failed' ? result.error : 'The original connection has not confirmed this change.',
+    recovery: result.how === 'unconfirmed' ? { label: 'Retry original change', disabled: busy, onPress: onRetry } : undefined,
+  });
 }
 
 type ThreadMessage = Extract<ThreadTimelineEvent, { kind: 'message' }>;
@@ -1076,12 +1075,13 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   const [draft, setDraft] = useState(() => readThreadDraft(draftCache.current.get(key)));
   const touched = useRef(false);
   const appliedSelection = useRef(selectionVersion);
-  const [sending, setSending] = useState(false);
   const sentTarget = useRef<string | undefined>(undefined);
   const [failure, setFailure] = useState<ThreadEditResult>();
   // A Start's receipt belongs to its attempt (source, episode and new thread ID), never to the
   // shared origin: a first composer has none, so a handed-off attempt never blocks the next Start.
-  const delivery = threadDeliveries?.get(!thread && start ? id && start.origin ? threadStartAttemptScope(start.origin, id) : '' : id!);
+  const deliveryTarget = id ?? sentTarget.current;
+  const delivery = threadDeliveries?.get(!thread && start ? deliveryTarget && start.origin ? threadStartAttemptScope(start.origin, deliveryTarget) : '' : deliveryTarget!);
+  const sending = !!delivery && !delivery.retry;
   const feedback = delivery?.retry ? { how: 'unconfirmed' as const, retry: delivery.retry } : failure;
   // A fresh Start composes only once its StartContext names the recipient it signs.
   const enabled = canReply && status === 'online' && !sending && !delivery && (!!thread || !start || !!start.origin);
@@ -1120,29 +1120,24 @@ function ThreadComposer({ thread, start, canReply, contextualTitle, selection, s
   }, [selectionVersion]);
 
   const send = async (run: () => Promise<ThreadEditResult>) => {
-    setSending(true);
     const submittedDraft = start && !thread ? JSON.stringify(draft) : undefined;
     const submittedOwner = draftsOwner.current;
     const submittedGeneration = draftGeneration.current;
-    try {
-      const next = await run();
-      // The shared map is reset in place on pairing/actor changes. An old send
-      // must neither persist its text for the next owner nor clear their typing.
-      if (start && !thread && (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration)) return;
-      if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
-      if (next.how === 'sent') {
-        if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
-        if (start && !thread) {
-          start.onAccepted(sentTarget.current!);
-        }
+    const next = await run();
+    // The shared map is reset in place on pairing/actor changes. An old send
+    // must neither persist its text for the next owner nor clear their typing.
+    if (start && !thread && (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration)) return;
+    if (next.how === 'unconfirmed' && start && !thread) start.onSubmitted?.(sentTarget.current!, submittedDraft!);
+    if (next.how === 'sent') {
+      if (!start || thread || draftCache.current.get(key) === submittedDraft) storeDraft({ text: '' });
+      if (start && !thread) {
+        start.onAccepted(sentTarget.current!);
       }
-      setFailure(next.how === 'failed' ? next : undefined);
-      // Only after the owner/generation fences: reread the recipient, show it, and wait for a new
-      // explicit send. A handed-off attempt has no callback and is never retargeted.
-      if (next.how === 'failed' && next.refreshStartContext && start && !thread) start.onRecipientRefused?.();
-    } finally {
-      setSending(false);
     }
+    setFailure(next.how === 'failed' ? next : undefined);
+    // Only after the owner/generation fences: reread the recipient, show it, and wait for a new
+    // explicit send. A handed-off attempt has no callback and is never retargeted.
+    if (next.how === 'failed' && next.refreshStartContext && start && !thread) start.onRecipientRefused?.();
   };
 
   return <View style={{ gap: 6 }}>
