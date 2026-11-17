@@ -797,6 +797,9 @@ pub struct Attention {
     /// The agent whose conversation this item belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Exact daemon-selected first-Start recipient and its authority basis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_recipient: Option<ThreadStartRecipient>,
     /// Every agent conversation this item shows in, starting with `conversation_id`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversation_ids: Vec<String>,
@@ -5674,6 +5677,56 @@ pub enum ThreadState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadStartRecipient {
+    pub agent_id: String,
+    pub basis: ThreadStartRecipientBasis,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "_tag", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ThreadStartRecipientBasis {
+    Original,
+    Configured,
+    Fallback {
+        original_agent_id: String,
+        retirement: ThreadStartRetirement,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadStartRetirement {
+    pub claim_id: String,
+    pub kind: ThreadStartRetirementKind,
+    pub state: ThreadStartRetirementState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ThreadStartRetirementKind {
+    #[serde(rename = "agent.retired")]
+    AgentRetired,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ThreadStartRetirementState {
+    #[serde(rename = "retired")]
+    Retired,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadStartContext {
+    pub kind: ThreadStartContextKind,
+    pub source_id: String,
+    pub episode: String,
+    pub start_recipient: ThreadStartRecipient,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ThreadStartContextKind {
+    #[serde(rename = "thread-start-context")]
+    ThreadStartContext,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ThreadUnreadMark {
     /// Opaque stable signed operation ID, never a claim ID.
     pub mark_id: String,
@@ -5758,6 +5811,114 @@ pub struct ThreadTimelinePage {
     pub previous_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<ThreadTimelineAnchor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceEpisode {
+    pub source_id: String,
+    pub episode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PayloadUnavailable {
+    RetainedDefinitionUnavailable,
+    RetainedStepUnavailable,
+    OpeningUnavailable,
+    HistoricalInterpolationUnavailable,
+    BoundaryUnavailable,
+    PayloadUnavailable,
+    ReadBoundExceeded,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RequestProvenance {
+    RuntimeAsk {
+        asking_claim_id: String,
+    },
+    AuthoredEpisode {
+        mission_revision: String,
+        opening_claim_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReferenceSemantics {
+    RetainedReference,
+    LiveReference,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HistoricalReference {
+    pub target_id: String,
+    pub revision: Option<String>,
+    pub semantics: ReferenceSemantics,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "availability", rename_all = "kebab-case")]
+pub enum HistoricalPayload {
+    Available {
+        title: Option<String>,
+        text: String,
+        request: Option<serde_json::Value>,
+        references: Vec<HistoricalReference>,
+        provenance: RequestProvenance,
+    },
+    Unavailable {
+        reason: PayloadUnavailable,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "availability", rename_all = "kebab-case")]
+pub enum EpisodeState {
+    Available {
+        status: String,
+        answers: Vec<serde_json::Value>,
+    },
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RequestHistoryItem {
+    pub key: SourceEpisode,
+    pub payload: HistoricalPayload,
+    pub state: EpisodeState,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RequestHistoryRelation {
+    pub predecessor: SourceEpisode,
+    pub request: SourceEpisode,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceEpisodeGroup {
+    pub source_id: String,
+    pub episodes: Vec<SourceEpisode>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistorySourceSupport {
+    PersonStep,
+    UnsupportedSource,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RequestHistoryPage {
+    pub items: Vec<RequestHistoryItem>,
+    pub relations: Vec<RequestHistoryRelation>,
+    pub source_episodes: Vec<SourceEpisodeGroup>,
+    pub boundary_items: Vec<RequestHistoryItem>,
+    pub source_support: Option<HistorySourceSupport>,
+    pub next_cursor: Option<String>,
+    pub complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
