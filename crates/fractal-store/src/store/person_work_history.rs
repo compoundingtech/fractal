@@ -347,10 +347,10 @@ mod tests {
         let store = fixture();
         let conn = store.connection.write();
         assert!(matches!(read(&conn, 0).payload, HistoricalPayload::Unavailable { .. }));
-        conn.execute("UPDATE claims SET body='{\"fields\":{\"reason\":\"retained reason\"}}' WHERE id='opening'", []).unwrap();
+        conn.execute("UPDATE claims SET body='{\"fields\":{\"person\":\"person/avery\",\"attempt\":1,\"reason\":\"retained reason\"}}' WHERE id='opening'", []).unwrap();
         assert!(matches!(read(&conn, u64::MAX).payload,
             HistoricalPayload::Unavailable { reason: PayloadUnavailable::PayloadUnavailable }));
-        conn.execute("UPDATE claims SET body='{\"fields\":{}}' WHERE id='opening'", []).unwrap();
+        conn.execute("UPDATE claims SET body='{\"fields\":{\"person\":\"person/avery\",\"attempt\":1,\"title\":\"Retained title\"}}' WHERE id='opening'", []).unwrap();
         assert!(matches!(read(&conn, u64::MAX).payload,
             HistoricalPayload::Unavailable { reason: PayloadUnavailable::PayloadUnavailable }));
         let body = json!({"fields":{"reason":"x".repeat(MAX_BODY_BYTES + 1)}}).to_string();
