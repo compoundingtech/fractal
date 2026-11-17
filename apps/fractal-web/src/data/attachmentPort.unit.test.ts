@@ -322,8 +322,8 @@ describe('native attachment port', () => {
     } })
     const send = gatewayMessageSend(client, async () => ({ _tag: 'Success', value: `snapshot/attempt-${++snapshots}` }))
     expect(await send({ ...request, images: [{ bytes: new Uint8Array([7, 8, 9]), mediaType: 'image/webp', name: 'original.webp' }] },
-      'original-key')).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
-    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: 'original-key',
+      'original-chat-retry-key')).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: 'original-chat-retry-key',
       parameters: { ...request.parameters, to: 'agent/other', content: 'Changed', attachments: [], tags: [] },
     })).toMatchObject({ _tag: 'Success' })
     expect(actions).toHaveLength(2)
@@ -331,7 +331,7 @@ describe('native attachment port', () => {
     expect(actions[1]?.idempotency_key).not.toBe(actions[0]?.idempotency_key)
     expect(actions[1]?.fence.snapshot_id).toBe('snapshot/attempt-2')
     expect(actions[1]?.parameters).toEqual(actions[0]?.parameters)
-    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: 'original-key' }))
+    expect(await send({ ...request, _tag: 'Resend', idempotencyKey: 'original-chat-retry-key' }))
       .toMatchObject({ _tag: 'Refused', reason: 'unconfirmed' })
     expect(actions).toHaveLength(2)
   })

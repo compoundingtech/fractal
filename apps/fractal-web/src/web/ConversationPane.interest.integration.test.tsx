@@ -789,9 +789,12 @@ describe('ConversationPane composer/send binding', () => {
     expect(userRows()[0]).toBe(originalRow)
     const echoId = gateway!.echoId
     if (echoId === undefined) throw new TypeError('Expected retried message identity')
+    // The gateway helper derives this suffix from the new action's idempotency key.
+    expect(echoId).toMatch(/^message\/[0-9a-f]{16}$/)
+    const pairId = `timeline-entry/retry/${echoId.slice('message/'.length)}`
     gateway!.conversationFrame(scratchSeat, [
-      { ...entry(1, ''), id: 'timeline-entry/retry/message', type: 'message', role: 'user', body: { message_id: echoId, from: 'person/operator', to: scratchSeat } },
-      { ...entry(2, 'Retried hello'), id: 'timeline-entry/retry/content', type: 'content', role: 'user', body: { text: markdownBlock('Retried hello'), media_type: 'text/plain' } },
+      { ...entry(1, ''), id: `${pairId}-message`, type: 'message', role: 'user', body: { message_id: echoId, from: 'person/operator', to: scratchSeat } },
+      { ...entry(2, 'Retried hello'), id: `${pairId}-content`, type: 'content', role: 'user', body: { text: markdownBlock('Retried hello'), media_type: 'text/plain' } },
     ])
     await until(() => userRows()[0]?.textContent === 'Retried hello')
     expect(userRows()[0]).toBe(originalRow)
