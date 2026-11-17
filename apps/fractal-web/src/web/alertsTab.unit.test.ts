@@ -61,4 +61,15 @@ describe('Alerts tab projection', () => {
     expect(alertsTabRows([item({ default_answer: { id: 'skip', label: 'Skip' } })], now)[0]!.line2).toBe('')
     expect(alertsTabRows([item({ requester_id: 'agent/not-served', step_run_id: 'step-run/not-served' })], now)[0]!.line2).toBe('')
   })
+
+  it('names who raised a row as its card does: a served name as declared, An agent for a seat without one, Fractal for its machinery', () => {
+    const raised = (id: string, label: string) => alertsTabRows([item({ presentation: { ...presented('stopped'), raised_by: { id, label } } })], now)[0]!.line2
+    expect(raised('agent/example/atlas', 'Atlas')).toBe('Atlas')
+    expect(raised('agent/example/atlas', 'atlas')).toBe('atlas')
+    expect(raised('agent/example/atlas', 'example/atlas')).toBe('An agent')
+    expect(raised('agent/example/d415892ea7a1dab11e6ba7ed22a8eb13', 'example/d415892ea7a1dab11e6ba7ed22a8eb13')).toBe('An agent')
+    // Fractal serves its own machinery as 'st' (attention.rs is_fractal).
+    expect(raised('agent/st3/reconciler', 'st')).toBe('Fractal')
+    expect(raised('daemon/runtime', 'st')).toBe('Fractal')
+  })
 })

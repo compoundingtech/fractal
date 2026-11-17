@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Use the shared embedded thread conversation throughout native iOS",
+  "replay": {
+    "status": "none",
+    "detail": "Native views read the same retained daemon thread history and preserve existing device pairing and ordinary conversation state."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "This app presentation adds no database format."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Thread messages use the enrolled device key and the existing selected-member collection connection. Shared delivery policy preserves ordinary attachments and outbox behavior."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The current iOS app requires threads-v1 version 2 and the exact summary feed. Inbox sources use the server-resolved agent and the same embedded composer before and after first Send. Inbox, agent, mission and standalone views share multiple collapsible threads, Rename, Close, Reopen, closed replies and message quotes. Keyboard-aware containers keep the composer and quoted context usable. Explicit visible-message read updates existing Inbox hints across clients. Original uncertain Start and lifecycle requests remain reachable through remount or missing source/association without changing their signed intent."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Installing the app update does not restart the daemon."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Install the current app alongside the daemon and other client upgrades before enabling writes. Keep the existing pairing and device key; an older daemon shows upgrade feedback."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Retry the retained original request after an unconfirmed outcome. Existing pairing, server history and ordinary outbox state need no reset."
+  }
+}

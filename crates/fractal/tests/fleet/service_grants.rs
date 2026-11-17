@@ -103,8 +103,9 @@ async fn wait_retained(node: &Node, grants: &[Grant]) {
 async fn fixtures(node: &mut Node, counterexample: bool) -> Vec<Grant> {
     node.stop();
     // Public /v1/claims deliberately forbids these authority kinds and subjects.
-    // Fixture-only offline writes preserve that production restriction. Even the
-    // baseline-origin case is seeded by the candidate store, never old-binary issuance.
+    // Fixture-only offline writes preserve that production restriction. These
+    // grants are candidate-created, including on a node upgraded from the release.
+    // They are never evidence of the old binary issuing or accepting a service grant.
     let mut grants = vec![
         seed(node, 1, "service", PLUGIN, "read.service.status", false, false),
         seed(node, 2, "service", PLUGIN, "read.assistant.summary", false, false),
@@ -120,15 +121,15 @@ async fn fixtures(node: &mut Node, counterexample: bool) -> Vec<Grant> {
     grants
 }
 
-async fn mixed_pair(old: Option<PathBuf>, old_issuer: bool) {
+async fn mixed_pair(old_peer: Option<PathBuf>) {
     let root = tempfile::tempdir().unwrap();
     let secret = root.path().join("fleet.secret");
     fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
     let mut issuer = Node::new(root.path(), "issuer");
     let mut peer = Node::new(root.path(), "peer");
-    if let Some(old) = old {
-        if old_issuer { issuer.binary = old; } else { peer.binary = old; }
+    if let Some(old) = old_peer {
+        peer.binary = old;
     }
     let fleet = "542c372d-0a13-4217-9817-4e868f45a734";
     issuer.legacy_config(fleet, &secret, &[("peer", peer.port)]);
@@ -150,69 +151,145 @@ async fn mixed_pair(old: Option<PathBuf>, old_issuer: bool) {
 #[ignore = "needs ST3_COMPAT_BIN: the pinned deployed source"]
 async fn previous_release_refuses_service_grants_from_a_candidate_issuer() {
     if fractal_daemon::test_support::supervise_test() { return; }
-    mixed_pair(Some(compat_binary()), false).await;
+    mixed_pair(Some(compat_binary())).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs ST3_COMPAT_BIN: the pinned deployed source"]
-async fn previous_release_refuses_offline_seeded_service_grants_with_its_own_origin() {
+#[ignore = "needs ST3_COMPAT_BIN: the pinned deployed storage-version-20 source"]
+async fn previous_release_refuses_upgraded_own_origin_grant_store_and_candidate_recovers() {
     if fractal_daemon::test_support::supervise_test() { return; }
-    mixed_pair(Some(compat_binary()), true).await;
+    upgraded_grants_refuse_previous_reader(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs ST3_COMPAT_BIN: the pinned deployed source"]
-async fn previous_release_refuses_plugin_service_grants_on_same_database_rollback() {
+#[ignore = "needs ST3_COMPAT_BIN: the pinned deployed storage-version-20 source"]
+async fn previous_release_refuses_upgraded_plugin_grant_store_and_candidate_recovers() {
     if fractal_daemon::test_support::supervise_test() { return; }
-    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the pinned baseline"));
+    upgraded_grants_refuse_previous_reader(true).await;
+}
+
+// Inspect immutable authority records without opening the database through Store,
+// which would itself perform the very upgrade whose refusal this test measures.
+type StoredRows = std::collections::BTreeMap<String, Vec<rusqlite::types::Value>>;
+
+#[derive(Debug, PartialEq)]
+struct StoredHistory {
+    claims: StoredRows,
+    signatures: StoredRows,
+}
+
+fn stored_rows(connection: &rusqlite::Connection, sql: &str) -> StoredRows {
+    let mut statement = connection.prepare(sql).unwrap();
+    let columns = statement.column_count();
+    let rows = statement.query_map([], |row| {
+        let values = (0..columns).map(|column| row.get(column))
+            .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()?;
+        Ok((row.get::<_, String>(0)?, values))
+    }).unwrap();
+    rows.collect::<rusqlite::Result<StoredRows>>().unwrap()
+}
+
+fn stored_history(node: &Node) -> StoredHistory {
+    let connection = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap();
+    StoredHistory {
+        claims: stored_rows(&connection,
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims ORDER BY id"),
+        signatures: stored_rows(&connection,
+            "SELECT claim_id,signer,key,nonce,signature FROM claim_signatures ORDER BY claim_id"),
+    }
+}
+
+fn assert_history_retained(before: &StoredHistory, after: &StoredHistory) {
+    for (id, claim) in &before.claims {
+        assert_eq!(after.claims.get(id), Some(claim), "retained claim {id} changed");
+    }
+    for (id, signature) in &before.signatures {
+        assert_eq!(after.signatures.get(id), Some(signature), "retained signature {id} changed");
+    }
+}
+
+async fn assert_current_grant_controls(node: &Node, grants: &[Grant], counterexample: bool) {
+    for (index, grant) in grants.iter().enumerate() {
+        // The live proposal route returns400 only for the valid assistant control;
+        // service/plugin, expired and revoked grants must return exactly403.
+        assert_auth(node, grant, index == 3).await;
+    }
+    if counterexample {
+        let (status, body) = auth_response(node, &grants[6]).await;
+        assert_eq!(status, 403, "{body}");
+        let error: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["code"], "forbidden", "{body}");
+        assert_eq!(error["message"], "invalid service principal", "{body}");
+    }
+    // A denied plugin credential must not be laundered into an assistant identity
+    // during owner inspection. Keep a positive assistant owner-read control too.
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    for (grant, principal, scope) in [
+        (&grants[0], PLUGIN, "read.service.status"),
+        (&grants[3], "assistant/chatgpt", "read.assistant.summary"),
+    ] {
+        let inspected: Value = owner
+            .get(&format!("/v1/client/assistant/grants/{}", grant.id)).await.unwrap();
+        assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
+        assert_eq!(inspected["principal"], principal, "{inspected}");
+        assert_eq!(inspected["scopes"], json!([scope]), "{inspected}");
+    }
+    assert_retained(node, grants).await;
+}
+
+async fn upgraded_grants_refuse_previous_reader(counterexample: bool) {
+    let old = compat_binary();
     let root = tempfile::tempdir().unwrap();
     let mut node = Node::new(root.path(), "issuer");
+    node.binary = old.clone();
     node.start().await;
+    let database = node.state_dir().join("claims.sqlite3");
+    assert_eq!(database_schema(&database), 20,
+        "this probe requires the actual pinned storage-version-20 binary");
+    let retained_note = node.note("service-grant-history-before-upgrade").await;
+    node.stop();
+    let release_history = stored_history(&node);
+    assert!(release_history.claims.contains_key(&retained_note));
+
+    // Upgrade the real release-owned store through the ordinary current opener.
+    // Candidate-created grants below do not promise obsolete old-client behavior.
+    node.binary = PathBuf::from(st3());
+    node.start().await;
+    assert_eq!(database_schema(&database), 23);
+    assert_history_retained(&release_history, &stored_history(&node));
     assert_candidate_issuance_grammar(&node).await;
-    // Includes the unissuable profile-blind counterexample; candidate must refuse it.
-    let grants = fixtures(&mut node, true).await;
-    for (index, grant) in grants.iter().enumerate() {
-        assert_auth(&node, grant, index == 3).await;
+    let grants = fixtures(&mut node, counterexample).await;
+    assert_current_grant_controls(&node, &grants, counterexample).await;
+    node.stop();
+    let upgraded_history = stored_history(&node);
+    assert_history_retained(&release_history, &upgraded_history);
+    for grant in &grants {
+        for id in &grant.claims {
+            assert!(upgraded_history.claims.contains_key(id));
+            assert!(upgraded_history.signatures.contains_key(id));
+        }
     }
     let state = node.state_dir();
-    node.stop();
     node.binary = old;
-    node.start().await;
+    assert!(!node.start_with_schema_refusal(Some(23)).await,
+        "the actual previous reader must refuse the upgraded store");
+    assert!(tokio::net::UnixStream::connect(node.socket()).await.is_err(),
+        "a refused old reader must not expose a credential-serving listener");
     assert_eq!(node.state_dir(), state);
-    for (index, grant) in grants.iter().take(6).enumerate() {
-        assert_auth(&node, grant, index == 3).await;
-    }
-    // The deployed baseline understands service profiles. The counterexample is
-    // refused by its principal grammar, not by treating the profile as assistant.
-    let (status, body) = auth_response(&node, &grants[6]).await;
-    assert_eq!(status, 403, "{body}");
-    let error: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(error["code"], "forbidden", "{body}");
-    assert_eq!(error["message"], "invalid service principal", "{body}");
-    // Owner inspection must preserve the plugin principal rather than laundering
-    // a retained service record into an assistant identity.
-    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
-    let inspected: Value = owner
-        .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
-    assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
-    assert_eq!(inspected["principal"], PLUGIN, "{inspected}");
-    assert_eq!(inspected["scopes"], json!(["read.service.status"]), "{inspected}");
-    // Keep a positive owner-read control with the assistant principal and profile
-    // accepted by both binaries; refusal above must not conceal a broken inspection route.
-    let inspected: Value = owner
-        .get(&format!("/v1/client/assistant/grants/{}", grants[3].id)).await.unwrap();
-    assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
-    assert_eq!(inspected["principal"], "assistant/chatgpt", "{inspected}");
-    assert_eq!(inspected["scopes"], json!(["read.assistant.summary"]), "{inspected}");
-    assert_retained(&node, &grants).await;
-    node.stop();
+    assert_eq!(database_schema(&database), 23, "refusal must not lower the storage floor");
+    assert_eq!(stored_history(&node), upgraded_history,
+        "old-reader refusal must leave exact authoritative history and signatures unchanged");
+
     node.binary = PathBuf::from(st3());
     node.start().await;
     assert_eq!(node.state_dir(), state);
-    for (index, grant) in grants.iter().enumerate() {
-        assert_auth(&node, grant, index == 3).await;
-    }
-    assert_retained(&node, &grants).await;
+    assert_eq!(database_schema(&database), 23);
+    assert_history_retained(&upgraded_history, &stored_history(&node));
+    assert_current_grant_controls(&node, &grants, counterexample).await;
+    assert!(node.claims().await.iter().any(|claim| claim["id"] == retained_note),
+        "the original release history remains visible after recovery");
 }
 
 fn compat_binary() -> PathBuf {
@@ -222,7 +299,7 @@ fn compat_binary() -> PathBuf {
 #[tokio::test(flavor = "multi_thread")]
 async fn candidate_offline_service_fixtures_replicate_without_authorizing_credentials() {
     if fractal_daemon::test_support::supervise_test() { return; }
-    mixed_pair(None, false).await;
+    mixed_pair(None).await;
 }
 
 async fn assert_candidate_issuance_grammar(node: &Node) {

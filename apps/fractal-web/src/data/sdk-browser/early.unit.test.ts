@@ -226,7 +226,7 @@ describe('FractalLive adopting the early socket', () => {
           FractalLive({
             baseUrl: 'http://gateway.test',
             maxFollows: 4,
-            fetch: async () => new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: {} })),
+            fetch: async () => new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: { capabilities: [] } })),
             socket: () => {
               freshSockets += 1
               return { onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} } satisfies CollectionSocket
