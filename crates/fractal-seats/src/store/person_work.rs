@@ -1981,6 +1981,134 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#, "al
         );
     }
 
+    fn append_historical_cancelled_ask_ready(store: &Store, origin: &StepRunView, ask: &str) {
+        let activation = || store.readers.get().query_row(
+            "SELECT activated_at_unix_ms,readiness_epoch FROM step_runs WHERE subject=?1",
+            [&origin.subject],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, u32>(1)?)),
+        ).unwrap();
+        let before = activation();
+        store.connection.batched(|tx| -> Result<()> {
+            let cancelled = tx.query_row(
+                "SELECT id FROM claims WHERE subject=?1 AND kind='work.person-cancelled'",
+                [ask], |row| row.get::<_, String>(0),
+            )?;
+            // Historical runtime writers emitted a ready effect even for a cancellation.
+            // Its causal predecessor identifies it as the cancelled ask's derived effect.
+            let ready = append_claim_tx(
+                tx, &store.origin, &origin.subject, "step-run.state", Some("daemon/runtime"),
+                &json!({"fields": {"status": "ready", "attempt": origin.attempt}}),
+                &[cancelled], None,
+            )?;
+            project_mission_run_update(tx, &ready).unwrap();
+            Ok(())
+        }).unwrap().unwrap();
+        assert_eq!(activation(), before, "an ignored historical effect must not normalize timestamps");
+    }
+
+    fn cancel_exact_ask(store: &Store, input: &PersonAskRequest, ask: &str) {
+        let episode = request(&store.readers.get(), ask).unwrap().unwrap().id;
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None,
+            subject: ask.into(),
+            actor: input.actor.clone(),
+            summary: "No longer needed".into(),
+            evidence: vec![],
+            episode: Some(episode),
+            idempotency_key: "cancel-exact-episode".into(),
+            answer: None,
+        }, true).unwrap();
+    }
+
+    #[test]
+    fn cancelled_ask_historical_ready_stays_failed_incrementally_and_on_replay() {
+        let (source, origin, input) = fixture();
+        let target = Store::open_memory("birch").unwrap();
+        target.project_replication_backlog().unwrap();
+        let ask = source.ask_person(&input).unwrap();
+        receive(&source, &target);
+        for store in [&source, &target] {
+            assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "waiting-person");
+        }
+        cancel_exact_ask(&source, &input, &ask.subject);
+        receive(&source, &target);
+        for store in [&source, &target] {
+            assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "failed");
+        }
+        append_historical_cancelled_ask_ready(&source, &origin, &ask.subject);
+        receive(&source, &target);
+        for store in [&source, &target] {
+            let check = || {
+                let waiting = store.step_run(&origin.subject).unwrap().unwrap();
+                assert_eq!(waiting.attempt, origin.attempt);
+                assert_eq!(waiting.status, "failed");
+                assert_eq!(waiting.blocked_reason.as_deref(), Some("ask cancelled by agent/alder.asker"));
+                assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+            };
+            check();
+            store.replay_replication_graph().unwrap();
+            check();
+        }
+    }
+
+    #[test]
+    fn cancelled_ask_historical_ready_is_repaired_once_on_disk_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cancelled-ask.sqlite3");
+        let (store, origin, input) = fixture_with_store(Store::open(&path, "alder").unwrap());
+        let ask = store.ask_person(&input).unwrap();
+        cancel_exact_ask(&store, &input, &ask.subject);
+        append_historical_cancelled_ask_ready(&store, &origin, &ask.subject);
+        let expected = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(expected.status, "failed");
+        store.connection.batched(|tx| -> Result<()> {
+            // Simulate the persisted result of the historical projector, with the original
+            // retained cancellation and its causally derived ready claim left untouched.
+            tx.execute(
+                "UPDATE step_runs SET status='ready',blocked_reason=NULL WHERE subject=?1",
+                [&origin.subject],
+            )?;
+            tx.execute("DELETE FROM meta WHERE key='person_cancellation_projection_rules'", [])?;
+            tx.execute_batch(
+                "CREATE TRIGGER cancelled_ask_no_claim_insert BEFORE INSERT ON claims
+                 BEGIN SELECT RAISE(ABORT, 'repair must not insert claims'); END;
+                 CREATE TRIGGER cancelled_ask_no_claim_update BEFORE UPDATE ON claims
+                 BEGIN SELECT RAISE(ABORT, 'repair must not update claims'); END;
+                 CREATE TRIGGER cancelled_ask_no_claim_delete BEFORE DELETE ON claims
+                 BEGIN SELECT RAISE(ABORT, 'repair must not delete claims'); END;",
+            )?;
+            Ok(())
+        }).unwrap().unwrap();
+        assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "ready");
+        drop(store);
+        let repaired = Store::open(&path, "alder").unwrap();
+        let check = |store: &Store| {
+            let after = store.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(after.status, expected.status);
+            assert_eq!(after.attempt, expected.attempt);
+            assert_eq!(after.blocked_reason, expected.blocked_reason);
+            assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+            let marker: String = store.readers.get().query_row(
+                "SELECT value FROM meta WHERE key='person_cancellation_projection_rules'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(marker, "1");
+        };
+        check(&repaired);
+        repaired.connection.batched(|tx| -> Result<()> {
+            // A repeated run-tree rebuild deletes and reinserts step rows. Guard its deletion
+            // path so the next successful open proves the persisted marker skips the repair.
+            tx.execute_batch(
+                "CREATE TRIGGER cancelled_ask_no_repeat_rebuild BEFORE DELETE ON step_runs
+                 BEGIN SELECT RAISE(ABORT, 'unchanged reopen must not rebuild steps'); END;",
+            )?;
+            Ok(())
+        }).unwrap().unwrap();
+        drop(repaired);
+        let unchanged = Store::open(&path, "alder").unwrap();
+        check(&unchanged);
+    }
+
     #[test]
     fn historical_automatic_cancellation_uses_asking_predecessor_and_replays() {
         for wrong_episode in [false, true] {
