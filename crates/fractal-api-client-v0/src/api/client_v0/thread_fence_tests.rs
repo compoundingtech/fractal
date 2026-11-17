@@ -1090,7 +1090,7 @@ pub(crate) mod retained_discussion {
                 let before = state.store.read_snapshot(Ok).unwrap();
                 let (status, refused) = opening_preview(&state, PERSON, &origin).await;
                 assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-                assert_eq!(refused["code"], "stale-fence");
+                assert_eq!(refused["code"], "recipient-unassigned");
                 assert_eq!(refused["message"], "this Inbox source has no configured responsible agent");
                 assert!(refused["value"]["start_recipient"].is_null());
                 assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
