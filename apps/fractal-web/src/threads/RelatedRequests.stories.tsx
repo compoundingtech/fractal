@@ -8,6 +8,7 @@ import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
+import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
@@ -177,7 +178,7 @@ const createFixture = (scenario: Scenario) => {
 const RequestHistoryStory = ({ scheme, viewport, scenario }: Args) => {
   const [fixture] = React.useState(() => createFixture(scenario))
   React.useEffect(() => () => fixture.registry.dispose(), [fixture])
-  return <main data-scheme={scheme} data-viewport={viewport} style={{ width: viewport }}
+  return <div data-scheme={scheme} data-viewport={viewport} style={{ width: viewport }}
     {...stylex.props(styles.canvas, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
     <NarrowLayoutContext.Provider value={viewport < 900}>
       <DataSourceProvider source={fixture.source} registry={fixture.registry}>
@@ -185,7 +186,7 @@ const RequestHistoryStory = ({ scheme, viewport, scenario }: Args) => {
         <div data-request-history-scene={scenario} {...stylex.props(styles.pane)}><LiveThreadPane threadId={threadId} /></div>
       </DataSourceProvider>
     </NarrowLayoutContext.Provider>
-  </main>
+  </div>
 }
 
 const scenarios: readonly Scenario[] = ['branch', 'long-history-cross-page', 'unavailable', 'hidden-predecessor', 'loading', 'stale', 'refused', 'failed', 'unsupported']
@@ -204,7 +205,7 @@ const meta = {
     viewport: { options: [1440, 390], control: 'inline-radio' },
     scenario: { options: scenarios, control: 'select' },
   },
-  render: args => <RequestHistoryStory key={`${args.scenario}:${args.viewport}:${args.scheme}`} {...args} />,
+  render: args => <main><RequestHistoryStory key={`${args.scenario}:${args.viewport}:${args.scheme}`} {...args} /></main>,
 } satisfies Meta<Args>
 export default meta
 
@@ -272,7 +273,7 @@ export const Unavailable: Story = {
   play: async ({ canvasElement }) => {
     await waitFor(() => expect(row(canvasElement, approval, abc)).not.toBeNull())
     await expect(row(canvasElement, approval, abc)?.querySelector('[data-request-title]')?.textContent).toBe('Original request unavailable')
-    await expect(row(canvasElement, approval, abc)?.textContent).not.toContain('def')
+    await expect(row(canvasElement, approval, abc)?.textContent).not.toContain('Review def instead: it fixes the migration order.')
     await expect(canvasElement.querySelector('[data-request-history-incomplete]')).not.toBeNull()
   },
 }
@@ -318,7 +319,7 @@ export const Failed: Story = {
       if (found === null) throw new Error('The section is not shown yet')
       return found
     })
-    await userEvent.click(within(section).getByRole('button', { name: 'Retry' }))
+    await userEvent.click(await within(section).findByRole('button', { name: 'Retry: Fractal could not load related requests.' }))
     await waitFor(() => expect(row(canvasElement, ci, ciEpisode)).not.toBeNull())
   },
 }
@@ -343,14 +344,40 @@ export const Walkthrough: Story = {
   },
 }
 
-/** Compare every state in one gallery. */
+/** Visit every real state without duplicating the pane's named landmarks. */
 export const AllStates: Story = {
-  render: args => <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
-    {scenarios.map(scenario => <section key={scenario} aria-label={scenario}>
-      <h2>{scenario}</h2>
-      <RequestHistoryStory {...args} scenario={scenario} viewport={390} />
-    </section>)}
-  </div>,
+  render: args => <main>
+    <Tabs defaultSelectedKey="branch">
+      <TabList aria-label="Related request states">
+        {scenarios.map(scenario => <Tab key={scenario} id={scenario}>{scenario}</Tab>)}
+      </TabList>
+      {scenarios.map(scenario => <TabPanel key={scenario} id={scenario}>
+        <RequestHistoryStory key={scenario} {...args} scenario={scenario} viewport={390} />
+      </TabPanel>)}
+    </Tabs>
+  </main>,
+  play: async context => {
+    const canvas = within(context.canvasElement)
+    const stateStories: Record<Scenario, Story> = {
+      branch: Branch,
+      'long-history-cross-page': LongHistoryCrossPage,
+      unavailable: Unavailable,
+      'hidden-predecessor': HiddenPredecessor,
+      loading: Loading,
+      stale: Stale,
+      refused: Refused,
+      failed: Failed,
+      unsupported: Unsupported,
+    }
+    for (const scenario of scenarios) {
+      await userEvent.click(canvas.getByRole('tab', { name: scenario, exact: true }))
+      await expect(canvas.getByRole('tabpanel', { name: scenario, exact: true })).toBeVisible()
+      if (scenario === 'loading') await canvas.findByText('Loading related requests')
+      await stateStories[scenario].play?.(context)
+      await expect(canvas.getAllByRole('main')).toHaveLength(1)
+      await expect(canvas.getAllByRole('region', { name: 'Related requests', exact: true })).toHaveLength(1)
+    }
+  },
 }
 
 const styles = stylex.create({
