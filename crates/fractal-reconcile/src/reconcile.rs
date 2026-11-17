@@ -803,15 +803,15 @@ fn record_member_commands(
     Ok(())
 }
 
-fn observed_pty_status(observation: &fractal_runtime::PtyObservation) -> String {
+fn observed_pty_status(observation: &fractal_runtime::PtyObservation) -> &str {
     if observation.status == "running"
         && observation
             .pid
             .is_some_and(|pid| !local_process_is_alive(pid))
     {
-        return "vanished".into();
+        return "vanished";
     }
-    observation.status.clone()
+    &observation.status
 }
 
 #[cfg(unix)]
@@ -847,13 +847,14 @@ impl NativeRuntime {
                 };
                 // Ordinary observation cannot publish a held command around the
                 // launch writer fence. Only observe_start may inspect it as running.
-                let status = if !physical_start
+                let physical_status = observed_pty_status(&item);
+                let status = (if physical_status == "running" && !physical_start
                     && self.launch_is_held(item.tags.get(start_jobs::OPERATION_TAG).map(String::as_str))?
                 {
-                    "starting".into()
+                    "starting"
                 } else {
-                    observed_pty_status(&item)
-                };
+                    physical_status
+                }).to_owned();
                 if include_provenance
                     && let Some(incarnation) = &incarnation_id
                     && let Some(operation) = item.tags.get(start_jobs::OPERATION_TAG)
