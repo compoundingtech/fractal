@@ -262,11 +262,20 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
   const placementScope = JSON.stringify(selector ?? null);
   const [show, setShow] = useState(false);
   const lifetime = JSON.stringify([actor, draftGeneration.current, placementScope]);
-  const [opened, setOpened] = useState<{ client: ThreadClient; lifetime: string; items: ReadonlyMap<string, ThreadSummary> }>();
-  const expanded = opened?.client === client && opened.lifetime === lifetime ? opened.items : undefined;
+  const [opened, setOpened] = useState<{ client: ThreadClient; lifetime: string; items: ReadonlyMap<string, ThreadSummary>; order: readonly string[] }>();
+  const owned = opened?.client === client && opened.lifetime === lifetime ? opened : undefined;
+  const expanded = owned?.items;
+  // Only navigation/ownership exits release the reading placement, never a list refresh.
+  useFocusEffect(useCallback(() => () => setOpened(undefined), [client, lifetime]));
   const threads = page.items.filter(thread => thread.id !== excludeId && (!marked || !!reminderFromSummary(thread)));
   if (marked && expanded) for (const thread of expanded.values()) {
     if (thread.id !== excludeId && !threads.some(row => row.id === thread.id)) threads.push(thread);
+  }
+  if (marked && owned?.items.size) {
+    // Freeze the visit's row ordering: removing an open row from membership must
+    // not move its body/composer below the remaining rows in the same ScrollView.
+    const positions = new Map(owned.order.map((id, index) => [id, index]));
+    threads.sort((left, right) => (positions.get(left.id) ?? owned.order.length) - (positions.get(right.id) ?? owned.order.length));
   }
   const onSummary = useCallback((thread: ThreadSummary, snapshot?: Snapshot) => {
     page.replace(thread, snapshot);
@@ -321,10 +330,11 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       {threads.map(thread => {
         const open = expanded?.has(thread.id) ?? false;
         const toggle = () => setOpened(previous => {
-          const items = previous?.client === client && previous.lifetime === lifetime ? new Map(previous.items) : new Map<string, ThreadSummary>();
+          const previousOwned = previous?.client === client && previous.lifetime === lifetime ? previous : undefined;
+          const items = new Map(previousOwned?.items);
           if (items.has(thread.id)) items.delete(thread.id);
           else items.set(thread.id, thread);
-          return { client, lifetime, items };
+          return { client, lifetime, items, order: previousOwned?.items.size ? previousOwned.order : threads.map(row => row.id) };
         });
         return open ? <ExpandedContextThread key={thread.id} client={client} initial={thread} refresh={threadRefresh} placement={`context:${placementScope}:${thread.id}`} seekReminder={marked}
           onSummary={onSummary} toggle={toggle} onOpen={() => openThread(thread.id, (threadEdits?.project(thread) ?? thread).title)} revealComposer={revealComposer} />

@@ -175,7 +175,7 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   const state = hooks();
   const page = { items: [thread], snapshots: new Map(), loading: false, live: false, reload() {}, replace() {} };
   const list = compile('ContextThreadList', 'function ContextThreadHeader', {
-    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {},
+    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {}, useFocusEffect() {},
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => 1, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 20,
     useThreadPage: () => page, useTextAppearance: () => ({ system: false, palette: {} }), theme: {},
     View: 'View', Pressable: 'Pressable', T: 'T', ScrollView: 'ScrollView', ThreadViewport: 'ThreadViewport', Button: 'Button',
@@ -458,7 +458,7 @@ test('thread groups read in system text, titles wrap at accessibility sizes and 
   let viewports = [];
   const page = { items: [{ id: 'thread/one', title: 'Review', state: 'open' }], snapshots: new Map(), loading: false, live: true, reload() {}, replace() {} };
   const list = compile('ContextThreadList', 'function ContextThreadHeader', {
-    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {},
+    ...state, useStore: () => ({ threadRefresh: 0 }), useMemo: compute => compute(), useCallback: fn => fn, useEffect() {}, useFocusEffect() {},
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => undefined, useThreadViewports: () => viewports,
     THREAD_WINDOW_SIZE: 20, useThreadPage: () => page, useTextAppearance: () => ({ system: true, colors: {} }), theme: {},
     View: 'View', Pressable: 'Pressable', T: 'T', ScrollView: 'ScrollView', ThreadViewport: 'ThreadViewport', Button: 'Button',
@@ -1275,7 +1275,7 @@ test('the marked unread list reads through the bounded unread client; typed erro
   const marked = { items: [], snapshots: new Map(), loading: false, live: false, issue: 'This connection can\'t read marked threads.', reload() {}, replace() {} };
   const list = compile('ContextThreadList', 'function ContextThreadHeader', {
     ...state, useStore: () => ({ threadRefresh: 0, feed: { belongsTo: () => true, followThreadSummaries: () => assert.fail('marked lists are not followed') } }),
-    useMemo: compute => compute(), useCallback: fn => fn, useEffect() {},
+    useMemo: compute => compute(), useCallback: fn => fn, useEffect() {}, useFocusEffect() {},
     useRef: current => ({ current }), useWindowDimensions: () => ({ height: 800 }), useTitleLines: () => 1, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 20,
     useThreadPage: (read, _refresh, follow) => { reader = read; follower = follow; return { items: contextItems, snapshots: new Map() }; },
     useMarkedUnreadPage: enabled => enabled ? marked : { items: [] },

@@ -40,7 +40,7 @@ const host = type => function Host({ ref, children, ...props }) {
   const id = React.useRef(Symbol(type)).current;
   hostProps.set(id, { type, props });
   React.useEffect(() => () => { hostProps.delete(id); }, [id]);
-  return React.createElement('div', { ref, 'data-host': type, 'data-collapsable': props.collapsable === false ? 'false' : undefined }, children);
+  return React.createElement('div', { ref, 'data-host': type, 'aria-label': props.accessibilityLabel, 'data-collapsable': props.collapsable === false ? 'false' : undefined }, children);
 };
 const hosts = Object.fromEntries(['View', 'T', 'Text', 'Button', 'Field', 'Pressable', 'ContextMenu', 'Runs',
   'ThreadComposer', 'ThreadEditFlash', 'ThreadReadIssue'].map(type => [type, host(type)]));
@@ -79,7 +79,24 @@ const flushFrames = () => {
   frames.clear();
   for (const run of due) run();
 };
-const navigation = { isFocused: () => true, addListener: () => () => {} };
+let navigationFocused = true;
+const navigationListeners = { focus: new Set(), blur: new Set(), beforeRemove: new Set() };
+const navigation = {
+  isFocused: () => navigationFocused,
+  addListener: (event, callback) => { navigationListeners[event].add(callback); return () => navigationListeners[event].delete(callback); },
+};
+function navigate(focused) {
+  navigationFocused = focused;
+  for (const callback of [...navigationListeners[focused ? 'focus' : 'blur']]) callback();
+}
+function useNativeFocusEffect(callback) {
+  React.useEffect(() => {
+    let release = navigation.isFocused() ? callback() : undefined;
+    const focus = navigation.addListener('focus', () => { release?.(); release = callback(); });
+    const blur = navigation.addListener('blur', () => { release?.(); release = undefined; });
+    return () => { release?.(); focus(); blur(); };
+  }, [callback]);
+}
 const route = { key: 'route/thread' };
 const scrollHost = { measureInWindow: done => done(0, 0, 400, 600) };
 const viewportRef = { current: { getNativeScrollRef: () => scrollHost } };
@@ -95,7 +112,7 @@ const { useUnreadVisit, useUnreadVisitEntry } = load('./unreadVisitNative.ts', {
   },
   '@react-navigation/native': {
     useNavigation: () => navigation, useRoute: () => route,
-    useFocusEffect: callback => React.useEffect(() => callback(), [callback]),
+    useFocusEffect: useNativeFocusEffect,
   },
   './unreadActions': { applyVisitEffect, UnreadVisitController },
   './unreadVisit': { unreadVisit },
@@ -410,7 +427,7 @@ async function mountMarkedList(harness, initial) {
   const useStore = () => React.useContext(StoreContext);
   const hooks = { useStore, useCallback: React.useCallback, useEffect: React.useEffect,
     useMemo: React.useMemo, useRef: React.useRef, useState: React.useState,
-    useFocusEffect: callback => React.useEffect(() => callback(), [callback]) };
+    useFocusEffect: useNativeFocusEffect };
   const appearance = () => ({ system: true, palette: {}, colors: {}, color: value => value });
   const deps = { ...hooks, ...hosts, ClientError, THREAD_WINDOW_SIZE, reminderFromSummary, ACCESSIBILITY_FONT_SCALE: 1.3,
     errorText: error => String(error), theme: {}, useTextAppearance: appearance,
@@ -458,7 +475,14 @@ async function mountMarkedList(harness, initial) {
   harness.store.threadActions.add('thread.reply');
   const originalUnread = harness.store.unreadClient;
   harness.store.unreadClient = { ...originalUnread,
-    listMarked: async () => { listReads++; return reminderFromSummary(summary) ? { kind: 'items', items: [summary] } : { kind: 'empty' }; },
+    listMarked: async () => {
+      listReads++;
+      return { kind: 'items', items: [
+        ...(reminderFromSummary(summary) ? [summary] : []),
+        { ...initial, id: 'thread/two', title: 'Other one' },
+        { ...initial, id: 'thread/three', title: 'Other two' },
+      ] };
+    },
   };
   harness.member.threadGet = async () => ({ value: summary });
   harness.member.threadTimeline = async () => ({ value: { items: [{ ...message, thread_quote_id: null }], next_cursor: null, anchor: { state: 'current', message_id: message.id } } });
@@ -473,7 +497,7 @@ async function mountMarkedList(harness, initial) {
     const [, update] = React.useState(0);
     React.useEffect(() => { harness.onChange(() => update(value => value + 1)); return () => harness.onChange(() => {}); }, []);
     return React.createElement(StoreContext.Provider, { value: { ...harness.store } },
-      React.createElement(ThreadGroup, { context: { marked_unread: true }, title: 'Marked unread', openThread() {} }));
+      React.createElement(ThreadGroup, { context: { marked_unread: true }, title: 'Marked unread', openThread: () => navigate(false) }));
   }
   const root = createRoot(document.getElementById('root'));
   await step(() => root.render(React.createElement(Store)));
@@ -481,7 +505,7 @@ async function mountMarkedList(harness, initial) {
     unmount: () => step(() => root.unmount()) };
 }
 
-for (const ending of ['collapse', 'owner', 'generation', 'read-grant']) {
+for (const ending of ['collapse', 'owner', 'generation', 'read-grant', 'tab-blur', 'push-blur']) {
   test(`marked-list removal preserves the open native reading context until ${ending}`, async context => {
     context.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 });
     frames.clear();
@@ -493,11 +517,16 @@ for (const ending of ['collapse', 'owner', 'generation', 'read-grant']) {
     try {
       await step(() => row('Marked unread').onPress());
       await step(() => row('Review').onPress());
+      const scroll = document.querySelector('[data-host="ScrollView"]');
+      const order = () => [...scroll.querySelectorAll('[data-host="Pressable"][aria-label]')].map(node => node.getAttribute('aria-label').split(',')[0])
+        .filter(title => ['Review', 'Other one', 'Other two'].includes(title));
+      assert.deepEqual(order(), ['Review', 'Other one', 'Other two']);
+      scroll.scrollTop = 29;
       const body = await layOut(100);
       const composer = document.querySelector('[data-composer]');
       assert.ok(composer, 'the production composer mounted');
       composer.focus();
-      body.scrollTop = 29;
+      assert.ok(scroll.contains(body), 'the conversation belongs to the real list ScrollView');
       await step(() => {
         const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
         setter.call(composer, 'Keep this draft');
@@ -513,11 +542,19 @@ for (const ending of ['collapse', 'owner', 'generation', 'read-grant']) {
       assert.equal(document.querySelector('[data-collapsable="false"]'), body);
       assert.equal(document.querySelector('[data-composer]'), composer);
       assert.equal(document.activeElement, composer);
-      assert.equal(body.scrollTop, 29);
+      assert.equal(document.querySelector('[data-host="ScrollView"]'), scroll);
+      assert.equal(scroll.scrollTop, 29, 'the actual ScrollView retains its offset');
+      assert.deepEqual(order(), ['Review', 'Other one', 'Other two'], 'membership removal never moves the open row below its neighbors');
       assert.equal(row('Review').accessibilityLabel.includes('marked unread reminder'), false);
-      assert.equal(mounted().some(({ type, props }) => type === 'T' && props.children === 'Marked unread'), false);
+      assert.equal(scroll.querySelector('[aria-label^="Review"]').textContent.includes('Marked unread'), false);
       if (ending === 'collapse') await step(() => row('Review').onPress());
-      else {
+      else if (ending === 'tab-blur' || ending === 'push-blur') {
+        await step(() => ending === 'push-blur' ? button('Open thread').onPress() : navigate(false));
+        assert.equal(document.querySelector('[data-collapsable="false"]'), null, 'navigation exit releases the retained body');
+        await step(() => navigate(true));
+        assert.equal(row('Review'), undefined, 'refocus cannot restore a cleared membership from the old visit');
+        assert.deepEqual(order(), ['Other one', 'Other two']);
+      } else {
         if (ending === 'owner') harness.store.actor = 'person/ada';
         if (ending === 'generation') harness.store.draftGeneration.current++;
         if (ending === 'read-grant') harness.store.threadClient = undefined;
@@ -525,6 +562,6 @@ for (const ending of ['collapse', 'owner', 'generation', 'read-grant']) {
       }
       assert.equal(document.querySelector('[data-collapsable="false"]'), null);
       assert.equal(document.querySelector('[data-composer]'), null);
-    } finally { await view.unmount(); }
+    } finally { await view.unmount(); navigate(true); }
   });
 }
