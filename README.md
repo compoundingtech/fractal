@@ -77,8 +77,9 @@ For this repository, **PR proof is hosted CI at the exact head**. Agents must no
 skip all local evidence work, including for agents with listed signers, and record `hosted_proof`.
 It is repository policy, not a per-push `ST_EVIDENCE_LOCAL=off` bypass. The public-content guard still blocks unsafe pushes.
 Policy is read from the base, preferring `.fractal/prepush-policy.json` when present; candidate policy cannot enable it.
+Malformed or non-object policy and unknown `pr-proof` values print a diagnostic and retain the default local evidence flow.
 
-The local pre-signing flow below applies only where the accepted hosted policy is absent:
+The local pre-signing flow below applies only where accepted policy does not select hosted proof:
 
 **You need** a Linux x86_64 machine with Nix. On our machines a run peaks at about 16 cores and 18 GB of RAM. The kept build
 folder takes 60 to 110 GB of disk. A full warm run takes about 12 minutes (our target is 12 minutes or less).

@@ -640,12 +640,12 @@ class Hook(unittest.TestCase):
                  '  mail-redelivery-canaries not covered            no record\n'
                  '  fractal-web              CI runs it             no local command')
 
-    def accept_prepush_policy(self, policies):
+    def accept_prepush_policy(self, policies, raw=False):
         git(self.work, 'checkout', '-q', 'main')
         for directory, policy in policies.items():
             path = self.work / directory / 'prepush-policy.json'
             path.parent.mkdir(exist_ok=True)
-            path.write_text(json.dumps(policy))
+            path.write_text(policy if raw else json.dumps(policy))
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', 'accepted pre-push policy')
         git(self.work, '-c', 'core.hooksPath=/dev/null', 'push', '-q', 'origin', 'main')
@@ -701,6 +701,22 @@ class Hook(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertEqual(self.receipts()[-1]['outcome'], 'refused')
         self.assertEqual([c['argv'] for c in self.calls()], [['--status', '--base', 'origin/main']])
+
+    def test_invalid_base_policy_keeps_the_default_agent_refusal_and_receipt(self):
+        for raw, problem in (('{', 'invalid JSON'), ('null', 'expected a JSON object'),
+                             ('[]', 'expected a JSON object'),
+                             ('{"pr-proof": "unknown"}', "unknown pr-proof value 'unknown'")):
+            with self.subTest(raw):
+                self.accept_prepush_policy({'.st': raw}, raw=True)
+                before = len(self.calls())
+                done = self.push(STUB_STATUS='3', STUB_STATUS_OUT=self.UNCOVERED, ST_AGENT='agent/some/seat')
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn(f'origin/main:.st/prepush-policy.json: {problem}; using the default local evidence flow',
+                              done.stderr)
+                self.assertEqual(done.stderr.count(problem), 1)
+                self.assertEqual(self.receipts()[-1]['outcome'], 'refused')
+                self.assertEqual([c['argv'] for c in self.calls()[before:]], [['--status', '--base', 'origin/main']])
+                self.assertFalse(self.remote_has('refs/heads/feature'))
 
     def test_an_agents_covered_tree_is_pushed_silently_after_asking_about_all_checks(self):
         done = self.push(STUB_STATUS='0', ST_AGENT='agent/some/seat')

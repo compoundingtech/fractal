@@ -162,7 +162,20 @@ def hosted_proof(base):
     policy = git('show', f'{base}:{path}')
     if policy.returncode != 0:
         raise RuntimeError(f'cannot read accepted pre-push policy at {base}')
-    return json.loads(policy.stdout).get('pr-proof') == 'hosted'
+    try:
+        setting = json.loads(policy.stdout)
+    except ValueError:
+        say(f'{base}:{path}: invalid JSON; using the default local evidence flow')
+        return False
+    if not isinstance(setting, dict):
+        say(f'{base}:{path}: expected a JSON object; using the default local evidence flow')
+        return False
+    if 'pr-proof' not in setting:
+        return False
+    if setting['pr-proof'] != 'hosted':
+        say(f'{base}:{path}: unknown pr-proof value {setting["pr-proof"]!r}; using the default local evidence flow')
+        return False
+    return True
 
 
 def positive(name, default):
