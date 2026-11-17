@@ -298,8 +298,6 @@ fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
     ui.click(super::super::doc::Hit::Row(index));
     assert_eq!(ui.focused_pane(), Some(Pane::List(0)), "exercise Inbox, not an independent thread tab");
     let host = Pane::Home(Some(ID.into())).key();
-    ui.click(super::super::doc::Hit::Thread(host.clone(), thread::Tap::Compose(ID.into())));
-    ui.paste(DRAFT.into());
     let now = std::time::Instant::now();
     assert!(present_at(&mut ui, now).contains("Meaningful reply content"));
     assert!(ui.threads.writes().is_empty(), "opening alone does not clear the reminder");
@@ -307,6 +305,10 @@ fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
     let write = ui.threads.writes().pop().expect("500 ms dwell clears the reminder");
     let Mutation::ClearUnread(clear) = &write.mutation else { panic!("expected clear") };
     assert_eq!(clear.observed_marks, [mark]);
+    // Editing intentionally suspends auto-clear. Start the draft while the clear is in flight,
+    // so its completion and the subsequent list refresh must retain this exact draft host.
+    ui.click(super::super::doc::Hit::Thread(host.clone(), thread::Tap::Compose(ID.into())));
+    ui.paste(DRAFT.into());
     let mut accepted = ui.threads.summaries[ID].clone();
     accepted.value.unread_reminder = None;
     ui.threads.complete(Receipt { write, confirmation: Confirmation::Applied(Some(accepted)) },
