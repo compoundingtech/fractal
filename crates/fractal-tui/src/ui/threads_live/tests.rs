@@ -4514,8 +4514,8 @@ fn stale_recipient_refusal_refreshes_and_shows_the_new_recipient_before_a_fresh_
                 Receipt {
                     write: refused_write.clone(),
                     confirmation: Confirmation::Failed(refused(
-                        fractal_client::ErrorCode::RecipientRetired,
-                        "recipient-retired",
+                        fractal_client::ErrorCode::StaleFence,
+                        "stale-fence",
                         "The selected recipient is no longer current.",
                     )),
                 },
@@ -5048,8 +5048,8 @@ fn start_recipient_layout_evidence() {
         Receipt {
             write: start,
             confirmation: Confirmation::Failed(refused(
-                fractal_client::ErrorCode::RecipientRetired,
-                "recipient-retired",
+                fractal_client::ErrorCode::NotFound,
+                "not-found",
                 "The selected recipient is no longer current.",
             )),
         },

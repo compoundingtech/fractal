@@ -3303,6 +3303,18 @@ impl Threads {
                 && matches!(write.mutation, Mutation::Start(_))
                 && let Some(item) = write.host.strip_prefix("home:")
             {
+                if matches!(
+                    &error,
+                    ClientError::Api(fractal_client::ErrorCode::RecipientRetired, ..)
+                ) {
+                    let notice = start_context_error(error);
+                    self.start_contexts.remove(item);
+                    self.start_context_pending.remove(item);
+                    self.start_context_reads.retain(|read| read.item != item);
+                    self.start_context_failures
+                        .insert(item.into(), notice.clone());
+                    return Some(notice);
+                }
                 self.request_start_context(item);
                 return Some(format!(
                     "Start was refused: {} Checking the recipient again; review it before sending. Your draft is kept.",
