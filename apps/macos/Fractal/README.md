@@ -24,13 +24,33 @@ collection, but `FractalClient` has no typed attention or availability stream.
   on Back; with Reduce Motion it fades in. VoiceOver focus moves to the page title
   and back to the row or tile that opened it. Closing the panel returns it to the
   top level.
+- **Inbox tabs** split the inbox into Asks, Updates and Notices, each with its
+  count; `InboxKind` classifies on wire fields only, never titles. Asks are every
+  open request (`Role.ask`); updates are `update.type` `update` sent by an agent
+  (`requester_id` `agent/…`); every other update is a notice, such as the runtime's
+  `daemon/runtime` word that an ask ended (`update.about` `step-run/…`). The home
+  label's line carries the three as plain text tabs (no added height) and the capped
+  rows follow the selected one; More opens the full inbox on that tab. The full
+  inbox puts its Activity overview above a segmented All · Asks · Updates · Notices
+  control; Asks group under `AskGroup` sub-headers (decisions, choices, feedback,
+  questions, then reviews, prompts and forms answered in Fractal), and All lists
+  each kind under its own label. Both surfaces open on Asks and return to it when
+  the panel closes. Gallery scenarios `inbox-tabs-*` cover home, each page tab, an
+  empty tab, and both with and without activity.
 - **Inbox activity** counts arrival and resolution claims in the generic Fractal
   series response, grouped by ask/update type. Arrivals stack above the axis and
-  resolutions below, with asks in the stronger tone. The home label carries a
+  resolutions below, with asks in the stronger tone, on one scale for every tab:
+  the selected tab's series stays full and the other fades (notices count as
+  updates; All keeps both full). The home label carries a
   fixed-height 14-day strip; the full inbox adds a 14-day daily / 24-hour hourly
-  picker and per-bucket hover values. Missing activity data draws no chart; failed
-  reads retain the last chart with an offline notice. Gallery scenarios
-  `inbox-activity-{busy,quiet}-{home,page}` exercise both appearances at 360 pt.
+  picker and per-bucket hover values. Missing activity data keeps the home label
+  and full inbox Activity section visible with an explicit unavailable notice,
+  never a fabricated zero chart. Failed reads retain the last chart with an offline
+  notice. Live history requires Fractal's typed arrival and resolution events for
+  every inbox row source, carrying ask/update type and person on both directions;
+  the live adapter intentionally waits for that complete contract rather than
+  substituting fleet-wide person-work counts. Gallery scenarios
+  `inbox-activity-{busy,quiet,unavailable}-{home,page}` exercise both appearances at 360 pt.
 - **Asks** are classified by the wire kind and offered actions. Person steps
   are answered on their page: a decision's or
   choice's named answers (recommended first; request-changes takes words), a
@@ -343,10 +363,11 @@ weekly budget. Render just these on a Mac with:
 ## Scroll and refresh performance Mac gate
 
 `PanelScroll` and `PanelForm` preserve their compact ideal height, bounded by the
-screen budget after measured chrome. A persistent `PanelWindowFrame` window accessor owns
-native resizing: AppKit chooses the anchor when positioning the window; synchronous resize
-notifications preserve that top edge instead of AppKit's default bottom-left origin.
-There are no delayed corrections or new resize animations. Short content stays compact,
+screen budget after measured chrome. The live `PanelWindowFrame` sizes the hosting window
+from the measured page on both growth and shrinkage, anchored two points below the current
+status-item window. macOS 27's `MenuBarExtra` can otherwise retain a larger hosting frame
+and center the smaller painted page inside it: checking only the window's top misses this
+detachment. No anchor is learned from previous panel frames. Short content stays compact,
 and content beyond the budget scrolls internally. Unbounded snapshots still size naturally.
 Markdown blocks/inline attributed strings and attachment images use bounded content-keyed
 caches. Ages share one minute-aligned clock. Identical page polls and pruning do not rewrite
@@ -380,14 +401,43 @@ Neither probe orders a window front or measures actual screen presentation or 12
 For navigation, build first (`/usr/bin/swift build -c release`), then run
 `.build/release/FractalMacGallery <out-dir> --navigation-probe`.
 It also never orders a window front, and records `navigation-probe.json` (phase,
-window height/top, content, viewport, offset) at 300/400/1578 pt. It asserts the menu-bar
-anchor through first-open loading, separately released SLO/availability reads, row arrival
-and removal, every signal, speech, ask/update route and refresh. Back restores native scroll
-state; a fresh push starts at the top. Page heights match unbounded content capped to the
-screen budget, and a quiet panel stays compact. Native outward wheel events and refreshes
-preserve top/bottom offsets, including fitting content. A 19-row inbox fits without scrolling
-on the tall screen; short screens apply `InboxCap`. Showing every row when all rows and
-signals fit is intentional. An AppKit move establishes a new top anchor for subsequent resizing.
+window height/top, content, viewport, offset) at 300/400/1578 pt. It checks layout through
+first-open loading, separately released SLO/availability reads, row arrival and removal,
+every signal, speech, ask/update route and refresh. Back restores native scroll state; a
+fresh push starts at the top. Page heights match unbounded content capped to the screen
+budget, and a quiet panel stays compact. This synthetic window is not a native attachment
+test. Native outward wheel events and refreshes preserve top/bottom offsets, including
+fitting content. A 19-row inbox fits without scrolling on the tall screen; short screens
+apply `InboxCap`.
+
+### Native panel attachment regression
+
+Build the DEBUG app and evolving Unix-socket member fixture on a developer Mac:
+
+```sh
+bash scripts/probe-panel-mac.sh build "$HOME/.local/state/fractal-panel-probe"
+```
+
+Transfer that directory into an isolated macOS GUI VM (the capture VM route above can
+provide one). In the guest, with the directory at the same short absolute path, run:
+
+```sh
+stage="$HOME/.local/state/fractal-panel-probe"
+bash "$stage/run.sh" run "$stage"
+```
+
+This opens the actual app's status-item scene, keeps it open across 19→14→40→3 rows and
+an availability read failure, navigates compact pages, and closes/reopens it twice.
+It needs an authorized GUI session, not Accessibility consent. On macOS 27 the status
+button has no target/action, so the DEBUG-only hook invokes AppKit's expanded-interface
+session delegate; release builds contain neither this SPI nor the probe.
+`frames.jsonl` records window moves/resizes/setFrame stacks, status/screen frames and the
+painted page rectangle. Its oracle checks the painted top, not just the hosting window's
+top; persistent centering within a stale large window fails. Missing samples, transitions
+or fixture data also fail. `source-revision` identifies the build source.
+Do not run the UI probe on an unapproved desktop. It is not wired into the headless
+macOS CI lane: it needs a logged-in WindowServer session. The offscreen layout checks
+remain the headless gate.
 
 `trace` records Animation Hitches and Time Profiler and exports their data tables.
 The script lists the interaction procedure and strict pass thresholds: every drill-in

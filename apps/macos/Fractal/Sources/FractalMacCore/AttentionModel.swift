@@ -131,6 +131,10 @@ public enum AnswerState: Sendable, Equatable {
   public internal(set) var attachments: [String: LiveSection<Data>] = [:]
   /// What the last answer or control committed, shown on the top level after its card left.
   public internal(set) var receipt: Receipt?
+  /// The top level's inbox tab and the full inbox's; each starts on Asks, again whenever the
+  /// panel closes.
+  public var glanceTab = InboxKind.asks
+  public var inboxTab = InboxTab.asks
   private var refreshAgain = false
 
   public init(
@@ -160,10 +164,14 @@ public enum AnswerState: Sendable, Equatable {
     }
   }
 
-  /// Open asks, without the ones the person snoozed (Fractal still lists those).
-  public var asks: [AttentionRecord] { shown { if case .ask = $0.role { true } else { false } } }
+  /// One kind's rows, without the ones the person snoozed (Fractal still lists those).
+  public func inbox(_ kind: InboxKind) -> [AttentionRecord] { shown { InboxKind($0) == kind } }
 
-  public var updates: [AttentionRecord] { shown { $0.role == .update } }
+  public var asks: [AttentionRecord] { inbox(.asks) }
+
+  public var updates: [AttentionRecord] { inbox(.updates) }
+
+  public var notices: [AttentionRecord] { inbox(.notices) }
 
   /// Asks and updates hidden until their snooze ends.
   public var snoozed: [AttentionRecord] { records { $0.role != .ignored && $0.isSnoozed(at: snoozeClock) } }
@@ -218,7 +226,8 @@ public enum AnswerState: Sendable, Equatable {
   /// Speech acts only on a read that just succeeded, never on stale asks or availability.
   private func considerSpeech(now: Date) {
     guard let speech, case .fresh = attention.state, let page = attention.value else { return }
-    speech.consider(asks + updates, open: page.records, availability: freshAvailability, macPresence: macPresence, now: now)
+    let shownUpdates = shown { $0.role == .update }
+    speech.consider(asks + shownUpdates, open: page.records, availability: freshAvailability, macPresence: macPresence, now: now)
   }
 
   /// The open card with this attention ID, at its latest read revision.

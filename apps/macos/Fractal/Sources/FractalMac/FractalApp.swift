@@ -107,6 +107,9 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     Self.log("Fractal \(build.machineVersion) started")
+    #if DEBUG
+      Task { await NativePanelDiagnostic.run(model: self.model) }
+    #endif
     if isConfigured {
       Self.log(model.speech == nil ? "speech off: FRACTAL_SPEECH_SOCKET unset" : "speech gate on")
     }
@@ -157,7 +160,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
       }
     }
     let line =
-      "attention \(describe(model.attention.state)) (\(model.openAskCount) asks, \(model.updates.count) updates); "
+      "attention \(describe(model.attention.state)) (\(model.openAskCount) asks, \(model.updates.count) updates, \(model.notices.count) notices); "
       + "slo \(describe(model.slo.state)) (\(model.slo.value?.rows.count ?? 0) rows, \(model.sloBoard?.needsAttention ?? 0) need attention); "
       + "availability \(describe(model.availability.state))"
     guard line != lastLogged else { return }

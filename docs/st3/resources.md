@@ -10,7 +10,7 @@ Ordered [merge lanes](lanes.md), workflow population limits, and resource admiss
 Effect scope / data DSL exec step / shell exec
              |
              v
-execution-host writer: holds + class/FIFO + shared fit + fenced membership
+execution-host writer: holds + class/backfill/aging + shared fit + fenced membership
              |
              v
 payload gate -> execution generation -> whole-tree retirement proof
@@ -21,13 +21,20 @@ serialized admission decision, the admitted generation, process placement, and r
 owns enforcement. Graph observations describe those facts; a replicated grant-shaped claim cannot
 launch a process. No standing lane worker or replicated graph semaphore grants resource capacity.
 
-A named lane policy binds an execution host, `maxMembers`, optional CPU/memory footprint, and
-required coverage. The host refuses a conflicting policy for an existing name. Every request has
-a class: `landing`, `check` or `agent` (the default). The host serves classes in that order and
-preserves FIFO within a class; a non-fitting higher-class head cannot be bypassed by lower-class
-work. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
+A named lane policy binds an execution host, `maxMembers`, an explicit CPU/memory profile, and
+required coverage. A request without a profile is refused with typed code `missing-profile`;
+there is no implicit finite-execution footprint. The host refuses a conflicting policy for an
+existing name. Every request has a class: `landing`, `check` or `agent` (the default). Classes
+are served in that order. Within a class, FIFO is preferred, but a fitting later ticket may
+backfill a head that does not fit until that head has waited 15 minutes. A lower class never
+bypasses a higher-class head. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
 generation. Independent roots consume room once in the accountant shared with seats and their
 raises/bursts, including CI and shell work. A child run without an OS process reserves no memory.
+
+An earlier profile-less installed policy can acquire its first explicit profile while preserving
+the same member limit and coverage. Already granted profile-less custody remains valid through
+retirement; profiled admission on that lane waits for those holders to drain. This transition
+does not permit changing an already explicit profile or silently rewriting a request.
 
 A durable **host hold** closes admission without occupying a membership. Its authenticated owner,
 revision, reason, affected operations and receipt persist independently of the initiating run.
@@ -43,8 +50,10 @@ fractal resources exec --lane verification --class check \
 ```
 
 The CLI uses the local daemon's internal resource path and the same finite membership machinery
-as programs and DSL steps. It does not require a client-v0 route. Memory and disk accept byte
-counts or binary suffixes such as `24G`. Admission and payload timeouts are separate budgets.
+as programs and DSL steps. It does not require a client-v0 route. Memory and disk accept integer
+byte counts, exact unsigned e/E notation (`2e9` equals `2000000000`), or binary suffixes such as
+`24G`. Signed, fractional, malformed and overflowing byte strings are typed parse errors; no
+floating-point rounding is used. Admission and payload timeouts are separate budgets.
 Waiting, admitted and refused diagnostics go to stderr with `blockedBy`; payload stdout is not
 mixed with admission diagnostics, and the payload's exit status is preserved.
 
@@ -95,8 +104,8 @@ const verify = Effect.scoped(Effect.gen(function* () {
 }))
 ```
 
-`maxMembers` defaults to one and `coverage` to `logical`. Capacity is optional; memory is bytes in
-the program API. `admissionTimeout` is an optional duration. The acquired handle exposes
+`maxMembers` defaults to one and `coverage` to `logical`. An explicit capacity profile is required
+for admission; memory is bytes in the program API. `admissionTimeout` is an optional duration. The acquired handle exposes
 `lane.exec(id, argv, options)` and `lane.run(id, mission, input)`. The latter starts a linked child
 run whose actual exec roots consume the same native membership and fencing context. Arbitrary
 Effect code inside the scope does not move its processes into the lane or fence external writes.
@@ -130,9 +139,9 @@ step "verify" timeout="20m" {
 ```
 
 The step must contain exactly one exec declaration, and its actual host must match the lane host.
-The name and explicit host are required. The remaining defaults and options match the program API:
-`max-members` maps to `maxMembers`, `admission-timeout` to `admissionTimeout`, and lane-child
-`capacity` to the independent root's footprint. Numeric bounds for a shared containment slice
+The name, explicit host, and nested `capacity` profile are required for admission. Other defaults
+and options match the program API: `max-members` maps to `maxMembers`, `admission-timeout` to
+`admissionTimeout`, and lane-child `capacity` to the independent root's footprint. Numeric bounds for a shared containment slice
 accommodate its configured members; independent root reservations still add in host fit.
 
 The DSL lowers to the same native request, payload gate and retirement operations as the program
@@ -144,8 +153,8 @@ An existing step's direct `capacity` continues to raise its assigned agent's sea
 steps cannot declare that direct raise. Nesting `capacity` inside the new explicit resource `lane`
 does not reinterpret old capacity declarations. Omitting the new lane leaves published step JSON
 and definition hashes unchanged; old history remains readable. A physical independent exec root
-is not a seat descendant merely because environment variables name that seat. Logical exclusivity
-without a new footprint can coexist with a seat's existing raise.
+is not a seat descendant merely because environment variables name that seat. Logical coverage
+still requires an explicit profile and reserves its declared footprint alongside seat raises.
 
 New lane-bearing revisions use the existing fleet reader-capability barrier:
 `mission_resource_lane>=1` is required for ordinary lanes and `>=2` for non-agent classes, disk
@@ -162,13 +171,26 @@ queued -> admitted -> prepared -> payload released -> execution ended -> retired
 withdraw   cancel       uncertain      cancel tree       descendants remain
 ```
 
-The host evaluates holds, class/FIFO order, logical occupancy and physical fit in its writer
-transaction. Waiters register a host/lane wake dependency before rechecking. Release, hold
-resolution, preparation cleanup and authority changes wake affected work; there is no mission
-reserve-probe loop. Host-memory observations invalidate fit when outside usage changes, never
-grant capacity on elapsed time alone. A blocked higher-class head retains its place even when a
-lower-class request would fit. Seat starts, scoped raises and finite executions share the native
-host accountant rather than maintaining independent CI or shell budgets.
+The host evaluates holds, class priority, logical occupancy and physical fit in its writer
+transaction. Within the highest waiting class it prefers FIFO, but before the head has waited
+15 minutes a later ticket may pass only when the earlier ticket does not fit and the later one
+fits all current budgets: ARC-aware memory, mount disk floors and reservations, and heavy-IO
+tokens. Fresh fit observations, not a previous blocked reason, decide backfill. Lower classes
+cannot pass a higher-class head.
+
+At 15 minutes the waiting head reserves the capacity it needs by closing admission to all
+later tickets in its class and lower classes until it is admitted. This fence is not another
+memory, disk or IO charge: existing holders retain their reservations, and the head is charged
+exactly once when admitted. Withdrawal or terminal refusal removes the fence; cancellation
+wakes the next waiter. Requests exceeding host lane room are refused as `impossible`, even
+with zero holders, rather than retaining an unfulfillable reservation.
+
+Waiters register a host/lane wake dependency before rechecking. Release, hold resolution,
+preparation cleanup and authority changes wake affected work. The 15-minute aging deadline
+is a scheduled one-shot wake, combined with any earlier admission deadline, not a poll loop;
+once aged there is no repeating aging timer. Host-memory and disk observations invalidate fit
+when usage changes, never grant capacity on elapsed time alone. Seat starts, scoped raises and
+finite executions share the native host accountant rather than independent CI or shell budgets.
 
 Seat starts, bursts and finite lanes share one ARC-aware host accountant:
 `eligible_arc = min(max(0, arc.size - arc.c_min), evictable_arc)` (zero without ZFS),

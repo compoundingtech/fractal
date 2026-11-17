@@ -9,10 +9,14 @@ public struct InboxActivity: Sendable, Equatable {
     public var label: String { self == .days ? "14 d" : "24 h" }
   }
 
+  /// A series: Fractal's lifecycle events carry ask or update.
+  public enum Kind: CaseIterable, Sendable { case asks, updates }
+
   public struct Counts: Sendable, Equatable {
     public var asks: Int
     public var updates: Int
     public var total: Int { asks + updates }
+    public subscript(kind: Kind) -> Int { kind == .asks ? asks : updates }
     public init(asks: Int = 0, updates: Int = 0) {
       self.asks = asks
       self.updates = updates
