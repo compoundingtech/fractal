@@ -495,19 +495,19 @@ impl Store {
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         if request.capacity.is_some() {
             let policy = serde_json::to_string(&(request.max_members, request.capacity, request.coverage))?;
-            transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
-                rusqlite::params![request.host,request.name,policy])?;
-            let installed: String = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
-                rusqlite::params![request.host,request.name], |row| row.get(0))?;
-            if installed != policy {
+            let installed: Option<String> = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                rusqlite::params![request.host,request.name], |row| row.get(0)).optional()?;
+            if let Some(installed) = installed.filter(|installed| *installed != policy) {
                 let previous: (u32, Option<Capacity>, Coverage) = serde_json::from_str(&installed)?;
                 anyhow::ensure!(previous == (request.max_members, None, request.coverage),
                     "resource lane policy differs from host-installed policy");
                 // Earlier writers installed profile-less policies. Define the missing profile
                 // without changing their custody; resource_blocking drains those holders first.
-                transaction.execute("UPDATE resource_lane_policies_v1 SET policy=?3 WHERE host=?1 AND lane=?2",
-                    rusqlite::params![request.host,request.name,policy])?;
+                transaction.execute("DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
+                    rusqlite::params![request.host,request.name])?;
             }
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
+                rusqlite::params![request.host,request.name,policy])?;
         }
         let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM resource_memberships_v1 WHERE id=?1)", [&request.id], |r| r.get(0))?;
         let mut member = if exists {
