@@ -821,10 +821,13 @@ impl Ui {
             self.threads.stop_reading();
             return;
         }
-        let Some(pane) = self.focused_pane() else {
+        if self.focused_pane().is_none() {
             self.threads.leave_view();
             return;
-        };
+        }
+        // Read the same resolved detail that draw_main presents (Inbox's tab is List(0),
+        // but its thread document and body geometry belong to Home(Some(thread))).
+        let pane = self.main_pane();
         let host = pane.key();
         let shown = {
             let frame = self.frame.borrow();

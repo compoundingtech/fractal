@@ -279,8 +279,7 @@ fn unread_marked_row_is_a_private_reminder_and_opening_it_seeks_the_anchor() {
     assert_eq!(clear.observed_marks, [mark]);
 }
 
-#[test]
-fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
+fn inbox_detail_survives_dwell_clear_and_marked_refetch(compose_before_dwell: bool) {
     const OTHER: &str = "thread/other-marked";
     const DRAFT: &str = "Unsent reply stays here";
     let mark = smallclaims::store::operation_id_for_key("unread/inbox-context");
@@ -298,6 +297,10 @@ fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
     ui.click(super::super::doc::Hit::Row(index));
     assert_eq!(ui.focused_pane(), Some(Pane::List(0)), "exercise Inbox, not an independent thread tab");
     let host = Pane::Home(Some(ID.into())).key();
+    if compose_before_dwell {
+        ui.click(super::super::doc::Hit::Thread(host.clone(), thread::Tap::Compose(ID.into())));
+        ui.paste(DRAFT.into());
+    }
     let now = std::time::Instant::now();
     assert!(present_at(&mut ui, now).contains("Meaningful reply content"));
     assert!(ui.threads.writes().is_empty(), "opening alone does not clear the reminder");
@@ -305,10 +308,10 @@ fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
     let write = ui.threads.writes().pop().expect("500 ms dwell clears the reminder");
     let Mutation::ClearUnread(clear) = &write.mutation else { panic!("expected clear") };
     assert_eq!(clear.observed_marks, [mark]);
-    // Editing intentionally suspends auto-clear. Start the draft while the clear is in flight,
-    // so its completion and the subsequent list refresh must retain this exact draft host.
-    ui.click(super::super::doc::Hit::Thread(host.clone(), thread::Tap::Compose(ID.into())));
-    ui.paste(DRAFT.into());
+    if !compose_before_dwell {
+        ui.click(super::super::doc::Hit::Thread(host.clone(), thread::Tap::Compose(ID.into())));
+        ui.paste(DRAFT.into());
+    }
     let mut accepted = ui.threads.summaries[ID].clone();
     accepted.value.unread_reminder = None;
     ui.threads.complete(Receipt { write, confirmation: Confirmation::Applied(Some(accepted)) },
@@ -332,6 +335,45 @@ fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
     ui.click(super::super::doc::Hit::Row(index));
     assert_eq!(ui.main_pane(), Pane::Home(Some(OTHER.into())));
     assert!(!present_at(&mut ui, now + std::time::Duration::from_millis(502)).contains("Meaningful reply content"));
+}
+
+#[test]
+fn unread_inbox_detail_survives_dwell_clear_and_marked_refetch() {
+    inbox_detail_survives_dwell_clear_and_marked_refetch(true);
+}
+
+#[test]
+fn unread_inbox_detail_retains_draft_started_while_clear_is_in_flight() {
+    inbox_detail_survives_dwell_clear_and_marked_refetch(false);
+}
+
+#[test]
+fn unread_read_host_matches_rendered_detail_not_list_only_tabs() {
+    for pane in [Pane::List(0), Pane::List(1), Pane::List(2),
+        Pane::Home(Some(ID.into())), Pane::Thread(ID.into())] {
+        let mut ui = fixture(true, &[]);
+        ui.open_in_glass(pane.clone(), Open::Tab);
+        if pane == Pane::List(0) {
+            ui.threads.select_inbox_detail(Some(ID.into()));
+        }
+        let drawn = ui.main_pane();
+        let now = std::time::Instant::now();
+        let rendered = present_at(&mut ui, now);
+        assert_eq!(ui.threads.reading_host.as_deref(), Some(drawn.key().as_str()));
+        present_at(&mut ui, now + std::time::Duration::from_millis(499));
+        assert!(ui.threads.writes().is_empty(), "{pane:?}: no early read");
+        present_at(&mut ui, now + std::time::Duration::from_millis(500));
+        let writes = ui.threads.writes();
+        if matches!(pane, Pane::List(1 | 2)) {
+            assert!(!rendered.contains("Meaningful reply content"));
+            assert!(writes.is_empty(), "{pane:?}: a list does not embed its hovered agent/mission");
+        } else {
+            assert!(rendered.contains("Meaningful reply content"));
+            assert_eq!(writes.len(), 1, "{pane:?}: the drawn detail supplies read evidence");
+            assert!(matches!(&writes[0].mutation, Mutation::MarkRead(read)
+                if read.seen_message_ids == ["message/visible"]));
+        }
+    }
 }
 
 #[test]
