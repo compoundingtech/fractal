@@ -11,19 +11,13 @@ import { expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
-import goldenStartRefusals from '../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json'
+import startRefusalWire from '../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json'
 import { LiveInboxThreads, LiveResolvedInboxThreads, LiveThreadPane } from './LiveThreads.tsx'
 import { gatewayThreads, type ThreadSource } from './threadSource.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const base = fixture.capabilities
-// Instantiate only the documented golden placeholder using the same request ID as context() below
-// (subjectReadPort.gateway.fixtures.json:10). Real regenerated IDs pass through unchanged.
-const startRefusalWire = structuredClone(goldenStartRefusals)
-for (const envelope of Object.values(startRefusalWire)) {
-  if (envelope.request_id === '<request-id>') envelope.request_id = base.request_id
-}
 const original = 'agent/workshop/atlas'
 const configured = 'agent/workshop/triage'
 const fallback = 'agent/workshop/harbor'
