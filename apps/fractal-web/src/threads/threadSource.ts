@@ -394,7 +394,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     const atom = readStartContext(sourceId)(episode)
     registry.refresh(atom)
     // Finish the canonical reread even if the rejected composer is unmounted.
-    const { promise, resolve } = Promise.withResolvers<void>()
+    let resolve!: () => void
+    const promise = new Promise<void>(complete => { resolve = complete })
     const stop = registry.subscribe(atom, feed => {
       if (feed._tag === 'Waiting' && registry.get(access).read) return
       queueMicrotask(() => { stop(); resolve() })
