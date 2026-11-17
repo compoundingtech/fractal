@@ -9,6 +9,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
 import { LiveThreadPane } from './LiveThreads.tsx'
 import { gatewayThreads } from './threadSource.ts'
+import { threadAnchorAttribute, threadAnchorSelector } from './threadAnchor.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -80,18 +81,18 @@ it.each(['manual', 'foreground', 'inactive-pane'] as const)('marks only current 
   document.body.append(host)
   const root = createRoot(host)
   const mark = () => [...host.querySelectorAll('button')].find(row => row.getAttribute('aria-label') === 'Mark visible replies read')
-  const messageViewport = (size: number) => observations.find(observer => observer.rows.size === size && [...observer.rows].every(row => row.hasAttribute('data-thread-message')))
+  const messageViewport = (size: number) => observations.find(observer => observer.rows.size === size && [...observer.rows].every(row => row.matches(threadAnchorSelector)))
   try {
     await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveThreadPane threadId={id} active={mode !== 'inactive-pane'} /></DataSourceProvider>))
-    await vi.waitFor(() => expect(messageViewport(1)).toBeDefined())
+    await vi.waitFor(() => expect(messageViewport(2)).toBeDefined())
     const older = [...host.querySelectorAll('button')].find(row => row.textContent === 'Load earlier messages')
     expect(older).toBeDefined()
     await act(async () => older?.click())
-    await vi.waitFor(() => expect(messageViewport(3)).toBeDefined())
-    const viewport = messageViewport(3)!
-    const row = (id: string) => [...viewport.rows].find(element => element.getAttribute('data-thread-message') === id)!
+    await vi.waitFor(() => expect(messageViewport(4)).toBeDefined())
+    const viewport = messageViewport(4)!
+    const row = (id: string) => [...viewport.rows].find(element => element.getAttribute(threadAnchorAttribute) === id)!
     for (const element of viewport.rows) {
-      const rect = new DOMRect(8, element.getAttribute('data-thread-message') === 'message/newest-offscreen' ? 2000 : 120, 100, 40)
+      const rect = new DOMRect(8, element.getAttribute(threadAnchorAttribute) === 'message/newest-offscreen' ? 2000 : 120, 100, 40)
       vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(rect)
       const content = element.querySelector<HTMLElement>('[data-thread-message-content]')
       if (content !== null) {

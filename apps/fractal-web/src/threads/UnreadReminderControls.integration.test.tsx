@@ -40,7 +40,7 @@ const setup = async ({ read, canMark, visible = ['message/2', 'message/3'], with
   const timeline = document.createElement('div')
   for (const id of ['message/1', 'message/2', 'message/3']) {
     const row = document.createElement('article')
-    row.setAttribute('data-thread-message', id)
+    row.setAttribute('data-thread-anchor', id)
     row.textContent = `Reply ${id}`
     const link = document.createElement('a')
     link.href = '#'
@@ -86,7 +86,7 @@ it('shows the reminder and Jump read-only without the grant, and nothing for an 
     expect(view.button(jump)).not.toBeNull()
     expect(view.button(markUnread)).toBeNull()
     expect(view.button(markRead)).toBeNull()
-    await view.optionClick(view.timeline.querySelector('[data-thread-message="message/1"]')!)
+    await view.optionClick(view.timeline.querySelector('[data-thread-anchor="message/1"]')!)
     expect(view.mark).not.toHaveBeenCalled()
 
     // No reminder and no grant: no badge, no controls.
@@ -120,10 +120,10 @@ it('marks unread from the first visible reply and clears exactly the observed ma
 it('marks unread from an Option-clicked visible reply but not a plain click, a link inside it, or an offscreen reply', async () => {
   const view = await setup({ read: { _tag: 'Known', reminder: undefined }, canMark: true, visible: ['message/1', 'message/2'] })
   try {
-    const row = view.timeline.querySelector('[data-thread-message="message/1"]')!
+    const row = view.timeline.querySelector('[data-thread-anchor="message/1"]')!
     await act(async () => { row.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 })) })
     await view.optionClick(row.querySelector('a')!)
-    await view.optionClick(view.timeline.querySelector('[data-thread-message="message/3"]')!)
+    await view.optionClick(view.timeline.querySelector('[data-thread-anchor="message/3"]')!)
     expect(view.mark).not.toHaveBeenCalled()
     await view.optionClick(row)
     expect(view.mark).toHaveBeenCalledExactlyOnceWith({ threadId, anchor_message_id: 'message/1', observed_marks: [] })
@@ -136,7 +136,7 @@ it('refuses without a visible reply and shows Fractal refusals as one alert', as
   try {
     await view.press(markUnread)
     expect(view.mark).not.toHaveBeenCalled()
-    expect(view.host.querySelector('[role=alert]')?.textContent).toBe('Scroll to a visible reply before marking it unread.')
+    expect(view.host.querySelector('[role=alert]')?.textContent).toBe('Scroll to a visible message before marking it unread.')
 
     view.clear.mockResolvedValueOnce({ _tag: 'Refused', detail: 'The reminder changed. Review it and try again.' } satisfies UnreadActionResult)
     await view.press(markRead)
@@ -159,7 +159,7 @@ it('jumps to the reminded reply, and names an anchor it cannot show yet instead 
     await view.press(jump)
     expect(view.seek).toHaveBeenCalledExactlyOnceWith({ threadId, anchor_message_id: 'message/2' })
     expect(scrolled).toHaveBeenCalledOnce()
-    expect(scrolled.mock.contexts[0]).toBe(view.timeline.querySelector('[data-thread-message="message/2"]'))
+    expect(scrolled.mock.contexts[0]).toBe(view.timeline.querySelector('[data-thread-anchor="message/2"]'))
     expect(view.host.querySelector('[role=status]')).toBeNull()
 
     view.seek.mockResolvedValueOnce({ _tag: 'Unavailable', detail: 'That reply is no longer in this thread.' } satisfies UnreadSeekResult)
@@ -172,7 +172,7 @@ it('jumps to the reminded reply, and names an anchor it cannot show yet instead 
     await view.press(jump)
     expect(view.host.querySelector('[role=status]')?.textContent).toBe('Fractal is still locating that reply.')
     expect(view.host.querySelectorAll('[data-thread-unread-reminder]')).toHaveLength(1)
-    expect(view.timeline.querySelectorAll('[data-thread-message], [data-thread-anchor]')).toHaveLength(3)
+    expect(view.timeline.querySelectorAll('[data-thread-anchor]')).toHaveLength(3)
     expect(scrolled).toHaveBeenCalledOnce()
 
     // Found before the hydrated page commits: say so, then reveal the row once it renders.

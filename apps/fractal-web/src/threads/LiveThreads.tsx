@@ -25,6 +25,7 @@ import { awayVisit, enterUnreadVisit, holdUnreadVisit, planUnreadView, type Unre
 import { UnreadReminderControls } from './UnreadReminderControls.tsx'
 import { ThreadRequestHistory } from './RelatedRequests.tsx'
 import type { UnreadReminderRead } from './unread-action-port.ts'
+import { threadAnchorAttribute, threadAnchorSelector, threadReadEligibleAttribute } from './threadAnchor.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
@@ -551,7 +552,7 @@ function LiveThread({ source, thread, visitRef, active = true, embedded = true, 
     {...(observation === undefined || markRead === undefined ? {} : {
       canMarkRead: viewport.canMark,
       onMarkRead: () => {
-        const seen = viewport.capture()
+        const seen = viewport.capture(true)
         const anchor = seen.at(-1)
         return anchor === undefined
           ? Promise.resolve({ detail: 'Scroll to a visible reply before marking it read.' })
@@ -573,7 +574,7 @@ function useThreadViewport(enabled: boolean) {
   // The timeline mounts only once the thread's detail is observed, so observation follows the element itself.
   const [container, timeline] = React.useState<HTMLDivElement | null>(null)
   const [canMark, setCanMark] = React.useState(false)
-  const capture = React.useRef<() => string[]>(() => [])
+  const capture = React.useRef<(readEligibleOnly: boolean) => string[]>(() => [])
   React.useLayoutEffect(() => {
     setCanMark(false)
     if (!enabled || container === null || typeof IntersectionObserver === 'undefined') return
@@ -586,11 +587,11 @@ function useThreadViewport(enabled: boolean) {
         if (tracked.has(entry.target) && entry.isIntersecting && entry.intersectionRatio >= 0.001) visible.add(entry.target)
         else visible.delete(entry.target)
       }
-      setCanMark(visible.size > 0)
+      setCanMark([...visible].some(row => row.hasAttribute(threadReadEligibleAttribute)))
     }
     // Viewport-rooted observation also clips against the pane’s ancestor scroll containers.
     const observer = new IntersectionObserver(track, { threshold: 0.001 })
-    const rows = () => [...container.querySelectorAll('[data-thread-message]')]
+    const rows = () => [...container.querySelectorAll(threadAnchorSelector)]
     const syncRows = () => {
       const current = new Set(rows())
       for (const row of tracked) {
@@ -604,20 +605,20 @@ function useThreadViewport(enabled: boolean) {
         tracked.add(row)
         observer.observe(row)
       }
-      setCanMark(visible.size > 0)
+      setCanMark([...visible].some(row => row.hasAttribute(threadReadEligibleAttribute)))
     }
     const changes = new MutationObserver(syncRows)
-    changes.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-thread-message'] })
+    changes.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: [threadAnchorAttribute, threadReadEligibleAttribute] })
     syncRows()
-    capture.current = () => {
+    capture.current = readEligibleOnly => {
       track(observer.takeRecords())
       // The sticky control can overlap a row that still intersects the viewport.
       // Recheck current scroll clipping at the moment the person presses it.
       const bounds = threadViewportBounds(container)
       // Timeline DOM order is chronological, including earlier history pages.
       const seen = rows().flatMap(row => {
-        if (!visible.has(row)) return []
-        const id = row.getAttribute('data-thread-message')
+        if (!visible.has(row) || (readEligibleOnly && !row.hasAttribute(threadReadEligibleAttribute))) return []
+        const id = row.getAttribute(threadAnchorAttribute)
         const rect = row.getBoundingClientRect()
         return id !== null && rect.top < bounds.bottom && rect.bottom > bounds.top
           && rect.left < bounds.right && rect.right > bounds.left ? [id] : []
@@ -631,7 +632,7 @@ function useThreadViewport(enabled: boolean) {
       capture.current = () => []
     }
   }, [enabled, container])
-  return { timeline, container, canMark, capture: () => capture.current() }
+  return { timeline, container, canMark, capture: (readEligibleOnly = false) => capture.current(readEligibleOnly) }
 }
 
 function threadViewportBounds(container: HTMLElement) {
@@ -715,7 +716,7 @@ function ThreadTimeline({ source, threadId, cursor, direction, agentId, agentNam
   React.useLayoutEffect(() => {
     const anchor = feed._tag === 'Observed' && feed.value.anchor?.state === 'current' ? feed.value.anchor.message_id : undefined
     if (anchor === undefined || anchor === revealedAnchor.current) return
-    const row = [...(rows.current?.querySelectorAll<HTMLElement>('[data-thread-anchor]') ?? [])].find(row => row.dataset.threadAnchor === anchor)
+    const row = [...(rows.current?.querySelectorAll<HTMLElement>(threadAnchorSelector) ?? [])].find(row => row.getAttribute(threadAnchorAttribute) === anchor)
     if (row === undefined) return
     row.scrollIntoView?.({ block: 'center', behavior: 'auto' })
     revealedAnchor.current = anchor
@@ -744,7 +745,8 @@ function ThreadTimeline({ source, threadId, cursor, direction, agentId, agentNam
         const quoted = quotedId === undefined ? undefined : feed.value.items.find(
           (candidate): candidate is ThreadMessageEvent => candidate.kind === 'message' && candidate.id === quotedId,
         )
-        return <li key={event.id} data-thread-anchor={event.id} data-thread-message={event.actor_id === agentId && feed.freshness === 'live' ? event.id : undefined} {...stylex.props(stylex.defaultMarker(), styles.event)}>
+        return <li key={event.id} {...{ [threadAnchorAttribute]: event.id,
+          [threadReadEligibleAttribute]: event.actor_id === agentId && feed.freshness === 'live' ? '' : undefined }} {...stylex.props(stylex.defaultMarker(), styles.event)}>
           <div {...stylex.props(styles.eventHeader)}>
             <strong title={sender === 'You' ? undefined : event.actor_id}>{sender}</strong>
             {time}
