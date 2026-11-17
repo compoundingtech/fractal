@@ -148,7 +148,7 @@ fn the_fractal_ci_objectives_are_declarable_over_workflow_run_claims() {
     assert_eq!((count.event.as_str(), count.at.as_str()), ("github.workflow-run", "completed_at"));
     assert_eq!(count.only, [only("workflow", &["Workspace CI"])]);
     assert_eq!(count.excludes, [Exclude { field: "flakes".into(), values: vec!["0".into()] }]);
-    assert_eq!(objectives[2].target("per-hour", false).map(|target| target.bound), Some(Bound::Max(0.0)));
+    assert_eq!(objectives[1].target("per-hour", false).map(|target| target.bound), Some(Bound::Max(0.0)));
 }
 
 #[test]
