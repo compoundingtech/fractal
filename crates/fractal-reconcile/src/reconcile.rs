@@ -937,6 +937,9 @@ impl RuntimeControl for NativeRuntime {
         }
         #[cfg(target_os = "macos")]
         {
+            if !member.one_shot {
+                return Ok(None);
+            }
             let pid = if member.terminal {
                 self.pty()?.snapshot()?.into_iter().find(|item| {
                     item.name == member.runtime_id && item.status == "running"
@@ -1044,6 +1047,10 @@ impl RuntimeControl for NativeRuntime {
         self.start_checked(member, Some(guard))
     }
     fn start_held(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<Option<Box<dyn fractal_runtime::LaunchRelease>>> {
+        if !member.one_shot {
+            self.start_guarded(member, guard)?;
+            return Ok(None);
+        }
         let operation = member.tags.get(start_jobs::OPERATION_TAG)
             .context("held native launch lacks start operation")?;
         let gate = fractal_runtime::NativeLaunchGate::prepare(&self.launch_gate_root, operation)?;
