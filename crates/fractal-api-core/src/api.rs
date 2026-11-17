@@ -514,7 +514,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -847,6 +847,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/usage", get(operations::get_usage))
         .route("/v1/slo", get(operations::get_slo))
         .route("/v1/slo/history", get(operations::get_slo_history))
+        .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(records::get_claim))
         .route("/v1/reviews", get(records::list_reviews))
@@ -2107,6 +2108,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
+        | "unknown-objective"
+        | "invalid-series"
+        | "unsupported-objective-series"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
