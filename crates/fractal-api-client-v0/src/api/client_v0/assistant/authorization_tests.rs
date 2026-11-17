@@ -804,12 +804,15 @@ agent "reads-codex" { workspace "/tmp"; command "true"; restart always; }
     for path in [
         endpoint.replace(&urlencoding::encode(&session).to_string(), "session%2Fwrong"),
         endpoint.replace("agent%2Freads-codex", "agent%2Fother"),
-        format!("{endpoint}&cursor=invalid"),
     ] {
         let (status, value, _) = fixture.request(&path, None).await;
         assert!(!status.is_success(), "{value}");
         assert!(value.get("value").is_none(), "{value}");
     }
+    let (status, value, _) = fixture.request(&format!("{endpoint}&cursor=invalid"), None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
+    assert_eq!(value["code"], "validation-failed", "{value}");
+    assert!(value.get("value").is_none(), "{value}");
 }
 
 fn thread_fixture_message(

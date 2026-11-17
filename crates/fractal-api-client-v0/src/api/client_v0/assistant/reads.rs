@@ -128,6 +128,7 @@ async fn thread_read(
                 let store_error = |error: FractalError| match error.code {
                     "thread-unavailable" => unavailable(),
                     "stale-thread-cursor" => stale(&error.message),
+                    "invalid-thread-cursor" => validation(&error.message),
                     _ => ApiError::bad(error),
                 };
                 let bind = |cursor: Option<&str>| {
