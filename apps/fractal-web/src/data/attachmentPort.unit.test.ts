@@ -336,6 +336,45 @@ describe('native attachment port', () => {
     expect(actions).toHaveLength(2)
   })
 
+  it('does not consume a newer unprotected retry generation after delayed scope selection', async () => {
+    const actions: (typeof Native.ActionRequest.Type)[] = []
+    const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input, init) => {
+      if (String(input).endsWith('/capabilities')) return Response.json(recording.capabilities)
+      actions.push(Native.decodeUnknownSync(Native.ActionRequest)(JSON.parse(String(init?.body))))
+      return Response.json({
+        api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'stale-fence',
+        message: 'Snapshot expired', retryable: true, request_id: 'request/stale', applied: 'none',
+      }, { status: 409 })
+    } })
+    const entered = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    let delayNext = false
+    const send = gatewayMessageSend(client, async () => ({ _tag: 'Success', value: 'snapshot/retry' }), {
+      repository: async () => {
+        if (delayNext) {
+          delayNext = false
+          entered.resolve()
+          await resume.promise
+        }
+        return undefined
+      },
+    })
+    const key = 'unprotected-generation'
+    expect(await send(request, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    const resend: AttachmentSendRequest = { ...request, _tag: 'Resend', idempotencyKey: key }
+    delayNext = true
+    const slow = send(resend)
+    await entered.promise
+    expect(await send(resend)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    resume.resolve()
+    expect(await slow).toMatchObject({ _tag: 'Refused', reason: 'retry-refused' })
+    expect(actions).toHaveLength(2)
+    expect(await send(resend)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    expect(actions).toHaveLength(3)
+    expect(new Set(actions.map(action => action.idempotency_key)).size).toBe(3)
+    expect(actions.every(action => JSON.stringify(action.parameters) === JSON.stringify(actions[0]?.parameters))).toBe(true)
+  })
+
   it.each(['capability', 'snapshot', 'actor', 'grant', 'preparation'] as const)(
     'retains unprotected retry intent after a pre-dispatch %s refusal',
     async failure => {

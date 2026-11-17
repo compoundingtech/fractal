@@ -382,6 +382,54 @@ describe('thread sender account and retry ownership', () => {
     expect(JSON.parse(bodies[1]!).idempotency_key).toBe(`${start.key}/retry`)
     expect(await first.read(`${start.key}/retry`)).toMatchObject({ state: 'delivered' })
   })
+
+  it.each(['protected', 'unprotected'] as const)('pins an invoked retry while another owner quickly refuses its child in %s mode', async mode => {
+    const repo = mode === 'protected' ? await open() : undefined
+    const bodies: string[] = []
+    const { client } = transport(body => {
+      bodies.push(body)
+      return Response.json(refusals['recipient-retired'], { status: 409 })
+    })
+    const delayedOwner = bind(client, repo)
+    expect(await delayedOwner.send(reply)).toMatchObject({ how: 'not-applied' })
+    const competingOwner = repo === undefined ? delayedOwner : bind(client, repo)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const capabilities = client.capabilities.bind(client)
+    vi.spyOn(client, 'capabilities').mockImplementationOnce(async () => {
+      entered.resolve()
+      await release.promise
+      return capabilities()
+    })
+    const options = { retry: true, revalidate: async () => {} }
+    const delayed = delayedOwner.send(reply, options)
+    await entered.promise
+    expect(await competingOwner.send(reply, options)).toMatchObject({ how: 'not-applied' })
+    expect(bodies).toHaveLength(2)
+    release.resolve()
+    expect(await delayed).toMatchObject({ how: 'not-applied' })
+    expect(bodies.map(body => JSON.parse(body).idempotency_key)).toEqual([reply.key, `${reply.key}/retry`])
+    if (repo !== undefined) expect(await repo.read(`${reply.key}/retry/retry`)).toBeUndefined()
+    // Only a subsequent invocation may consume the child's newly observed refusal.
+    expect(await delayedOwner.send(reply, options)).toMatchObject({ how: 'not-applied' })
+    expect(bodies.map(body => JSON.parse(body).idempotency_key)).toEqual([reply.key, `${reply.key}/retry`, `${reply.key}/retry/retry`])
+  })
+
+  it('limits a fresh sender to the refused root and its single existing child', async () => {
+    const repo = await open()
+    const { client, calls } = transport(() => Response.json(refusals['recipient-retired'], { status: 409 }))
+    const original = bind(client, repo)
+    const options = { retry: true, revalidate: async () => {} }
+    expect(await original.send(reply)).toMatchObject({ how: 'not-applied' })
+    expect(await original.send(reply, options)).toMatchObject({ how: 'not-applied' })
+    const restored = bind(client, repo)
+    expect(await restored.send(reply, options)).toMatchObject({ how: 'not-applied' })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(2)
+    expect(await repo.read(`${reply.key}/retry/retry`)).toBeUndefined()
+    expect(await restored.send(reply, options)).toMatchObject({ how: 'not-applied' })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(3)
+    expect(await repo.read(`${reply.key}/retry/retry`)).toMatchObject({ state: 'not-applied' })
+  })
 })
 
 it('never creates another retry after the fresh retry child becomes unknown', async () => {

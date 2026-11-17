@@ -630,6 +630,10 @@ Only explicit `applied: none` allows a deliberate Retry. It creates a new attemp
 the same immutable intent with a fresh snapshot, action ID and idempotency key, rather
 than replaying the old packet. Protected retries atomically require an undismissed
 not-applied predecessor and converge on one deterministic child permit across tabs.
+Each explicit Retry pins the predecessor observed when the action starts, before
+asynchronous identity reads. A concurrent retry can converge on that predecessor's
+single child but cannot advance again if the child has already been refused; a further
+generation requires another explicit Retry after observing that child's nonapplication.
 If retry preparation or current-identity checks fail before dispatch, the refusal retains
 the existing row and retry owner; a later Retry continues its already accepted child.
 Unprotected retry intent is retained only in-session and provides no crash recovery.

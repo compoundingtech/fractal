@@ -363,6 +363,71 @@ describe('chat durable gateway delivery', () => {
     },
   )
 
+  it.each(['protected scope', 'protected capability', 'unprotected scope'] as const)(
+    'pins a slow Resend to its observed generation during %s discovery',
+    async mode => {
+      const repo = mode.startsWith('protected') ? await open() : undefined
+      const { client, calls } = transport(() => Response.json({ ...bare, applied: 'none' }, { status: 409 }))
+      const entered = Promise.withResolvers<void>()
+      const resume = Promise.withResolvers<void>()
+      let delayNext = false
+      const delay = async () => {
+        if (!delayNext) return
+        delayNext = false
+        entered.resolve()
+        await resume.promise
+      }
+      const capabilities = client.capabilities.bind(client)
+      vi.spyOn(client, 'capabilities').mockImplementation(async () => {
+        if (mode === 'protected capability') await delay()
+        return capabilities()
+      })
+      const send = gatewayMessageSend(client, snapshot, { repository: async () => {
+        if (mode !== 'protected capability') await delay()
+        return repo
+      } })
+      expect(await send(request, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+      const resend: AttachmentSendRequest = { ...request, _tag: 'Resend', idempotencyKey: key }
+      delayNext = true
+      const slow = send(resend)
+      await entered.promise
+      expect(await send(resend)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+      resume.resolve()
+      expect(await slow).toMatchObject({ _tag: 'Refused', reason: 'retry-refused' })
+      expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(2)
+      if (repo !== undefined) {
+        expect(await repo.read(`${key}/retry`)).toMatchObject({ state: 'not-applied' })
+        expect(await repo.read(`${key}/retry/retry`)).toBeUndefined()
+        expect(await repo.list()).toHaveLength(2)
+      }
+      // Only a subsequent deliberate user action may advance the observed child.
+      expect(await send(resend)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+      expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(3)
+      if (repo !== undefined) {
+        expect(await repo.read(`${key}/retry/retry`)).toMatchObject({ state: 'not-applied' })
+        expect(await repo.read(`${key}/retry/retry/retry`)).toBeUndefined()
+        expect(await repo.list()).toHaveLength(3)
+      }
+    },
+  )
+
+  it('observes an existing unapplied child after reopening without advancing it in the same Resend', async () => {
+    const repo = await open()
+    const { client, calls } = transport(() => Response.json({ ...bare, applied: 'none' }, { status: 409 }))
+    const first = bind(client, repo)
+    const resend: AttachmentSendRequest = { ...request, _tag: 'Resend', idempotencyKey: key }
+    expect(await first(request, key)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    expect(await first(resend)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    const reopened = bind(client, repo)
+    expect(await reopened(resend)).toMatchObject({ _tag: 'Refused', reason: 'retry-refused' })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(2)
+    expect(await repo.read(`${key}/retry/retry`)).toBeUndefined()
+    expect(await reopened(resend)).toMatchObject({ _tag: 'Refused', reason: 'stale-fence' })
+    expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(3)
+    expect(await repo.read(`${key}/retry/retry`)).toMatchObject({ state: 'not-applied' })
+    expect(await repo.read(`${key}/retry/retry/retry`)).toBeUndefined()
+  })
+
   it('converges concurrent retries on one child and one dispatch permit', async () => {
     const repo = await open()
     let posts = 0

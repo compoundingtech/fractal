@@ -39,7 +39,12 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
   const session = new Map<string, { packet: ThreadPacket; actor: string; state: 'sending' | 'none' | 'unknown' | 'sent' }>()
   const protectedRepositories = new Map<string, IndexedDbOutbox>()
   const retryableKeys = new Set<string>()
+  const observedPredecessors = new Map<string, { id: string; revision: number }>()
   return { send: async (input, options) => {
+    // Pin the generation before repository discovery, capability checks, or target revalidation.
+    const predecessor = observedPredecessors.get(input.key)
+    const invokedSession = session.get(input.key)
+    const invokedSessionState = invokedSession?.state
     let dispatched = false
     let retryIntent = options?.retry === true || retryableKeys.has(input.key) || session.get(input.key)?.state === 'none'
     try {
@@ -86,7 +91,10 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
         const { response, value } = await capabilities()
         let retained = session.get(input.key)
         if (retained !== undefined && retained.actor !== value.session_actor) throw new Error('Return to the original account to retry this action.')
-        if (retained !== undefined && retained.state !== 'none') return retained.state === 'sent' ? { how: 'sent' } : unconfirmed
+        if (retained !== invokedSession || invokedSessionState !== 'none' || retained?.state !== 'none') {
+          if (retained !== undefined) return retained.state === 'sent' ? { how: 'sent' }
+            : retained.state === 'none' ? { how: 'not-applied', error: new Error('The retained thread attempt was explicitly not applied.') } : unconfirmed
+        }
         if (retained !== undefined) {
           const previous = retained
           previous.state = 'sending'
@@ -124,7 +132,7 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
           return retained.state === 'none' ? { how: 'not-applied', error } : unconfirmed
         }
       }
-      let record = await repo.read(input.key)
+      let record = await repo.read(predecessor?.id ?? input.key)
       const restored = record !== undefined
       if (record?.state === 'not-applied') {
         retryIntent = true
@@ -132,26 +140,30 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
       }
       if (restored) await requireOutboxScope(client, repo)
       let retryPacket: ThreadPacket | undefined
-      // Every retry has its own single-use permit. Concurrent tabs converge on the same child.
-      while (record?.state === 'not-applied') {
+      let pinnedPredecessor = predecessor
+      if (record?.state === 'not-applied') {
         if (record.packet.type === 'message.send') throw new Error('The saved action is not a thread send.')
         retryPacket = record.packet
-        const child = await repo.read(`${record.id}/retry`)
-        if (child === undefined) break
-        record = child
+        pinnedPredecessor ??= { id: record.id, revision: record.revision }
+        const child = await repo.read(`${pinnedPredecessor.id}/retry`)
+        if (child?.state === 'not-applied') {
+          observedPredecessors.set(input.key, { id: child.id, revision: child.revision })
+          return { how: 'not-applied', error: new Error('The retained thread retry was explicitly not applied.') }
+        }
+        if (child !== undefined) record = child
       }
+      if (record === undefined && predecessor !== undefined) return unconfirmed
       if (record !== undefined && record.state !== 'not-applied' && (record.mayHaveDispatched || record.state !== 'pending')) {
         return record.state === 'delivered' ? { how: 'sent' } : unconfirmed
       }
       let intent: typeof intentSchema.Type
       if (record === undefined || record.state === 'not-applied') {
-        const id = record === undefined ? input.key : `${record.id}/retry`
+        const id = pinnedPredecessor === undefined ? input.key : `${pinnedPredecessor.id}/retry`
         intent = Schema.decodeUnknownSync(intentSchema)(JSON.stringify(retryPacket === undefined ? input : {
           key: id, type: retryPacket.type, parameters: retryPacket.parameters,
         }))
         const fresh = createOutboxRecord(id, { text: intent.parameters.content, attachments: [] })
-        const predecessor = record?.state === 'not-applied' ? { id: record.id, revision: record.revision } : undefined
-        if (!await repo.accept(fresh, [], new TextEncoder().encode(Schema.encodeSync(intentSchema)(intent)), predecessor)) return unconfirmed
+        if (!await repo.accept(fresh, [], new TextEncoder().encode(Schema.encodeSync(intentSchema)(intent)), pinnedPredecessor)) return unconfirmed
         record = fresh
       } else {
         const bytes = await repo.readIntentBytes(record.id)
@@ -185,7 +197,11 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
         kind: 'message', actionId: record.packet.id, targetId: record.packet.parameters.target_id,
       }, Native.decodeUnknownSync(schema.ActionResult))
       retryableKeys.delete(input.key)
-      if (result.how === 'not-applied') retryableKeys.add(input.key)
+      if (result.how === 'not-applied') {
+        retryableKeys.add(input.key)
+        const observed = await repo.read(record.id)
+        if (observed?.state === 'not-applied') observedPredecessors.set(input.key, { id: observed.id, revision: observed.revision })
+      }
       return result.how === 'sent' ? { how: 'sent' } : result
     } catch (error) { return dispatched ? unconfirmed : { how: retryIntent ? 'retry-refused' : 'failed', error } }
   } }

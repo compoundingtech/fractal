@@ -84,6 +84,10 @@ const unconfirmed = (): ConversationPortResult<never> => ({
   _tag: 'Refused', reason: 'unconfirmed',
   detail: 'Fractal has not confirmed this message. Do not send it again.',
 })
+const retryNotApplied = (): ConversationPortResult<never> => ({
+  _tag: 'Refused', reason: 'retry-refused',
+  detail: 'The existing retry was not applied. Choose Retry again to make a new attempt.',
+})
 const storageRefusal = (): ConversationPortResult<never> => ({
   _tag: 'Refused', reason: 'storage', detail: 'This browser could not save this message safely. Nothing was sent.',
 })
@@ -99,12 +103,14 @@ const sendUnprotected = async (
   client: FractalClient, snapshot: (fresh?: boolean) => Promise<ConversationPortResult<string>>,
   input: AttachmentSendRequest, key: string, unappliedIntents: Map<string, PreparedMessageSendPacket['parameters']>,
   principals: Map<string, string>,
+  retained: PreparedMessageSendPacket['parameters'] | undefined,
   discovered?: EnvelopeOf<Capabilities>,
   onPrepared?: (messageIds: readonly string[]) => void,
   onDispatched?: () => void,
 ): Promise<ConversationPortResult<ActionResult>> => {
-  const retained = input._tag === 'Resend' ? unappliedIntents.get(key) : undefined
-  if (input._tag === 'Resend' && retained === undefined) return unconfirmed()
+  if (input._tag === 'Resend' && (retained === undefined || unappliedIntents.get(key) !== retained)) {
+    return unappliedIntents.has(key) ? retryNotApplied() : unconfirmed()
+  }
   // Consume the retry permission synchronously, before preparation can yield.
   unappliedIntents.delete(key)
   let packet: PreparedMessageSendPacket | undefined
@@ -164,7 +170,7 @@ const sendUnprotected = async (
       ? { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
       : conversationPortFailure(cause)
   } finally {
-    if (!dispatched && retained !== undefined) unappliedIntents.set(key, retained)
+    if (!dispatched && retained !== undefined && !unappliedIntents.has(key)) unappliedIntents.set(key, retained)
   }
 }
 
@@ -177,11 +183,16 @@ export const gatewayMessageSend = (
   // Only proven-unapplied immutable intent grants a deliberate new attempt.
   const unappliedIntents = new Map<string, PreparedMessageSendPacket['parameters']>()
   const scopes = new Map<string, IndexedDbOutbox['scope'] | 'unprotected'>()
+  const observed = new Map<string, Pick<OutboxRecord<PreparedPacket>, 'id' | 'revision'>>()
   const principals = new Map<string, string>()
   return async (input: AttachmentSendRequest, chosenKey?: string, onPrepared?: (messageIds: readonly string[]) => void): Promise<ConversationPortResult<ActionResult>> => {
+  const rootKey = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
+  // This invocation owns only the generation visible at the synchronous user action.
+  const predecessor = input._tag === 'Resend' ? observed.get(rootKey) : undefined
+  const retained = input._tag === 'Resend' ? unappliedIntents.get(rootKey) : undefined
   let dispatched = false
   const attempt = async (): Promise<ConversationPortResult<ActionResult>> => {
-  let key = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
+  let key = predecessor?.id ?? rootKey
   let repo: IndexedDbOutbox | undefined
   let discoveredIdentity: EnvelopeOf<Capabilities> | undefined
   try { repo = await outbox.repository(response => { discoveredIdentity = response }) } catch (cause) {
@@ -190,17 +201,19 @@ export const gatewayMessageSend = (
       : storageRefusal()
   }
   const selectedScope = repo?.scope ?? 'unprotected'
-  const originalScope = scopes.get(key)
+  const originalScope = scopes.get(rootKey)
   if (originalScope !== undefined && (originalScope === 'unprotected'
     ? selectedScope !== 'unprotected'
     : selectedScope === 'unprotected' || !sameScope(originalScope, selectedScope))) {
     return { _tag: 'Refused', reason: 'ungranted', detail: 'Return to the original account and deployment to send this message.' }
   }
-  scopes.set(key, selectedScope)
-  if (repo === undefined) return sendUnprotected(client, snapshot, input, key, unappliedIntents, principals, discoveredIdentity, onPrepared,
+  scopes.set(rootKey, selectedScope)
+  if (repo === undefined) return sendUnprotected(client, snapshot, input, rootKey, unappliedIntents, principals, retained, discoveredIdentity, onPrepared,
     () => { dispatched = true })
   let record: OutboxRecord<PreparedPacket> | undefined
   try { record = await repo.read(key) } catch { return storageRefusal() }
+  const pinnedPredecessor = predecessor ?? (input._tag === 'Resend' && record?.state === 'not-applied'
+    ? { id: record.id, revision: record.revision } : undefined)
   if (record !== undefined) {
     try {
       const current = scopeFromCapabilities(await client.capabilities())
@@ -209,13 +222,16 @@ export const gatewayMessageSend = (
       }
     } catch { return { _tag: 'Refused', reason: 'identity-unavailable', detail: 'Identity unavailable, retry later. Nothing was sent.' } }
   }
-  if (input._tag === 'Resend') {
+  if (input._tag === 'Resend' && record?.state === 'not-applied') {
     try {
-      while (record?.state === 'not-applied') {
-        const child = await repo.read(`${key}/retry`)
-        if (child === undefined) break
+      const child = await repo.read(`${key}/retry`)
+      if (child !== undefined) {
         key = child.id
         record = child
+        if (child.state === 'not-applied') {
+          observed.set(rootKey, { id: child.id, revision: child.revision })
+          return retryNotApplied()
+        }
       }
     } catch { return storageRefusal() }
   }
@@ -274,7 +290,7 @@ export const gatewayMessageSend = (
       const bytes = await repo.readIntentBytes(key)
       if (bytes === undefined) return preparationBlocked
       original = Schema.decodeUnknownSync(intentSchema)(text.decode(bytes))
-      if (input._tag === 'Resend' && record.state === 'not-applied') {
+      if (input._tag === 'Resend' && record.state === 'not-applied' && pinnedPredecessor !== undefined) {
         const predecessor = record
         const childKey = `${key}/retry`
         const spool: SpoolInput[] = []
@@ -291,7 +307,7 @@ export const gatewayMessageSend = (
         const childOriginal = { ...original, id: `action/${crypto.randomUUID()}` }
         try {
           if (await repo.accept(child, spool, utf8.encode(Schema.encodeSync(intentSchema)(childOriginal)),
-            { id: predecessor.id, revision: predecessor.revision })) {
+            pinnedPredecessor)) {
             record = child
             original = childOriginal
           } else {
@@ -302,6 +318,10 @@ export const gatewayMessageSend = (
           }
         } catch { return storageRefusal() }
         key = childKey
+        if (record.state === 'not-applied') {
+          observed.set(rootKey, { id: record.id, revision: record.revision })
+          return retryNotApplied()
+        }
         if (record.state !== 'pending' || record.mayHaveDispatched) return unconfirmed()
       }
     }
@@ -357,6 +377,11 @@ export const gatewayMessageSend = (
     dispatched = true
     if (outcome.how === 'sent') return { _tag: 'Success', value: outcome.receipt }
     if (outcome.how === 'unconfirmed') return unconfirmed()
+    // Retain the exact durable revision proven unapplied, not a later descendant.
+    try {
+      const failed = await repo.read(key)
+      if (failed?.state === 'not-applied') observed.set(rootKey, { id: failed.id, revision: failed.revision })
+    } catch { /* The refusal remains authoritative, but no new retry permission is inferred. */ }
     const cause = outcome.error
     return cause instanceof ClientError && cause.response.code === 'stale-fence'
       ? { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
