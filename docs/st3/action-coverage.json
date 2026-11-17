@@ -3567,7 +3567,7 @@
     {
       "action": "ToggleConversationFirst",
       "tests": [
-        "crates/fractal-tui/src/ui/glass.rs::opening_an_agent_attaches_its_terminal_unless_this_device_chose_conversation_first",
+        "crates/fractal-tui/src/ui/glass.rs::opening_an_agent_respects_the_default_and_stored_terminal_choice",
         "crates/fractal-tui/tests/support/attach_default.rs::attach_default_probe"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"

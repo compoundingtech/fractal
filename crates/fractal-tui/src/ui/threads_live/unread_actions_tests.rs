@@ -374,6 +374,7 @@ async fn unread_v2_peer_requires_upgrade_without_querying_new_thread_endpoints()
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     let queries = Arc::new(AtomicUsize::new(0));
     let observed = queries.clone();
+    let stream_queries = queries.clone();
     let app = axum::Router::new()
         .route("/v1/client/capabilities", axum::routing::get(|| async {
             let mut caps: serde_json::Value = serde_json::from_str(include_str!(
@@ -387,6 +388,25 @@ async fn unread_v2_peer_requires_upgrade_without_querying_new_thread_endpoints()
             ]);
             axum::Json(caps)
         }))
+        .route("/v1/client/collections/stream", axum::routing::get(
+            move |upgrade: axum::extract::ws::WebSocketUpgrade| {
+                let stream_queries = stream_queries.clone();
+                async move {
+                    // The feed negotiates capabilities only after its collection handshake.
+                    upgrade.protocols(["fractal.client.collections.v0"])
+                        .on_upgrade(move |mut socket| async move {
+                            while let Some(Ok(message)) = socket.recv().await {
+                                if let axum::extract::ws::Message::Text(text) = message {
+                                    let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                                    if matches!(command["collection"].as_str(), Some("threads" | "thread-timeline")) {
+                                        stream_queries.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                }
+                            }
+                        })
+                }
+            },
+        ))
         .fallback(move |uri: axum::http::Uri| {
             let observed = observed.clone();
             async move {
