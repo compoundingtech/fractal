@@ -154,8 +154,8 @@ export type ThreadStartOrigin = { agentId: string; sourceId: string; episode: st
 export function threadDraftKey(thread: string): string {
   return `thread-draft/${thread}`;
 }
-export function threadStartScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>): string {
-  return JSON.stringify([origin.sourceId, origin.episode]);
+export function threadStartScope(thread: string): string {
+  return `start/${thread}`;
 }
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
@@ -1184,7 +1184,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
       const signingProfile = signingKeyRef.current;
-      return trackThreadDelivery(threadStartScope(origin), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
+      return trackThreadDelivery(threadStartScope(thread), thread, () => submitThreadAction(thread, 'start', {}, async (member, key) => {
         const signing = await readPhoneSigning(signingProfile);
         if (!signing) throw new Error('Pair this phone again to sign thread messages.');
         const { signature, messageId } = await signThreadMessage(key, signing, {
