@@ -254,6 +254,7 @@ use smallclaims::windows::holds;
 
 pub mod accounts;
 pub mod declared_objectives;
+mod github_capture_config;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;

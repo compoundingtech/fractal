@@ -389,6 +389,12 @@ fn parse_desired_node(
             "an objective declaration must be at the root",
         ));
     }
+    if matches!(kind, "github-source" | "github-scope") && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "github-configuration-inside-mission",
+            "GitHub acquisition and effective-dated membership are root declarations",
+        ));
+    }
     if kind == crate::notice_owner::KIND && context.owner_run.is_some() {
         return Err(FractalError::new(
             "notice-owner-inside-mission",
@@ -1705,6 +1711,14 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     match kind {
         "account" => validate_account(node)?,
         "objective" => validate_objective(node)?,
+        "github-source" => {
+            fractal_schema::github_capture::declarations::parse_source(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-source", message))?;
+        }
+        "github-scope" => {
+            fractal_schema::github_capture::declarations::parse_roster(&canonical_node(node)?)
+                .map_err(|message| FractalError::new("invalid-github-scope", message))?;
+        }
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
