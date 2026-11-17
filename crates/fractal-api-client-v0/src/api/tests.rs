@@ -336,6 +336,106 @@ async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history()
 }
 
 #[tokio::test]
+async fn series_reads_declared_event_counts_on_both_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = parse_intent(r#"version 2
+objective "factory/work-throughput" {
+  about "Merged pull requests"
+  indicator "count" {
+    subject-prefix "custom/acme/change/"
+    event "custom.acme.change-merged" at="merged_at"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, "node").unwrap();
+    state.store.apply_internal(&intent, "series-objective").unwrap();
+    for (name, at) in [("a", 1000), ("b", 2000), ("c", 4000)] {
+        state.store.append_claim(&ClaimInput {
+            subject: format!("custom/acme/change/{name}"),
+            kind: "custom.acme.change-merged".into(),
+            actor: None,
+            fields: BTreeMap::from([("merged_at".into(), json!(at))]),
+            evidence: vec![],
+            idempotency_key: None,
+            expected_subject: None,
+        }).unwrap();
+    }
+    let app = router(state.clone());
+    for prefix in ["/v1/series", "/v1/client/series"] {
+        let (status, body) = get_request(app.clone(), &format!(
+            "{prefix}?objective=factory%2Fwork-throughput&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({
+            "from": 1000, "to": 4000, "bucket_seconds": 1,
+            "buckets": [
+                {"start": 1000, "end": 2000, "count": 1},
+                {"start": 2000, "end": 3000, "count": 1},
+                {"start": 3000, "end": 4000, "count": 0},
+            ],
+        }));
+        let (status, _) = get_request(app.clone(), &format!(
+            "{prefix}?objective=missing&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get_request(app.clone(), &format!(
+            "{prefix}?objective=factory%2Fwork-throughput&from=4000&to=1000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let denied = client_v0::series_read(
+        State(state),
+        Extension(client_v0::ClientSession::for_tests_scoped("person/fixture", "person/fixture", &["read.attention"])),
+        Query(vec![]),
+    ).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn series_counts_repeatable_claim_kinds_and_typed_field_groups() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (subject, kind, at, group) in [
+        ("custom/acme/inbox/a", "custom.acme.arrived", 1000, Some(json!("ask"))),
+        ("custom/acme/inbox/b", "custom.acme.resolved", 1001, Some(json!("update"))),
+        ("custom/acme/inbox/c", "custom.acme.arrived", 2000, None),
+        ("custom/acme/elsewhere/d", "custom.acme.arrived", 1000, Some(json!("ask"))),
+    ] {
+        let mut fields = BTreeMap::from([("at".into(), json!(at))]);
+        if let Some(group) = group { fields.insert("type".into(), group); }
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: None, fields,
+            evidence: vec![], idempotency_key: None, expected_subject: None,
+        }).unwrap();
+    }
+    let app = router(state);
+    for prefix in ["/v1/series", "/v1/client/series"] {
+        let (status, body) = get_request(app.clone(), &format!(
+            "{prefix}?kind=custom.acme.arrived&kind=custom.acme.resolved&subject_prefix=custom%2Facme%2Finbox%2F&group_by=type&from=1000&to=4000&bucket_seconds=1",
+        )).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({
+            "from": 1000, "to": 4000, "bucket_seconds": 1, "group_by": "type",
+            "buckets": [
+                {"start": 1000, "end": 2000, "count": 2, "groups": [{"value": "ask", "count": 1}, {"value": "update", "count": 1}]},
+                {"start": 2000, "end": 3000, "count": 1, "groups": [{"value": null, "count": 1}]},
+                {"start": 3000, "end": 4000, "count": 0, "groups": []},
+            ],
+        }));
+        for query in [
+            "from=1000&to=4000&bucket_seconds=1",
+            "objective=missing&kind=custom.acme.arrived&from=1000&to=4000&bucket_seconds=1",
+            "kind=custom.acme.arrived&from=1000&from=2000&to=4000&bucket_seconds=1",
+        ] {
+            let (status, _) = get_request(app.clone(), &format!("{prefix}?{query}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

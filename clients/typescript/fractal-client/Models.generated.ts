@@ -1993,7 +1993,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | AvailabilityHistory | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | AutoResolvedAsks | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | AvailabilityHistory | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | Series | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -2041,6 +2041,9 @@ export type ErrorCode = (
   | "unsupported-capability"
   | "peer-too-old"
   | "validation-failed"
+  | "unknown-objective"
+  | "invalid-series"
+  | "unsupported-objective-series"
   | "idempotency-conflict"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
@@ -4151,6 +4154,26 @@ export type SchedulesPage = {
 };
 
 export type SenderRef = string;
+
+export type Series = {
+  bucket_seconds: number;
+  buckets: Array<SeriesBucket>;
+  from: number;
+  group_by?: string;
+  to: number;
+};
+
+export type SeriesBucket = {
+  count: number;
+  end: number;
+  groups?: Array<SeriesGroup>;
+  start: number;
+};
+
+export type SeriesGroup = {
+  count: number;
+  value: unknown;
+};
 
 export type Session = ResourceHeader & {
   ended_at?: (Timestamp | null);

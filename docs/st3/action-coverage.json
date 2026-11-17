@@ -2537,6 +2537,15 @@
       "verification": "shared API restart case"
     },
     {
+      "command": "st series",
+      "description": "Read bucketed counts for a declared objective or explicit claim selection, optionally grouped by a field",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets",
+        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI JSON reads over private Unix socket; disk store reopened between reads"
+    },
+    {
       "command": "st sets ls",
       "description": "List selected owned sets",
       "tests": [

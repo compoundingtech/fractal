@@ -36,6 +36,7 @@ fn open_installs_each_domain_in_order() {
             "run-eta",
             "gate-runners",
             "wake-lookup",
+            "objective-times",
         ]
     );
 }
@@ -62,11 +63,14 @@ fn append_projects_each_claim_kind_in_order() {
         ("work.claimed", &["custom", "resource-preparation", "ordered-membership-flush"]),
         ("message.read", &["custom", "resource-preparation", "ordered-membership-flush"]),
     ] {
-        assert_eq!(taking(projectors::APPEND, kind), expected, "append order for {kind}");
+        let mut expected_with_times = vec!["objective-times"];
+        expected_with_times.extend_from_slice(expected);
+        assert_eq!(taking(projectors::APPEND, kind), expected_with_times, "append order for {kind}");
     }
     assert_eq!(
         projectors::APPEND.iter().map(|projector| projector.name).collect::<Vec<_>>(),
         [
+            "objective-times",
             "identities",
             "custom",
             "resources",
@@ -107,7 +111,7 @@ fn replicated_claims_project_credits_arrangements_read_positions_and_ordered_mem
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "usage-credits", "arrangements", "run-eta", "ordered-membership"]
+        ["objective-times", "custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "usage-credits", "arrangements", "run-eta", "ordered-membership"]
     );
 }
 
