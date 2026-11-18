@@ -47,6 +47,29 @@ only devices presenting a real signing public key enroll one. Devices can be
 revoked through the existing device revocation action, and a browser can revoke
 its own grant through `POST /v1/client/pairing/browser-requests/revoke-current`.
 
+## Internal service admission
+
+An optional `internal_services` list declares production systemd user units that
+need daemon-internal routes. Each entry contains `unit` (the exact `.service`
+name) and `exe` (the absolute executable path reported by `/proc/<pid>/exe`, not
+a launcher, symlink, or argument). Home Manager must write these declarations
+alongside the corresponding units; an absent or empty list grants no exemption.
+
+Only a connector in that exact unit beneath the daemon user's systemd user
+hierarchy, running the declared executable, may stop ancestry inspection at the
+same user's manager. Every process below the manager must remain readable and
+seat-free. Other unreadable ancestors still fail closed. The manager's
+environment and executable are not read. Its real UID, parent PID 1, `systemd`
+process name, and exact `init.scope` cgroup identify the stopping point, but
+these facts are not authority: same-UID code can forge them. Authority comes
+from the declared caller unit and executable, rechecked after the walk.
+
+Undeclared units, including ordinary `systemd-run --user` transient units, gain
+no exemption. A seat can restart a declared unit with the declared executable;
+running that real production binary is an accepted launch path. The exemption
+applies only to `/v1/internal/` and does not grant replication-worker authority
+or change other route guards.
+
 ## KDL documents
 
 Every declaration file starts with `version 2`. Declarations follow directly:

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Admit explicitly declared production user services on internal routes",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "Replication authority and other route guards are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Linux internal routes can admit configured internal_services unit/exe pairs despite an unreadable same-user systemd manager environment. Undeclared services and other unreadable ancestors receive no exemption."},
+  "downtime": {"status": "none", "detail": "No downtime beyond the normal daemon restart."},
+  "manual": {"status": "changed", "detail": "The host configuration must explicitly declare each authorized unit and its actual absolute executable path. Empty declarations grant no exemption. Restarting a declared unit with its real executable is an accepted same-user launch path."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}

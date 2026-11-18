@@ -15,6 +15,13 @@ pub struct ReservedUnixSocket {
     aliases: [Option<SocketAlias>; 2],
 }
 
+impl ReservedUnixSocket {
+    pub fn with_internal_services(mut self, services: Vec<crate::config::InternalService>) -> Self {
+        self.reserved = self.reserved.with_internal_services(services);
+        self
+    }
+}
+
 struct SocketAlias {
     path: PathBuf,
     target: &'static str,
