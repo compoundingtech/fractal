@@ -241,3 +241,25 @@ fn memory_high_throttling_alone_is_not_a_censored_peak() {
     observed.memory_events.as_mut().unwrap().high = 585;
     assert_eq!(observed.rejection(), None);
 }
+
+#[test]
+fn nearest_rank_is_exact_at_every_trailing_window_length() {
+    assert_eq!(p95(&mut []), None);
+    for count in 1_u64..=256 {
+        let mut values: Vec<_> = (1..=count).rev().collect();
+        assert_eq!(p95(&mut values), Some((count * 95).div_ceil(100)));
+    }
+}
+
+#[test]
+fn persisted_memory_and_disk_counters_preserve_the_full_unsigned_domain() {
+    let mut connection = database();
+    let mut observed = sample(1, u64::MAX);
+    observed.disk_growth_bytes = Some(u64::MAX);
+    assert_eq!(record(&mut connection, &observed), RecordOutcome::Recorded);
+    assert_eq!(record(&mut connection, &observed), RecordOutcome::Duplicate);
+    let result = reading(&connection, ready());
+    assert_eq!((result.memory_samples, result.disk_samples), (1, 1));
+    // With fewer than twenty samples the oversized peak does not replace the seed.
+    assert_eq!(result.memory_high_bytes, 1000);
+}

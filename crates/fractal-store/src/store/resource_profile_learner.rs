@@ -232,21 +232,26 @@ pub fn estimate(
     validate_identity(host, key, semantic_revision)?;
     ensure!(seed.memory_high_bytes != 0 && seed.memory_max_bytes >= seed.memory_high_bytes,
         "seed requires positive memory high and max at least high");
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT sequence,memory_peak,disk_growth FROM resource_profile_samples_v1
          WHERE host=?1 AND profile_key=?2 AND semantic_revision=?3
-         ORDER BY sequence DESC LIMIT 256",
+         ORDER BY sequence DESC LIMIT ?4",
     )?;
-    let mut rows = statement.query(params![host, key, semantic_revision])?;
-    let mut memory = Vec::with_capacity(WINDOW_SAMPLES);
-    let mut disk = Vec::with_capacity(WINDOW_SAMPLES);
+    let mut rows = statement.query(params![host, key, semantic_revision, WINDOW_SAMPLES as u32])?;
+    let mut memory = Vec::new();
+    let mut disk = Vec::new();
     let mut revision = None;
     while let Some(row) = rows.next()? {
         let sequence: u64 = row.get(0)?;
         revision.get_or_insert(sequence);
-        memory.push(row.get::<_, String>(1)?.parse::<u64>()?);
-        if let Some(bytes) = row.get::<_, Option<String>>(2)? {
-            disk.push(bytes.parse::<u64>()?);
+        if memory.is_empty() { memory.reserve_exact(WINDOW_SAMPLES); }
+        memory.push(row.get_ref(1)?.as_str()?.parse::<u64>()?);
+        if let value @ rusqlite::types::ValueRef::Text(_) = row.get_ref(2)? {
+            if disk.is_empty() { disk.reserve_exact(WINDOW_SAMPLES); }
+            disk.push(value.as_str()?.parse::<u64>()?);
+        } else {
+            ensure!(matches!(row.get_ref(2)?, rusqlite::types::ValueRef::Null),
+                "invalid persisted disk-growth counter");
         }
     }
     let memory_samples = u64::try_from(memory.len())?;
