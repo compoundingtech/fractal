@@ -111,7 +111,7 @@ it.each([
   }
 })
 
-it.each(['close', 'rename'] as const)('keeps the original %s reachable after its summary changes and the view remounts', async kind => {
+it.each(['close', 'rename'] as const)('keeps an unknown %s visible without replay after its summary changes and the view remounts', async kind => {
   const { FractalClient } = await import('@fractal/client')
   const { RegistryContext, useAtomValue } = await import('@effect/atom-react')
   const AtomRegistry = await import('effect/reactivity/AtomRegistry')
@@ -133,8 +133,7 @@ it.each(['close', 'rename'] as const)('keeps the original %s reachable after its
   const registry = AtomRegistry.make()
   const source = gatewayThreads(client, registry)
   const pendingChange = source.pendingChange
-  const retryChange = source.retryChange
-  if (!pendingChange || !retryChange) throw new Error('Expected retained lifecycle actions')
+  if (!pendingChange) throw new Error('Expected retained lifecycle actions')
   const id = 'thread/review'
   const host = document.createElement('div')
   document.body.append(host)
@@ -144,7 +143,7 @@ it.each(['close', 'rename'] as const)('keeps the original %s reachable after its
     const title = updated && kind === 'rename' ? 'New title' : 'PR #42'
     const pending = useAtomValue(pendingChange(id))
     const thread = Native.decodeUnknownSync(Native.ThreadSummary)({ id, agent_id: 'agent/atlas', title, title_revision: updated && kind === 'rename' ? 'claim/new-title' : 'claim/title', revision: updated ? 'claim/updated' : 'claim/open', state })
-    return <ThreadPanel thread={thread} embedded={false} pendingChange={pending} onRetryChange={() => retryChange(id)}
+    return <ThreadPanel thread={thread} embedded={false} pendingChange={pending}
       onRename={(title, revision) => source.rename({ summary: thread, snapshotId: base.snapshot.id }, title, revision)}
       onChangeState={state => source.changeState({ summary: thread, snapshotId: base.snapshot.id }, state)}>History</ThreadPanel>
   }
@@ -181,9 +180,10 @@ it.each(['close', 'rename'] as const)('keeps the original %s reachable after its
     }
     await act(async () => root.render(<RegistryContext.Provider value={registry}>Another view</RegistryContext.Provider>))
     await render(true)
-    await press(`Retry ${kind}`)
+    expect(host.textContent).toContain(`Fractal has not confirmed the previous ${kind}.`)
+    expect(host.textContent).toContain('Do not send it again.')
+    expect([...host.querySelectorAll('button')].some(button => button.textContent === `Retry ${kind}`)).toBe(false)
     expect(writes).toHaveLength(1)
-    expect(host.textContent).toContain(`Retry ${kind}`)
     const nextAction = kind === 'close' ? 'Reopen thread' : 'Rename'
     expect([...host.querySelectorAll('button')].find(button => button.textContent === nextAction)?.disabled).toBe(true)
   } finally { stop(); await act(async () => root.unmount()); registry.dispose(); host.remove() }

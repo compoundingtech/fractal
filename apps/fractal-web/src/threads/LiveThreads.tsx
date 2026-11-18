@@ -419,9 +419,9 @@ function PendingStartPanel({ source, start }: { readonly source: ThreadSource; r
       setRetrying(false)
     }
   }
-  return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded
-    pendingChange="thread start" retryPending={start.state === 'sending'}>
-    {start.state === 'unconfirmed' ? <p {...stylex.props(styles.note)}>Fractal has not confirmed this action. Do not send it again.</p> : null}
+  return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded>
+    {start.state === 'sending' ? <p role="status" {...stylex.props(styles.note)}>Sending…</p>
+      : start.state === 'unconfirmed' ? <p role="status" {...stylex.props(styles.note)}>Fractal has not confirmed this action. Do not send it again.</p> : null}
     {start.state === 'not-applied' ? <div data-thread-start-not-applied="" {...stylex.props(styles.retryRow)}>
       <p {...stylex.props(styles.note)}>Fractal did not apply this thread start. Retry sends the same message to the same recipient.</p>
       {retry === undefined ? null : <ActionButton variant="outline" isDisabled={retrying} onPress={() => { void retry() }}>Retry thread start</ActionButton>}
