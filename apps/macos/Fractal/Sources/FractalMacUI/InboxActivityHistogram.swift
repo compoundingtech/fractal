@@ -19,34 +19,41 @@ extension View {
   }
 }
 
+/// The top level's inbox line: the label and its 14-day strip open the full inbox; the kind tabs
+/// share the line, so they add no height.
 struct InboxActivityLabel: View {
   let model: AttentionModel
-  let count: Int
   static let height: CGFloat = 36
 
   var body: some View {
-    Button {
-      PanelMotion.open(.inbox, in: model)
-    } label: {
-      HStack(spacing: 8) {
-        Text("Inbox").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-        if let activity = model.inboxActivity[.days]?.value {
-          InboxActivityBars(activity: activity).frame(width: 84, height: 22)
-            .accessibilityLabel("Inbox activity, last 14 days")
-        } else {
-          Text("Activity unavailable").font(.caption2).foregroundStyle(.tertiary)
+    HStack(spacing: 8) {
+      Button {
+        model.inboxTab = InboxTab(model.glanceTab)
+        PanelMotion.open(.inbox, in: model)
+      } label: {
+        HStack(spacing: 8) {
+          Text("Inbox").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+          if let activity = model.inboxActivity[.days]?.value {
+            InboxActivityBars(activity: activity, tab: InboxTab(model.glanceTab)).frame(width: 84, height: 22)
+              .accessibilityLabel("Inbox activity, last 14 days")
+          } else {
+            Text("Activity unavailable").font(.caption2).foregroundStyle(.tertiary)
+          }
         }
-        Spacer(minLength: 4)
-        Text("\(count)").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+        .contentShape(.rect)
       }
-      .padding(.horizontal, 12)
-      .frame(height: Self.height)
+      .buttonStyle(.plain)
+      .accessibilityHint("Opens inbox and activity")
+      Spacer(minLength: 4)
+      InboxTextTabs(model: model)
     }
-    .buttonStyle(.plain)
-    .accessibilityHint("Opens inbox and activity")
+    .padding(.horizontal, 12)
+    .frame(height: Self.height)
   }
 }
 
+/// The full inbox's overview, above its tabs: every series on one fixed scale, the selected
+/// tab's at full strength and the others faded.
 struct InboxActivityHistogram: View {
   let model: AttentionModel
   @Environment(\.inboxActivityPeriod) private var pinned
@@ -68,12 +75,19 @@ struct InboxActivityHistogram: View {
         if let activity = model.inboxActivity[period]?.value {
           HStack(spacing: 12) {
             Text("↑ In  ↓ Out")
-            Label("Asks", systemImage: "square.fill").foregroundStyle(Color.accentColor)
-            Label("Updates", systemImage: "square.fill").foregroundStyle(
-              Color.accentColor.opacity(0.45))
+            ForEach(InboxActivity.Kind.allCases, id: \.self) { kind in
+              // The selected tab's series reads in the primary color; the swatch carries the fade.
+              let selected = model.inboxTab.kind != nil && model.inboxTab.highlights(kind)
+              HStack(spacing: 3) {
+                Image(systemName: "square.fill").foregroundStyle(InboxActivityBars.color(kind, tab: model.inboxTab))
+                Text(kind == .asks ? "Asks" : "Updates")
+                  .fontWeight(selected ? .semibold : .regular)
+                  .foregroundStyle(selected ? .primary : .secondary)
+              }
+            }
           }.font(.caption).foregroundStyle(.secondary)
           GeometryReader { geometry in
-            InboxActivityBars(activity: activity, hovered: hovered)
+            InboxActivityBars(activity: activity, tab: model.inboxTab, hovered: hovered)
               .contentShape(.rect)
               .onContinuousHover { phase in
                 switch phase {
@@ -127,18 +141,22 @@ struct InboxActivityHistogram: View {
 
 private struct InboxActivityBars: View {
   let activity: InboxActivity
+  let tab: InboxTab
   var hovered: Int?
+
+  /// Asks in the stronger tone; a series the tab does not select fades to a quarter.
+  static func color(_ kind: InboxActivity.Kind, tab: InboxTab) -> Color {
+    Color.accentColor.opacity((kind == .asks ? 1 : 0.45) * (tab.highlights(kind) ? 1 : 0.25))
+  }
 
   var body: some View {
     HistoryBars(
-      buckets: activity.buckets.map { bucket in
-        [
-          .init(value: Double(bucket.arrivals.asks), color: .accentColor),
-          .init(value: Double(bucket.arrivals.updates), color: .accentColor.opacity(0.45)),
-          .init(value: -Double(bucket.resolutions.asks), color: .accentColor),
-          .init(value: -Double(bucket.resolutions.updates), color: .accentColor.opacity(0.45)),
-        ]
+      buckets: activity.buckets.map { bucket -> [HistoryBars.Segment] in
+        let kinds = InboxActivity.Kind.allCases
+        return kinds.map { HistoryBars.Segment(value: Double(bucket.arrivals[$0]), color: Self.color($0, tab: tab)) }
+          + kinds.map { HistoryBars.Segment(value: -Double(bucket.resolutions[$0]), color: Self.color($0, tab: tab)) }
       },
+      // One scale for every tab, so switching tabs never rescales the bars.
       maximum: Double(
         activity.buckets.map { max($0.arrivals.total, $0.resolutions.total) }.max() ?? 1),
       diverging: true, hovered: hovered

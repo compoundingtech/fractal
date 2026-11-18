@@ -29,8 +29,7 @@ public struct PanelNavigationEntry: Identifiable, Hashable, Sendable {
   }
 }
 
-/// Everything a card's page shows beyond its row, read fresh when the page opens: the full
-/// request as the asker wrote it, the work it belongs to, and where its subjects stand.
+/// A card's full request from the list snapshot, optionally enriched with work and subject state.
 public struct AttentionContext: Sendable, Equatable {
   /// The card's own detail text (markdown), when it says more than the title.
   public let detail: String?

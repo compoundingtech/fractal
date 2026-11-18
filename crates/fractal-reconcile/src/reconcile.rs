@@ -600,6 +600,12 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
         anyhow::bail!("runtime does not support generation-fenced execution status")
     }
+    fn cancel_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support generation-fenced payload cancellation")
+    }
+    fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
+        anyhow::bail!("runtime does not support generation-fenced memory observations")
+    }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
     }
@@ -1037,6 +1043,25 @@ impl RuntimeControl for NativeRuntime {
         match self.exec.observe(id)? {
             Some(fractal_runtime::ExecObservation::Exited(current)) if current.generation_id == generation => Ok(current.exit_signal),
             _ => anyhow::bail!("resource execution exit status is missing or belongs to another generation"),
+        }
+    }
+    fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+        self.exec.signal_if(id, Some(generation), libc::SIGTERM)
+    }
+    fn resource_exec_memory_peak(&self, id: &str, generation: &str) -> Result<Option<u64>> {
+        let current = match self.exec.observe(id)? {
+            Some(fractal_runtime::ExecObservation::Running(current) | fractal_runtime::ExecObservation::Exited(current))
+                if current.generation_id == generation => current,
+            _ => anyhow::bail!("resource execution memory belongs to an unknown generation"),
+        };
+        let Some(unit) = current.scope_unit else { return Ok(None); };
+        let snapshot = fractal_runtime::systemd::snapshot()?;
+        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(None); };
+        anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
+        match fs::read_to_string(group.join("memory.peak")) {
+            Ok(value) => Ok(Some(value.trim().parse()?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
         }
     }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {

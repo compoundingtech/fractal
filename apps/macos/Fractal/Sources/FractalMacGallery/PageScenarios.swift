@@ -149,7 +149,7 @@ let pageScenarios: [Scenario] = [
   Scenario(
     id: "ask-decision", title: "Decision page",
     description:
-      "The urgent decision drilled into: the question in markdown, why it needs the person, reasons, the recommendation, a PR whose head moved since the ask, an attached image, the work step, the answers (one prominent) and the asker’s recent conversation."
+      "The urgent decision open beside the inbox: the question in markdown, why it needs the person, reasons, the recommendation, a PR whose head moved since the ask, an attached image, the last progress, the asker’s conversation, and the pinned picks with the recommended one preselected."
   ) { now in
     let content = Content(now: now)
     return await opened(model(content.fractal(content.asks + [content.update])), .attention("attention/ship-tray"))
@@ -164,7 +164,7 @@ let pageScenarios: [Scenario] = [
   Scenario(
     id: "ask-feedback", title: "Feedback page with a draft",
     description:
-      "A feedback ask with words typed and not sent: the draft lives on the model, so it survives the panel closing; nothing is prominent while it is unsent."
+      "A feedback ask with words typed and not sent: the draft lives on the model, so it survives the panel closing; Send (⌘Return) sends it."
   ) { now in
     let content = Content(now: now)
     let model = await opened(model(content.fractal([content.feedbackAsk])), .attention("attention/tray-copy"))
@@ -180,7 +180,7 @@ let pageScenarios: [Scenario] = [
   },
   Scenario(
     id: "update-page", title: "Update page",
-    description: "An update drilled into: its summary, the merged PR it is about, Mark Read and Snooze."
+    description: "An update open beside the inbox: its summary, the merged PR it is about, Mark Read and Snooze."
   ) { now in
     let content = Content(now: now)
     return await opened(model(content.fractal([content.update])), .attention("attention/landed"))

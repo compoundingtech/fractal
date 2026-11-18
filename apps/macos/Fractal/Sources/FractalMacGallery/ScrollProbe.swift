@@ -52,7 +52,8 @@ import FractalMacUI
         await model.refresh()
         model.open(.attention("attention/ship-tray"))
         await model.readOpenPage()
-        let size = CGSize(width: 360, height: height)
+        // The card opens beside the list: the panel is the whole split.
+        let size = CGSize(width: PanelMetrics.width + PanelMetrics.detailWidth, height: height)
         let host = NSHostingView(rootView: TrayPanel(model: model, build: GalleryBuild.identity)
           .environment(\.panelAvailableHeight, height))
         host.sizingOptions = []
@@ -96,10 +97,18 @@ import FractalMacUI
           require(answerFrame(host) == answers, "refresh moved the pinned answer controls")
         }
         require(writes.value == 0, "same-content refresh rewrote page sections")
-        // Exercise the real pinned form: a required-word answer must not submit an empty draft.
-        guard let changes = accessible("answer-choice-answer:changes", in: host),
+        // Exercise the real pinned form. The recommendation is preselected, so Send is ready; a
+        // pick only selects (nothing is sent until Send); a required-word answer must not submit
+        // an empty draft.
+        guard let hold = accessible("answer-choice-answer:hold", in: host),
+          let changes = accessible("answer-choice-answer:changes", in: host),
           let send = accessible("answer-send", in: host)
-        else { fail("scroll-probe FAIL: missing required-word controls", code: 1) }
+        else { fail("scroll-probe FAIL: missing answer controls", code: 1) }
+        require(send.isAccessibilityEnabled?() == true, "preselected recommendation left Send disabled")
+        require(hold.accessibilityPerformPress?() == true, "decline choice not pressable")
+        await settle(host, size: size)
+        require(model.answerDrafts["attention/ship-tray"]?.selected == "answer:hold", "pick did not select its draft")
+        require(model.answers["attention/ship-tray"] == nil && model.receipt == nil, "a pick submitted without Send")
         require(changes.accessibilityPerformPress?() == true, "required-word choice not pressable")
         await settle(host, size: size)
         require(model.answerDrafts["attention/ship-tray"]?.selected == "answer:changes",
@@ -116,7 +125,7 @@ import FractalMacUI
         await settle(host, size: size)
         require(model.answers["attention/ship-tray"] != nil || model.receipt != nil,
           "valid required-word answer did not submit")
-        print("scroll-probe PASS D2 width=360 appearance=\(appearance) height=\(height): answers visible and fixed; bottom reachable; 20 refreshes; zero section writes; stable scroll")
+        print("scroll-probe PASS split width=\(Int(size.width)) appearance=\(appearance) height=\(height): answers visible and fixed; recommendation preselected; pick never sends; bottom reachable; 20 refreshes; zero section writes; stable scroll")
         window.contentView = nil
       }
     }

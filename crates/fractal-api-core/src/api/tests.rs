@@ -17120,3 +17120,52 @@ async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
         server.abort();
     }
 }
+
+#[tokio::test]
+async fn native_rename_plan_and_proof_routes_are_read_only_and_symmetric() {
+    for (family, from, to, source) in [
+        ("agents", "agent/example-plan/worker", "agent/example-plan-renamed/worker",
+            "version 2\nagent \"example-plan/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n"),
+        ("missions", "mission/example-plan", "mission/example-plan-renamed",
+            "version 2\nmission \"example-plan\" state=\"ready\" { goal \"Review candidate\"; step \"review\" { assigned-to \"person/robin\"; }; }\n"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+        let expected = intent.subjects.keys().chain(intent.missions.values().map(|mission| &mission.subject)).map(|subject| {
+            (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+        }).collect();
+        state.store.apply(&intent, &expected, "example-plan-declare").unwrap();
+        let before = state.store.selected_desired_token(from).unwrap();
+        let app = router(state.clone());
+        let request = json!({
+            "from": from, "to": to, "actor": "person/robin",
+            "reason": "Clarify responsibility", "idempotency_key": "example-plan",
+            "expected_naming_revision": null, "expected_declaration": null,
+        });
+        let (status, plan) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id/plan"), request.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["request"], request);
+        let digest = plan["request_digest"].as_str().unwrap();
+        assert_eq!(state.store.selected_desired_token(from).unwrap(), before);
+        let (status, receipt) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id"), request,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        let applied = state.store.selected_desired_token(from).unwrap();
+        for suffix in [String::new(), format!("&request_digest={digest}")] {
+            let path = format!("/v1/{family}/rename-proof?from={from}&to={to}{suffix}");
+            let (status, proof) = get_request(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{proof}");
+            assert_eq!(proof["availability"], "selected", "{proof}");
+            assert_eq!(proof["request_digest"], digest);
+            assert_eq!(state.store.selected_desired_token(from).unwrap(), applied);
+        }
+        let response = app.oneshot(Request::builder()
+            .uri(format!("/v1/{family}/rename-proof?from={from}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}

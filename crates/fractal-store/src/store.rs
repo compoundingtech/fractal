@@ -22,6 +22,7 @@ pub mod deploy;
 pub mod host_holds;
 pub mod resource_membership;
 pub mod shell_resources;
+pub mod resource_exec_receipts;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;

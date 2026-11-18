@@ -9,6 +9,14 @@ public enum PanelMetrics {
   /// Control Center is about 310 pt wide; the tray takes 50 pt more so a row's title, asker and
   /// age share one line.
   public static let width: CGFloat = 360
+  /// An open card's column, beside the page it was picked from: the panel widens to
+  /// `width + detailWidth` (760 pt), a list | detail split as Mail and Messages draw it.
+  public static let detailWidth: CGFloat = 400
+  /// The split is never shorter than this (less on a short screen): the detail's pinned answers
+  /// and the start of its request share the column even beside a short page.
+  static let splitMinHeight: CGFloat = 560
+  /// One appearance-aware tint over the window's glass: leave 55% of its backdrop contrast.
+  static let surfaceTintOpacity: Double = 0.45
   /// Leading and trailing content inset: titles, rows and section labels share this edge.
   static let inset: CGFloat = 14
   /// The hover highlight's inset from the panel edge and its corner radius.
@@ -169,17 +177,32 @@ extension EnvironmentValues {
   }
 }
 
+private struct PanelDetailOpenKey: EnvironmentKey {
+  static let defaultValue = false
+}
+
+extension EnvironmentValues {
+  /// A card is open beside this page: Esc closes the card first, and the page's own Back takes
+  /// the card with it.
+  var panelDetailOpen: Bool {
+    get { self[PanelDetailOpenKey.self] }
+    set { self[PanelDetailOpenKey.self] = newValue }
+  }
+}
+
 /// A drilled-in page's header: back, the page title, and an optional trailing control (a
 /// switch, as Wi-Fi's and Bluetooth's pages have). A hairline separates it from the content.
 struct PageHeader<Trailing: View>: View {
   let title: String
   let model: AttentionModel
   @ViewBuilder let trailing: () -> Trailing
+  @Environment(\.panelDetailOpen) private var detailOpen
 
   var body: some View {
     VStack(spacing: 0) {
       HStack(spacing: 6) {
         Button {
+          if detailOpen { model.back() }
           PanelMotion.back(in: model)
         } label: {
           Image(systemName: "chevron.left")
@@ -188,8 +211,9 @@ struct PageHeader<Trailing: View>: View {
             .contentShape(.rect)
         }
         .buttonStyle(.borderless)
-        .keyboardShortcut(.cancelAction)
-        .help("Back (Esc)")
+        // With a card open beside the page, Esc belongs to the card's Close.
+        .keyboardShortcut(detailOpen ? nil : .cancelAction)
+        .help(detailOpen ? "Back" : "Back (Esc)")
         .accessibilityLabel("Back")
         Text(title).font(.headline).lineLimit(1).accessibilityAddTraits(.isHeader)
           // A push lands VoiceOver on the page it opened; Back lands on what opened the page left.
@@ -285,14 +309,18 @@ struct SectionLabel: View {
 }
 
 /// A full-width row that highlights under the pointer like a Control Center row: the highlight
-/// is feedback only, every row's action is the click itself (keyboard: Tab, Space).
+/// is feedback only, every row's action is the click itself (keyboard: Tab, Space). The row
+/// whose card is open beside the list keeps a selection fill, as a Mail list row does.
 struct PanelRowButtonStyle: ButtonStyle {
+  var selected = false
+
   func makeBody(configuration: Configuration) -> some View {
-    PanelRowBody(configuration: configuration)
+    PanelRowBody(configuration: configuration, selected: selected)
   }
 
   private struct PanelRowBody: View {
     let configuration: Configuration
+    let selected: Bool
     @State private var hovering = false
 
     var body: some View {
@@ -302,20 +330,23 @@ struct PanelRowButtonStyle: ButtonStyle {
         .contentShape(.rect)
         .background {
           RoundedRectangle(cornerRadius: PanelMetrics.highlightRadius, style: .continuous)
-            .fill(.fill.tertiary)
-            .opacity(configuration.isPressed ? 1 : hovering ? 0.7 : 0)
+            .fill(selected ? AnyShapeStyle(.tint.opacity(0.22)) : AnyShapeStyle(.fill.tertiary))
+            .opacity(selected || configuration.isPressed ? 1 : hovering ? 0.7 : 0)
             .padding(.horizontal, PanelMetrics.highlightInset)
         }
         .onHover { hovering = $0 }
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
   }
 }
 
 extension ButtonStyle where Self == PanelRowButtonStyle {
   static var panelRow: PanelRowButtonStyle { .init() }
+  static func panelRow(selected: Bool) -> PanelRowButtonStyle { .init(selected: selected) }
 }
 
-/// A content-layer group (Control Center's platter, without glass: the panel is the glass).
+/// A content-layer group (Control Center's platter, without extra glass).
+/// The panel's window supplies the glass, with one shared root tint beneath all content.
 struct Platter<Content: View>: View {
   var padding: CGFloat = 10
   @ViewBuilder let content: () -> Content
