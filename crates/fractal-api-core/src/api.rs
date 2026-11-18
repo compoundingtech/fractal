@@ -664,6 +664,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/resources/{id}", get(resources::show))
         .route("/v1/internal/resources/{id}/wait", post(resources::wait))
         .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
+        .route("/v1/internal/resources/{id}/member-scope", get(resources::member_scope))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -8577,7 +8578,7 @@ async fn health(
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
-        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2,"resource_profile_keys":1},
     });
     if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
         health["service_manager"] = supervisor;

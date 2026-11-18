@@ -9,6 +9,8 @@ pub const PARENT_ENV: &str = "FRACTAL_RESOURCE_PARENT";
 pub struct ParentContext {
     pub grant: Grant,
     pub request: LaneRequest,
+    #[serde(default)]
+    pub root_exec_id: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
@@ -56,6 +58,16 @@ pub struct Execution {
     pub head_start: Option<String>,
     pub clean_start: Option<bool>,
     pub result: Option<PayloadResult>,
+    /// Host-derived root identity; labels supplied in the payload environment never set it.
+    #[serde(default)]
+    pub root_exec_id: String,
+    #[serde(default)]
+    pub receipt_subject: Option<String>,
+    /// Digest of the initial semantic submission, before host profile resolution.
+    #[serde(default)]
+    pub submission_digest: Option<String>,
+    #[serde(default)]
+    pub refusal_code: Option<resource_membership::RefusalCode>,
 }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
@@ -87,21 +99,42 @@ fn checkpoint_shell_scrub(connection: &Connection) -> Result<()> {
     anyhow::ensure!(busy == 0, "shell environment scrub checkpoint busy; refusing to open store");
     Ok(())
 }
+fn submission_digest(command: &Command) -> Result<String> {
+    use sha2::Digest as _;
+    // Ambient environment values are transport-only, never replay identity or audit data.
+    let body = serde_json::to_vec(&("shell-resource-submission-v1", &command.id, &command.lane,
+        &command.argv, &command.cwd, command.timeout_ms, &command.parent))?;
+    Ok(format!("{:x}", sha2::Sha256::digest(body)))
+}
+
 
 impl Store {
     pub fn submit_shell_resource(&self, mut command: Command, now: u64) -> Result<Execution> {
         anyhow::ensure!(!command.id.is_empty() && !command.argv.is_empty(), "shell execution requires identity and argv");
         anyhow::ensure!(command.cwd.starts_with('/'), "shell execution cwd must be absolute");
+        anyhow::ensure!(command.argv.iter().all(|argument| !argument.contains('\0')), "resource argv contains NUL");
+        let submission_digest = submission_digest(&command)?;
+        let root_exec_id = if let Some(parent) = &command.parent {
+            let member = self.resource_membership_for_grant(parent)?;
+            anyhow::ensure!(member.request == command.lane, "nested command must retain the verified parent request");
+            member.request.id.strip_prefix("shell:").context("nested shell parent is not a shell execution")?.to_owned()
+        } else { command.id.clone() };
         let environment = std::mem::take(&mut command.environment);
-        // Serialize submission with launch lookup, including an explicitly empty
-        // environment. Absence means a restart lost the caller's launch context.
+        // Serialize submission with launch lookup; absence after restart refuses launch.
         let mut environments = self.shell_environments.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
-            stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None };
+            stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
+            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None };
         // One row per command does not bound its serialized argv/result bytes.
-        self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",
+        let inserted = self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
+        if inserted == 0 {
+            let existing = self.shell_resource(&execution.command.id)?;
+            anyhow::ensure!(existing.submission_digest.as_deref() == Some(submission_digest.as_str()),
+                "shell execution identity conflicts with a different or historical submission");
+            return Ok(existing);
+        }
         environments.insert(execution.command.id.clone(), environment);
         drop(environments);
         self.resource_admission_elapsed(&format!("shell-wait:{}", execution.command.id), now, now);
@@ -142,6 +175,10 @@ impl Store {
         next.command.environment.clear();
         next.cancel |= previous.cancel;
         next.revision = previous.revision;
+        if next.root_exec_id.is_empty() { next.root_exec_id.clone_from(&next.command.id); }
+        if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") && next.command.parent.is_none() {
+            next.receipt_subject = Some(resource_exec_receipts::subject(&self.origin, &next));
+        }
         if next == previous { return Ok(false); }
         next.revision += 1;
         // Primary-key selection bounds rows, not replacement body bytes or retained rows.
@@ -240,6 +277,7 @@ mod tests {
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             class: RequestClass::Check, disk: None, io: None, coverage: Coverage::Logical,
             admission_timeout_ms: None,
+            profile: None, profile_estimate: None, disk_path: None,
             owner: Owner { run: format!("shell:{id}"), step: format!("shell:{id}"), attempt: 1, invocation: Some(format!("shell:{id}")) },
         }, argv: vec!["true".into()], cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None }
     }
@@ -356,6 +394,22 @@ mod tests {
         let store = Store::open(&path, "host-a").unwrap();
         assert_eq!(store.shell_resource("pending").unwrap().state, "waiting");
         assert!(store.take_shell_environment("pending").is_none());
+    }
+
+    #[test]
+    fn stable_submission_id_never_relaunches_or_replaces_semantic_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("store.db")).unwrap();
+        let first = command("stable");
+        let accepted = store.submit_shell_resource(first.clone(), 10).unwrap();
+        let mut retry = first.clone();
+        retry.environment.insert("VOLATILE_SECRET".into(), "not-identity".into());
+        let repeated = store.submit_shell_resource(retry, 20).unwrap();
+        assert_eq!(repeated.queued_at, accepted.queued_at);
+        assert_eq!(repeated.revision, accepted.revision);
+        let mut conflicting = first;
+        conflicting.argv = vec!["false".into()];
+        assert!(store.submit_shell_resource(conflicting, 30).is_err());
     }
 
     #[test]

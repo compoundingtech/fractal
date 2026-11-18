@@ -5754,6 +5754,16 @@ fn cli_main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Membership inspection is offline: no telemetry runtime, identity lookup or daemon client.
+    if let Command::Resources { command: resources_cli::ResourcesCommand::InMember { owner_uid } } = &cli.command {
+        return match resources_cli::in_member(*owner_uid, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                stderr_message("fractal", format_args!("{error:#}"));
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Validation must precede identity lookup, configuration loading and client construction.
     if let Command::Validate(args) = &cli.command {
         return match run_validate(args, cli.json) {
@@ -7936,6 +7946,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
+                    "resource_profile_keys": 1,
                     "per_run_missions": 1,
                     "shell_resource_exec": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),

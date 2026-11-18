@@ -1506,6 +1506,7 @@ mission "shell-owner" state="ready" {{
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
+            profile: None, profile_estimate: None, disk_path: None,
         };
         let now = u64::try_from(now_ms()).unwrap();
         let mut execution = store.submit_shell_resource(Command {
