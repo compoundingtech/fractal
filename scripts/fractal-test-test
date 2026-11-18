@@ -1033,6 +1033,18 @@ class StTest(unittest.TestCase):
         trees = mock.patch.object(st_test, 'needs_tree', return_value=True)  # demo stands in for a check that builds, so the pool is exercised
         trees.start()
         self.addCleanup(trees.stop)
+        self.native_bin = tmp / 'native-bin'
+        self.native_bin.mkdir()
+        native = self.native_bin / 'fractal'
+        native.write_text(f'#!{sys.executable}\nimport json,os,sys\n'
+                          'a=sys.argv[1:]\n'
+                          'if a[a.index("resources")+1]=="cancel":\n'
+                          ' print(json.dumps({"requestId":a[a.index("--request-id")+1],"cancelled":True,"tombstone":True,"execution":None})); sys.exit(0)\n'
+                          'a=a[a.index("--")+1:]\nos.execvpe(a[0],a,os.environ)\n')
+        native.chmod(0o755)
+        native_path = mock.patch.dict(GIT_ENV, PATH=f'{self.native_bin}:{GIT_ENV.get("PATH", os.defpath)}')
+        native_path.start()
+        self.addCleanup(native_path.stop)
 
     def test_fixture_push_does_not_start_remote_maintenance(self):
         self.commit('b.txt', 'two')
@@ -1126,16 +1138,6 @@ class StTest(unittest.TestCase):
             st_test.LOCAL['demo'] = command
         out, err = io.StringIO(), io.StringIO()
         env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, ST_TEST_TMP=str(self.run_tmp), **(extra_env or {}))
-        native_bin = Path(self.tmp.name, 'native-bin')
-        native_bin.mkdir(exist_ok=True)
-        native = native_bin / 'fractal'
-        native.write_text(f'#!{sys.executable}\nimport json,os,sys\n'
-                          'a=sys.argv[1:]\n'
-                          'if a[1:3]==["resources","cancel"]:\n'
-                          ' print(json.dumps({"requestId":a[a.index("--request-id")+1],"cancelled":True,"tombstone":True,"execution":None})); sys.exit(0)\n'
-                          'a=a[a.index("--")+1:]\nos.execvpe(a[0],a,os.environ)\n')
-        native.chmod(0o755)
-        env['PATH'] = f'{native_bin}:{env.get("PATH", os.defpath)}'
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
@@ -1620,12 +1622,15 @@ class StTest(unittest.TestCase):
         self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
         marker = Path(self.tmp.name) / 'grandchild-alive'
         script = f'(sleep 30; touch {marker}) & echo started >&2; sleep 30'
-        with mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', script]):
+        with mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', script]), \
+                mock.patch.object(st_test, 'admission_clock', wraps=st_test.admission_clock) as clock:
             code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MEMBERS_LIMIT': '2'})
+        command = clock.call_args.args[0]
+        self.assertEqual(command[command.index('--timeout') + 1], '2000')
         self.assertEqual(code, 1, out + err)
         self.assertEqual(self.statements(), [])
         self.assertIn('NOT RUN', out)
-        self.assertIn('materializing the megarepo members timed out after 2s', out)
+        self.assertIn('materializing the megarepo members timed out (ST_TEST_MEMBERS_LIMIT or --queue-limit)', out)
         self.assertIn('started', err)
         time.sleep(1)
         self.assertFalse(marker.exists(), 'the process group was killed, not only its leader')
@@ -1749,8 +1754,8 @@ class StTest(unittest.TestCase):
     def test_ci_local_reports_native_wait_and_payload_boundaries_without_a_load_gate(self):
         source = (ROOT / 'scripts/ci-local').read_text()
         self.assertNotIn('waiting: load1', source)
-        self.assertLess(source.index("printf 'wait "), source.index('exec fractal resources exec'))
-        self.assertLess(source.index('exec fractal resources exec'), source.index("printf 'slot "))
+        self.assertLess(source.index("printf 'wait "), source.index('exec "${native[@]}"'))
+        self.assertLess(source.index('exec "${native[@]}"'), source.index("printf 'slot "))
 
     def test_the_waits_for_a_build_slot_have_a_limit_of_their_own(self):
         self.commit('b.txt', 'two')
@@ -2310,6 +2315,7 @@ finally:
         self.assertEqual(marker.read_text(), 'unwound')
 
     def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
+        elsewhere = self.home / 'elsewhere'
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
         command = ['sh', '-c', f'echo "${{CARGO_TARGET_DIR:-none}}" >> {seen}']
@@ -2327,25 +2333,26 @@ finally:
                 self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # the pool's own: emptied, tag or none
             self.assertFalse((target / 'junk').exists())
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': 'off'})[0], 0)
-            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': str(elsewhere)})[0], 0)
             shared = self.home / 'shared-target'
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': str(shared)})[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
-        self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
+        self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', str(elsewhere), str(shared), 'none'])
 
     def test_a_check_that_builds_keeps_cargos_intermediates_beside_its_target_whatever_build_dir_the_host_sets(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
+        elsewhere = self.home / 'elsewhere'
         command = ['sh', '-c', f'echo "${{CARGO_TARGET_DIR:-none}} ${{CARGO_BUILD_BUILD_DIR:-none}}" >> {seen}']
         host = {'CARGO_BUILD_BUILD_DIR': '/srv/build/cargo/{workspace-path-hash}'}
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=host)[0], 0)
-            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=dict(host, CARGO_TARGET_DIR='/elsewhere'))[0], 0)
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=dict(host, CARGO_TARGET_DIR=str(elsewhere)))[0], 0)
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=dict(host, ST_EVIDENCE_TARGET='off'))[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env=host)[0], 0)  # builds nothing: left as it is
         target, tree = self.pool() / 'target-0', self.pool() / 'tree-0'
         self.assertEqual(seen.read_text().splitlines(), [
-            f'{target} {target}', '/elsewhere /elsewhere', f'none {tree / "target"}', 'none /srv/build/cargo/{workspace-path-hash}'])
+            f'{target} {target}', f'{elsewhere} {elsewhere}', f'none {tree / "target"}', 'none /srv/build/cargo/{workspace-path-hash}'])
 
     def test_a_host_build_dir_removed_after_the_build_leaves_the_dep_info_check_its_units(self):
         # A real cargo build of a one-file crate whose cargo config, as a build host's did, puts intermediates in a build-dir of their
@@ -3099,7 +3106,9 @@ finally:
         git(self.work, 'commit', '-q', '--allow-empty', '-m', 'only on the remote')
         theirs = git(self.work, 'rev-parse', 'HEAD')
         git(self.work, 'push', '-q', 'origin', 'feature')
-        git(self.work, 'reset', '-q', '--hard', 'HEAD^')
+        git(self.work, 'checkout', '-q', '--detach', 'HEAD^')
+        git(self.work, 'update-ref', 'refs/heads/feature', 'HEAD')
+        git(self.work, 'checkout', '-q', 'feature')
         code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
         self.assertIn(f'origin/feature has commits this branch lacks ({theirs[:12]})', str(code))
         self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], theirs)  # never forced
@@ -3526,7 +3535,8 @@ finally:
         (self.home / '.local/bin').mkdir(parents=True, exist_ok=True)
         with mock.patch.dict(os.environ, {'HOME': str(self.home)}):
             entries = st_test.check_path().split(':')
-        self.assertEqual(entries[:2], [str(self.home / '.local/bin'), str(self.home / '.cargo/bin')])
+        self.assertEqual(entries[0], str(self.home / '.cargo/bin'))
+        self.assertNotIn(str(self.home / '.local/bin'), entries)
 
     def test_checks_build_without_incremental_state_unless_the_caller_chose(self):
         self.commit('b.txt', 'two')
@@ -3647,12 +3657,14 @@ finally:
     def test_the_checks_do_not_see_the_agent_seats_variables_but_the_hosts_ranking_name_and_the_switches_stay(self):
         self.commit('b.txt', 'two')
         seat = {'ST_MISSION': 'm', 'ST3_ENDPOINT': 'e', 'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c', 'ANTHROPIC_API_KEY': 'k',
-                'ST_AGENT': 'agent/x', 'ST_AGENT_FOO': 'x', 'ST_SKIP_EVIDENCE': '0', 'ST_EVIDENCE_TIME_LIMIT': '9'}
+                'ST_AGENT': GIT_ENV.get('ST_AGENT', 'agent/x'), 'ST_AGENT_FOO': 'x',
+                'ST_SKIP_EVIDENCE': '0', 'ST_EVIDENCE_TIME_LIMIT': '9'}
         out = Path(self.tmp.name) / 'seen'
         code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
         self.assertEqual(code, 0, err)
         seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
-        for name in ('ST_MISSION', 'ST3_ENDPOINT', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ST_AGENT_FOO'):
+        self.assertEqual(seen['ST3_ENDPOINT'], 'e')
+        for name in ('ST_MISSION', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ST_AGENT_FOO'):
             self.assertNotIn(name, seen)
         for name in ('ST_AGENT', 'ST_SKIP_EVIDENCE', 'ST_EVIDENCE_TIME_LIMIT'):
             self.assertIn(name, seen)
@@ -3667,14 +3679,15 @@ finally:
         for name in seat:
             self.assertNotIn(name, seen)
 
-    def test_a_check_sees_no_fractal_variable_of_the_seat(self):
+    def test_a_check_keeps_native_endpoint_but_no_other_fractal_variable_of_the_seat(self):
         self.commit('b.txt', 'two')
-        seat = {'FRACTAL_ENDPOINT': '/seat/st3.sock', 'FRACTAL_AGENT': 'agent/x', 'FRACTAL_BIN': '/seat/st3'}
+        seat = {'FRACTAL_ENDPOINT': '/seat/st3.sock', 'FRACTAL_AGENT': GIT_ENV.get('FRACTAL_AGENT', 'agent/x'), 'FRACTAL_BIN': '/seat/st3'}
         out = Path(self.tmp.name) / 'seen'
         code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
         self.assertEqual(code, 0, err)
         seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
-        self.assertEqual([name for name in seen if name.startswith('FRACTAL_')], [])
+        self.assertEqual({name: value for name, value in seen.items() if name.startswith('FRACTAL_')},
+                         {'FRACTAL_ENDPOINT': '/seat/st3.sock'})
 
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')
