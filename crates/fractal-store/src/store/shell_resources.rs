@@ -119,7 +119,7 @@ fn checkpoint_shell_scrub(connection: &Connection) -> Result<()> {
     anyhow::ensure!(busy == 0, "shell environment scrub checkpoint busy; refusing to open store");
     Ok(())
 }
-fn submission_digest(command: &Command) -> Result<String> {
+pub fn submission_digest(command: &Command) -> Result<String> {
     use sha2::Digest as _;
     // Ambient environment values are transport-only, never replay identity or audit data.
     let body = if let Some(request_id) = &command.request_id {
@@ -243,6 +243,12 @@ impl Store {
     pub fn shell_resource(&self, id: &str) -> Result<Execution> {
         let body: String = self.readers.get().query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [id], |row| row.get(0))?;
         Ok(serde_json::from_str(&body)?)
+    }
+
+    pub fn shell_resource_if_exists(&self, id: &str) -> Result<Option<Execution>> {
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT body FROM shell_resources_v1 WHERE id=?1", [id], |row| row.get(0)).optional()?;
+        body.map(|body| serde_json::from_str(&body).map_err(anyhow::Error::from)).transpose()
     }
 
     pub fn shell_resource_by_request(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid) -> Result<Option<Execution>> {
