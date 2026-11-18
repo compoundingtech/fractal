@@ -95,7 +95,7 @@ fn fold(connection: &Connection, subject: &str) -> Result<()> {
                             'tags',json_extract(body,'$.fields.tags')),
                 CAST(accepted_at_unix_ms AS INTEGER)
          FROM claims WHERE subject=?1 AND kind='message.sent'
-         ORDER BY length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC LIMIT 1",
+         ORDER BY CAST(accepted_at_unix_ms AS INTEGER),id LIMIT 1",
         [subject], |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?;
     let sent = match sent {
