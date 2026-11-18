@@ -101,17 +101,19 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
 /// Keep the completion marker separate from the scrub: a crash or busy checkpoint
 /// before physical erasure must repeat the rewrite on the next open.
 fn scrub_historical_environments(connection: &Connection) -> Result<()> {
-    connection.execute_batch("PRAGMA secure_delete=ON;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3c3043b9f6fc owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "PRAGMA secure_delete=ON;
         CREATE TABLE IF NOT EXISTS shell_environment_scrub_v1 (complete INTEGER PRIMARY KEY CHECK(complete=1));")?;
     let complete: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM shell_environment_scrub_v1)", [], |row| row.get(0))?;
     if complete { return Ok(()); }
+    // Historical JSON bodies remain unbounded; scrubbing preserves their other fields.
     connection.execute(
-        "UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment',json('{}'))", [])?;
+        /* sqlite-large-value: allow-for-now lv-h9abbf1dff207 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET body=json_set(body,'$.command.environment',json('{}'))", [])?;
     checkpoint_shell_scrub(connection)?;
-    connection.execute_batch("VACUUM")?;
+    // Physical reclamation still processes the whole database, not bounded units.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h017f6a53ca41 owner=fractal_store::store::shell_resources TODO=trace-statement-and-value-representation */ "VACUUM")?;
     checkpoint_shell_scrub(connection)?;
-    connection.execute("INSERT INTO shell_environment_scrub_v1(complete) VALUES(1)", [])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-haceef5fded64 owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_environment_scrub_v1(complete) VALUES(1)", [])?;
     Ok(())
 }
 

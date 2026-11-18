@@ -208,11 +208,17 @@ mod tests {
     fn nested_execution_claims_only_the_charged_membership() {
         let store = Store::open_memory("host-a").unwrap();
         let parent = terminal(&store, "parent", "completed");
+        store.start_resource_authority("host-a", "epoch").unwrap();
+        let grant = match store.request_resource_membership(&parent.command.lane,
+            super::super::resource_membership::Fit {
+                room: parent.command.lane.capacity, ..Default::default()
+            }, 10).unwrap() {
+            super::super::resource_membership::Admission::Admitted(grant) => grant,
+            other => panic!("expected admitted parent: {other:?}"),
+        };
         let mut child_command = command("child");
-        child_command.parent = Some(super::super::resource_membership::Grant {
-            membership_id: "parent".into(), authority_epoch: "epoch".into(),
-            generation: "generation".into(), coverage: Coverage::Logical,
-        });
+        child_command.lane = parent.command.lane.clone();
+        child_command.parent = Some(grant);
         let mut child = store.submit_shell_resource(child_command, 10).unwrap();
         child.state = "completed".into();
         store.update_shell_resource(&child).unwrap();
