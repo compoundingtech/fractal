@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make the reserved client-control-fixture instance permanently local-only with typed fleet, replication and peer-relay refusals and health proof.",
+  "replay": {"status": "none", "detail": "No startup replay or history rewrite."},
+  "schema": {"status": "none", "detail": "No claim, store or generated client schema changes. The health response adds network_policy with the enforced mode and network capability booleans."},
+  "rules": {"status": "none", "detail": "No admission vocabulary, canonical ordering, checkpoint or retention changes."},
+  "compatibility": {"status": "changed", "detail": "The reserved client-control-fixture instance refuses fleet operations, replication workers and peer relays. Existing fleet membership or peer configuration fails startup closed. Default and other named instances keep their existing behavior. Paired fixture client transport remains available."},
+  "manual": {"status": "none", "detail": "Source-only change; no setup, instance initialization, enrollment, grant, service exposure or live activation is authorized or performed."},
+  "recovery": {"status": "none", "detail": "There is no configuration bypass for the reserved instance. Incorrect fleet or peer configuration must be removed before it can start; no automatic cleanup of state is performed."},
+  "downtime": {"status": "unknown", "detail": "No builds, tests, daemon launches or restarts were run for this source change."}
+}

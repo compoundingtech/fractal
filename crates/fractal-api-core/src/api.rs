@@ -164,6 +164,7 @@ mod request_latency;
 mod client_observations;
 pub mod client_push;
 pub mod client_commands;
+pub mod client_control_enrollment;
 pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
@@ -197,6 +198,7 @@ pub mod records;
 mod write_principal;
 mod native_delivery;
 pub mod replication;
+mod local_only;
 mod replication_replay;
 mod runs;
 mod continuity;
@@ -1117,6 +1119,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             (state.clone(), transport),
             response_envelope,
         ))
+        .layer(from_fn_with_state(state.clone(), local_only::enforce))
         .with_state(state)
 }
 
@@ -6914,6 +6917,9 @@ pub fn remote_unavailable(host: &str) -> ApiError {
 
 /// A known dial-out owner syncs outward but has no inbound owner transport.
 pub fn remote_unavailable_for_owner(state: &AppState, host: &str) -> ApiError {
+    if state.local_only() {
+        return local_only::refusal(crate::config::NetworkOperation::PeerRelay);
+    }
     let dial_out = if let Some(relay) = &state.client_relay {
         relay.is_dial_out_owner(host)
     } else {
@@ -7591,6 +7597,10 @@ async fn serve_reserved_unix_with_lookup_ready(
         // Every local connection names its caller, so request counts by client are always on.
         let mut diagnostic_connection = crate::relay_trace::Connection::capture();
         let peer_pid = local_peer_pid(&stream);
+        let operator_peer = UnixOperatorPeer {
+            // Both values are supplied by the kernel, never by request metadata.
+            same_uid: stream.peer_cred().is_ok_and(|credentials| credentials.uid() == unsafe { libc::geteuid() }),
+        };
         // This must precede dispatch: the numeric peer PID can be recycled while
         // a descendant continues using the connector's inherited socket.
         let (peer_process, peer_capture_error) = match local_peer_process(&stream) {
@@ -7661,6 +7671,7 @@ async fn serve_reserved_unix_with_lookup_ready(
                 let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
+                    request.extensions_mut().insert(operator_peer);
                     if let Some(cause) = ancestry_cause {
                         request.extensions_mut().insert(cause);
                     }
@@ -8030,6 +8041,12 @@ fn observed_harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProce
 {
     Err(AncestryUnavailableCause { pid: Some(pid),
         reason: AncestryUnavailableReason::UnsupportedPlatform })
+}
+
+/// Kernel-established Unix connector identity for privileged fixture enrollment.
+#[derive(Clone, Copy, Debug)]
+pub struct UnixOperatorPeer {
+    pub same_uid: bool,
 }
 
 #[derive(Clone)]
@@ -8552,6 +8569,8 @@ async fn health(
     State(state): State<AppState>,
     supervisor: Option<Extension<SupervisorHealth>>,
 ) -> Result<Json<Value>, ApiError> {
+    let network_policy = crate::config::NetworkPolicy::for_state_dir(&state.state_dir);
+    let network_enabled = !network_policy.is_local_only();
     let mut health = json!({
         "status": "ready",
         "node": state.node,
@@ -8560,6 +8579,12 @@ async fn health(
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
+        "network_policy": {
+            "mode": network_policy,
+            "fleet_join": network_enabled,
+            "replication": network_enabled,
+            "peer_relay": network_enabled,
+        },
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
         "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
     });

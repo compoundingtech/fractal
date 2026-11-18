@@ -333,6 +333,7 @@ pub const ALL_SCOPES: &[&str] = &[
     "terminal.control",
     "control.attention",
     "control.messages",
+    "control.commands",
     "control.launches",
     "control.missions",
     "control.work",
@@ -723,7 +724,36 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         "state":if assistant::trusted_issuer(state, session).is_ok() {"granted"} else {"ungranted"}}));
     // Agent rows carry st's presentation (docs/clients/ui-contract.md, Agent).
     capabilities.push(json!({"id":"presentation", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"phone-commands", "version":1, "state":if super::client_commands::capable(session) {"granted"} else {"ungranted"}}));
     capabilities
+}
+
+#[cfg(test)]
+mod phone_command_capability_tests {
+    use super::*;
+
+    #[test]
+    fn phone_commands_v1_advertises_existing_command_authority_only() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests_shared::state(root.path());
+        let local = ClientSession::local(Some("agent/test")).unwrap();
+        let mut paired = ClientSession::for_tests("person/test/session/device", "person/test", "gateway");
+        paired.pairing_grant = Some("custom/client/pairing-test".into());
+        paired.pairing_issued_here = true;
+        let mut foreign = paired.clone();
+        foreign.pairing_issued_here = false;
+        let unrelated = ClientSession::for_tests("agent/test", "agent/test", "gateway");
+        let ungranted = ClientSession::for_tests("person/test", "person/test", "unix");
+        for (session, expected) in [
+            (local, "granted"), (paired, "granted"), (foreign, "ungranted"),
+            (unrelated, "ungranted"), (ungranted, "ungranted"),
+            (ClientSession::local(None).unwrap(), "ungranted"),
+        ] {
+            let advertised = capabilities(&state, &session).into_iter()
+                .filter(|capability| capability["id"] == "phone-commands").collect::<Vec<_>>();
+            assert_eq!(advertised, [json!({"id":"phone-commands", "version":1, "state":expected})]);
+        }
+    }
 }
 
 pub fn forbidden(message: impl Into<String>) -> ApiError {

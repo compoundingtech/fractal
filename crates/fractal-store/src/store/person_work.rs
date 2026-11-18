@@ -12,6 +12,57 @@ mod revision_provenance_tests;
 pub mod continuity;
 pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
+const ASK_SUBJECT_PREFIX: &str = "step-run/";
+const ASK_ID_PREFIX: &str = "ask-";
+const INDEPENDENT_ASK_STEP: &str = "ask";
+
+/// Independent asks own a synthetic generation rather than borrowing a program generation.
+pub fn independent_ask_generation(id: &str) -> String {
+    format!("{ASK_ID_PREFIX}{id}")
+}
+
+/// Construct the canonical subject of an independent native ask.
+pub fn independent_ask_subject(id: &str) -> String {
+    format!("{ASK_SUBJECT_PREFIX}{ASK_ID_PREFIX}{id}/{INDEPENDENT_ASK_STEP}")
+}
+
+/// Construct the canonical subject of an ask attached to a program generation.
+pub fn attached_ask_subject(generation: &str, id: &str) -> String {
+    format!("{ASK_SUBJECT_PREFIX}{generation}/{ASK_ID_PREFIX}{id}")
+}
+
+/// Parse a native ask subject, returning its ask id and optional program generation.
+/// This checks syntax only; it does not attest that an ask exists or was approved.
+pub fn parse_native_ask_subject(subject: &str) -> Option<(&str, Option<&str>)> {
+    fn token(value: &str) -> bool {
+        !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    }
+    let (generation, step) = subject.strip_prefix(ASK_SUBJECT_PREFIX)?.split_once('/')?;
+    if step == INDEPENDENT_ASK_STEP {
+        let id = generation.strip_prefix(ASK_ID_PREFIX)?;
+        token(id).then_some((id, None))
+    } else {
+        let id = step.strip_prefix(ASK_ID_PREFIX)?;
+        (token(generation) && token(id)).then_some((id, Some(generation)))
+    }
+}
+
+#[cfg(test)]
+mod ask_subject_tests {
+    use super::*;
+
+    #[test]
+    fn constructors_round_trip_through_native_ask_grammar() {
+        assert_eq!(parse_native_ask_subject(&independent_ask_subject("one")), Some(("one", None)));
+        assert_eq!(parse_native_ask_subject(&attached_ask_subject("generation", "two")),
+            Some(("two", Some("generation"))));
+        for invalid in ["ask/one", "step-run/ask-/ask", "step-run//ask-one",
+            "step-run/generation/ask-", "step-run/generation/ask-one/extra"] {
+            assert!(parse_native_ask_subject(invalid).is_none(), "{invalid}");
+        }
+    }
+}
+
 /// The structured request an ask claim carries. An ask from a newer build whose request this
 /// build cannot read is refused rather than answered as free text.
 pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>, FractalError> {
