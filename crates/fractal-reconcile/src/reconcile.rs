@@ -578,12 +578,12 @@ pub trait RuntimeControl: Send + Sync + 'static {
         Ok(None)
     }
     fn start(&self, member: &MemberSpec) -> Result<()>;
-    fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_guarded(&self, member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         guard()?;
         self.start(member)
     }
     /// A finite resource grant must never silently fall back to an ordinary detached start.
-    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _operation: Option<&fractal_runtime::LaunchOperation>, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
         anyhow::bail!("runtime does not support finite resource memberships")
     }
     fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
@@ -981,7 +981,7 @@ impl RuntimeControl for NativeRuntime {
             .and_then(|item| item.tags.get("st3.rollout").cloned()))
     }
     fn start(&self, member: &MemberSpec) -> Result<()> {
-        self.start_checked(member, None)
+        self.start_checked(member, None, None)
     }
     fn start_operation(&self, runtime_id: &str, terminal: bool, incarnation: &str) -> Result<Option<String>> {
         if terminal {
@@ -997,13 +997,13 @@ impl RuntimeControl for NativeRuntime {
             })
         }
     }
-    fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
-        self.start_checked(member, Some(guard))
+    fn start_guarded(&self, member: &MemberSpec, operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+        self.start_checked(member, operation, Some(guard))
     }
-    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, operation: Option<&fractal_runtime::LaunchOperation>, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
         let mut backend_entered = false;
-        self.start_checked_inner(member, Some(guard), &mut backend_entered, Some((store, &request)))
+        self.start_checked_inner(member, operation, Some(guard), &mut backend_entered, Some((store, &request)))
     }
     fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
@@ -1197,18 +1197,19 @@ impl NativeRuntime {
     fn start_checked(
         &self,
         member: &MemberSpec,
+        operation: Option<&fractal_runtime::LaunchOperation>,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
         // The backend owns its launch boundary and returns an exact StartRejected
         // witness when it can prove that no producer was created.
         let mut backend_entered = false;
-        self.start_checked_inner(member, guard, &mut backend_entered, None)
+        self.start_checked_inner(member, operation, guard, &mut backend_entered, None)
             .map_err(|error| {
                 if backend_entered {
                     error
                 } else {
                     error.context(fractal_runtime::StartRejected {
-                        operation: member.tags.get(start_jobs::OPERATION_TAG).cloned(),
+                        operation: operation.map(|operation| operation.0.clone()),
                     })
                 }
             })
@@ -1217,10 +1218,12 @@ impl NativeRuntime {
     fn start_checked_inner(
         &self,
         member: &MemberSpec,
+        operation: Option<&fractal_runtime::LaunchOperation>,
         guard: Option<&dyn Fn() -> Result<()>>,
         backend_entered: &mut bool,
         resource: Option<(&Store, &crate::store::resource_membership::LaneRequest)>,
     ) -> Result<()> {
+        let exec = self.exec.clone().with_launch_operation(operation.cloned());
         let executable = launch_executable()?;
         let mut environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
@@ -1263,6 +1266,7 @@ impl NativeRuntime {
             let runtime = self
                 .pty()?
                 .clone()
+                .with_launch_operation(operation.cloned())
                 .with_binary(pty_binary.to_string_lossy());
             if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
                 let predecessor = member
@@ -1358,7 +1362,7 @@ impl NativeRuntime {
                         release()
                     })
                 };
-                let execution = match self.exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
+                let execution = match exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
                     lane: &lane, binding: &binding, guard: &guarded, authorize: &authorize,
                 }) {
                     Ok(execution) => execution,
@@ -1374,13 +1378,12 @@ impl NativeRuntime {
             }
             if let Some(guard) = guard {
                 *backend_entered = true;
-                return self
-                    .exec
+                return exec
                     .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
                     .map(|_| ());
             }
             *backend_entered = true;
-            self.exec
+            exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())
         }

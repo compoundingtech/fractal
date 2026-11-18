@@ -113,12 +113,17 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
     }
 }
 
+fn require_transient_environment_daemon(capabilities: &Value) -> Result<()> {
+    anyhow::ensure!(capabilities.pointer("/capabilities/shell_resource_exec").and_then(Value::as_u64).is_some_and(|version| version >= 2)
+        && capabilities.pointer("/capabilities/mission_resource_lane").and_then(Value::as_u64).is_some_and(|version| version >= 2),
+        "refused: daemon requires shell_resource_exec>=2 (transient environment) and mission_resource_lane>=2; upgrade the execution host before sending payload environment");
+    Ok(())
+}
+
 async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
     require_exec_platform()?;
     let capabilities: Value = client.get("/v1/health").await?;
-    anyhow::ensure!(capabilities.pointer("/capabilities/shell_resource_exec").and_then(Value::as_u64).is_some_and(|version| version >= 1)
-        && capabilities.pointer("/capabilities/mission_resource_lane").and_then(Value::as_u64).is_some_and(|version| version >= 2),
-        "refused: daemon requires shell_resource_exec>=1 and mission_resource_lane>=2; upgrade the execution host before requesting classified resources");
+    require_transient_environment_daemon(&capabilities)?;
     let cwd = std::env::current_dir()?;
     let parent = std::env::var(shell_resources::PARENT_ENV).ok().map(|value| serde_json::from_str::<shell_resources::ParentContext>(&value)).transpose()
         .context("invalid nested resource membership marker")?;
@@ -243,6 +248,16 @@ mod tests {
             result.unwrap();
         }
     }
+    #[test]
+    fn v1_daemon_is_rejected_before_environment_transport() {
+        let old = serde_json::json!({"capabilities":{"shell_resource_exec":1,"mission_resource_lane":2}});
+        let error = require_transient_environment_daemon(&old).unwrap_err();
+        assert!(error.to_string().contains("shell_resource_exec>=2"));
+        let current = serde_json::json!({"capabilities":{"shell_resource_exec":2,"mission_resource_lane":2}});
+        require_transient_environment_daemon(&current).unwrap();
+        assert!(require_transient_environment_daemon(&serde_json::json!({})).is_err());
+    }
+
     #[tokio::test]
     async fn payload_exit_code_is_passed_through_and_result_is_durable() {
         let directory = tempfile::tempdir().unwrap();
