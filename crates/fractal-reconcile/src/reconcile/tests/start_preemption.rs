@@ -18,6 +18,7 @@ use super::*;
     verification_hidden: AtomicBool,
     provenance_error: AtomicBool,
     ending_unverified: AtomicBool,
+    end_before_result: AtomicBool,
     closed_operation: std::sync::OnceLock<String>,
 }
 
@@ -110,6 +111,13 @@ use super::*;
                 .insert(member.runtime_id.clone());
         }
         self.inner.start(member)?;
+        if self.end_before_result.load(Ordering::Acquire) {
+            let mut observations = self.inner.ptys.lock().unwrap();
+            let observation = observations.iter_mut()
+                .find(|observation| observation.runtime_id == member.runtime_id).unwrap();
+            observation.status = "exited".into();
+            observation.exit_code = Some(23);
+        }
         let _ = self.started.send(member.runtime_id.clone());
         Ok(())
     }
@@ -282,6 +290,7 @@ use super::*;
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        end_before_result: AtomicBool::new(false),
         closed_operation: std::sync::OnceLock::new(),
     });
     let reconciler = Arc::new(Reconciler::new(
@@ -467,19 +476,22 @@ async fn a_panicking_completion_is_isolated_without_dropping_the_broad_pass() {
 
 #[tokio::test]
 async fn start_results_are_adopted_while_the_broad_pass_is_held() {
-    for stale in [false, true] {
+    for (stale, ended) in [(false, false), (true, false), (false, true)] {
         // A superseded producer deliberately ignores its launch guard, so this
         // exercises refusal at completion application, not just before launch.
-        let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, !stale);
+        let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, !stale);
+        runtime.end_before_result.store(ended, Ordering::Release);
         let subject = "agent/example/worker";
         apply_source(
             &store,
-            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; one-shot }",
             "prompt-start-adoption",
         );
         assert!(launch(&reconciler, subject));
         tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
         let operation = store.runtime_start_for(subject).unwrap().unwrap();
+        assert!(operation.body["member"]["driver"].is_null(), "this must cover command-only seats");
+        assert_eq!(operation.body["member"]["one_shot"], true);
         let (pass_entered, mut pass_entered_rx) = mpsc::unbounded_channel();
         let (pass_release, pass_held) = std::sync::mpsc::channel();
         // Release even on an assertion failure: no blocked worker leaks out of the test.
@@ -496,18 +508,29 @@ async fn start_results_are_adopted_while_the_broad_pass_is_held() {
         release.0.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if store.runtime_start_for(subject).unwrap().is_none_or(|start| start.applied) {
+                let applied = store.runtime_start_for(subject).unwrap().is_none_or(|start| start.applied);
+                let adopted = store.latest_observation(subject, "runtime.observed").unwrap()
+                    .is_some_and(|claim| claim.body["fields"]["adopted"] == true);
+                if applied && (stale || adopted) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.expect("start-result application waited for the held broad pass");
+        }).await.expect("start-result adoption waited for the held broad pass");
         let succeeded = store.observations_for(subject, "runtime.action.succeeded").unwrap();
         assert_eq!(succeeded.len(), usize::from(!stale));
         if !stale {
             assert_eq!(succeeded[0].body["fields"]["operation"], operation.id);
             let observed = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
             assert_eq!(observed.body["fields"]["incarnation_id"], "blocked-start-incarnation");
+            assert_eq!(observed.body["fields"]["adopted"], true);
+            assert_eq!(observed.body["fields"]["status"], if ended { "exited" } else { "running" });
+            if ended {
+                assert_eq!(observed.body["fields"]["exit_code"], 23);
+            }
+        } else {
+            assert!(!store.observations_for(subject, "runtime.observed").unwrap().iter()
+                .any(|claim| claim.body["fields"]["adopted"] == true));
         }
         // The same signal and the broad pass's start stage are both idempotent.
         let before = store.observations_for(subject, "runtime.observed").unwrap().len();
@@ -818,6 +841,7 @@ agent "example/worker" { workspace "/tmp"; command "true" }
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        end_before_result: AtomicBool::new(false),
         closed_operation: std::sync::OnceLock::new(),
     });
     let notify = Arc::new(Notify::new());

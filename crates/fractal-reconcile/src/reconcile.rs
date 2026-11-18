@@ -8581,21 +8581,41 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        // Native drivers must bind before readiness can be established. Publish running
-        // authority at launch completion only for the physically observed incarnation
-        // owned by this start operation; readiness and restart completion remain separate.
-        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
-            self.runtime.observe_start(member)?.is_some_and(|observation| {
-                observation.status == "running"
-                    && observation.incarnation_id.as_deref() == Some(incarnation)
-            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
-                .as_deref() == Some(operation_id)
+        // Adopt only a fresh physical observation of this operation's exact
+        // incarnation. This includes command-only seats and one-shots that
+        // already ended; readiness and restart completion remain separate.
+        let observation = if let Some(incarnation) = incarnation.as_deref() {
+            self.runtime.observe_start(member)?.filter(|observation| {
+                observation.incarnation_id.as_deref() == Some(incarnation)
+                    && matches!(observation.status.as_str(), "running" | "exited" | "stopped" | "vanished")
+            })
         } else {
-            false
+            None
+        };
+        let observation = if let (Some(observation), Some(incarnation)) = (observation, incarnation.as_deref())
+            && self.runtime.start_operation(
+                &member.runtime_id, member.terminal, incarnation,
+            )?.as_deref() == Some(operation_id)
+        {
+            Some(observation)
+        } else {
+            None
         };
         let mut starting = member_fields(
-            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+            member,
+            observation.as_ref().map_or("starting", |observation| observation.status.as_str()),
+            incarnation.as_deref(),
+            observation.is_some(),
         );
+        if let Some(observation) = &observation {
+            if let Some(code) = observation.exit_code {
+                starting.insert("exit_code".into(), Value::from(code));
+            }
+            self.retain_exit_evidence(
+                &subject.subject, &member.runtime_id, member.terminal,
+                incarnation.as_deref(), &mut starting,
+            )?;
+        }
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {

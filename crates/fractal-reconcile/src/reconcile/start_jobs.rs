@@ -444,8 +444,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let _capture = self.store.capture_runtime_observations()?;
         self.reconcile_start_operation(operation, &PassPtySnapshot::new())?;
-        Ok(self.store.latest_observation(subject, "runtime.action.succeeded")?
-            .is_some_and(|claim| claim.body["fields"]["operation"] == id))
+        let Some(succeeded) = self.store.latest_observation(subject, "runtime.action.succeeded")?
+            .filter(|claim| claim.body["fields"]["operation"] == id)
+        else {
+            return Ok(false);
+        };
+        Ok(self.store.latest_observation(subject, "runtime.observed")?
+            .is_some_and(|claim| {
+                claim.body["fields"]["adopted"] == true
+                    && claim.body["fields"]["incarnation_id"] == succeeded.body["fields"]["incarnation_id"]
+            }))
     }
 
     pub fn reconcile_start_jobs(&self) -> Result<()> {
