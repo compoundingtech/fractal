@@ -30621,6 +30621,7 @@ mission "ios-proof-blocked" state="ready" {
     #[test]
     fn a_read_or_closed_work_wake_acknowledges_a_short_turn() {
         let mut wake = crate::model::MessageView {
+            delivery_thread: None,
             subject: "message/work-wake".into(),
             from: "daemon/runtime".into(),
             to: "agent/worker".into(),
@@ -30650,6 +30651,7 @@ mission "ios-proof-blocked" state="ready" {
     #[test]
     fn a_wake_delivered_into_an_already_working_turn_is_acknowledged() {
         let mut wake = crate::model::MessageView {
+            delivery_thread: None,
             subject: "message/work-wake".into(),
             from: "daemon/runtime".into(),
             to: "agent/worker".into(),
@@ -30688,6 +30690,7 @@ mission "ios-proof-blocked" state="ready" {
     #[test]
     fn staged_pi_wake_into_a_working_turn_is_not_retried() {
         let wake = crate::model::MessageView {
+            delivery_thread: None,
             subject: "message/work-wake".into(),
             from: "daemon/runtime".into(),
             to: "agent/worker".into(),

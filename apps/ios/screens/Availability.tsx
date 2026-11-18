@@ -1,4 +1,5 @@
-import { ActionSheetIOS, Alert, View } from 'react-native';
+import { View } from 'react-native';
+import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
 import { availabilityRows, AXES, axisChange, CLEARED, CUSTOM_HINT, customUntil, presetUntil, REPAIR_FOR_AVAILABILITY, UNTIL_PRESETS, type AvailabilityRow, type Axis } from '../availability';
 import { useStore } from '../store';
 import { GroupedHeader, GroupedRow, Note } from '../ui';
@@ -8,7 +9,7 @@ const HINTS = { status: 'Sets or clears your status', interruptions: 'Sets which
 /** How long a change holds: a preset, a typed time or span, or until the person changes it. */
 function pickEnd(title: string, open: string, done: (until: Date | null) => void) {
   const options = [...UNTIL_PRESETS, 'Custom…', open, 'Cancel'];
-  ActionSheetIOS.showActionSheetWithOptions({ title, options, cancelButtonIndex: options.length - 1 }, index => {
+  showOwnedActionSheet({ title, options, cancelButtonIndex: options.length - 1 }, index => {
     if (index < UNTIL_PRESETS.length) done(presetUntil(UNTIL_PRESETS[index], new Date()));
     else if (index === UNTIL_PRESETS.length) Alert.prompt('Until when?', CUSTOM_HINT, text => {
       const until = customUntil(text, new Date());
@@ -27,7 +28,7 @@ export function AvailabilitySection() {
   const granted = (scope: string) => caps?.capabilities.some(capability => capability.id === scope && capability.state === 'granted') ?? false;
   const choose = (axis: Axis) => {
     const { title, choices } = AXES[axis];
-    ActionSheetIOS.showActionSheetWithOptions({ title, options: [...choices.map(([label]) => label), 'Cancel'], cancelButtonIndex: choices.length }, index => {
+    showOwnedActionSheet({ title, options: [...choices.map(([label]) => label), 'Cancel'], cancelButtonIndex: choices.length }, index => {
       if (index >= choices.length) return;
       const [label, value] = choices[index];
       if (value === CLEARED[axis]) void actions.changeAvailability(axisChange(axis, value, null));

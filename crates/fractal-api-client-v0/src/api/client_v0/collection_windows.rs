@@ -1000,11 +1000,21 @@ mod tests {
                 let windows = windows.clone();
                 let slots = slots.clone();
                 let barrier = barrier.clone();
+                // Distinct admitted device grants, not invented grant IDs: attention reads
+                // revalidate the current pairing before serving either cached or cold rows.
+                let paired = state.store.append_client_operation_claim(&ClaimInput {
+                    subject: format!("custom/client/{n}"),
+                    kind: "custom.client.pairing-completed".into(),
+                    actor: Some("person/ada".into()),
+                    fields: serde_json::from_value(json!({
+                        "session_actor": format!("client/{n}"), "person_id": "person/ada",
+                        "expires_at_unix_ms": client_now_ms() as u64 + 60_000,
+                        "scopes": ["read.projections"],
+                    })).unwrap(),
+                    evidence: vec![], expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                let session = paired_client_session(&state, &paired, "fabric-loopback", false).unwrap();
                 readers.spawn(async move {
-                    let mut session = ClientSession::local(Some("person/ada")).unwrap();
-                    // Independently authenticated subscribers with identical visible data.
-                    session.actor = format!("client/{n}");
-                    session.pairing_grant = Some(format!("custom/client/{n}"));
                     let mut query = request(collection);
                     query.limit = Some(n % 8 + 1);
                     barrier.wait().await;
