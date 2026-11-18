@@ -8,6 +8,7 @@ fn sample(id: u64, peak: u64) -> RetirementSample {
     RetirementSample {
         host: "host".into(), key: "repo/install".into(), semantic_revision: "scope-v1".into(),
         execution: format!("execution-{id}"), generation: 1, retirement_confirmed: true,
+        pre_retirement_populated: Some(false),
         end_reason: EndReason::Natural, coverage: Coverage::Full, memory_peak_bytes: Some(peak),
         memory_events: Some(MemoryEvents { max: 0, high: 0, oom: 0, oom_kill: 0, oom_group_kill: 0 }),
         disk_growth_bytes: Some(10),
@@ -262,4 +263,21 @@ fn persisted_memory_and_disk_counters_preserve_the_full_unsigned_domain() {
     assert_eq!((result.memory_samples, result.disk_samples), (1, 1));
     // With fewer than twenty samples the oversized peak does not replace the seed.
     assert_eq!(result.memory_high_bytes, 1000);
+}
+
+#[test]
+fn natural_leader_exit_does_not_make_destructively_retired_descendants_trainable() {
+    let mut connection = database();
+    let mut observed = sample(1, 100);
+    observed.pre_retirement_populated = Some(true);
+    assert_eq!(record(&mut connection, &observed),
+        RecordOutcome::Rejected(Rejection::PopulatedBeforeRetirement));
+    assert_eq!(reading(&connection, ready()).memory_samples, 0);
+}
+
+#[test]
+fn absent_cgroup_population_counter_cannot_certify_untruncated_retirement() {
+    let mut observed = sample(1, 100);
+    observed.pre_retirement_populated = None;
+    assert_eq!(observed.rejection(), Some(Rejection::MissingRetirementEvidence));
 }

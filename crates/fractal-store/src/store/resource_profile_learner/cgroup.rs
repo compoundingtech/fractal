@@ -25,6 +25,9 @@ pub struct Observation {
     pub memory_events: Option<MemoryEvents>,
     /// None: no delegated IO accounting; Some(empty): accounting exists with no IO yet.
     pub io_stat: Option<Vec<IoDeviceStat>>,
+    /// Sample again after observer exit and before any destructive retirement. None cannot
+    /// prove an untruncated execution, even when a later retirement proves tree absence.
+    pub populated: Option<bool>,
 }
 
 fn optional_file(path: &Path) -> Result<Option<String>> {
@@ -42,7 +45,25 @@ pub fn read(cgroup: &Path) -> Result<Observation> {
         .map(|value| parse_memory_events(&value)).transpose()?;
     let io_stat = optional_file(&cgroup.join("io.stat"))?
         .map(|value| parse_io_stat(&value)).transpose()?;
-    Ok(Observation { memory_peak_bytes, memory_events, io_stat })
+    let populated = optional_file(&cgroup.join("cgroup.events"))?
+        .map(|value| parse_populated(&value)).transpose()?;
+    Ok(Observation { memory_peak_bytes, memory_events, io_stat, populated })
+}
+
+pub fn parse_populated(value: &str) -> Result<bool> {
+    let mut populated = None;
+    for line in value.lines() {
+        let mut fields = line.split_ascii_whitespace();
+        if fields.next() != Some("populated") { continue; }
+        ensure!(populated.is_none(), "duplicate cgroup populated counter");
+        populated = Some(match fields.next() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => anyhow::bail!("invalid cgroup populated counter"),
+        });
+        ensure!(fields.next().is_none(), "malformed cgroup populated counter");
+    }
+    populated.context("missing cgroup populated counter")
 }
 
 pub fn parse_memory_events(value: &str) -> Result<MemoryEvents> {
@@ -140,5 +161,14 @@ mod tests {
         assert!(missing.io_stat.is_none());
         std::fs::write(directory.path().join("io.stat"), "").unwrap();
         assert_eq!(read(directory.path()).unwrap().io_stat, Some(vec![]));
+    }
+
+    #[test]
+    fn population_proof_distinguishes_empty_live_and_missing_counters() {
+        assert!(!parse_populated("populated 0\nfrozen 0\n").unwrap());
+        assert!(parse_populated("populated 1\nfrozen 0\n").unwrap());
+        for value in ["frozen 0\n", "populated 2\n", "populated 0\npopulated 1\n"] {
+            assert!(parse_populated(value).is_err());
+        }
     }
 }

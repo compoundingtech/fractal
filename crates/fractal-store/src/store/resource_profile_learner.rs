@@ -65,6 +65,7 @@ pub struct RetirementSample {
     pub execution: String,
     pub generation: u64,
     pub retirement_confirmed: bool,
+    pub pre_retirement_populated: Option<bool>,
     pub end_reason: EndReason,
     pub coverage: Coverage,
     pub memory_peak_bytes: Option<u64>,
@@ -79,6 +80,8 @@ pub struct RetirementSample {
 pub enum Rejection {
     UnconfirmedRetirement,
     Truncated,
+    PopulatedBeforeRetirement,
+    MissingRetirementEvidence,
     IncompleteCoverage,
     MissingMemoryEvents,
     MemoryLimitEvent,
@@ -89,6 +92,11 @@ impl RetirementSample {
     pub fn rejection(&self) -> Option<Rejection> {
         if !self.retirement_confirmed {
             return Some(Rejection::UnconfirmedRetirement);
+        }
+        match self.pre_retirement_populated {
+            Some(false) => {}
+            Some(true) => return Some(Rejection::PopulatedBeforeRetirement),
+            None => return Some(Rejection::MissingRetirementEvidence),
         }
         if self.end_reason != EndReason::Natural {
             return Some(Rejection::Truncated);
@@ -292,3 +300,17 @@ pub fn remaining_disk(estimate: u64, allocated_high_water: u64) -> u64 {
 #[cfg(test)]
 #[path = "resource_profile_learner/tests.rs"]
 mod tests;
+
+impl super::Store {
+    pub fn resource_profile_estimate(
+        &self,
+        host: &str,
+        key: &str,
+        semantic_revision: &str,
+        seed: SeedLimits,
+        readiness: HostReadiness,
+    ) -> Result<LearnedEstimate> {
+        let connection = self.readers.get();
+        estimate(&connection, host, key, semantic_revision, seed, readiness)
+    }
+}
