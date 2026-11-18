@@ -26,7 +26,7 @@ concurrency:
 jobs:
   fractal-mac-changes:
     name: fractal-mac-changes
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -73,7 +73,7 @@ jobs:
   fractal-mac:
     name: fractal-mac
     needs: [fractal-mac-changes]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-mac-changes.result == 'success' && needs.fractal-mac-changes.outputs.relevant == 'true') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (!cancelled() && needs.fractal-mac-changes.result == 'success' && needs.fractal-mac-changes.outputs.relevant == 'true') }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 20
     defaults:
@@ -162,7 +162,7 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   macos-ci:
     name: macos-ci
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'macos-ci')) }}
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 120
     defaults:
@@ -425,4 +425,4 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}

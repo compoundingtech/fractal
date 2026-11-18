@@ -28,7 +28,7 @@ permissions:
 jobs:
   fractal-changelog:
     name: fractal-changelog
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request') }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -101,4 +101,4 @@ jobs:
         env:
           CACHE_REASON: Runs standard-library guards and queries published release metadata; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.state == 'open' && github.event.pull_request.draft == false)) && (success()) }}
