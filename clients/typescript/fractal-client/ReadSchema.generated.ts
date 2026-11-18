@@ -328,6 +328,19 @@ export const AgentRelationship = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentRelationship = typeof AgentRelationship.Type
 export type AgentRelationshipEncoded = typeof AgentRelationship.Encoded
 
+export const AgentResidency = /*#__PURE__*/ (() => Schema.Struct({
+  /** Exact eligible epoch plus configured threshold. */
+  "due_at": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "Exact eligible epoch plus configured threshold." }),
+  /** Start of continuous eligibility, never the received-mail activity clock. */
+  "eligible_since": Schema.OptionFromNullOr(Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" }))).annotate({ description: "Start of continuous eligibility, never the received-mail activity clock." }),
+  /** Effective off, never or member policy. */
+  "policy": Schema.String.annotate({ description: "Effective off, never or member policy." }),
+  /** Why this snapshot cannot become idle-suspended. */
+  "refusal_reason": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Why this snapshot cannot become idle-suspended." })
+}).annotate({ identifier: "AgentResidency" }))()
+export type AgentResidency = typeof AgentResidency.Type
+export type AgentResidencyEncoded = typeof AgentResidency.Encoded
+
 /** Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`. */
 export const AgentState = /*#__PURE__*/ (() => openEnum([
   "desired",
@@ -651,6 +664,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "reachability": AgentReachability,
   /** Diagnostic harness reason, not a machine-readable verdict. */
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Diagnostic harness reason, not a machine-readable verdict." }),
+  /** Off-by-default idle residency diagnostics at this snapshot. No automatic suspension is performed. */
+  "residency": Schema.OptionFromOptionalNullOr(AgentResidency, NULL_NONE).annotate({ description: "Off-by-default idle residency diagnostics at this snapshot. No automatic suspension is performed." }),
   /** The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field. */
   "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
@@ -684,6 +699,8 @@ export const AgentDeclaration = /*#__PURE__*/ (() => Schema.Struct({
   "accountable": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^person/[A-Za-z0-9_.-]+$", "u")))),
   "declared_admission": optionalKey(DeclaredAdmission),
   "id": Id,
+  /** Authored idle-suspend participation. Omission and member inherit the current host policy; never opts the seat out. This is declaration metadata, not a launch change. */
+  "idle_suspend": optionalKey(Schema.Literals(["never","member"])).annotate({ description: "Authored idle-suspend participation. Omission and member inherit the current host policy; never opts the seat out. This is declaration metadata, not a launch change." }),
   "kdl": Schema.String,
   "revision": Schema.String,
   "revisions": Schema.Array(Schema.String),
