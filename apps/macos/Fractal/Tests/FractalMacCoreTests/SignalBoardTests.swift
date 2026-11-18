@@ -132,7 +132,7 @@ final class SignalBoardTests: XCTestCase {
       {"as_of_unix_ms":1800000000000,"rows":[
         {"id":"transaction/read","kind":"objective","about":"Reads","target":"≤ 1.0% bad events; diagnostic p95 ≤ 100 ms","current":"2 / 100 bad events; diagnostic p95 50 ms","window":"30d","status":"exhausted","remaining_percent":0,"tone":"red","explain":"Fast pair 2.00×/2.00×; slow pair 2.00×/2.00×. Missing coverage is unknown, not recovery."},
         {"id":"database","kind":"objective","about":"Database","target":"≤ 5.0% bad covered milliseconds; diagnostic ≤ 100 MiB","current":"0 / 1000 bad covered milliseconds; diagnostic 20 MiB","window":"30d","status":"met","remaining_percent":100,"tone":"green","explain":"Hourly evidence uses cadence-aware pairs: 2h+1h and 6h+1h."},
-        {"id":"person-read","kind":"objective","about":"Latency","target":"≤ 5.0% bad events","current":"5 / 100 bad events","window":"30d","status":"burning","remaining_percent":0,"tone":"yellow","explain":"Both windows of a pair must burn; short spikes alone are diagnostic."}
+        {"id":"person-read","kind":"objective","about":"Latency","target":"≤ 5.0% bad events","current":"1 / 100 bad events","window":"30d","status":"burning","remaining_percent":80,"tone":"yellow","explain":"Both windows of a pair must burn; short spikes alone are diagnostic."}
       ]}
       """#.utf8)
     let list = try JSONDecoder().decode(SloList.self, from: data)
