@@ -53,7 +53,7 @@ pub fn declares_per_run_missions(mission: &MissionSpec) -> bool {
             || step.nested_mission.as_deref().is_some_and(declares_per_run_missions)
             || step.loop_spec.as_ref().is_some_and(|spec| {
                 [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
-                    .into_iter().flatten().any(declares_per_run_missions)
+                    .into_iter().flatten().any(|branch| declares_per_run_missions(branch))
             })
     })
 }
