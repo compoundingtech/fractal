@@ -428,6 +428,7 @@ impl Runtime for FractalRuntime {
             let _ = rebuilt;
         }
         migrate_occurrence_creation_projections_tx(transaction)?;
+        migrate_person_cancellation_projections_tx(transaction)?;
         Ok(())
     }
 

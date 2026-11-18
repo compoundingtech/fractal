@@ -1362,6 +1362,8 @@ enum MissionViewCommand {
     },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
+    /// Inspect local selected rename evidence without exporting a portable bundle.
+    RenameProof(IdentityRenameProofArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
     /// Legacy: use `fractal apply FILE`; publish authored KDL after checking exec gates.
     ///
@@ -3081,6 +3083,8 @@ enum AgentsCommand {
     Rename(AgentRenameArgs),
     /// Change an agent's canonical ID, preserving its immutable identity and harness.
     RenameId(IdentityRenameArgs),
+    /// Inspect local selected rename evidence without exporting a portable bundle.
+    RenameProof(IdentityRenameProofArgs),
     /// Show one agent's current claim and its queued mission runs in order, or move a run.
     /// The show form is also available as `fractal missions queued AGENT`.
     Queue(AgentQueueArgs),
@@ -3109,6 +3113,18 @@ struct IdentityRenameArgs {
     expected_declaration: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: Option<String>,
+    /// Evaluate this exact rename request without writing claims or changing names.
+    #[arg(long)]
+    plan: bool,
+}
+
+#[derive(Args)]
+struct IdentityRenameProofArgs {
+    from: String,
+    to: String,
+    /// Require evidence for this exact planned request digest.
+    #[arg(long)]
+    request_digest: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3247,6 +3263,11 @@ async fn run_identity_rename(
         idempotency_key: args.idempotency_key.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
     };
     let client = generated_client(endpoint, None)?;
+    if args.plan {
+        let kind = if agent { fractal_client::IdentityKind::Agent } else { fractal_client::IdentityKind::Mission };
+        let plan = client.identity_rename_plan(kind, &request).await?;
+        return print_value(&plan, json_output);
+    }
     let receipt = if agent {
         client.agent_rename_id(&request).await?
     } else {
@@ -3258,6 +3279,18 @@ async fn run_identity_rename(
     println!("{} -> {} ({})", receipt.from, receipt.canonical_id, receipt.applied);
     println!("{} at frontier {}", receipt.replication.state, receipt.replication.frontier);
     Ok(())
+}
+
+async fn run_identity_rename_proof(
+    endpoint: &Endpoint,
+    args: IdentityRenameProofArgs,
+    agent: bool,
+    json_output: bool,
+) -> Result<()> {
+    let kind = if agent { fractal_client::IdentityKind::Agent } else { fractal_client::IdentityKind::Mission };
+    let client = generated_client(endpoint, None)?;
+    let proof = client.identity_rename_proof(kind, &args.from, &args.to, args.request_digest.as_deref()).await?;
+    print_value(&proof, json_output)
 }
 
 #[derive(Args)]
@@ -6225,7 +6258,7 @@ fn daemon_is_unreachable(error: &anyhow::Error) -> bool {
 
 async fn run(cli: Cli) -> Result<()> {
     if let Command::ResourcePayload { result, argv } = cli.command {
-        return resources_cli::payload(&result, argv);
+        return resources_cli::payload(&result, argv).await;
     }
     let own = fractal_drivers::contracts::env("ST_AGENT");
     anyhow::ensure!(
@@ -7762,6 +7795,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             open_daemon_store(&config, &state_identity)
         })
     })?);
+    fractal_daemon::slo::install_budget_ledger(&config.state_dir.join("slo-budgets.sqlite3"), &config.node)
+        .context("opening native SLO accounting before serving requests")?;
     store
         .extension::<fractal_daemon::config::AgentPopulationEnabled>()
         .0
@@ -16214,6 +16249,19 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
     } else {
         format!("agent/{actor}")
     };
+    // Custom shells have no driver to export an incarnation. Their launch does
+    // export the operation: resolve its exact local PTY before consulting a
+    // runtime projection that may still describe the predecessor.
+    if let Some(operation) = fractal_drivers::contracts::env("ST3_START_OPERATION")
+        && let Ok(session) = std::env::var("PTY_SESSION")
+        && let Some(root) = std::env::var_os("PTY_ROOT").filter(|value| !value.is_empty())
+    {
+        let observations = fractal_runtime::PtyRuntime::new(PathBuf::from(root)).snapshot()?;
+        return Ok(observations.iter().find(|observation| observation.name == session)
+            .and_then(|observation| pty_observation_incarnation(
+                &subject, std::slice::from_ref(observation), Some(&operation),
+            )));
+    }
     let status: StatusResponse = client
         .get(&format!(
             "/v1/status?subject={}&summary=true",
@@ -16232,6 +16280,7 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
 fn pty_observation_incarnation(
     actor: &str,
     observations: &[fractal_runtime::PtyObservation],
+    operation: Option<&str>,
 ) -> Option<String> {
     let subject = if actor.starts_with("agent/") {
         actor
@@ -16241,6 +16290,9 @@ fn pty_observation_incarnation(
     let observation = observations.iter().find(|observation| {
         observation.status == "running"
             && observation.tags.get("st3.subject").map(String::as_str) == Some(subject)
+            && operation.is_none_or(|operation| {
+                observation.tags.get("st3.start-operation").map(String::as_str) == Some(operation)
+            })
     })?;
     Some(format!(
         "{}:{}",
@@ -16256,7 +16308,7 @@ fn current_local_pty_incarnation(actor: &str) -> Result<Option<String>> {
     let observations = fractal_runtime::PtyRuntime::new(PathBuf::from(root))
         .snapshot()
         .context("reading the local PTY registry for the native driver incarnation")?;
-    Ok(pty_observation_incarnation(actor, &observations))
+    Ok(pty_observation_incarnation(actor, &observations, None))
 }
 
 async fn current_local_agent_incarnation(client: &Client, actor: &str) -> Result<Option<String>> {
@@ -16459,6 +16511,10 @@ async fn send_message(
     args: MessageSendArgs,
     attachments: Vec<fractal_daemon::model::AttachmentInput>,
 ) -> Result<Option<MessageSendReceipt>> {
+    if fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").is_some() {
+        anyhow::ensure!(args.idempotency_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
+            "a program message requires an explicit stable --idempotency-key");
+    }
     let id = uuid::Uuid::now_v7().simple().to_string();
     let mission_id = format!("message/{id}");
     // Before anything else: an agent that sends to a person needs this answer, not another.

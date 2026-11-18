@@ -11,14 +11,16 @@ enum Fixture {
     actions: [String] = ["work.done"], promptAnswers: [String] = [], request: RequestForm? = nil,
     update: UpdateNote? = nil, workDoneDefaults: WorkDoneAnswer? = nil, from: String = "builder",
     requestedAt: Date? = nil, deadlineAt: Date? = nil, urgent: Bool = false, seenAt: Date? = nil,
-    snoozedUntil: Date? = nil, conversationID: String? = nil
+    snoozedUntil: Date? = nil, conversationID: String? = nil, requesterID: String? = nil,
+    snapshotContext: AttentionContext? = nil
   ) -> AttentionRecord {
     AttentionRecord(
       id: id, revision: revision, kind: kind, state: state, sourceID: "work/step-1", episode: episode,
       title: title, detail: "", from: from, requestedAt: requestedAt, deadlineAt: deadlineAt,
       defaultAnswerLabel: nil, actions: actions, promptAnswers: promptAnswers, request: request,
       update: update, workDoneDefaults: workDoneDefaults, url: url, isUrgent: urgent, seenAt: seenAt,
-      snoozedUntil: snoozedUntil, conversationID: conversationID)
+      snoozedUntil: snoozedUntil, conversationID: conversationID, requesterID: requesterID,
+      snapshotContext: snapshotContext)
   }
 
   static func decision(recommended: String? = "ship") -> RequestForm {

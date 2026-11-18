@@ -173,6 +173,17 @@ fn park_step_tx(tx: &Transaction<'_>, origin: &str, step: &str, record: &EffectR
 }
 
 fn lease_tx(tx: &Connection, owner: &EffectOwner, sender: &str) -> Result<(), FractalError> {
+    if sender.starts_with("mission-run/") {
+        let valid: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM step_runs s JOIN mission_runs m ON m.id=s.run_id
+             WHERE s.subject=?1 AND m.mission_id=?2 AND s.attempt=?3
+             AND 'mission-run/'||s.run_id=?4
+             AND s.status IN ('ready','working','blocked','waiting-person'))",
+            params![owner.step, owner.mission.strip_prefix("mission/").unwrap_or(&owner.mission),
+                owner.attempt, sender], |row| row.get(0)).map_err(internal)?;
+        if valid && owner.incarnation == format!("program:{}", owner.attempt) { return Ok(()); }
+        return Err(FractalError::new("run-credential-ended", "the program effect requires its current live attempt"));
+    }
     let valid: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM step_runs s JOIN mission_runs m ON m.id=s.run_id
          WHERE s.subject=?1 AND m.mission_id=?2 AND s.attempt=?3 AND s.lease_owner=?4
@@ -196,6 +207,9 @@ fn may_originate_tx(tx: &Connection, origin: &str, step: &str, caller: &str,
          AND c.kind='mission-run.created' WHERE s.subject=?1",
         [step], |row| row.get(0)).map_err(internal)?;
     if anchor.as_deref() != Some(origin) { return Ok(false); }
+    // A program has no worker lease. Its locally anchored run credential is the authority;
+    // the endpoint and lease_tx bind it to this exact current attempt.
+    if caller.starts_with("mission-run/") { return Ok(true); }
     let claimed: Option<String> = tx.query_row(
         "SELECT CASE WHEN COUNT(DISTINCT origin)=1 THEN MIN(origin) END
          FROM claims WHERE subject=?1 AND kind='work.claimed' AND actor=?2
@@ -356,6 +370,16 @@ impl Store {
         smallclaims::touched::note_read(|| record.lease_owner.clone());
         smallclaims::touched::note_read(|| format!("actor:{}", record.lease_owner));
         if record.provider == "native-message" {
+            if record.lease_owner.starts_with("mission-run/") {
+                let owner = EffectOwner {
+                    mission: self.readers.get().query_row(
+                        "SELECT m.mission_id FROM step_runs s JOIN mission_runs m ON m.id=s.run_id WHERE s.subject=?1",
+                        [&record.bound_step_run], |row| row.get(0)).map_err(internal)?,
+                    key: String::new(), step: record.bound_step_run.clone(),
+                    attempt: record.bound_attempt, incarnation: record.lease_incarnation.clone(),
+                };
+                if lease_tx(&self.readers.get(), &owner, &record.lease_owner).is_ok() { return Ok(false); }
+            }
             smallclaims::touched::note_read(|| format!("operation:{}",
                 operation_id_for_key(&format!("native-effect-message/{}", record.operation_id))));
         }

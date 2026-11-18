@@ -6094,15 +6094,26 @@ fn native_driver_binds_the_local_pty_incarnation_instead_of_a_stale_graph_value(
         pid: Some(42),
         created_at: Some("2026-09-22T12:00:00.000Z".into()),
         display_name: None,
-        tags: BTreeMap::from([("st3.subject".into(), "agent/run/worker".into())]),
+        tags: BTreeMap::from([
+            ("st3.subject".into(), "agent/run/worker".into()),
+            ("st3.start-operation".into(), "exact-start".into()),
+        ]),
     }];
 
     assert_eq!(
-        pty_observation_incarnation("agent/run/worker", &observations).as_deref(),
+        pty_observation_incarnation("agent/run/worker", &observations, None).as_deref(),
         Some("42:2026-09-22T12:00:00.000Z")
     );
     assert_eq!(
-        pty_observation_incarnation("agent/run/other", &observations),
+        pty_observation_incarnation("agent/run/other", &observations, None),
+        None
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("exact-start")).as_deref(),
+        Some("42:2026-09-22T12:00:00.000Z")
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("predecessor")),
         None
     );
 }
@@ -10640,4 +10651,40 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
     assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
         "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
     assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
+}
+
+#[test]
+fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
+    for family in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", family, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/operator", "--reason", "Clarify responsibility",
+            "--idempotency-key", "example-plan", "--plan", "--json",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename plan"),
+        };
+        assert!(args.plan);
+        assert_eq!(args.idempotency_key.as_deref(), Some("example-plan"));
+        for digest in [None, Some("sha256:example&exact")] {
+            let mut argv = vec![
+                "st", family, "rename-proof", "agent/example-old", "agent/example-new", "--json",
+            ];
+            if let Some(digest) = digest {
+                argv.extend(["--request-digest", digest]);
+            }
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let args = match cli.command {
+                Command::Agents { command: AgentsCommand::RenameProof(args) }
+                | Command::Missions { command: MissionViewCommand::RenameProof(args) } => args,
+                _ => panic!("expected local rename proof"),
+            };
+            assert_eq!(args.from, "agent/example-old");
+            assert_eq!(args.to, "agent/example-new");
+            assert_eq!(args.request_digest.as_deref(), digest);
+        }
+        assert!(Cli::try_parse_from(["st", family, "rename-proof", "agent/example-old"]).is_err());
+    }
 }

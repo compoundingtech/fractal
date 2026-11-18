@@ -15,6 +15,8 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
   public let detail: String
   /// Who asked: the requesting agent, else the subject the card is about.
   public let from: String
+  /// `requester_id` as Fractal sends it (`agent/…`, `daemon/runtime`), nil when absent.
+  public let requesterID: String?
   public let requestedAt: Date?
   public let deadlineAt: Date?
   public let defaultAnswerLabel: String?
@@ -36,13 +38,16 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
   /// The asking agent (`agent/…`) whose conversation the card belongs to; the member resolves
   /// it to that agent's current session.
   public let conversationID: String?
+  /// Full request already carried by attention.list; no network is needed to open a detail.
+  public let snapshotContext: AttentionContext?
 
   public init(
     id: String, revision: String, kind: String, state: String, sourceID: String,
     episode: String?, title: String, detail: String, from: String, requestedAt: Date?,
     deadlineAt: Date?, defaultAnswerLabel: String?, actions: [String], promptAnswers: [String],
     request: RequestForm?, update: UpdateNote?, workDoneDefaults: WorkDoneAnswer?, url: URL,
-    isUrgent: Bool = false, seenAt: Date? = nil, snoozedUntil: Date? = nil, conversationID: String? = nil
+    isUrgent: Bool = false, seenAt: Date? = nil, snoozedUntil: Date? = nil, conversationID: String? = nil,
+    requesterID: String? = nil, snapshotContext: AttentionContext? = nil
   ) {
     self.id = id
     self.revision = revision
@@ -66,6 +71,8 @@ public struct AttentionRecord: Identifiable, Sendable, Equatable {
     self.seenAt = seenAt
     self.snoozedUntil = snoozedUntil
     self.conversationID = conversationID
+    self.requesterID = requesterID
+    self.snapshotContext = snapshotContext
   }
 
   /// Fractal still lists a snoozed row; the tray hides it until its snooze ends.
@@ -141,13 +148,16 @@ public struct RequestAnswer: Sendable, Equatable {
 }
 
 public struct UpdateNote: Sendable, Equatable {
+  /// `update.type`; `update` today.
+  public let type: String
   public let about: String
   public let summary: String?
   /// `update.speech`: the words to say, present only when the person asked to be told this
   /// outcome. An update without it is shown, never spoken unasked.
   public let speech: String?
 
-  public init(about: String, summary: String?, speech: String? = nil) {
+  public init(type: String = "update", about: String, summary: String?, speech: String? = nil) {
+    self.type = type
     self.about = about
     self.summary = summary
     self.speech = speech

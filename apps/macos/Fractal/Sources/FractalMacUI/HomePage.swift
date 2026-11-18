@@ -27,31 +27,46 @@ struct HomePage: View {
   }
 }
 
-/// The full inbox: every shown ask and update, asks first. The top level's More row opens it.
+/// The full inbox: the activity overview, then All and one tab per kind. Asks group under their
+/// request type; All lists every kind under its own label. The top level's More row opens it.
 struct InboxPage: View {
   let model: AttentionModel
 
   var body: some View {
-    let asks = model.asks
-    let updates = model.updates
+    let total = InboxKind.allCases.map { model.inbox($0).count }.reduce(0, +)
     PanelPage {
       PageHeader(title: "Inbox", model: model) {
-        Text("\(asks.count + updates.count)")
+        Text("\(total)")
           .font(.subheadline.monospacedDigit())
           .foregroundStyle(.secondary)
       }
     } content: {
       PanelScroll {
         InboxActivityHistogram(model: model)
+        InboxSegmentedTabs(model: model)
         if case .stale = model.attention.state { StaleRow(model: model) }
-        if asks.isEmpty && updates.isEmpty { CaughtUpRow() }
-        if !asks.isEmpty {
-          SectionLabel(title: "Asks", aside: "\(asks.count)")
-          ForEach(asks) { InboxRow(record: $0, model: model) }
-        }
-        if !updates.isEmpty {
-          SectionLabel(title: "Updates", aside: "\(updates.count)")
-          ForEach(updates) { InboxRow(record: $0, model: model) }
+        if total == 0 {
+          CaughtUpRow()
+        } else if let kind = model.inboxTab.kind {
+          let rows = model.inbox(kind)
+          if rows.isEmpty {
+            EmptyTabRow(kind: kind)
+          } else if kind == .asks {
+            ForEach(AskGroup.grouped(rows)) { section in
+              SectionLabel(title: section.group.title, aside: "\(section.asks.count)")
+              ForEach(section.asks) { InboxRow(record: $0, model: model) }
+            }
+          } else {
+            ForEach(rows) { InboxRow(record: $0, model: model) }
+          }
+        } else {
+          ForEach(InboxKind.allCases, id: \.self) { kind in
+            let rows = model.inbox(kind)
+            if !rows.isEmpty {
+              SectionLabel(title: kind.title, aside: "\(rows.count)")
+              ForEach(rows) { InboxRow(record: $0, model: model) }
+            }
+          }
         }
         SnoozedNote(model: model)
       }
@@ -271,10 +286,10 @@ enum TileText {
 
 // MARK: - Inbox
 
-/// Notices, the inbox capped to what fits, then the signals. Asks come first, then updates; rows
-/// past the cap leave for the full inbox behind a More row, so the whole panel fits the scroll
-/// limit (at least three rows stay, however short the screen). Everything but the rows has a
-/// known height: labels and signals are fixed, notices are measured.
+/// Notices, the selected kind's rows capped to what fits, then the signals. Rows past the cap
+/// leave for the full inbox, open on the same tab, behind a More row, so the whole panel fits
+/// the scroll limit (at least three rows stay, however short the screen). Everything but the
+/// rows has a known height: labels and signals are fixed, notices are measured.
 private struct Glance: View {
   let model: AttentionModel
   @Environment(\.panelScrollHeight) private var maxHeight
@@ -282,20 +297,18 @@ private struct Glance: View {
   @State private var snoozedHeight: CGFloat = 0
 
   var body: some View {
-    let asks = model.asks
-    let updates = model.updates
-    let total = asks.count + updates.count
+    let rows = model.inbox(model.glanceTab)
+    let isEmpty = InboxKind.allCases.allSatisfy { model.inbox($0).isEmpty }
     let board = model.signalBoard
     let cap = InboxCap(
-      totalCount: total, availableHeight: Double(maxHeight), fixedHeight: Double(fixedHeight(board)),
+      totalCount: rows.count, availableHeight: Double(maxHeight), fixedHeight: Double(fixedHeight(board)),
       rowHeight: Double(PanelMetrics.rowHeight), moreRowHeight: Double(PanelMetrics.rowHeight))
-    let shownAsks = min(cap.visibleCount, asks.count)
-    VStack(alignment: .leading, spacing: 0) { InboxNotices(model: model, asks: asks, isEmpty: total == 0) }
+    VStack(alignment: .leading, spacing: 0) { InboxNotices(model: model, asks: model.asks, isEmpty: isEmpty) }
       .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { noticesHeight = $0 }
-    InboxActivityLabel(model: model, count: total)
-    if total > 0 {
-      ForEach(asks.prefix(shownAsks)) { InboxRow(record: $0, model: model) }
-      ForEach(updates.prefix(cap.visibleCount - shownAsks)) { InboxRow(record: $0, model: model) }
+    InboxActivityLabel(model: model)
+    if !isEmpty {
+      if rows.isEmpty { EmptyTabRow(kind: model.glanceTab) }
+      ForEach(rows.prefix(cap.visibleCount)) { InboxRow(record: $0, model: model) }
       if cap.hiddenCount > 0 { MoreRow(count: cap.hiddenCount, model: model) }
     }
     VStack(alignment: .leading, spacing: 0) { SnoozedNote(model: model) }
@@ -341,6 +354,7 @@ private struct MoreRow: View {
 
   var body: some View {
     Button {
+      model.inboxTab = InboxTab(model.glanceTab)
       PanelMotion.open(.inbox, in: model)
     } label: {
       HStack(spacing: PanelMetrics.symbolSpacing) {
@@ -397,7 +411,8 @@ struct InboxRow: View {
           .accessibilityHidden(true)
       }
     }
-    .buttonStyle(.panelRow)
+    // The card open beside the list keeps its row selected.
+    .buttonStyle(.panelRow(selected: model.route == .attention(record.id)))
     .help(help(write))
     .accessibilityLabel(accessibilityLabel(write))
     .accessibilityIdentifier("inbox-row-\(record.id)")
