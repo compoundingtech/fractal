@@ -449,7 +449,7 @@ mod tests {
         assert!(store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
         assert!(!store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
         assert!(store.record_idle_unrouted(SEAT, UnroutedKind::ExplicitResume).unwrap());
-        let second = Store::open(&path, "alder").unwrap();
+        let second = Arc::new(Store::open(&path, "alder").unwrap());
         messages_shard::open(&second, root.path()).unwrap();
         assert!(!second.record_idle_unrouted(SEAT, UnroutedKind::ExplicitResume).unwrap());
         let count: u64 = store.readers.get().query_row(
@@ -639,12 +639,13 @@ mod tests {
             end_sleep_tx(tx, "alder", SEAT, &state, ended, "retire").unwrap();
             Ok::<_, anyhow::Error>(())
         }).unwrap().unwrap();
-        let receipts: (u64, Value) = store.readers.get().query_row(
+        let receipts: (u64, String) = store.readers.get().query_row(
             "SELECT COUNT(*), json_extract(body,'$.fields') FROM claims WHERE kind='residency.sleep-ended'",
             [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(receipts.0, 1, "a replayed retire reuses the sleep episode");
-        assert_eq!(receipts.1["end_class"], "retire");
-        assert_eq!(receipts.1["short_sleep"], 0, "a zero idle threshold cannot have a shorter sleep");
+        let fields: Value = serde_json::from_str(&receipts.1).unwrap();
+        assert_eq!(fields["end_class"], "retire");
+        assert_eq!(fields["short_sleep"], 0, "a zero idle threshold cannot have a shorter sleep");
     }
 
     #[test]
