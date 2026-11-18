@@ -2420,6 +2420,8 @@ pub struct ObservationTrim {
 const TRIM_SCAN_PAGE: i64 = 5_000;
 
 pub struct Store {
+    /// Identity of this open, including same-process reopen or restore.
+    membership_lifetime: uuid::Uuid,
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
@@ -2842,6 +2844,10 @@ pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
 pub type HumanAttention = (BTreeSet<String>, Vec<fractal_ui_model::missions::Gate>);
 
 impl Store {
+    pub fn ordered_membership_lifetime(&self) -> uuid::Uuid {
+        self.membership_lifetime
+    }
+
     /// Decision reads must wait for the run's committed pending projection work.
     pub fn run_projection_pending(&self, subject: &str) -> Result<bool> {
         smallclaims::touched::note_read(|| subject.to_owned());
@@ -2934,6 +2940,7 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
@@ -2964,6 +2971,7 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
@@ -2995,6 +3003,7 @@ impl Store {
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
