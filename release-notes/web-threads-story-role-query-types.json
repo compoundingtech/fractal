@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Related-request story assertions use supported exact accessible-name queries, restoring the web typecheck without changing their matching strictness.",
+  "replay": { "status": "none", "detail": "Story assertions only; no replay changes." },
+  "schema": { "status": "none", "detail": "No storage or wire schema changes." },
+  "rules": { "status": "none", "detail": "No policy changes." },
+  "compatibility": { "status": "none", "detail": "Production behavior is unchanged. String accessible names already match exactly in role queries, so the unsupported exact option is unnecessary." },
+  "downtime": { "status": "none", "detail": "No runtime changes." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}
