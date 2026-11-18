@@ -1224,6 +1224,12 @@ impl NativeRuntime {
         let executable = launch_executable()?;
         let mut environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
+        if resource.is_some() {
+            // Finite commands have membership custody, not a seat-start operation.
+            // Do not turn payload or inherited login variables into durable IDs/log fields.
+            crate::environment::remove_aliases(&mut environment, "ST3_START_OPERATION");
+            environment.remove("ST_START_OPERATION");
+        }
         set_lane(&mut environment, member.capacity);
         let mut launch = fractal_runtime::Launch::from(&member.launch);
         match &mut launch {

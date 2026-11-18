@@ -274,6 +274,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         if newly_started {
             execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(execution, now);
             let mut environment = self.store.take_shell_resource_environment(&execution.command.id)?;
+            // Caller payload variables are not trusted launch-operation metadata.
+            crate::environment::remove_aliases(&mut environment, "ST3_START_OPERATION");
+            environment.remove("ST_START_OPERATION");
             environment.insert(PARENT_ENV.into(), serde_json::to_string(&crate::store::shell_resources::ParentContext { grant: grant.clone(), request: request.clone() })?);
             // Nested CLIs must reconnect to the exact authority which owns the inherited grant.
             environment.insert("ST3_ENDPOINT".into(), self.endpoint.clone());

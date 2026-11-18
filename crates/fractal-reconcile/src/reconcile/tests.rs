@@ -617,6 +617,123 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
     }
 
+    #[test]
+    fn native_shell_resources_do_not_persist_or_log_caller_start_operations() {
+        use super::{NativeRuntime, RuntimeControl};
+        use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Exercise each spelling alone: canonical precedence must not hide an alias leak.
+        for key in ["ST3_START_OPERATION", "FRACTAL_START_OPERATION", "ST_START_OPERATION"] {
+            for rejected in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let store = Store::open_memory("node").unwrap();
+                store.start_resource_authority("node", "sentinel-epoch").unwrap();
+                let request = LaneRequest {
+                    id: "sentinel-membership".into(), name: "sentinel-lane".into(),
+                    host: "node".into(), max_members: 1,
+                    capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 256 << 20 }),
+                    coverage: Coverage::Logical, admission_timeout_ms: None,
+                    class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
+                    owner: Owner {
+                        run: "mission-run/sentinel".into(), step: "step-run/sentinel/work".into(),
+                        attempt: 1, invocation: Some("shell-sentinel".into()),
+                    },
+                };
+                assert!(matches!(
+                    store.request_resource_membership(&request, Fit {
+                        room: Some(fractal_runtime::Capacity { cores: 2, memory: 1 << 30 }),
+                        ..Fit::default()
+                    }, 1).unwrap(),
+                    Admission::Admitted(_)
+                ));
+                let intent = crate::graph::parse_test_intent(
+                    &format!(
+                        "version 2\nexec \"sentinel\" {{ command \"true\"; workspace {:?}; }}",
+                        root.path().display().to_string(),
+                    ),
+                    "native-shell-resources-sentinel",
+                ).unwrap();
+                let mut member = intent.subjects.values()
+                    .find_map(|subject| subject.member.clone()).unwrap();
+                member.runtime_id = "shell-sentinel".into();
+                member.launch = crate::model::LaunchSpec::Shell(
+                    "test -z \"$ST3_START_OPERATION$FRACTAL_START_OPERATION$ST_START_OPERATION\" && printf finite-ok".into(),
+                );
+                let sentinel = format!("private-native-shell-resources-{key}");
+                member.environment.insert(key.into(), sentinel.clone());
+                super::resource_lanes::set_request(&mut member, &request).unwrap();
+                let runtime = NativeRuntime::new(root.path(), None, Path::new("unused-pty"));
+                let capture = Capture(Arc::new(Mutex::new(Vec::new())));
+                let writer = capture.clone();
+                let subscriber = tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::DEBUG)
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone())
+                    .finish();
+                tracing::subscriber::with_default(subscriber, || {
+                    let guard = || -> Result<()> {
+                        anyhow::ensure!(!rejected, "sentinel fixture guard rejection");
+                        Ok(())
+                    };
+                    let result = runtime.start_resource_guarded(&store, &member, &guard);
+                    let record = root.path().join("exec/shell-sentinel.json");
+                    if rejected {
+                        let error = result.unwrap_err();
+                        assert!(error.to_string().contains("sentinel fixture guard rejection"));
+                        let proof = error.downcast_ref::<fractal_runtime::StartRejected>().unwrap();
+                        assert_eq!(proof.operation, None);
+                        assert!(!record.exists(), "rejected launch must not create a generation");
+                    } else {
+                        result.unwrap();
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        loop {
+                            if let Some(observation) = runtime.observe_exec(&member.runtime_id).unwrap()
+                                && observation.status == "exited"
+                            {
+                                assert_eq!(observation.exit_code, Some(0));
+                                let generation = observation.incarnation_id.unwrap();
+                                assert_eq!(
+                                    runtime.resource_exec_output(&member.runtime_id, &generation).unwrap(),
+                                    ("finite-ok".into(), String::new()),
+                                );
+                                break;
+                            }
+                            assert!(std::time::Instant::now() < deadline, "finite shell did not exit");
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        let json = std::fs::read_to_string(record).unwrap();
+                        assert!(!json.contains(&sentinel), "caller value leaked into generation JSON");
+                        let generation: fractal_runtime::ExecGeneration = serde_json::from_str(&json).unwrap();
+                        assert_eq!(generation.start_operation, None);
+                        assert!(generation.resource_membership.is_some());
+                    }
+                });
+                let diagnostics = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+                assert!(!diagnostics.contains(&sentinel), "caller value leaked into diagnostics");
+                if rejected {
+                    assert!(
+                        diagnostics.contains("exec spawn guard rejected"),
+                        "must capture the diagnostic that formerly exposed operation_id",
+                    );
+                    assert!(diagnostics.contains("operation_id=\"unavailable\""));
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn agent_start_receipt_records_only_exact_runtime_process_provenance() {

@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Keep captured shell resource environment values out of durable records and execution responses",
   "replay": {"status": "changed", "detail": "Every store startup idempotently removes captured environment maps from historical shell resource bodies. Only the number of changed rows is returned; no environment values are logged. This owner-local custody table is not replicated, so an older peer cannot re-import its records."},
-  "schema": {"status": "changed", "detail": "Shell command environment values move through an input-only submission envelope and a process-local launch handoff. They are omitted from stored command bodies and execution responses. No table or replicated claim schema changes."},
+  "schema": {"status": "changed", "detail": "Shell command environment values move through an input-only submission envelope and a process-local launch handoff. They are omitted from stored command bodies and execution responses. Finite commands discard caller and inherited start-operation aliases so those values cannot become generation metadata or diagnostic operation identifiers. No table or replicated claim schema changes."},
   "rules": {"status": "none", "detail": "Resource ownership, admission, and execution fencing are unchanged."},
   "compatibility": {"status": "changed", "detail": "Queued commands whose launch environment is lost on daemon restart fail closed rather than executing with an incomplete environment. Clients should resubmit them. Program resource command environments and program-host start messages remain transient process-launch inputs, not durable environment snapshots."},
   "downtime": {"status": "none", "detail": "The scrub runs when an updated store opens; no coordinated fleet outage is required."},
