@@ -1,7 +1,7 @@
 import { actionReceiptCheck, appliedAnswer } from '../../clients/typescript/fractal-client/index.ts';
 import { expectedPreparedPacketIdentities } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
-import { markOutboxDispatched, observeOutbox, prepareOutboxRecord, restoreOutboxEntries, restoreOutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
+import { createOutboxRecord, markOutboxDispatched, observeOutbox, prepareOutboxRecord, restoreOutboxEntries, restoreOutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { OutboxPreparingRecord, OutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { ActionResult, EnvelopeOf } from '../../clients/typescript/fractal-client/Models.generated.ts';
 import { ConversationAttempts } from './conversationAttempts.ts';
@@ -14,6 +14,7 @@ import type { Picked } from './images.ts';
 export interface OutboxOwner {
   repository: IosOutboxRepository;
   acceptIntent(id: string, text: string, images: readonly Picked[], metadata: OutboxMessageMetadata): Promise<OutboxPreparingRecord>;
+  commitRetry(child: OutboxPreparingRecord, validate: () => Promise<void>): Promise<boolean>;
   readAttachment(reference: string): Promise<Uint8Array>;
   authorize(): void;
   cleanup(now: number): Promise<void>;
@@ -22,6 +23,7 @@ export interface OutboxOwner {
 export interface OutboxTransport {
   /** Also validates the captured person, actor, profile slot and original connection. */
   authorize(intent: OutboxMessageIntent): void;
+  validateRetry(intent: OutboxMessageIntent): Promise<'retired' | 'reassigned' | 'unassigned' | undefined>;
   prepare(record: OutboxPreparingRecord, intent: OutboxMessageIntent): Promise<PreparedPacket>;
   post(packet: PreparedPacket): Promise<EnvelopeOf<ActionResult>>;
   /** Direct original-member authoritative read only; absence never proves nonapplication. */
@@ -173,6 +175,37 @@ export class OutboxRuntime {
       await this.refresh();
     } catch (error) { this.notices.set(id, this.transport.errorText(error)); await this.refresh().catch(error => this.signalIssue(error)); }
   };
+  /** Explicit new attempt only: never restore dispatch permission on the parent packet. */
+  retry = async (id: string, childId: string): Promise<void> => {
+    if (this.stopped || this.busy.has(id) || id === childId) return;
+    this.busy.add(id);
+    try {
+      const parent = await this.owner.repository.read(id);
+      if (!parent || parent.state !== 'not-applied' || parent.ambiguous) return;
+      const intent = messageIntent(parent.intent);
+      if (!intent) return;
+      this.authorize(intent);
+      const childIntent: OutboxMessageIntent = { ...intent, parentAttemptId: id };
+      const child = createOutboxRecord(childId, childIntent);
+      let recipientBlocked = false;
+      if (!await this.owner.commitRetry(child, async () => {
+        const state = await this.transport.validateRetry(intent);
+        this.authorize(intent);
+        if (state) {
+          recipientBlocked = true;
+          this.notices.set(id, `Recipient ${state}. No new attempt was created; the original recovery is kept.`);
+          throw new Error(`Recipient ${state}`);
+        }
+      }).catch(error => {
+        if (recipientBlocked) return false;
+        throw error;
+      })) { await this.refresh(); return; }
+      await this.refresh();
+      this.launch(childId);
+    } catch (error) { this.signalIssue(error); }
+    finally { this.busy.delete(id); }
+  };
+
   discard = async (id: string): Promise<void> => {
     try {
       await this.owner.repository.discard(id);

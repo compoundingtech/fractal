@@ -131,3 +131,35 @@ test('store reply acceptance cannot delete or save an identical restored draft f
     if (restored) assert.equal(cache.get(key), saved);
   }
 });
+
+test('production retry preflight rereads canonical recipient and retirement on the original client', async () => {
+  const a = source.indexOf('        validateRetry: '), b = source.indexOf('\n        sha256:', a);
+  assert.ok(a > 0 && b > a);
+  const expression = source.slice(a + '        validateRetry: '.length, b).trim().replace(/,$/, '');
+  const { outputText } = ts.transpileModule(`exports.validate = ${expression};`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } });
+  for (const kind of ['chat', 'start', 'reply']) for (const state of ['current', 'retired', 'reassigned', 'unassigned']) {
+    const originalAgent = 'agent/dotfiles/manager', calls = [];
+    class Refusal extends Error { constructor(code) { super(code); this.response = { code }; this.status = 409; } }
+    const original = {
+      threadStartContext: async () => {
+        calls.push('canonical');
+        if (state === 'unassigned') throw new Refusal('recipient-unassigned');
+        return { value: { start_recipient: { agent_id: state === 'reassigned' ? 'person/ada' : originalAgent } } };
+      },
+      threadGet: async () => { calls.push('thread'); return { value: { agent_id: state === 'reassigned' ? 'person/ada' : originalAgent } }; },
+      agentsGet: async id => {
+        calls.push('agent');
+        if (state === 'unassigned') throw new Refusal('recipient-unassigned');
+        return { value: { kind: 'agent', id: state === 'reassigned' ? 'person/ada' : id, state: state === 'retired' ? 'retired' : 'running' } };
+      },
+    };
+    const exports = {};
+    new Function('exports', 'original', 'authorizeIntent', 'ClientError', outputText)(exports, original, () => {}, Refusal);
+    const message = kind === 'chat' ? { kind, to: originalAgent } : kind === 'start'
+      ? { kind, target: 'thread/original', origin: { agentId: originalAgent, sourceId: 'notice/original', episode: 'episode/original' } }
+      : { kind, target: 'thread/original', agentId: originalAgent };
+    assert.equal(await exports.validate({ message }), state === 'current' ? undefined : state);
+    assert.ok(calls.length > 0);
+  }
+  assert.match(source, /const currentFence = intent.parentAttemptId\s*\? \{ snapshot_id: \(await original.capabilities\(\)\).snapshot.id/);
+});

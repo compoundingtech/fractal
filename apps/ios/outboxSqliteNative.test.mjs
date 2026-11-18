@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
-import { createOutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
+import { createOutboxRecord, prepareOutboxRecord, markOutboxDispatched, observeOutbox } from '../../clients/typescript/fractal-client/outbox.ts';
+import { prepareMessageSendPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
+import { createHash } from 'node:crypto';
 import { OutboxBindingUnavailableError } from './outboxBinding.ts';
 
 // Native dependency ports only; run the actual native wrapper and repository SQL in Node.
@@ -23,7 +25,7 @@ const hooks = registerHooks({
 });
 
 // The optional module is captured on import; its methods delegate to each test's ports.
-ports.bridge = { prepareStorage: () => ports.prepareStorage() };
+ports.bridge = { prepareStorage: () => ports.prepareStorage(), readAttachment: reference => ports.readAttachment(reference) };
 const { openNativeOutbox } = await import('./outboxSqliteNative.ts');
 
 test('native wrapper snapshots scope before await and authorizes only the immutable storage scope', async t => {
@@ -71,4 +73,54 @@ test('native wrapper snapshots scope before await and authorizes only the immuta
   assert.ok(checkedScopes.every(captured => captured === owner.repository.scope));
   const rows = db.prepare('SELECT principal_id, member_id, deployment_id FROM outbox_records').all();
   assert.deepEqual(rows.map(row => ({ ...row })), [{ principal_id: original.principalId, member_id: original.memberId, deployment_id: original.deploymentId }]);
+  // Real native-wrapper serialization + real SQLite: cleanup cannot overtake a
+  // retry paused in attachment validation, but a cleanup winner fails closed.
+  const protection = { databaseDirectory: '/private/test/SQLite/fractal-outbox', spoolDirectory: '/private/test/SQLite/fractal-outbox/spool',
+    databaseExcludedFromBackup: true, spoolExcludedFromBackup: true };
+  ports.prepareStorage = async () => protection;
+  const bytes = Buffer.from('original image'), hash = createHash('sha256').update(bytes).digest('hex');
+  const reference = 'spool/' + hash;
+  let exists = true, releaseRead, readStarted;
+  const started = new Promise(resolve => { readStarted = resolve; });
+  ports.readAttachment = async () => {
+    readStarted();
+    await new Promise(resolve => { releaseRead = resolve; });
+    if (!exists) throw new Error('Stored image unavailable');
+    return bytes.toString('base64');
+  };
+  const intent = { text: 'image draft', attachments: [{ reference, contentHash: 'sha256:' + hash, mediaType: 'image/png' }] };
+  const parent = createOutboxRecord('action/image-parent', intent);
+  await owner.repository.commit(parent);
+  const packet = prepareMessageSendPacket({ id: parent.id, idempotency_key: 'image-parent-key-at-least-sixteen',
+    fence: { snapshot_id: 'snapshot/original', subject_revisions: {} }, parameters: { to: 'person/ada', content: intent.text } });
+  const ready = prepareOutboxRecord(parent, packet, ['message/image']);
+  await owner.repository.compareAndSwap(0, ready);
+  const dispatched = markOutboxDispatched(ready);
+  await owner.repository.compareAndSwap(1, dispatched);
+  await owner.repository.compareAndSwap(2, observeOutbox(dispatched, { kind: 'failure', applied: 'none' }));
+  const child = createOutboxRecord('action/image-child', intent);
+  let validated = false;
+  const accepting = owner.commitRetry(child, async () => { validated = true; assert.equal(exists, true); });
+  await started;
+  let deleted = false;
+  const cleanup = owner.repository.cleanup(Date.now() + 8 * 86400_000, async () => { deleted = true; exists = false; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(deleted, false);
+  releaseRead();
+  assert.equal(await accepting, true);
+  assert.equal(validated, true);
+  await cleanup;
+  assert.equal(deleted, false); // Committed child now protects the reference.
+  assert.deepEqual((await owner.repository.read(child.id)).intent, intent);
+  // A later terminal child is eligible for cleanup; now cleanup wins before retry.
+  const childReady = prepareOutboxRecord(child, { ...packet, id: child.id }, ['message/child']);
+  await owner.repository.compareAndSwap(0, childReady);
+  const childDispatched = markOutboxDispatched(childReady);
+  await owner.repository.compareAndSwap(1, childDispatched);
+  await owner.repository.compareAndSwap(2, observeOutbox(childDispatched, { kind: 'failure', applied: 'none' }));
+  await owner.repository.cleanup(Date.now() + 8 * 86400_000, async () => { exists = false; });
+  assert.equal(exists, false);
+  ports.readAttachment = async () => { throw new Error('Stored image unavailable'); };
+  await assert.rejects(owner.commitRetry(createOutboxRecord('action/too-late', intent), async () => assert.fail('missing bytes must fail first')), /Storage unavailable, retry later/);
+  assert.equal(await owner.repository.read('action/too-late'), undefined);
 });

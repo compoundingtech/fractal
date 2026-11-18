@@ -8,6 +8,7 @@ export type OutboxMessageMetadata = {
   message: OutboxMessage;
   binding: { profileSlot: string; person: string; signingKey: string; sessionActor: string };
   acceptedAt: number;
+  parentAttemptId?: string;
 };
 export type OutboxMessageIntent = OutboxIntent & OutboxMessageMetadata;
 export type OutboxAccepted = { how: 'accepted'; outboxId: string };

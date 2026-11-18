@@ -80,6 +80,17 @@ member. Dispatched work restores unknown and is never automatically replayed.
 Recovery offers Check status, Open conversation, Copy and warned local Discard;
 damaged entries expose only status and Discard. Check status uses exact authoritative
 timeline identities only; absent/unsupported lookup remains unknown, not not-applied.
+Only proven not-applied recovery offers Retry as new attempt: an explicit user action
+commits a fresh child id with the original draft, attachments and binding, retaining
+the parent id. It never resends the parent's signed packet. Unknown has no Retry,
+and lifecycle restoration never redispatches terminal not-applied attempts.
+Child acceptance shares the filesystem acceptance/cleanup barrier and verifies every
+retained attachment before committing; unavailable bytes prevent child creation.
+Immediately before that commit, the original client rereads the canonical Start
+recipient or reply thread and the agent's retirement state. Retired, reassigned or
+unassigned recipients leave the parent intact with a specific recovery status and
+no child or POST. A permitted child prepares a new packet with a freshly read fence;
+ordinary retries bypass the initial-send cached snapshot optimization.
 There is no exclusion/seal protocol, and no claim to reconcile every lost receipt.
 Storage failure preserves drafts and recovery, with a retry-later storage action.
 Saved Start metadata remains packetless unknown. Protected-profile migration commits
@@ -122,9 +133,10 @@ blocked retirement refusal. Both preserve the draft.
 A signed POST requires explicit `applied: none` under the shared application-certainty
 rules before a refusal can invalidate the recipient context and require a new Send.
 Absent proof remains unknown, even with `retryable: false`: retain the original signed
-packet, recipient and idempotency key, with no automatic or explicit resend, refresh or retarget. The golden
-`stale-fence` envelope still lacks that proof; `recipient-unassigned` and
-`recipient-retired` carry it. A definitive unassigned POST rereads context once,
+packet, recipient and idempotency key, with no automatic or explicit resend, refresh or retarget.
+The golden stale-snapshot `stale-fence`, `recipient-unassigned` and `recipient-retired`
+envelopes carry explicit proof in both the outer and legacy details locations.
+A definitive unassigned POST rereads context once,
 then the unavailable setup blocks further sends without Retry and keeps the draft.
 A later refusal cannot settle an earlier unknown send.
 Server message text is never parsed and `stale-fence` has no responsibility reason.
