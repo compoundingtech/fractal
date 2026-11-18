@@ -719,7 +719,10 @@ export const objective = <const I extends ObjectiveInput>(input: I): Objective &
       fail('minSamples is not a positive integer')
     }
   }
-  const rawTargets = input.targets === undefined && (indicator.kind === 'native' || indicator.kind === 'ratio' || indicator.kind === 'gauge') ? [] : input.targets
+  const rawTargets = input.targets === undefined && (
+    indicator.kind === 'native' || indicator.kind === 'ratio' || indicator.kind === 'gauge' ||
+    ((indicator.kind === 'github-merged-count' || indicator.kind === 'github-ready-to-merged') && indicator.measurement === 'only')
+  ) ? [] : input.targets
   if (Array.isArray(rawTargets) === false) fail('has no `target`')
   const targets = rawTargets!.map((value) => parseTarget({ value, fail }))
   const onBreach = input.onBreach === undefined ? undefined : parseBreach({ value: input.onBreach, fail })

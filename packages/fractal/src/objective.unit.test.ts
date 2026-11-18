@@ -587,6 +587,23 @@ objective "delivery/ready-to-merged" {
 `)
   })
 
+  it('accepts omitted targets for both measured-only GitHub indicators like the native reader', () => {
+    for (const indicator of [
+      Fractal.indicator.githubReadyToMerged(native),
+      Fractal.indicator.githubMergedCount(native),
+    ]) {
+      const input = { name: 'delivery/measured', about: 'Measured GitHub evidence', indicator }
+      const text = render(input)
+      expect(text).toBe(render({ ...input, targets: [] }))
+      expect(text).toContain('measurement "only"')
+      expect(text).not.toContain('target "')
+    }
+    expect(() => render({
+      name: 'delivery/merged', about: 'Targeted GitHub throughput',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }),
+    })).toThrow('has no `target`')
+  })
+
   it('keeps merged-count target values policy-owned and omits author filters', () => {
     const text = render({
       name: 'delivery/merged',

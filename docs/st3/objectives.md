@@ -152,6 +152,9 @@ or lifecycle proof are unknown, never met. A completely covered empty count is a
 Corrections and retractions replace previous projection images and therefore revise previous
 counts and cycles.
 
+In TypeScript, either omit `targets` or provide `targets: []` for both measured-only
+GitHub indicators. Targeted merged-count still requires its explicit per-hour minimum.
+
 The native SLO measurement evidence contains fourteen civil-day bars, including partial today,
 with timezone, measured bounds and full calendar end bounds. Day lengths honor DST. It also
 carries source identity/generation, projection and roster revisions, the coverage frontier and
