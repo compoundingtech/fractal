@@ -3468,48 +3468,60 @@ async fn send_message(
             ).into());
         }
     }
-    let snapshot = match snapshot_hint {
+    let mut snapshot = match snapshot_hint {
         Some(known) => known,
         None => client.capabilities().await?.snapshot.id,
     };
-    let (id, idem) = crate::action_pair();
-    let request = client.prepare_message_send(
-        id.clone(),
-        idem,
-        Fence { snapshot_id: snapshot, ..Fence::default() },
-        parameters,
-    )?;
-    if let Some(sent) = sent {
-        let mut slot = sent.lock().map_err(|_| anyhow::anyhow!("message delivery state is unavailable"))?;
-        // Consume dispatch ownership while holding the lock, before any POST.
-        if slot.is_some() {
-            return Err(ClientError::Protocol("The original message has already been dispatched".into()).into());
-        }
-        *slot = Some(request.clone());
-    }
-    match client.submit_action(&request).await {
-        Ok(result) => {
-            if !result.value.completed_for(&id)
-                || result.value.operation_id.is_empty()
-                || result.value.snapshot_id.is_empty()
-                || !result.value.affected_ids.iter().any(|id| id.starts_with("message/"))
-            {
-                return Err(ClientError::Protocol(
-                    "Fractal has not confirmed the original message action".into(),
-                ).into());
+    // Only a definite nonapplication permits a fresh fence and another dispatch.
+    // Never enter this recovery path after an ambiguous attempt.
+    for attempt in 0..2 {
+        let (id, idem) = crate::action_pair();
+        let request = client.prepare_message_send(
+            id.clone(),
+            idem,
+            Fence { snapshot_id: snapshot, ..Fence::default() },
+            parameters.clone(),
+        )?;
+        if let Some(sent) = sent {
+            let mut slot = sent.lock().map_err(|_| anyhow::anyhow!("message delivery state is unavailable"))?;
+            // Consume dispatch ownership while holding the lock, before any POST.
+            if slot.is_some() {
+                return Err(ClientError::Protocol("The original message has already been dispatched".into()).into());
             }
-            Ok(message_id(result))
+            *slot = Some(request.clone());
         }
-        Err(error) => {
-            if error.not_applied()
-                && let Some(sent) = sent
-                && let Ok(mut slot) = sent.lock()
-            {
-                *slot = None;
+        match client.submit_action(&request).await {
+            Ok(result) => {
+                if !result.value.completed_for(&id)
+                    || result.value.operation_id.is_empty()
+                    || result.value.snapshot_id.is_empty()
+                    || !result.value.affected_ids.iter().any(|id| id.starts_with("message/"))
+                {
+                    return Err(ClientError::Protocol(
+                        "Fractal has not confirmed the original message action".into(),
+                    ).into());
+                }
+                return Ok(message_id(result));
             }
-            Err(error.into())
+            Err(error) => {
+                if error.not_applied() {
+                    if let Some(sent) = sent
+                        && let Ok(mut slot) = sent.lock()
+                    {
+                        *slot = None;
+                    }
+                    if attempt == 0
+                        && matches!(error, ClientError::Api(fractal_client::ErrorCode::StaleFence, ..))
+                    {
+                        snapshot = client.capabilities().await?.snapshot.id;
+                        continue;
+                    }
+                }
+                return Err(error.into());
+            }
         }
     }
+    unreachable!("the second dispatch always returns")
 }
 
 #[cfg(test)]
@@ -4788,7 +4800,7 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
         std::fs::remove_file(&socket).unwrap();
         (store, server) = serve(root.path(), &socket).await;
-        // This is the live loop's resend path: replay the preserved request first.
+        // A session change never authorizes another POST of a retained original.
         let replay = send_message(
             &client,
             "agent/example/worker",
@@ -4813,8 +4825,12 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
-        assert_eq!(replay.as_deref(), Some(message.as_str()));
+        .unwrap_err();
+        assert!(matches!(
+            replay.downcast_ref::<ClientError>(),
+            Some(ClientError::Protocol(message)) if message ==
+                "Delivery is unknown; the original may already have arrived and will not be sent again"
+        ));
         assert_eq!(store.index().unwrap(), index);
         let reply_sent = Mutex::new(None);
         let reply = Effect::Send {
@@ -4844,14 +4860,18 @@ mod tests {
             Some(message.as_str())
         );
         let reply_index = store.index().unwrap();
-        let (_, repeated) = perform(&client, "person/avery", &model, reply, Some(&reply_sent))
+        let repeated = perform(&client, "person/avery", &model, reply, Some(&reply_sent))
             .await
-            .unwrap();
-        assert_eq!(repeated.as_deref(), Some(replied.as_str()));
+            .unwrap_err();
+        assert!(matches!(
+            repeated.downcast_ref::<ClientError>(),
+            Some(ClientError::Protocol(message)) if message ==
+                "Delivery is unknown; the original may already have arrived and will not be sent again"
+        ));
         assert_eq!(
             store.index().unwrap(),
             reply_index,
-            "ordinary conversation replies keep the same retry receipt"
+            "a retained conversation reply never dispatches again"
         );
         for effect in [
             Effect::CreateTerminal {
