@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer as createViteServer } from 'vite'
@@ -9,9 +10,12 @@ import { createServer as createViteServer } from 'vite'
 // Exercise the real web app and its production gateway middleware, not fixtureSource.
 // The two Unix HTTP servers are transport test doubles, not initialized daemon instances.
 const app = fileURLToPath(new URL('..', import.meta.url))
-const scratch = fileURLToPath(new URL('../../../tmp/fixture-instance-routing/', import.meta.url))
-await mkdir(scratch, { recursive: true })
-const root = await mkdtemp(join(scratch, 'routing-'))
+// Keep socket paths below macOS's 104-byte sun_path limit, even in deep checkouts.
+const temporary = tmpdir()
+const scratch = Buffer.byteLength(join(temporary, 'fixture-routing-XXXXXX', 'fixture-client.sock')) < 104
+  ? temporary
+  : '/tmp'
+const root = await mkdtemp(join(scratch, 'fixture-routing-'))
 const authorization = ['Bearer', 'fixture-routing-test'].join(' ')
 const calls = { fixture: [], normal: [] }
 const gateways = []
