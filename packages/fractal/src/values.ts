@@ -242,7 +242,7 @@ export const InstantSchema = Schema.declare<InstantInput>((value): value is Inst
 /** Mission date profile: explicit known offset, Gregorian calendar, millisecond precision.
  * Decodes to an Effect UTC instant; encoding emits canonical UTC RFC3339 text.
  */
-export const Instant = Schema.declare<InstantInput>((input): input is InstantInput => {
+export const Instant = Schema.declare<DateTime.DateTime | string>((input): input is DateTime.DateTime | string => {
   if (typeof input !== 'string' && !DateTime.isDateTime(input)) return false
   if (typeof input === 'string' && (
     !/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u.test(input)
