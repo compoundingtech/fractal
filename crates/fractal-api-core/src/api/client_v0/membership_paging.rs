@@ -48,7 +48,7 @@ pub fn assemble(
     if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit)
         || arrangements::owner(container).ok() != Some(person)
     { return Err(error(INVALID)); }
-    let epoch = epoch(lifetime, captured.generation);
+    let epoch = lifetime_epoch(lifetime, captured.generation);
     if let Some(cursor) = cursor {
         cursor.validate()?;
         if cursor.person != person || cursor.subject != container || cursor.limit != limit {
@@ -106,8 +106,15 @@ pub fn error(code: &'static str) -> ApiError {
     }
 }
 
+/// A process nonce and transactional local projection generation, opaque on the wire.
+#[deprecated(note = "use lifetime_epoch")]
+pub fn epoch(generation: u64) -> String {
+    static BOOT: std::sync::LazyLock<uuid::Uuid> = std::sync::LazyLock::new(uuid::Uuid::new_v4);
+    format!("{}/{generation}", *BOOT)
+}
+
 /// Store-open nonce and transactional maintenance generation, opaque and equality-only.
-pub fn epoch(lifetime: uuid::Uuid, generation: u64) -> String {
+pub fn lifetime_epoch(lifetime: uuid::Uuid, generation: u64) -> String {
     format!("{lifetime}/{generation}")
 }
 
@@ -197,6 +204,20 @@ impl Cursor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(deprecated)]
+    fn epoch_functions_encode_uuid_and_generation() {
+        let u = uuid::Uuid::new_v4();
+        let g = 42_u64;
+        let lifetime = lifetime_epoch(u, g);
+        assert_eq!(lifetime, format!("{u}/{g}"));
+        for value in [epoch(g), lifetime] {
+            let (nonce, generation) = value.rsplit_once('/').unwrap();
+            uuid::Uuid::parse_str(nonce).unwrap();
+            assert_eq!(generation.parse::<u64>().unwrap(), g);
+        }
+    }
+
     fn snapshot(index: u64) -> ClientSnapshot {
         serde_json::from_value(serde_json::json!({
             "id":format!("snapshot/{index}"), "host_id":"host/example", "projection_version":"v0",
@@ -259,19 +280,19 @@ mod tests {
         let backup = root.path().join("backup.sqlite3");
         let store = fractal_store::store::Store::open(&path, "membership-epoch").unwrap();
         let mut cursor = cursor();
-        cursor.epoch = epoch(store.ordered_membership_lifetime(), 1);
+        cursor.epoch = lifetime_epoch(store.ordered_membership_lifetime(), 1);
         store.connection.write().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
         std::fs::copy(&path, &backup).unwrap();
         drop(store);
         let regressed = State { changed_index: 41, live_count: 4096 };
         assert_eq!(cursor.check_frontier(&snapshot(42), &cursor.epoch, regressed).unwrap_err().code, INCONSISTENT);
         let reopened = fractal_store::store::Store::open(&path, "membership-epoch").unwrap();
-        let reopened_epoch = epoch(reopened.ordered_membership_lifetime(), 1);
+        let reopened_epoch = lifetime_epoch(reopened.ordered_membership_lifetime(), 1);
         assert_eq!(cursor.check_frontier(&snapshot(42), &reopened_epoch, regressed).unwrap_err().code, RESET);
         drop(reopened);
         std::fs::copy(&backup, &path).unwrap();
         let restored = fractal_store::store::Store::open(&path, "membership-epoch").unwrap();
-        let restored_epoch = epoch(restored.ordered_membership_lifetime(), 1);
+        let restored_epoch = lifetime_epoch(restored.ordered_membership_lifetime(), 1);
         assert_ne!(reopened_epoch, restored_epoch);
         assert_eq!(cursor.check_frontier(&snapshot(42), &restored_epoch, regressed).unwrap_err().code, RESET);
     }
@@ -279,7 +300,7 @@ mod tests {
     const SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000101";
     fn cursor() -> Cursor {
         Cursor { version: 1, host_id: "host/example".into(), projection_version: "v0".into(),
-            epoch: epoch(uuid::Uuid::nil(), 1), person: "person/ada".into(), subject: SUBJECT.into(), limit: 200,
+            epoch: lifetime_epoch(uuid::Uuid::nil(), 1), person: "person/ada".into(), subject: SUBJECT.into(), limit: 200,
             changed_index: 42, live_count: 4096,
             after: After { bucket: String::new(), key: "a0".into(), member: "resource/example".into() } }
     }
@@ -337,8 +358,8 @@ mod tests {
         for (changed_index, live_count, expected) in [(43, 4096, CHANGED), (42, 4095, INCONSISTENT), (41, 4096, INCONSISTENT)] {
             assert_eq!(cursor.check_frontier(&snapshot, &cursor.epoch, State { changed_index, live_count }).unwrap_err().code, expected);
         }
-        assert_eq!(cursor.check_frontier(&snapshot, &epoch(uuid::Uuid::nil(), 2), state).unwrap_err().code, RESET);
-        assert_eq!(cursor.check_frontier(&snapshot, &epoch(uuid::Uuid::new_v4(), 1), state).unwrap_err().code, RESET);
+        assert_eq!(cursor.check_frontier(&snapshot, &lifetime_epoch(uuid::Uuid::nil(), 2), state).unwrap_err().code, RESET);
+        assert_eq!(cursor.check_frontier(&snapshot, &lifetime_epoch(uuid::Uuid::new_v4(), 1), state).unwrap_err().code, RESET);
         snapshot.host_id = "other".into();
         assert_eq!(cursor.check_frontier(&snapshot, &cursor.epoch, state).unwrap_err().code, RESET);
         snapshot.host_id = cursor.host_id.clone();
