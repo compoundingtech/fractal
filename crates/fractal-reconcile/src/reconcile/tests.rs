@@ -660,6 +660,53 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_shell_worker_receipt_precedes_reconcile_application() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store,
+            "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"sleep 600\"; }",
+            "worker-process-provenance");
+        let subject = store.desired_subject_with_writer("agent/node.worker").unwrap().unwrap().0;
+        let member = subject.member.as_ref().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("worker-current".into()),
+        });
+        let pid = std::process::id();
+        let token = fractal_runtime::process_start_token(pid).unwrap();
+        runtime.process_identities.lock().unwrap().insert(
+            (member.runtime_id.clone(), "worker-current".into()), (pid, token),
+        );
+        let reconciler = Reconciler::new(
+            store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.wait_for_test_starts.store(false, Ordering::Release);
+        reconciler.perform_start(&subject, member, "worker receipt before planner").unwrap();
+        // Join only the launch worker, never the completion-application planner.
+        let (live, changed) = &*reconciler.start_jobs.live;
+        let mut live = live.lock().unwrap();
+        while !live.is_empty() {
+            live = changed.wait(live).unwrap();
+        }
+        drop(live);
+        let operation = store.runtime_start_for(&subject.subject).unwrap().unwrap();
+        assert!(operation.finished);
+        assert!(!operation.applied);
+        assert!(!operation.receipted);
+        let result = operation.result.unwrap();
+        assert_eq!(result["operation_id"], operation.id);
+        assert_eq!(result["incarnation"], "worker-current");
+        assert_eq!(result["verification"], "operation-incarnation");
+        assert_eq!(result["runtime_pid"], pid);
+        assert_eq!(result["runtime_pid_start_token"], token.to_string());
+        assert_eq!(result["runtime_start_fields"]["status"], "starting");
+        assert!(result["runtime_before_start"].is_null());
+        assert!(store.latest_claim(&subject.subject, Some("runtime.observed")).unwrap().is_none());
+        assert!(store.latest_observation(&subject.subject, "runtime.action.succeeded").unwrap().is_none());
+    }
+
 
     #[test]
     fn claude_login_screen_recognizes_only_explicit_auth_prompts() {

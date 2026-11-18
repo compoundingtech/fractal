@@ -106,7 +106,10 @@ impl OwnedSetsStore for Store {
             options: &Options,
         ) -> Result<Preview, FractalError> {
         let mut preview = self.connection
-            .batched(|tx| plan_tx(tx, intent, options).map(|p| p.preview))
+            .batched(|tx| {
+                let normalized = identities::normalize_intent(tx, intent)?;
+                plan_tx(tx, normalized.as_ref(), options).map(|p| p.preview)
+            })
             .map_err(|e| FractalError::new("internal", e))??;
         // Operational annotations belong to preview only. Publication keeps its existing
         // transaction reads and suspension follows the shared launch-lineage comparator.
