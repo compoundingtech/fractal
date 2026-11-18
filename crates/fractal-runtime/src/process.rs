@@ -119,6 +119,7 @@ pub struct FiniteLane {
     /// Frozen per-generation envelope; absent historical callers inherit the aggregate cap.
     pub member_capacity: Option<crate::lane::Capacity>,
     pub memory_high_bytes: Option<u64>,
+    pub class: crate::lane::RequestClass,
     pub require_enforced: bool,
 }
 
@@ -1730,7 +1731,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "authorization_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let authorized = std::cell::Cell::new(false);
         let generation = runtime.spawn_in_lane_authorized(
@@ -1764,7 +1765,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "omitted_release_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let error = runtime.spawn_in_lane_authorized(
             "omitted", &crate::Launch::Shell("touch unauthorized-payload".into()),
@@ -1826,7 +1827,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "output_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let generation = runtime.spawn_in_lane_checked(
             "output", &crate::Launch::Shell("printf stdout-value; printf stderr-value >&2; exit 7".into()),
@@ -1858,7 +1859,7 @@ mod tests {
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
         let policy = FiniteLane {
             name: "wait_fixture".into(), capacity: None, require_enforced: false,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
         };
         let generation = runtime.spawn_in_lane_checked(
             "wait", &crate::Launch::Argv(vec!["sleep".into(), "60".into()]),
@@ -1899,7 +1900,7 @@ mod tests {
             name: format!("fixture_{}", std::process::id()),
             capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
             member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
-            memory_high_bytes: None,
+            memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: true,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -1960,7 +1961,7 @@ mod tests {
             name,
             capacity: Some(aggregate),
             member_capacity: Some(crate::lane::Capacity { cores: 1, memory: 256 * 1024 * 1024 }),
-            memory_high_bytes: Some(128 * 1024 * 1024),
+            memory_high_bytes: Some(128 * 1024 * 1024), class: crate::lane::RequestClass::default(),
             require_enforced: true,
         };
         let spawn = |id: &str, policy: &FiniteLane, binding: &ResourceExecutionBinding| {
@@ -2037,7 +2038,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         let error = runtime.spawn_in_lane_checked(
@@ -2062,7 +2063,7 @@ mod tests {
         let policy = FiniteLane {
             name: "fixture".into(),
             capacity: None,
-            member_capacity: None, memory_high_bytes: None,
+            member_capacity: None, memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         let generation = runtime.spawn_in_lane_checked(
@@ -2089,7 +2090,7 @@ mod tests {
         let mut policy = FiniteLane {
             name: "fixture".into(),
             capacity: Some(crate::lane::Capacity::DEFAULT),
-            member_capacity: Some(crate::lane::Capacity::DEFAULT), memory_high_bytes: None,
+            member_capacity: Some(crate::lane::Capacity::DEFAULT), memory_high_bytes: None, class: crate::lane::RequestClass::default(),
             require_enforced: false,
         };
         assert_eq!(policy.coverage().unwrap(), ResourceCoverage::LogicalOnly);
