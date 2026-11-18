@@ -5100,6 +5100,15 @@ mission "legacy-child" state="ready" {
 
     #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
+        exact_produced_mission_revision(false);
+    }
+
+    #[test]
+    fn a_step_uses_its_run_scoped_output_revision() {
+        exact_produced_mission_revision(true);
+    }
+
+    fn exact_produced_mission_revision(per_run: bool) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let bootstrap = r#"
 version 2
@@ -5120,6 +5129,9 @@ version 2
   }
 
 "#;
+        let bootstrap = if per_run {
+            bootstrap.replace("produces-mission \"project/work\"", "produces-mission \"project/${ST_MISSION_RUN}/work\"")
+        } else { bootstrap.to_owned() };
         let first_work = r#"
 version 2
 
@@ -5131,12 +5143,7 @@ version 2
   }
 
 "#;
-        apply_source(&store, bootstrap, "publish-bootstrap");
-        apply_source(&store, first_work, "publish-first-work");
-        let first = store
-            .mission_spec("project/work", None)
-            .unwrap()
-            .expect("first work mission");
+        apply_source(&store, &bootstrap, "publish-bootstrap");
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "bootstrap".into(),
@@ -5148,6 +5155,10 @@ version 2
                 idempotency_key: "run-bootstrap".into(),
             })
             .unwrap();
+        let mission_id = if per_run { format!("project/{}/work", run.id) } else { "project/work".into() };
+        let first_work = first_work.replace("project/work", &mission_id);
+        apply_source(&store, &first_work, "publish-first-work");
+        let first = store.mission_spec(&mission_id, None).unwrap().expect("first work mission");
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -5183,7 +5194,7 @@ version 2
                 &compile.subject,
                 "agent/node.planner",
                 Some("test"),
-                "project/work",
+                &mission_id,
                 &first,
                 "bind-first-work",
             )
@@ -5213,7 +5224,8 @@ version 2
   }
 
 "#;
-        apply_source(&store, second_work, "publish-second-work");
+        let second_work = second_work.replace("project/work", &mission_id);
+        apply_source(&store, &second_work, "publish-second-work");
         for _ in 0..4 {
             reconciler.reconcile_once().unwrap();
         }

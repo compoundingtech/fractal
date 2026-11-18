@@ -13284,6 +13284,15 @@ agent "example/other" {
 
 #[tokio::test]
 async fn a_claimed_step_publishes_one_attempt_bound_ready_mission() {
+    claimed_step_mission_output(false).await;
+}
+
+#[tokio::test]
+async fn a_claimed_step_publishes_a_run_scoped_ready_mission() {
+    claimed_step_mission_output(true).await;
+}
+
+async fn claimed_step_mission_output(per_run: bool) {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let source = r#"
@@ -13303,13 +13312,18 @@ version 2
   }
 
 "#;
-    let intent = parse_intent(source, "node").unwrap();
+    let source = if per_run {
+        source.replace("produces-mission \"project/work\"", "produces-mission \"project/${ST_MISSION_RUN}/work\"")
+    } else {
+        source.to_owned()
+    };
+    let intent = parse_intent(&source, "node").unwrap();
     let planned = state
         .store
         .mission(
             &intent,
             crate::model::IntentInput {
-                kdl: source.into(),
+                kdl: source.clone(),
                 source_name: None,
             },
         )
@@ -13348,13 +13362,15 @@ version 2
   }
 
 "#;
+    let mission_id = if per_run { format!("project/{}/work", run.id) } else { "project/work".into() };
+    let produced = produced.replace("project/work", &mission_id);
     let app = router(state.clone());
     let (status, output) = json_request(
         app.clone(),
         &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
         serde_json::to_value(MissionProductionRequest {
             intent: crate::model::IntentInput {
-                kdl: produced.into(),
+                kdl: produced.clone(),
                 source_name: Some("generated.kdl".into()),
             },
             actor: actor.clone(),
@@ -13406,14 +13422,14 @@ version 2
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{output}");
     assert_eq!(output["code"], "wrong-mission-output");
     let (status, output) = json_request(
-        app,
+        app.clone(),
         &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
         serde_json::to_value(MissionProductionRequest {
             intent: crate::model::IntentInput {
-                kdl: produced.into(),
+                kdl: produced.clone(),
                 source_name: Some("generated.kdl".into()),
             },
-            actor,
+            actor: actor.clone(),
             incarnation: Some("test".into()),
             idempotency_key: "publish-produced-work".into(),
         })
@@ -13421,13 +13437,13 @@ version 2
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{output}");
-    assert_eq!(output["mission"], "mission/project/work");
+    assert_eq!(output["mission"], format!("mission/{mission_id}"));
     let revision = output["revision"].as_str().unwrap();
     assert_eq!(revision.len(), 64);
     assert!(
         state
             .store
-            .mission_spec("project/work", Some(revision))
+            .mission_spec(&mission_id, Some(revision))
             .unwrap()
             .is_some()
     );
@@ -13438,9 +13454,21 @@ version 2
         .expect("attempt-bound mission output");
     assert_eq!(bound.revision, revision);
     assert_eq!(bound.claim_id, output["claim_id"]);
-    let published = state.store.mission_spec("project/work", Some(revision)).unwrap().unwrap();
+    let published = state.store.mission_spec(&mission_id, Some(revision)).unwrap().unwrap();
     let uris = state.store.declared_resource_uris(&published.resources).unwrap();
     assert_eq!(uris[&published.resources[0].subject], "urn:example:output");
+    let (status, replay) = json_request(
+        app,
+        &format!("/v1/work/mission/{}", urlencoding::encode(&step.subject)),
+        serde_json::to_value(MissionProductionRequest {
+            intent: crate::model::IntentInput { kdl: produced, source_name: Some("generated.kdl".into()) },
+            actor,
+            incarnation: Some("test".into()),
+            idempotency_key: "publish-produced-work".into(),
+        }).unwrap(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, output);
 }
 
 #[test]
