@@ -2490,6 +2490,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "under",
         "restart",
         "rollout",
+        "idle-suspend",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2536,6 +2537,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "workspace",
         "checkout",
         "rollout",
+        "idle-suspend",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2583,6 +2585,23 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
             return Err(FractalError::new(
                 "invalid-agent-lifecycle",
                 format!("agent lifecycle `{value}` must be standing, owner, or bounded"),
+            ));
+        }
+    }
+    if let Some(policy) = unique_child(document, "idle-suspend")? {
+        ensure_no_properties(policy)?;
+        ensure_no_children(policy)?;
+        if policy.ty().is_some() || policy.entries().iter().any(|entry| entry.ty().is_some()) {
+            return Err(FractalError::new(
+                "invalid-agent-idle-suspend",
+                "agent idle-suspend cannot have type annotations",
+            ));
+        }
+        let value = one_string(policy)?;
+        if crate::model::AgentIdleSuspend::parse(&value).is_none() {
+            return Err(FractalError::new(
+                "invalid-agent-idle-suspend",
+                "agent idle-suspend must be never or member",
             ));
         }
     }
@@ -6694,5 +6713,66 @@ github-source "public-example" {
         assert_eq!(parse_intent(source, "member-one").unwrap_err().code, "invalid-github-source");
         let disabled = source.replace("enabled #true", "enabled #false");
         assert!(parse_intent(&disabled, "member-one").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod idle_suspend_tests {
+    use super::*;
+    use crate::model::{AgentIdleSuspend, declared_idle_suspend};
+
+    #[test]
+    fn idle_suspend_is_optional_typed_declaration_metadata() {
+        let baseline = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }",
+            "node",
+        ).unwrap();
+        let original = &baseline.subjects["agent/example/worker"];
+        assert_eq!(declared_idle_suspend(Some(&original.desired)), None);
+        assert_eq!(declared_idle_suspend(None), None);
+        for (value, expected) in [
+            ("never", AgentIdleSuspend::Never),
+            ("member", AgentIdleSuspend::Member),
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ command \"true\"; idle-suspend \"{value}\"; }}"
+            );
+            let intent = parse_intent(&source, "node").unwrap();
+            let desired = &intent.subjects["agent/example/worker"];
+            assert_eq!(declared_idle_suspend(Some(&desired.desired)), Some(expected));
+            assert_ne!(desired.desired, original.desired);
+            assert_eq!(desired.member, original.member, "policy is not launch metadata");
+            assert!(desired.member.as_ref().unwrap()
+                .launch_changes(original.member.as_ref().unwrap()).is_empty());
+            let decoded: NormalizedIntent = serde_json::from_value(
+                serde_json::to_value(&intent).unwrap(),
+            ).unwrap();
+            assert_eq!(
+                declared_idle_suspend(Some(&decoded.subjects["agent/example/worker"].desired)),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn idle_suspend_refuses_duplicates_and_malformed_children() {
+        for policy in [
+            "idle-suspend",
+            "idle-suspend #true",
+            "idle-suspend 1",
+            "(policy)idle-suspend \"never\"",
+            "idle-suspend (policy)\"never\"",
+            "idle-suspend \"always\"",
+            "idle-suspend \"Never\"",
+            "idle-suspend \"never\" \"member\"",
+            "idle-suspend \"never\" mode=\"member\"",
+            "idle-suspend \"never\" {}",
+            "idle-suspend \"never\"; idle-suspend \"member\"",
+        ] {
+            let source = format!(
+                "version 2\nagent \"example/worker\" {{ command \"true\"; {policy}; }}"
+            );
+            assert!(parse_intent(&source, "node").is_err(), "{policy}");
+        }
     }
 }
