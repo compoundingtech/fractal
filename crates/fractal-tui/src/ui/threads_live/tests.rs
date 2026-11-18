@@ -604,6 +604,11 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         1,
         "retry must not create another lifecycle event"
     );
+    // The live summary alone cannot settle the ambiguous action. Deliver the
+    // original completed receipt before exercising independent metadata edits.
+    assert!(ui.threads.pending_actions.contains_key(id));
+    ui.threads.complete(receipt, &mut ui.conversation_state.drafts);
+    assert!(!ui.threads.pending_actions.contains_key(id));
     apply_window(&mut ui, &mut stream, id).await;
     assert_eq!(
         client.thread_get(id).await.unwrap().value.state,
@@ -1347,8 +1352,9 @@ fn enter_that_queues_nothing_says_why_and_keeps_the_draft() {
     assert!(threads.writes().is_empty());
     assert_eq!(
         threads.take_refusal().as_deref(),
-        Some("The original action is still being sent")
+        Some("The original action is pending or unknown and will not be sent again")
     );
+    assert_eq!(texts[&Input::Reply("thread/worker".into()).key()], "First reply");
 
     // Before the thread's summary has loaded, the reply has no context yet.
     let mut loading = Threads::default();

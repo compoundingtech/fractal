@@ -399,9 +399,8 @@ function PendingInboxStarts({ source, items }: { readonly source: ThreadSource; 
 }
 
 function PendingStartPanel({ start }: { readonly start: RetainedThreadStart }) {
-  return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded
-    pendingChange="thread start" retryPending={start.state === 'sending'}>
-    {start.state === 'unconfirmed' ? <p {...stylex.props(styles.note)}>Fractal has not confirmed this action. Do not send it again.</p> : null}
+  return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded>
+    <p role="status" {...stylex.props(styles.note)}>{start.state === 'sending' ? 'Sending…' : 'Fractal has not confirmed this action. Do not send it again.'}</p>
     <p {...stylex.props(styles.note)}>To <AgentName id={start.parameters.agent_id} /></p>
     <div {...stylex.props(styles.message)}>{start.parameters.content}</div>
   </ThreadPanel>

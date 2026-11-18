@@ -2932,8 +2932,24 @@ async fn perform_steadily(
     perform(client, person, model, effect, sent).await
 }
 
+#[derive(Debug)]
+struct MessageSnapshotRecoveryExhausted;
+
+impl std::fmt::Display for MessageSnapshotRecoveryExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the message snapshot recovery exhausted its single retry")
+    }
+}
+
+impl std::error::Error for MessageSnapshotRecoveryExhausted {}
+
 /// Only explicit nonapplication proof permits rebuilding a refused request.
 fn not_applied(error: &anyhow::Error, _effect: &Effect) -> bool {
+    // send_message owns the one snapshot refresh for this intent. Re-entering
+    // perform would reset that budget even though the refusal proves nonapplication.
+    if error.is::<MessageSnapshotRecoveryExhausted>() {
+        return false;
+    }
     error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<ClientError>())
@@ -3468,48 +3484,63 @@ async fn send_message(
             ).into());
         }
     }
-    let snapshot = match snapshot_hint {
+    let mut snapshot = match snapshot_hint {
         Some(known) => known,
         None => client.capabilities().await?.snapshot.id,
     };
-    let (id, idem) = crate::action_pair();
-    let request = client.prepare_message_send(
-        id.clone(),
-        idem,
-        Fence { snapshot_id: snapshot, ..Fence::default() },
-        parameters,
-    )?;
-    if let Some(sent) = sent {
-        let mut slot = sent.lock().map_err(|_| anyhow::anyhow!("message delivery state is unavailable"))?;
-        // Consume dispatch ownership while holding the lock, before any POST.
-        if slot.is_some() {
-            return Err(ClientError::Protocol("The original message has already been dispatched".into()).into());
-        }
-        *slot = Some(request.clone());
-    }
-    match client.submit_action(&request).await {
-        Ok(result) => {
-            if !result.value.completed_for(&id)
-                || result.value.operation_id.is_empty()
-                || result.value.snapshot_id.is_empty()
-                || !result.value.affected_ids.iter().any(|id| id.starts_with("message/"))
-            {
-                return Err(ClientError::Protocol(
-                    "Fractal has not confirmed the original message action".into(),
-                ).into());
+    // Only a definite nonapplication permits a fresh fence and another dispatch.
+    // Never enter this recovery path after an ambiguous attempt.
+    for attempt in 0..2 {
+        let (id, idem) = crate::action_pair();
+        let request = client.prepare_message_send(
+            id.clone(),
+            idem,
+            Fence { snapshot_id: snapshot, ..Fence::default() },
+            parameters.clone(),
+        )?;
+        if let Some(sent) = sent {
+            let mut slot = sent.lock().map_err(|_| anyhow::anyhow!("message delivery state is unavailable"))?;
+            // Consume dispatch ownership while holding the lock, before any POST.
+            if slot.is_some() {
+                return Err(ClientError::Protocol("The original message has already been dispatched".into()).into());
             }
-            Ok(message_id(result))
+            *slot = Some(request.clone());
         }
-        Err(error) => {
-            if error.not_applied()
-                && let Some(sent) = sent
-                && let Ok(mut slot) = sent.lock()
-            {
-                *slot = None;
+        match client.submit_action(&request).await {
+            Ok(result) => {
+                if !result.value.completed_for(&id)
+                    || result.value.operation_id.is_empty()
+                    || result.value.snapshot_id.is_empty()
+                    || !result.value.affected_ids.iter().any(|id| id.starts_with("message/"))
+                {
+                    return Err(ClientError::Protocol(
+                        "Fractal has not confirmed the original message action".into(),
+                    ).into());
+                }
+                return Ok(message_id(result));
             }
-            Err(error.into())
+            Err(error) => {
+                if error.not_applied() {
+                    if let Some(sent) = sent
+                        && let Ok(mut slot) = sent.lock()
+                    {
+                        *slot = None;
+                    }
+                    if attempt == 0
+                        && matches!(error, ClientError::Api(fractal_client::ErrorCode::StaleFence, ..))
+                    {
+                        snapshot = client.capabilities().await?.snapshot.id;
+                        continue;
+                    }
+                    if attempt == 1 {
+                        return Err(anyhow::Error::new(error).context(MessageSnapshotRecoveryExhausted));
+                    }
+                }
+                return Err(error.into());
+            }
         }
     }
+    unreachable!("the second dispatch always returns")
 }
 
 #[cfg(test)]
@@ -3767,6 +3798,60 @@ mod tests {
             .downcast_ref::<ClientError>()
             .unwrap()
             .outcome_unknown());
+    }
+
+    #[tokio::test]
+    async fn a_message_snapshot_refresh_is_bounded_across_the_whole_live_intent() {
+        use axum::{http::StatusCode, routing};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/st3/client-v0/fixtures/capabilities.json"
+        )).unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let counted = posts.clone();
+        let router = axum::Router::new()
+            .route("/v1/client/capabilities", routing::get(move || {
+                std::future::ready(axum::Json(capabilities.clone()))
+            }))
+            .route("/v1/client/actions", routing::post(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::future::ready((StatusCode::CONFLICT, axum::Json(serde_json::json!({
+                    "api_version": "st3.client.v0",
+                    "error_version": "st3.client.error.v0",
+                    "request_id": "request/stale",
+                    "code": "stale-fence",
+                    "message": "the snapshot is stale",
+                    "retryable": true,
+                    "applied": "none",
+                    "details": {"applied": "none"},
+                }))))
+            }));
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let sent = Mutex::new(None);
+        let effect = Effect::Send {
+            agent: "agent/example/worker".into(),
+            text: "One intent, one refresh".into(),
+            in_reply_to: None,
+            tags: vec![],
+            images: vec![],
+        };
+        let error = perform_steadily(
+            &client, "person/avery", &Model::default(), effect.clone(), Some(&sent),
+        ).await.unwrap_err();
+        assert_eq!(posts.load(Ordering::SeqCst), 2, "the outer retry loop must not reset the refresh budget");
+        assert!(error.is::<MessageSnapshotRecoveryExhausted>());
+        assert!(!not_applied(&error, &effect), "the exhausted intent cannot retry");
+        assert!(matches!(
+            error.downcast_ref::<ClientError>(),
+            Some(ClientError::Api(fractal_client::ErrorCode::StaleFence, ..))
+        ), "preserve the actual refusal for display");
+        assert!(sent.lock().unwrap().is_none(), "both attempts were definitively unapplied");
+        server.abort();
     }
 
     /// Unknown delivery must not re-enter message_send, even after the session changes.
@@ -4788,7 +4873,7 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
         std::fs::remove_file(&socket).unwrap();
         (store, server) = serve(root.path(), &socket).await;
-        // This is the live loop's resend path: replay the preserved request first.
+        // A session change never authorizes another POST of a retained original.
         let replay = send_message(
             &client,
             "agent/example/worker",
@@ -4813,8 +4898,12 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
-        assert_eq!(replay.as_deref(), Some(message.as_str()));
+        .unwrap_err();
+        assert!(matches!(
+            replay.downcast_ref::<ClientError>(),
+            Some(ClientError::Protocol(message)) if message ==
+                "Delivery is unknown; the original may already have arrived and will not be sent again"
+        ));
         assert_eq!(store.index().unwrap(), index);
         let reply_sent = Mutex::new(None);
         let reply = Effect::Send {
@@ -4844,14 +4933,18 @@ mod tests {
             Some(message.as_str())
         );
         let reply_index = store.index().unwrap();
-        let (_, repeated) = perform(&client, "person/avery", &model, reply, Some(&reply_sent))
+        let repeated = perform(&client, "person/avery", &model, reply, Some(&reply_sent))
             .await
-            .unwrap();
-        assert_eq!(repeated.as_deref(), Some(replied.as_str()));
+            .unwrap_err();
+        assert!(matches!(
+            repeated.downcast_ref::<ClientError>(),
+            Some(ClientError::Protocol(message)) if message ==
+                "Delivery is unknown; the original may already have arrived and will not be sent again"
+        ));
         assert_eq!(
             store.index().unwrap(),
             reply_index,
-            "ordinary conversation replies keep the same retry receipt"
+            "a retained conversation reply never dispatches again"
         );
         for effect in [
             Effect::CreateTerminal {

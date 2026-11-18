@@ -7987,9 +7987,11 @@ fn validate_snapshot_fence(state: &AppState, fence: &Fence) -> Result<(), ApiErr
                 .ok()
                 .is_some_and(|index| index <= current_index)
     }) {
-        return Err(stale(
+        let mut error = stale(
             "the client snapshot belongs to another host or a future store position",
-        ));
+        );
+        error.details.insert("applied".into(), json!("none"));
+        return Err(error);
     }
     Ok(())
 }
