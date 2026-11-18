@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Separate legacy no-proof refusals from current nonapplication golden fixtures",
+  "replay": {"status": "none", "detail": "Production replay policy is unchanged. Tests retain unknown and no resend when a legacy refusal lacks application proof."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes. The current golden stale-fence envelope carries applied:none; legacy variants explicitly omit proof."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Attachment send tests distinguish current explicit nonapplication from legacy stale-fence and derived rate-limited refusals without proof, independent of error code or message."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Only test coverage changes. Unknown remains non-retryable and explicit applied:none remains the sole basis for preparing a retry."}
+}

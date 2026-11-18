@@ -244,14 +244,18 @@ describe('chat durable gateway delivery', () => {
     expect(calls).toEqual([])
   })
 
-  const bare = certainty['stale-snapshot']
+  const goldenStale = certainty['stale-snapshot']
+  // Explicit legacy variant: the current golden includes nonapplication proof.
+  const bare = { ...goldenStale, applied: undefined, details: {} }
   const explicit = certainty['recipient-retired']
   it.each([
     { name: 'golden explicit none', body: explicit, state: 'not-applied' },
+    { name: 'golden stale fence explicit none', body: goldenStale, state: 'not-applied' },
+    { name: 'rate limited with explicit none', body: { ...goldenStale, code: 'rate-limited' }, state: 'not-applied' },
     { name: 'outer explicit none', body: { ...bare, applied: 'none' }, state: 'not-applied' },
     { name: 'details explicit none', body: { ...bare, details: { applied: 'none' } }, state: 'not-applied' },
-    { name: 'bare golden stale fence', body: bare, state: 'unknown' },
-    { name: 'bare rate limited', body: { ...bare, code: 'rate-limited' }, state: 'unknown' },
+    { name: 'legacy stale fence without proof', body: bare, state: 'unknown' },
+    { name: 'legacy rate limited without proof', body: { ...bare, code: 'rate-limited' }, state: 'unknown' },
     { name: 'explicit unknown', body: { ...bare, applied: 'unknown' }, state: 'unknown' },
     { name: 'outer unknown conflicts with none', body: { ...explicit, applied: 'unknown' }, state: 'unknown' },
     { name: 'details unknown conflicts with none', body: { ...explicit, details: { applied: 'unknown' } }, state: 'unknown' },
