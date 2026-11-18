@@ -678,13 +678,12 @@ mod tests {
         store.start_attention_list_refresher().unwrap();
         refresh_attention_list(&store).unwrap();
         let first = store.newest_attention_list().1.unwrap();
-        // More than the delta limit, from several permanently unread claim families.
+        // More than the delta limit of permanently unread lease-renewal claims.
         // Do not force a fleet fold or hide the relevant claim after the backlog.
-        let kinds = ["harness.timeline", "harness.usage", "message.sent", "work.renewed"];
         for number in 0..10_001 {
             store.append_claim(&ClaimInput {
-                subject: format!("custom/test/noise-{number}"),
-                kind: kinds[number % kinds.len()].into(),
+                subject: format!("step-run/noise-{number}/step"),
+                kind: "work.renewed".into(),
                 actor: None,
                 fields: BTreeMap::new(),
                 evidence: Vec::new(),
