@@ -402,6 +402,36 @@ impl Seat {
 }
 
 #[test]
+fn wake_demand_before_idle_stop_cancels_without_touching_runtime() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"original-1"
+    }), vec![token], None);
+    seat.store.append_claim(&ClaimInput {
+        subject:"message/wake-before-idle-stop".into(), kind:"message.sent".into(),
+        actor:Some("person/operator".into()),
+        fields:serde_json::from_value(json!({
+            "status":"sent","from":"person/operator","to":SUBJECT,"content":"Continue"
+        })).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let reconciler = Reconciler::new(seat.store.clone(), seat.runtime.clone(),
+        "amber".into(), Arc::new(Notify::new()));
+    let desired = seat.desired();
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    let observed = seat.runtime.observation.lock().unwrap().clone();
+    reconciler.reconcile_suspension(&desired, desired.member.as_ref().unwrap(),
+        observed.as_ref(), None, &suspension).unwrap();
+    let cancelled = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    assert_eq!(cancelled.phase, "failed");
+    assert_eq!(cancelled.code.as_deref(), Some("wake-pending"));
+    assert!(seat.runtime.stops.lock().unwrap().is_empty());
+    assert!(seat.store.wake_demand(SUBJECT).unwrap().oldest.is_some());
+}
+
+#[test]
 fn idle_resume_completion_requires_incarnation_channel_readiness() {
     let seat = Seat::new_with_owned_publication(false);
     let (suspend, token, member) = seat.finish_suspend();

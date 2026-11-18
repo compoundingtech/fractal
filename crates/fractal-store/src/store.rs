@@ -883,6 +883,9 @@ WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='
 CREATE INDEX IF NOT EXISTS claims_idle_action_index
 ON claims(subject, store_index)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
+CREATE INDEX IF NOT EXISTS claims_suspension_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume');
 CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
 ON claims(subject, json_extract(body, '$.fields.request_key'))
 WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';
@@ -24630,6 +24633,9 @@ pub struct ClaimCommitContext<'a> {
     pub prepare_request_fields: Option<&'a ClaimFieldPreparation<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Suspension/launch frontier read with an admitted mailbox staged/delivered decision.
+    /// Revalidate under the receipt writer lock so quiescing cannot race intake.
+    pub mailbox_intake_frontier: Option<u64>,
     /// Dedicated client operations publish a native receipt in the same transaction.
     pub client_operation: bool,
     /// Only a replicated claim (written in the writer's batch) can carry follow-up writes.
@@ -24810,6 +24816,15 @@ pub fn append_claim_with_commit_context(
             let fence = normalized_fence.as_deref();
             let settled_receipt = if let Some(fence) = fence {
                 check_mailbox_fence(transaction, fence, &graph.origin)?;
+                if let Some(frontier) = context.mailbox_intake_frontier
+                    && matches!(input.kind.as_str(), "message.staged" | "message.delivered")
+                    && crate::suspension::mailbox_intake_index(transaction, &fence.subject).map_err(internal)? != frontier
+                {
+                    return Err(FractalError::new(
+                        "seat-suspension-changed",
+                        "the seat's suspension or launch changed before delivery was recorded",
+                    ));
+                }
                 let index = transaction.query_row(
                     "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
                     [&input.subject], |row| row.get::<_, Option<u64>>(0),

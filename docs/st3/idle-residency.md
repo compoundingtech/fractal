@@ -110,6 +110,20 @@ support for reading the new kinds and fields, including evidence claims. Current
 not satisfy this gate. Downgrade is not promised. Rollback means setting the policy off and
 rolling forward with compatible readers and the wake path for existing idle suspensions intact.
 
+The writer barrier is the existing signed fleet feature protocol:
+`daemon.started.features.idle_residency = 1`. Admission requires an anchored,
+non-conflicted active local membership and the latest signed advertisement from
+every active member's current incarnation. A missing, unsigned or withdrawn
+advertisement refuses admission; an older positive advertisement is never a fallback.
+The same feature covers suspension provenance, wake admission and residency evidence
+readers. It is not an operator assertion or a comparison of version strings.
+
+Activation requires both that barrier and a member `idle_suspend_after` other than
+`"off"`. Turning the policy off, or declaring `idle-suspend "never"`, prevents new
+stops without cancelling queued wakes for existing idle suspensions. Manual
+suspensions remain outside automatic admission. The stop and wake paths are one
+cutover: a binary cannot advertise this feature while implementing only one side.
+
 ## Eligibility and the idle clock (IDLE-R03, IDLE-R04, IDLE-R12)
 
 A seat is eligible when its member enables idle suspension, its declaration does not opt out, and

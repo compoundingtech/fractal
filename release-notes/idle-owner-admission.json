@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fence automatic idle suspend and wake admission at the owning store writer.",
+  "replay": {"status": "changed", "detail": "Existing runtime action receipts remain authoritative. Automatic requests retain declaration, incarnation, policy epoch and wake-frontier provenance; separate idempotent eligibility and wake-demand evidence records explain admission decisions."},
+  "schema": {"status": "changed", "detail": "Adds optional idle provenance fields to runtime.action.requested and partial indexes for automatic and manual suspension episode candidates. No authoritative state is discarded."},
+  "rules": {"status": "changed", "detail": "Automatic admission requires signed idle_residency support from every active fleet member. The owner revalidates declaration, incarnation, policy epoch and caught-up demand frontiers under source-shard and graph-writer reservations. Mature demand or lag refusals are recorded once without consuming the eligible epoch. Wake admission prioritizes person demand, bounds concurrent owner-local wakes, excludes manual holds and retains durable capped retry timing. Missing or mismatched native sessions and invalid snapshots require intervention rather than automatic retry."},
+  "compatibility": {"status": "changed", "detail": "The daemon advertises idle_residency support. Automatic writer helpers refuse writes until the existing signed fleet feature barrier is satisfied; historical runtime actions remain readable."},
+  "downtime": {"status": "none", "detail": "No downtime is required; source and graph reservations are limited to admission or last-reversible-boundary validation."},
+  "manual": {"status": "none", "detail": "No operator override or migration is introduced. Manual suspension is not automatically resumed."},
+  "recovery": {"status": "changed", "detail": "Stable operation receipts deduplicate suspend epochs and wake attempts across processes and reopen. Failed resume acceptance timestamps preserve retry deadlines; unavailable or lagging sources fail closed."}
+}

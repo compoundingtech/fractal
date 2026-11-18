@@ -83,6 +83,7 @@ mod schedule_standby_selection_tests;
 mod schedule_admission_tests;
 mod schedule_replication_block;
 pub mod member_admission;
+mod idle_residency_evidence;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 pub use crate::config::{IdleResidencyPolicy, IdleResidencySettings};
@@ -1522,8 +1523,9 @@ pub struct Reconciler<R = NativeRuntime> {
     start_stage_finished_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
-    /// Off-by-default residency diagnostics; never author a suspension here.
+    /// Owner-fenced residency stop and wake policy; see `idle_nudge` and `store::idle_residency`.
     idle_residency: Mutex<IdleResidencyPolicy>,
+    idle_residency_evidence: Mutex<idle_residency_evidence::RuntimeEvidence>,
     /// When stalls of runs that name no reporter were last turned on, or `None` while off; see
     /// `run_report`.
     default_stall_reports_since: Mutex<Option<u128>>,
@@ -1804,6 +1806,7 @@ impl Reconciler<NativeRuntime> {
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
             idle_residency: Mutex::default(),
+            idle_residency_evidence: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -2039,6 +2042,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
             idle_residency: Mutex::default(),
+            idle_residency_evidence: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -3341,6 +3345,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{:?}", self.store.publication_cache_epoch()),
         );
         drop(observe_span);
+        self.reconcile_item("residency", "residency:host", true, || {
+            smallclaims::touched::note_read(|| "policy:idle-residency".into());
+            let enabled = self.idle_residency.lock()
+                .unwrap_or_else(PoisonError::into_inner).settings.after_ms.is_some();
+            self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                .evaluate_host(&self.store, enabled, now_ms())
+        })?;
         // Recovery is readback-only; use per-effect changes and lease deadlines,
         // never a full durable-history walk on unrelated daemon wakes.
         self.reconcile_effects()?;
@@ -3920,6 +3931,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             // Continue using the original desired subject, runtime ID and
                             // incarnation for every native/PTY operation below.
                             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+                            let mut evidence = self.idle_residency_evidence.lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            evidence.evaluate_subject(&self.store, &subject.subject, now_ms())?;
                         }
                         // A workspace or render failure blocks only a start or restart. A running member
                         // is still observed, checked, and given its work.
@@ -7086,6 +7100,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(Some(caught(|| -> Result<()> {
                     self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
+                    if subject.kind == "stop"
+                        && let Some(hold) = crate::suspension::current(&self.store, &subject.subject)?
+                            .filter(|hold| hold.cause() == "idle")
+                    {
+                        self.idle_residency_evidence.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .end_sleep(&self.store, &subject.subject, &hold, now_ms(), "stop")?;
+                    }
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
             })
@@ -9044,6 +9066,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         (mode == "in-place").then(|| ("mode".into(), Value::String(mode.into())))
                     ).collect(),
                 )?;
+                if suspension.cause() == "idle" {
+                    self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                        .before_suspend(&suspension.operation_id, &[]);
+                }
                 stop(observation)?;
                 Ok(())
             }

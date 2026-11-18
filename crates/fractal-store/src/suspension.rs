@@ -116,6 +116,33 @@ impl Suspension {
     }
 }
 
+/// Fence a mailbox intake decision to the suspension/launch claims read in its snapshot.
+/// Repairs can change that lineage without appending a new claim on the seat itself.
+pub fn mailbox_intake_index(connection: &rusqlite::Connection, subject: &str) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT MAX(value) FROM (
+            SELECT COALESCE(MAX(store_index),0) AS value FROM claims WHERE subject=?1
+            UNION ALL
+            SELECT COALESCE(MAX(store_index),0) FROM claims WHERE kind='record.repaired'
+        )",
+        [subject], |row| row.get(0),
+    )?)
+}
+
+/// Only staged/delivered receipts consume wake demand. Read receipts may settle work that
+/// crossed the channel before quiescing. The writer must validate this frontier atomically.
+pub fn mailbox_intake_frontier(store: &Store, subject: &str) -> Result<u64, crate::model::FractalError> {
+    store.read_snapshot(|_| {
+        if current(store, subject)?.is_some_and(|hold| hold.holds_seat()) {
+            return Ok(Err(crate::model::FractalError::new(
+                "seat-suspended",
+                "delivery waits for the seat's native resume and channel readiness",
+            )));
+        }
+        mailbox_intake_index(&store.readers.get(), subject).map(Ok)
+    }).map_err(|error| crate::model::FractalError::new("internal", error.to_string()))?
+}
+
 /// Describe a publication against its running launch, or its existing suspension lineage.
 /// Manual deferral is available only to owned-set publication; this introduces no policy.
 pub fn publication_action(
