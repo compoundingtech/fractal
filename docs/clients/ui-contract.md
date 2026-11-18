@@ -211,7 +211,7 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
   stopped on you. A footer counts missions that don't need you.
 - Each item: glyph and kind word, title, "who is waiting · waited N".
 - Every card shows links to its mission and agent, a **related** section (who raised it, when
-  Fractal says, and each target as a link), **Chat about this**, **Go to** its mission or agent,
+  Fractal says, and each target as a link), **Start a thread**, **Go to** its mission or agent,
   and **Remind me in 3h** (`attention.snooze`): Fractal keeps the snooze, so the item leaves Now
   on every device of the person until then, and its deadline does not move. On an item already
   put off (its `snoozed_until` still ahead) the same key brings it back (`until: null`). Home
@@ -237,9 +237,10 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
   own `dismiss` answer is answered with that answer instead (`work.done`), its note as the
   reason and the other notes alongside, since Fractal refuses `attention.dismiss` there.
 - Confirm destructive or binding actions (approve, cancel, reject, resolve) with a second tap.
-- **Chat about this** sends a *new* Fractal message to the agent involved (or the chief of
-  staff when no agent is), titled `About: <item title>`, with the item's id, title and mission
-  as context. The card shows that thread's replies.
+- **Start a thread** creates a durable thread with the daemon-assigned responsible agent,
+  the exact Inbox source and episode, and the first message in one operation. The card shows
+  that thread's history. Sources without an originating agent require the daemon's explicit
+  `inbox_fallback_agent`; clients never select a publisher, infer a role or override the recipient.
 
 ### Agents
 
@@ -884,7 +885,7 @@ never infer it.
 |---|---|
 | `tier` | The Now group: `stopped`, `alert`, `today`, `later` (`words.json` `tier`), or `null` for a row that is not on Now (an unread message stays in its conversation; a fault goes to its agent). `null` means not on Now, never "unknown". No card is in `alert` yet. |
 | `kind` | The card: `review`, `feedback`, `request`, `update`, `launch`, `revision`, `prompt`, `login` or `fault`, or `null` for a row that is no card at all (an unread message). |
-| `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission (the first in the agents roster's order, when several are), else the requester. `null` means the chief of staff. |
+| `agent` | The daemon-assigned responsible thread agent, `{id, label}`, including configured Inbox fallback when needed. `null` means discussion is unassigned. Clients label this assignment without inferring a recipient from the publisher, claimant or mission. |
 | `raised_by`, `waiting` | Who raised it, `{id, label}`: the requester, else the agent behind it, with Fractal's own actors (`daemon/…`, `agent/st3/reconciler`) labeled "Fractal", else "the … mission" it came from; and the step it holds, `{step, path}`. A person's label is their id. |
 | `launch` | On a launch card: the newest variant's mission as `{variant, goals[], steps[], agents[], asks_you}`. Each step is `{path, title, assignee, after[], asks_you}`, in display order without `finally` steps. `assignee` is `{kind, agent, label}`, with `kind` one of `agent`, `any`, `st` or `none`; an `st` step's label is "Fractal". Each agent is `{id, label, harness, host}`. `asks_you` counts the steps that stop for a person. With no previewable variant it is `{unavailable: {reason, diagnostics[]}}`, with up to three diagnostics, and so is a preview past 12 KiB, so the row stays within its 16 KiB bound. An agent's `harness` and `host` are its seat as the candidate declares it, else as Fractal runs it, else `null`. |
 | `revision` | On a revision card: the changes (see [Revision changes](#revision-changes)). |

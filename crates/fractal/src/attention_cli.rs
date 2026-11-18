@@ -176,56 +176,29 @@ pub(super) async fn run_attention(
         }
         AttentionCommand::Discuss(args) => {
             let actor = configured_human(args.actor.as_deref(), configured_person, "alerts")?;
-            let (item, card_id) =
-                actionable_attention_item(client, endpoint, &args.subject, &actor).await?;
-            // The agent whose conversation the alert belongs to; an older daemon names only the
-            // agent that asked.
-            let to = match args.to {
-                Some(to) => to,
-                None => item
-                    .conversation
-                    .clone()
-                    .or_else(|| item.requester_id.clone())
-                    .filter(|agent| agent.starts_with("agent/"))
-                    .context("this alert names no agent to talk to; pass --to AGENT")?,
-            };
-            let id = card_id.unwrap_or_else(|| item.subject.clone());
-            // The same words Fractal TUI's "Chat about this" sends.
-            let mut body = format!("{}\n\n---\nThis is about {} ({id}", args.body, item.title);
-            if let Some(mission) = &item.mission {
-                body.push_str(&format!(", mission {mission}"));
+            let (item, _) = actionable_attention_item(client, endpoint, &args.subject, &actor).await?;
+            let agent = item.conversation.as_deref()
+                .context("this Inbox item has no responsible agent; configure inbox_fallback_agent on the daemon")?;
+            let key = args.idempotency_key.unwrap_or_else(|| {
+                let input = json!([&actor, &item.subject, &item.episode, &args.body, message_key_hour()]);
+                format!("inbox-thread-start:{}", hex::encode(Sha256::digest(input.to_string())))
+            });
+            let thread = format!("thread/{}", hex::encode(Sha256::digest(json!([&actor, &key]).to_string())));
+            let receipt = submit_thread_action(endpoint, &actor, "thread.start", &key, json!({
+                "target_id": thread,
+                "agent_id": agent,
+                "origin": {"source_id": item.subject, "episode": item.episode},
+                "title": item.title,
+                "content": args.body,
+            })).await.with_context(|| format!("Inbox thread start key: {key}"))?;
+            if json_output {
+                print_value(&receipt, true)
+            } else {
+                println!("{thread}");
+                Ok(())
             }
-            body.push(')');
-            preflight_message_recipient(client, &to, false).await?;
-            let Some(receipt) = send_message(
-                client,
-                MessageSendArgs {
-                    to,
-                    body: Some(body),
-                    body_file: None,
-                    subject: Some(format!("About: {}", item.title)),
-                    in_reply_to: None,
-                    tags: Vec::new(),
-                    from: actor,
-                    attach: Vec::new(),
-                    wake: MessageWakeArgs::default(),
-                    print_kdl: false,
-                    idempotency_key: args.idempotency_key,
-                    allow_undeclared_recipient: false,
-                },
-                Vec::new(),
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            if let Err(error) = sync_message_projection(client).await {
-                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
-                receipt.idempotency_key,
-                plain_error(&error)));
-            }
-            print_message_receipt(&receipt, json_output)
         }
+
         AttentionCommand::Request(args) => {
             let actor = args
                 .actor

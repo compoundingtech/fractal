@@ -1,5 +1,7 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, Alert, AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { AppState, FlatList, Image, Keyboard, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { showOwnedActionSheet, OwnedAlert as Alert } from '../ownedPresentationNative';
+import { ownedPresentations } from '../ownedPresentation';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
@@ -10,7 +12,7 @@ import type { ConversationContentRef } from '../../../clients/typescript/fractal
 import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
-import { Banners } from '../chrome';
+import { Banners, useRefresh } from '../chrome';
 import { quality, readPositions } from '../qualityNative';
 import { seenTail } from '../readPosition';
 import rules from '../../../fixtures/clients/conversation-style.json';
@@ -18,6 +20,9 @@ import { tokenColor, type ConversationRules } from '../conversationStyle';
 import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
 import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
+import { ConversationComposer } from '../conversationComposer';
+import { ConversationAttempts } from '../conversationAttempts';
+import { ConversationFeedback, ConversationFrame, ConversationMessage } from '../conversationPresentation';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport } from '../visibleConversationImages';
@@ -30,6 +35,7 @@ import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
 import { Button, DraftRecoveryNote, Field, LINE, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
 import { AlertsStrip } from './Alerts';
+import { AgentThreads } from './Threads';
 
 // Drawn by the Fractal terminal UI's rules (fixtures/clients/conversation-style.json), so both apps look alike. Text
 // names its colour by Mocha token and `T` repaints it for the system appearance; fills and edges
@@ -39,7 +45,7 @@ const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
 // Keep both the original member binding and local images for an explicit new send.
-type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number; pickedImages?: Picked[] };
+type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; retryOriginal?: () => Promise<Sent>; resending?: boolean; images?: number; pickedImages?: Picked[] };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
 function nowClock() {
@@ -55,7 +61,7 @@ export function ConversationScreen(props: RootScreen<'Conversation'>) {
 
 function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
-  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
+  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, draftsOwner, draftGeneration, saveDrafts, actions, simpleOn } = useStore();
   // Native alert callbacks outlive the render that opened them. A new send must
   // use the selection at confirmation time, not the alert's captured client.
   const actionsRef = useRef(actions);
@@ -102,6 +108,9 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const [now, setNow] = useState(() => Date.now());
   // Asking Fractal again: true from the moment the phone starts following this conversation until Fractal sends it.
   const [refreshing, setRefreshing] = useState(true);
+  // Native pull to refresh, like every host screen; it also reloads the agent's thread group.
+  // Its own spinner state is separate from `refreshing`, which tracks the conversation follow.
+  const pullRefresh = useRefresh();
   // The entry whose text is open for selecting in place: a long press selects it, any part of it can be copied.
   const [selecting, setSelecting] = useState<string | null>(null);
   useEffect(() => {
@@ -110,7 +119,15 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     return () => clearInterval(timer);
   }, [issue]);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
-  const [pending, setPending] = useState<Pending[]>([]);
+  const attempts = useMemo(() => new ConversationAttempts<Pending, Sent>(
+    result => result.how === 'unconfirmed' ? () => actions.resend(result.request) : undefined,
+    error => ({ how: 'failed', error: String(error) })), [target, draftsOwner.current, draftGeneration.current]);
+  const pendingAttempts = useSyncExternalStore(attempts.subscribe, attempts.getSnapshot);
+  const nextAttempt = useRef(0);
+  const pending = useMemo((): Pending[] => pendingAttempts.map(attempt => ({ ...attempt.draft,
+    failed: attempt.result?.how === 'failed' ? attempt.result.error : undefined,
+    unconfirmed: attempt.result?.how === 'unconfirmed' ? attempt.result.request : undefined,
+    retryOriginal: attempt.retry, resending: attempt.phase === 'sending' && !!attempt.result })), [pendingAttempts]);
   // Opened from search ("said in conversations"), the conversation arrives found.
   const [find, setFind] = useState(route.params.find ?? '');
   const [findOpen, setFinding] = useState(!!route.params.find);
@@ -262,7 +279,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   }, [unreadable, timeline.entries, names]);
   // A message Fractal has taken shows up in the conversation; the pending copy then gives way.
   useEffect(() => {
-    setPending(previous => previous.filter(item => item.failed || !entries.some(entry => entry.body.kind === 'mail' && entry.body.from === 'you' && entry.body.text.trim() === item.text.trim())));
+    attempts.retain(attempt => attempt.phase === 'failed' || !entries.some(entry => entry.body.kind === 'mail' && entry.body.from === 'you' && entry.body.text.trim() === attempt.draft.text.trim()));
   }, [entries]);
   const finding = findOpen && find.trim() !== '';
   const found = useMemo(() => finding ? entries.filter(entry => entryMatches(entry, find)) : entries, [entries, find, finding]);
@@ -297,8 +314,8 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     const text = (spoken ?? draft).trim();
     const sending = images;
     if (!agent || (!text && !sending.length)) return;
-    const item: Pending = { id: `pending-${Date.now()}`, text, at: nowClock(), pickedImages: sending, ...(sending.length ? { images: sending.length } : {}) };
-    setPending(previous => [...previous, item]);
+    const item: Pending = { id: `pending-${Date.now()}-${nextAttempt.current++}`, text, at: nowClock(), pickedImages: sending, ...(sending.length ? { images: sending.length } : {}) };
+    const submittedOwner = draftsOwner.current, submittedGeneration = draftGeneration.current;
     // The words sent from dictation include what was in the box, so it empties either way; a send that
     // does not go puts the text back, and one that Fractal acknowledged leaves it empty.
     emptyBox();
@@ -308,7 +325,8 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     list.current?.scrollToOffset({ offset: 0, animated: offset.current < 1200 });
     const tags = dictated || spoken !== undefined ? ['dictated'] : undefined;
     setDictated(false);
-    const sent = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
+    const sent = await attempts.send(item.id, item, () => actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending));
+    if (draftsOwner.current !== submittedOwner || draftGeneration.current !== submittedGeneration) return;
     setSendIssue('');
     // Images that did not go stay ready to send again.
     if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
@@ -322,7 +340,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       if (tags) setDictated(true);
       setDraft(restored);
       saveDrafts();
-      setPending(previous => previous.filter(candidate => candidate.id !== item.id));
+      attempts.remove(item.id);
       setSendIssue(`Not sent: ${sendReason(sent.error, false)}`);
       return;
     }
@@ -334,15 +352,12 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. Retry only contacts that original connection. Sending as new uses the current member and a new key, and may create a duplicate.`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Retry original', onPress: async () => {
-        setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
-        settle(item.id, await actions.resend(bound));
+        if (item.retryOriginal) settle(item.id, await item.retryOriginal());
       } },
       { text: 'Send as new', style: 'destructive', onPress: async () => {
-        setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
         const parameters = bound.request.parameters;
-        const sent = await actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages);
+        const sent = await attempts.sendAsNew(item.id, () => actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages));
         if (sent.how === 'failed') {
-          setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: false } : candidate));
           setSendIssue(`Not sent: ${sent.error}`);
         } else settle(item.id, sent);
       } },
@@ -350,14 +365,16 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   }
   // A sent message waits to show up in the conversation; one Fractal has not confirmed keeps its request.
   function settle(id: string, sent: Sent) {
-    setPending(previous => previous.map(candidate => candidate.id !== id ? candidate
-      : { ...candidate, resending: false, failed: sent.how === 'failed' ? sent.error : undefined, unconfirmed: sent.how === 'unconfirmed' ? sent.request : undefined }));
-    if (sent.how === 'sent') setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== id)), 60_000);
+    if (sent.how === 'sent') setTimeout(() => attempts.remove(id), 60_000);
   }
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
     const pick = async () => {
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      const release = ownedPresentations.acquire();
+      let result;
+      try {
+        result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsMultipleSelection: true, selectionLimit: Math.max(1, MAX_IMAGES - images.length), base64: true, quality: 0.85 });
+      } finally { release(); }
       if (result.canceled) return;
       const more = result.assets.map(asset => asset.base64 ? picked(asset.base64, asset.mimeType ?? 'image/jpeg', asset.fileName ?? undefined) : `${asset.fileName ?? 'That image'} could not be read.`);
       const next = addImages(images, more);
@@ -368,7 +385,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       const next = addImages(images, [image ? fromDataUri(image.data, 'Pasted image') : 'The clipboard holds no image.']);
       setImages(next.images); setImageIssue(next.refused);
     };
-    ActionSheetIOS.showActionSheetWithOptions({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
+    showOwnedActionSheet({ options: ['Photo library', 'Paste image', 'Cancel'], cancelButtonIndex: 2 }, index => {
       if (index === 0) void pick().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
       if (index === 1) void paste().catch(error => setImageIssue(String(error instanceof Error ? error.message : error)));
     });
@@ -431,12 +448,44 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const strip = [styles.strip, { borderBottomColor: palette.surface0 }];
   const bar = { backgroundColor: palette.mantle, borderTopColor: palette.surface0 };
 
-  return <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={headerHeight}>
+  const composer = agent && listening ? <View style={[styles.composer, bar, { paddingBottom: bottom, flexDirection: 'column', alignItems: 'stretch' }]}>
+      <Waveform levels={levels} />
+      <T color={heard ? theme.text : theme.overlay0}>{heard || 'Listening…'}</T>
+      <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+        <Button label="cancel" color={theme.overlay1} onPress={() => void finishListening('cancel')} />
+        <Button label="done" color={theme.subtext0} onPress={() => void finishListening('edit')} />
+        <Button label="send" disabled={!canSend} onPress={() => void finishListening('send')} />
+      </View>
+    </View> : agent ? <ConversationComposer
+      text={draft} onChange={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
+      label={`Message ${title}`} inputRef={box} enabled canSend={canSend && !sizeInfo.over && (!!draft.trim() || !!images.length)}
+      onSend={() => void send()} sendLabel="send" sendStyle={styles.send}
+      style={[styles.composer, bar, { paddingBottom: bottom }]} inputStyle={[styles.input, canDictate ? { paddingRight: 36 } : null]}
+      before={images.length || imageIssue ? <View style={[styles.tray, bar]}>
+      {images.map(image => <View key={image.key}>
+        <Image source={{ uri: `data:${image.mediaType};base64,${image.base64}` }} style={[styles.thumb, { backgroundColor: palette.surface0 }]} accessibilityLabel={image.name ?? 'image to send'} />
+        <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${image.name ?? 'image'}`} hitSlop={8} onPress={() => setImages(previous => previous.filter(other => other.key !== image.key))} style={[styles.unthumb, { backgroundColor: palette.surface1 }]}><T bold color={theme.text}>✕</T></Pressable>
+        <T dim style={{ fontSize: 10 }}>{megabytes(image.bytes)}</T>
+      </View>)}
+      {imageIssue ? <T color={theme.waiting} style={{ flex: 1 }}>{imageIssue}</T> : null}
+    </View> : null}
+      status={sendIssue || sizeInfo.note ? <View style={[styles.tray, bar]} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
+      leading={<Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
+        <T color={images.length >= MAX_IMAGES ? theme.overlay0 : theme.accent} style={{ fontSize: 18 }}>＋</T>
+      </Pressable>}
+      inputAdornment={canDictate ? <Pressable accessibilityRole="button" accessibilityLabel="Dictate a message" hitSlop={8} onPress={() => void listen()} style={styles.mic}>
+        <T style={{ fontSize: 17 }}>🎙</T>
+      </Pressable> : null}
+    /> : session ? <View style={[styles.composer, bar, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null;
+  return <ConversationFrame style={styles.screen} keyboardVerticalOffset={headerHeight} composer={composer}>
     <DraftRecoveryNote />
     <Banners />
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
     {header ? <View style={strip}><T dim>{header}</T></View> : null}
-    {agent ? <AlertsStrip agentId={agent.id} /> : null}
+    {agent ? <>
+      <AlertsStrip agentId={agent.id} />
+      <AgentThreads agentId={agent.id} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
+    </> : null}
     {issue ? <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry} style={strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now, stopped)}</T></Pressable> : null}
     {!unresolved && !issue ? <Freshness refreshing={refreshing} loaded={loaded} lastFrame={lastFrame} /> : null}
     {findOpen ? <View style={[strip, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
@@ -449,6 +498,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       ref={list}
       onViewableItemsChanged={visibleEntries.current}
       inverted
+      refreshControl={pullRefresh}
       data={rows}
       extraData={selecting}
       keyExtractor={row => row.kind === 'entry' ? row.entry.id : row.kind === 'call' ? `call:${row.entry.id}` : row.kind === 'bundle' ? row.id : row.kind === 'pending' ? row.pending.id : 'older'}
@@ -482,48 +532,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     />
     </View>
     {away ? <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest" style={[styles.latest, { backgroundColor: palette.surface0 }]} onPress={() => list.current?.scrollToOffset({ offset: 0, animated: true })}><T bold color={theme.accent}>↓ latest</T></Pressable> : null}
-    {agent && listening ? <View style={[styles.composer, bar, { paddingBottom: bottom, flexDirection: 'column', alignItems: 'stretch' }]}>
-      <Waveform levels={levels} />
-      <T color={heard ? theme.text : theme.overlay0}>{heard || 'Listening…'}</T>
-      <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
-        <Button label="cancel" color={theme.overlay1} onPress={() => void finishListening('cancel')} />
-        <Button label="done" color={theme.subtext0} onPress={() => void finishListening('edit')} />
-        <Button label="send" disabled={!canSend} onPress={() => void finishListening('send')} />
-      </View>
-    </View> : agent ? <View>
-    {images.length || imageIssue ? <View style={[styles.tray, bar]}>
-      {images.map(image => <View key={image.key}>
-        <Image source={{ uri: `data:${image.mediaType};base64,${image.base64}` }} style={[styles.thumb, { backgroundColor: palette.surface0 }]} accessibilityLabel={image.name ?? 'image to send'} />
-        <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${image.name ?? 'image'}`} hitSlop={8} onPress={() => setImages(previous => previous.filter(other => other.key !== image.key))} style={[styles.unthumb, { backgroundColor: palette.surface1 }]}><T bold color={theme.text}>✕</T></Pressable>
-        <T dim style={{ fontSize: 10 }}>{megabytes(image.bytes)}</T>
-      </View>)}
-      {imageIssue ? <T color={theme.waiting} style={{ flex: 1 }}>{imageIssue}</T> : null}
-    </View> : null}
-    {sendIssue || sizeInfo.note ? <View style={[styles.tray, bar]} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
-    <View style={[styles.composer, bar, { paddingBottom: bottom }]}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
-        <T color={images.length >= MAX_IMAGES ? theme.overlay0 : theme.accent} style={{ fontSize: 18 }}>＋</T>
-      </Pressable>
-      {/* The microphone sits inside the box, at its right edge, over the text's padding. */}
-      <View style={{ flex: 1 }}>
-        <Field
-          ref={box}
-          value={draft}
-          onChangeText={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) draftCache.current.set(target, text); else draftCache.current.delete(target); }}
-          placeholder={`Message ${title}`}
-          multiline
-          style={[styles.input, canDictate ? { paddingRight: 36 } : null]}
-          editable
-          accessibilityLabel={`Message ${title}`}
-        />
-        {canDictate ? <Pressable accessibilityRole="button" accessibilityLabel="Dictate a message" hitSlop={8} onPress={() => void listen()} style={styles.mic}>
-          <T style={{ fontSize: 17 }}>🎙</T>
-        </Pressable> : null}
-      </View>
-      <Button label="send" disabled={!canSend || sizeInfo.over || (!draft.trim() && !images.length)} onPress={() => void send()} style={styles.send} />
-    </View>
-    </View> : session ? <View style={[styles.composer, bar, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by Fractal · read only' : 'this session has ended · read only'}</T></View> : null}
-  </KeyboardAvoidingView>;
+  </ConversationFrame>;
 }
 
 function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof useStore>['data']['agents'][number]>; onMission: (id: string, title: string) => void }) {
@@ -552,9 +561,11 @@ const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }:
     : rule.sending.text;
   const { color: paint } = useTextAppearance();
   return <View style={[styles.entry, styles.barred, { borderLeftColor: paint(c(tone ?? rule.sending_edge)) }]}>
-    <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
-    <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
-    {pending.unconfirmed ? <Button label="Resolve unconfirmed" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
+    <ConversationFeedback color={c(tone ?? rule.sending.color)}
+      message={<>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></>}
+      recovery={pending.unconfirmed ? { label: 'Resolve unconfirmed', color: c(rule.unconfirmed), disabled: !canSend || !!pending.resending, onPress: () => onSendAgain(pending) } : undefined}>
+      <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
+    </ConversationFeedback>
   </View>;
 });
 
@@ -742,12 +753,13 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
   }
   return <Pressable disabled={!long} accessibilityRole={long ? 'button' : undefined} accessibilityState={long ? { expanded: open } : undefined} onPress={() => onToggle(entry.id)}
     style={[styles.entry, styles.barred, { borderLeftColor: paint(c(look.edge)) }, toYou ? { backgroundColor: tokenColor(rule.to_you_fill, palette) } : null]}>
-    <T>{toYou ? <T color={c(look.edge)}>● </T> : null}<T bold={look.from_bold} color={c(look.from)}>{body.to ? `${body.from} → ${body.to}` : body.from}</T>{body.subject ? <T bold={look.from_bold} color={look.from_bold ? undefined : c(look.text)}>  {body.subject}</T> : null}<T dim>  {entry.at}</T>{body.dictated ? <T dim>  🎙</T> : null}{body.signed ? <T dim>  {body.signed}</T> : null}{mark ? <T color={c(mark.color)}>  {mark.text}</T> : null}</T>
-    <View style={long && !open ? { maxHeight: limit, overflow: 'hidden' } : null}>
-      {/* Measured at its full height and never shrunk by the fold: a measurement the fold could
-          change would fold and unfold the mail in a loop. */}
-      <View style={{ flexShrink: 0 }} onLayout={event => { const next = event.nativeEvent.layout.height; setHeight(previous => Math.max(previous, next)); }}>{whole.text ?? body.text ? <Markdown selectable={false} text={whole.text ?? body.text} color={c(look.text)} /> : null}</View>
-    </View>
+    {/* Measure full body height independently of the outside fold, avoiding fold/unfold loops. */}
+    <ConversationMessage
+      heading={<>{toYou ? <T color={c(look.edge)}>● </T> : null}<T bold={look.from_bold} color={c(look.from)}>{body.to ? `${body.from} → ${body.to}` : body.from}</T>{body.subject ? <T bold={look.from_bold} color={look.from_bold ? undefined : c(look.text)}>  {body.subject}</T> : null}<T dim>  {entry.at}</T>{body.dictated ? <T dim>  🎙</T> : null}{body.signed ? <T dim>  {body.signed}</T> : null}{mark ? <T color={c(mark.color)}>  {mark.text}</T> : null}</>}
+      text={(whole.text ?? body.text) || undefined} color={c(look.text)} selectable={false}
+      bodyContainerStyle={long && !open ? { maxHeight: limit, overflow: 'hidden' } : undefined}
+      bodyStyle={{ flexShrink: 0 }} onBodyLayout={event => { const next = event.nativeEvent.layout.height; setHeight(previous => Math.max(previous, next)); }}
+    />
     {body.whole && !(whole.text && !whole.note) ? <Pressable accessibilityRole="button" accessibilityLabel="Show the whole message" disabled={whole.loading} onPress={whole.load} hitSlop={6}>
       <T color={c(RULES.tool.collapse.color)}>{whole.loading ? '  loading the whole message…' : `  show the whole message · ${kib(body.whole.bytes)}`}</T>
     </Pressable> : null}

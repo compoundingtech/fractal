@@ -421,6 +421,7 @@ const pasteImages = (event: React.ClipboardEvent, intake: ComposerImageIntake | 
 
 function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusals?: readonly AttachmentRefusal[]; readonly refuseAttachment?: (message: string) => void }) {
   const { conversationLabel, targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, imageAttachments, attachmentRefusals = [], refuseAttachment, placeholder = 'Message, @ mentions and / commands as text', recipient, recipients, onRecipientChange, images } = props
+  const sendDisabled = props.sendDisabled ?? false
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
   const readOnly = disabledReason !== undefined || isDisabled
   const blocked = contextHoldsSend(props)
@@ -484,8 +485,8 @@ function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusa
       tabIndex={-1}
       {...stylex.props(styles.root, style, cold && styles.cold)}
       onSubmit={event => {
-        if (readOnly || blocked || sendBlocked || onRequestSubmit !== undefined) event.preventDefault()
-        if (readOnly) return
+        if (readOnly || sendDisabled || blocked || sendBlocked || onRequestSubmit !== undefined) event.preventDefault()
+        if (readOnly || sendDisabled) return
         if (sendBlocked) refuseSend()
         else if (!blocked) onRequestSubmit?.(false)
       }}
@@ -504,10 +505,10 @@ function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusa
         // The primitive's Mod+Shift+Enter steers past the form; a blocked draft refuses it like any other send.
         if (sendBlocked && !readOnly && event.shiftKey && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.stopPropagation(); refuseSend(); return }
         // A held draft never leaves through the runtime's own modified-Enter steer/queue path.
-        if (blocked && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.stopPropagation(); return }
+        if ((blocked || sendDisabled) && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.stopPropagation(); return }
         if (onRequestSubmit !== undefined && !event.shiftKey && !(window.matchMedia('(pointer: coarse) and (not (any-pointer: fine))').matches && !event.metaKey && !event.ctrlKey)) {
           event.preventDefault(); event.stopPropagation()
-          if (readOnly) return
+          if (readOnly || sendDisabled) return
           if (sendBlocked) refuseSend()
           else if (!blocked) onRequestSubmit(event.metaKey || event.ctrlKey)
         }
@@ -554,6 +555,9 @@ function PlainComposer(props: EmbraceComposerProps & { readonly attachmentRefusa
         {canStop && stopRefusal !== undefined && !stopping ? <span role="status" title={stopRefusal} {...stylex.props(styles.stopRefusal)}>{stopRefusal}</span> : null}
         {canStop ? <StopRunButton onStop={stop} pending={stopping} /> : null}
         {actions !== undefined ? actions(compact)
+          // Capability-held sends remain focusable, but neither pointer nor keyboard activation submits.
+          : sendDisabled ? <button type="button" aria-disabled="true"
+              aria-label={submitIcon === undefined ? undefined : sendLabel} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? sendLabel}</button>
           // Blocked, not empty: focusable and described by the refusal; pressing it only re-announces why.
           : sendBlocked ? <button type="button" aria-disabled="true" aria-describedby={refusalId} onClick={refuseSend}
               aria-label={submitIcon === undefined ? undefined : sendLabel} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? sendLabel}</button>
