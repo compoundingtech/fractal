@@ -85,6 +85,9 @@ the numeric field is bad only when it is strictly above `bad-above`. Missing or 
 numeric values and timestamps are not successful events. Times use the same RFC 3339 or Unix
 millisecond field representation as other claim indicators, but `at` is required.
 
+Mixed TypeScript and KDL objective declarations load in canonical declaration-source path order,
+not objective-ID order.
+
 ```kdl
 objective "acme/request-budget" {
   about "Interactive requests completing within 100ms"

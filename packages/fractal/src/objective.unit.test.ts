@@ -423,7 +423,8 @@ describe('objective subject trees', () => {
         'acme/native-kdl/objective.kdl': 'version 2\nobjective "acme/native-kdl" {\n about "Native ownership"\n indicator "native" { objective "transaction/read"; }\n}\n',
       })
       const subjects = (yield* load(root)).filter(({ kind }) => kind === 'objective')
-      expect(subjects.map(({ id }) => id)).toEqual(['acme/gauge', 'acme/native', 'acme/native-kdl', 'acme/ratio'])
+      // Canonical declaration paths sort lexically: "native-kdl/" precedes "native/".
+      expect(subjects.map(({ id }) => id)).toEqual(['acme/gauge', 'acme/native-kdl', 'acme/native', 'acme/ratio'])
     }),
   )
 
