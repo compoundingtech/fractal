@@ -401,6 +401,84 @@ impl Seat {
     }
 }
 
+fn seed_idle_sleep(seat: &Seat) -> String {
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    seat.store.bind_fleet(fleet).unwrap();
+    seat.store.pin_fleet_anchor(key.public()).unwrap();
+    seat.store.set_member_key(Some(key.clone())).unwrap();
+    seat.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+    seat.store.append_claim(&ClaimInput {
+        subject:"daemon/amber".into(),kind:"daemon.started".into(),actor:None,
+        fields:serde_json::from_value(json!({"status":"running","features":{"idle_residency":1}})).unwrap(),
+        evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    seat.store.replication_snapshot().unwrap();
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let request = seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend","cause":"idle","incarnation_id":"original-1","idle_after_ms":60_000
+    }), vec![token], None);
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"suspend","operation_status":"snapshotting","harness":"claude",
+        "native_session_id":"native-one","source_host":"amber"
+    }), vec![request.id.clone()], Some(crate::suspension::suspend_snapshot_key(&request.id)));
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"suspend","operation_status":"suspended"
+    }), vec![request.id.clone()], Some(crate::suspension::suspend_completed_key(&request.id)));
+    seat.runtime.observation.lock().unwrap().as_mut().unwrap().status = "exited".into();
+    request.id
+}
+
+fn sleep_end_classes(seat: &Seat) -> Vec<String> {
+    seat.store.claims_for_kind_at("residency.sleep-ended",None,false,16).unwrap().claims.iter()
+        .filter(|claim| claim.body["fields"]["seat"] == SUBJECT)
+        .map(|claim| claim.body["fields"]["end_class"].as_str().unwrap().to_owned()).collect()
+}
+
+#[test]
+fn explicit_stop_ends_the_historical_idle_hold_once_after_reopen() {
+    let mut seat = Seat::new_with_owned_publication(false);
+    seed_idle_sleep(&seat);
+    let source = format!("version 2\nstop {SUBJECT:?}\n");
+    let input = crate::graph::parse_internal_intent(&source, "amber").unwrap();
+    let preview = seat.store.mission(&input, crate::model::IntentInput {
+        kdl:source,source_name:None,
+    }).unwrap();
+    seat.store.apply_as(&input,&preview.subject_tokens,"end-idle-stop",Some("person/operator")).unwrap();
+    assert!(crate::suspension::current(&seat.store,SUBJECT).unwrap().is_none());
+    seat.reconcile();
+    seat.reopen();
+    seat.reconcile();
+    assert_eq!(sleep_end_classes(&seat), ["stop"]);
+}
+
+#[test]
+fn retiring_an_owned_idle_hold_records_one_retire_sleep_end() {
+    let mut seat = Seat::new();
+    seed_idle_sleep(&seat);
+    seat.publish(2,"first",None,true);
+    seat.reopen();
+    seat.reconcile();
+    assert_eq!(sleep_end_classes(&seat), ["retire"]);
+}
+
+#[test]
+fn manual_resume_ends_idle_sleep_without_becoming_an_automatic_wake() {
+    let seat = Seat::new_with_owned_publication(false);
+    let operation = seed_idle_sleep(&seat);
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let resume = seat.suspension_claim("runtime.action.requested", json!({"action":"resume"}),
+        vec![token,operation],None);
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"resume","operation_status":"resumed",
+        "native_session_id":"native-one","incarnation_id":"replacement-1"
+    }), vec![resume.id.clone()],Some(crate::suspension::resume_completed_key(&resume.id)));
+    let mut evidence = super::super::idle_residency_evidence::RuntimeEvidence::default();
+    evidence.evaluate_subject(&seat.store,SUBJECT,now_ms()).unwrap();
+    evidence.evaluate_subject(&seat.store,SUBJECT,now_ms()).unwrap();
+    assert_eq!(sleep_end_classes(&seat), ["manual"]);
+}
+
 #[test]
 fn wake_demand_before_idle_stop_cancels_without_touching_runtime() {
     let seat = Seat::new_with_owned_publication(false);

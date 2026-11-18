@@ -2,6 +2,7 @@
 //! durable authority; preflight evidence is usable only at an unchanged writer frontier.
 use super::*;
 use crate::model::MemberSpec;
+pub use fractal_telemetry::residency::UnroutedKind;
 
 const FEATURE: declared_admission::FleetFeature = declared_admission::FleetFeature {
     keys: &["idle_residency"],
@@ -175,6 +176,39 @@ impl Store {
         declared_admission::validate_fleet(&self.readers.get(), &self.origin, &FEATURE)
     }
 
+    /// Record one owner-local missing-route incident per idle sleep and entry point.
+    /// Lag is unknown, not proof that a wake route is absent.
+    pub fn record_idle_unrouted(&self, subject: &str, kind: UnroutedKind) -> Result<bool> {
+        if self.idle_residency_enabled().is_err() { return Ok(false); }
+        if !crate::suspension::current(self, subject)?.is_some_and(|state|
+            state.cause() == "idle" && state.phase == "suspended")
+        { return Ok(false); }
+        let demand = self.wake_demand(subject)?;
+        if demand.oldest.is_some() || !demand.frontier.caught_up { return Ok(false); }
+        let inserted = with_source_fence(self, || self.connection.batched(|tx| -> Result<bool> {
+            if declared_admission::validate_fleet(tx, &self.origin, &FEATURE).is_err()
+                || owned(tx, &self.origin, subject)?.is_none()
+                || !frontier_matches(self, tx, &demand.frontier)?
+            { return Ok(false); }
+            let Some(suspension) = crate::suspension::current_at_tx(tx, subject, None)?
+                .filter(|state| state.cause() == "idle" && state.phase == "suspended")
+            else { return Ok(false); };
+            let suspend = suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id);
+            let key = format!("idle-unrouted:{subject}:{suspend}:{}", kind.label());
+            if operation(tx, &format!("residency-evidence:{key}"))?.is_some() { return Ok(false); }
+            evidence(tx, &self.origin, subject, "unrouted", &key, "residency.unrouted",
+                json!({"observed_at":now_ms(),"kind":kind.label()}))?;
+            Ok(true)
+        }).map_err(anyhow::Error::msg)?)?;
+        if inserted {
+            static COUNTER: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+                std::sync::LazyLock::new(|| opentelemetry::global::meter("fractal.residency")
+                    .u64_counter("st.residency.unrouted").build());
+            COUNTER.add(1, &[opentelemetry::KeyValue::new("kind", kind.label())]);
+        }
+        Ok(inserted)
+    }
+
     /// Admit at most once per declaration/incarnation/policy/continuous-idle epoch.
     /// A failed request consumes that epoch; only fresh eligibility permits another attempt.
     pub fn admit_idle_suspend(&self, subject: &str, after_ms: Option<u64>, enabled_at: Option<u128>, now: u128) -> Result<Option<String>> {
@@ -216,8 +250,22 @@ impl Store {
         }).map_err(anyhow::Error::msg)?)
     }
 
-    /// Revalidate the admitted launch and policy at the last reversible stop boundary.
+    /// Revalidate without crossing the stop boundary (used before workspace capture).
     pub fn recheck_idle_suspend(&self, subject: &str, request: &str, after_ms: Option<u64>, enabled_at: Option<u128>) -> Result<bool> {
+        self.fence_idle_suspend(subject, request, after_ms, enabled_at, None)
+    }
+
+    /// Commit the stop boundary under the same source and owner reservations as the final
+    /// demand check. Demand cannot be accepted in a gap between validation and this receipt.
+    pub fn commit_idle_stop_boundary(&self, subject: &str, request: &str, after_ms: Option<u64>,
+        enabled_at: Option<u128>, fields: BTreeMap<String, Value>) -> Result<bool>
+    {
+        self.fence_idle_suspend(subject, request, after_ms, enabled_at, Some(fields))
+    }
+
+    fn fence_idle_suspend(&self, subject: &str, request: &str, after_ms: Option<u64>,
+        enabled_at: Option<u128>, snapshot: Option<BTreeMap<String, Value>>) -> Result<bool>
+    {
         let before = graph_index(&self.readers.get())?;
         let residency = crate::residency::evaluate_at(self, subject, None, after_ms)?.not_before(enabled_at, after_ms);
         if residency.refusal_reason.is_some() { return Ok(false); }
@@ -227,7 +275,7 @@ impl Store {
             if !frontier_matches(self, tx, &demand.frontier)? { return Ok(false); }
             declared_admission::validate_fleet(tx, &self.origin, &FEATURE).map_err(anyhow::Error::new)?;
             let Some(declaration) = owned(tx, &self.origin, subject)? else { return Ok(false); };
-            let latest: Option<String> = tx.query_row(&canonical_sql(
+            let latest: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-ha0e88fcd8a5e owner=fractal_store::store::idle_residency TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id
                  WHERE claims.subject=?1 AND claims.kind='runtime.action.requested' AND claims.actor IS NOT NULL
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1"
@@ -238,12 +286,22 @@ impl Store {
             let body: Value = serde_json::from_str(&body)?;
             let fields = &body["fields"];
             let runtime = latest_actual_at(tx, subject, None)?;
-            Ok(fields["action"] == "suspend" && fields["cause"] == "idle"
+            let valid = fields["action"] == "suspend" && fields["cause"] == "idle"
                 && fields["idle_declaration"] == declaration
                 && fields["idle_after_ms"] == json!(after_ms)
                 && fields["idle_enabled_at_unix_ms"] == json!(enabled_at)
                 && fields["idle_eligible_since_unix_ms"] == json!(residency.eligible_since_unix_ms)
-                && runtime.is_some_and(|runtime| runtime["status"] == "running" && runtime["incarnation_id"] == fields["incarnation_id"]))
+                && runtime.is_some_and(|runtime| runtime["status"] == "running" && runtime["incarnation_id"] == fields["incarnation_id"]);
+            if !valid { return Ok(false); }
+            if let Some(mut fields) = snapshot {
+                fields.insert("action".into(), json!("suspend"));
+                let key = crate::suspension::suspend_snapshot_key(request);
+                if operation(tx, &key)?.is_none() {
+                    append_receipt_claim_tx(tx, &self.origin, subject, "runtime.action.succeeded", Some(subject),
+                        &json!({"fields":fields,"evidence":[request]}), &[], None, &key)?;
+                }
+            }
+            Ok(true)
         }).map_err(anyhow::Error::msg)?)
     }
 
@@ -356,6 +414,48 @@ mod tests {
             claim(&store, SEAT, kind, Some(SEAT), fields);
         }
         store
+    }
+
+    #[test]
+    fn unrouted_incidents_are_gated_and_once_per_sleep_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.sqlite");
+        let store = fixture(&path, root.path());
+        assert!(!store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
+        store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+            "runtime.action.succeeded", Some(SEAT),
+            &json!({"evidence":[suspend],"fields":{"action":"suspend","operation_status":"suspended"}}),
+            &[], None, &crate::suspension::suspend_completed_key(&suspend))).unwrap().unwrap();
+        started(&store, false);
+        store.replication_snapshot().unwrap();
+        assert!(!store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
+        started(&store, true);
+        store.replication_snapshot().unwrap();
+        assert!(store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
+        assert!(!store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
+        assert!(store.record_idle_unrouted(SEAT, UnroutedKind::ExplicitResume).unwrap());
+        let second = Store::open(&path, "alder").unwrap();
+        messages_shard::open(&second, root.path()).unwrap();
+        assert!(!second.record_idle_unrouted(SEAT, UnroutedKind::ExplicitResume).unwrap());
+        let count: u64 = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE kind='residency.unrouted'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn pending_wake_is_not_an_unrouted_incident() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
+        store.connection.batched(|tx| append_receipt_claim_tx(tx, "alder", SEAT,
+            "runtime.action.succeeded", Some(SEAT),
+            &json!({"evidence":[suspend],"fields":{"action":"suspend","operation_status":"suspended"}}),
+            &[], None, &crate::suspension::suspend_completed_key(&suspend))).unwrap().unwrap();
+        claim(&store, "message/unrouted-test", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":SEAT,"content":"Continue.","status":"sent","tags":[]}));
+        assert!(!store.record_idle_unrouted(SEAT, UnroutedKind::Attach).unwrap());
+        assert!(!store.record_idle_unrouted(SEAT, UnroutedKind::ExplicitResume).unwrap());
     }
 
     #[test]
@@ -546,5 +646,21 @@ mod tests {
         claim(&store, "message/manual", "message.sent", Some("person/avery"),
             json!({"from":"person/avery","to":SEAT,"content":"Please wait.","status":"sent","tags":[]}));
         assert_eq!(store.admit_idle_wake(SEAT, 1, i64::MAX as u128).unwrap(), IdleWakeAdmission::default());
+    }
+    #[test]
+    fn demand_before_final_boundary_prevents_the_snapshot_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        let request = store.admit_idle_suspend(SEAT, Some(0), Some(0), i64::MAX as u128).unwrap().unwrap();
+        assert!(store.recheck_idle_suspend(SEAT, &request, Some(0), Some(0)).unwrap());
+        claim(&store, "message/between-validation-and-stop", "message.sent", Some("person/avery"),
+            json!({"from":"person/avery","to":SEAT,"content":"Continue","status":"sent","tags":[]}));
+        let fields = serde_json::from_value(json!({
+            "operation_status":"snapshotting","harness":"omp","native_session_id":"native-one",
+            "source_host":"alder","incarnation_id":"one"
+        })).unwrap();
+        assert!(!store.commit_idle_stop_boundary(SEAT, &request, Some(0), Some(0), fields).unwrap());
+        assert!(store.operation_claim(&crate::suspension::suspend_snapshot_key(&request)).unwrap().is_none());
+        assert_eq!(crate::suspension::current(&store,SEAT).unwrap().unwrap().phase,"quiescing");
     }
 }

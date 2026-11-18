@@ -254,6 +254,13 @@ in metric labels.
 | `unrouted/<incident id>` | `residency.unrouted` | `host`, `observed_at`, `kind` | on terminal attach or explicit resume of an idle-suspended seat with no wake demand |
 | `host/<host>` | `residency.host-sample` | `host`, `observed_at`, `held_silent_age_seconds`, `asleep_seats`, memory deltas with coverage | every 5 minutes on an enabled member; a failed sensor writes no age, never zero |
 
+Unrouted incidents are owner-local and reader-barrier gated. Terminal attachment (including
+local-terminal lookup) and explicit resume record at most one incident per suspend operation
+and kind, including across retries and daemon restarts. The owner validates a caught-up,
+unchanged wake frontier under the source and graph writer fences before recording absence
+of wake demand; lag is unknown, not an incident. Manual suspension never records one.
+Only a newly committed incident increments the bounded `kind` counter.
+
 A fleet declares objectives over these claims with `fractal apply`, one set per enabled member,
 each with an `only "host"` filter so a busy member cannot hide a quiet one. The recommended set
 uses seven-day windows, because one-day windows on a member with few wakes are mostly no-data:

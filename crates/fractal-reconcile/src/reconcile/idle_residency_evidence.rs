@@ -14,7 +14,7 @@ const SAMPLE_MS: u128 = 5 * 60 * 1000;
 #[derive(Default)]
 pub(super) struct RuntimeEvidence {
     instruments: Option<Instruments>,
-    before: BTreeMap<String, (Memory, Vec<u32>)>,
+    before: BTreeMap<String, Memory>,
     reclaimed: Option<MemoryDelta>,
 }
 
@@ -75,9 +75,10 @@ impl RuntimeEvidence {
     }
 
     /// Call once at the last reversible stop boundary, before stopping the process.
-    /// Only a known same-process scope is supplied; an empty/vanished scope is unknown private memory.
-    pub(super) fn before_suspend(&mut self, request: &str, pids: &[u32]) {
-        self.before.entry(request.into()).or_insert_with(|| (sensor::memory(pids), pids.to_vec()));
+    /// The runtime supplies the root's verified PID and birth token. The sensor
+    /// walks every thread's children and refuses incomplete or changing trees.
+    pub(super) fn before_suspend(&mut self, request: &str, root: Option<(u32, u64)>) {
+        self.before.entry(request.into()).or_insert_with(|| sensor::memory_tree(root));
     }
 
     /// Invoke after phase receipts and from the seat's normal reactive item. Replays are safe.
@@ -107,8 +108,10 @@ impl RuntimeEvidence {
                     self.activate().suspend(result);
                     if failure.is_some() { self.activate().refusal(code); }
                 }
-                if let Some((before, pids)) = self.before.remove(&request.id) {
-                    if success.is_some() { self.reclaimed = Some(MemoryDelta::between(before, sensor::memory(&pids))); }
+                if let Some(before) = self.before.remove(&request.id) {
+                    // A suspended success is the completed whole-seat stop, not
+                    // a missing post-stop /proc entry treated as a zero sample.
+                    if success.is_some() { self.reclaimed = Some(MemoryDelta::after_completed_stop(before, sensor::memory(&[]))); }
                 }
                 if let Some(completed) = success {
                     self.sleep_end(store, host, seat, request, completed, &requests, &succeeded)?;

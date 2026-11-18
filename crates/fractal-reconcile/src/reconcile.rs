@@ -9047,12 +9047,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return self.fail_suspension(agent, suspension, code,
                         "idle suspension cancelled while capturing the workspace".into(), Vec::new());
                 }
-                self.record_suspension_phase(
-                    agent,
-                    suspension,
-                    "runtime.action.succeeded",
-                    suspended::suspend_snapshot_key(&suspension.operation_id),
-                    BTreeMap::from([
+                let fields = BTreeMap::from([
                         (
                             "operation_status".into(),
                             Value::String("snapshotting".into()),
@@ -9067,11 +9062,23 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ),
                     ]).into_iter().chain(
                         (mode == "in-place").then(|| ("mode".into(), Value::String(mode.into())))
-                    ).collect(),
-                )?;
+                    ).collect();
                 if suspension.cause() == "idle" {
+                    let policy = *self.idle_residency.lock().unwrap_or_else(PoisonError::into_inner);
+                    if !self.store.commit_idle_stop_boundary(agent, &suspension.operation_id,
+                        policy.settings.after_ms, policy.enabled_at_unix_ms, fields)?
+                    {
+                        return self.fail_suspension(agent, suspension, "wake-pending",
+                            "idle suspension lost its final owner or demand fence".into(), Vec::new());
+                    }
+                } else {
+                    self.record_suspension_phase(agent, suspension, "runtime.action.succeeded",
+                        suspended::suspend_snapshot_key(&suspension.operation_id), fields)?;
+                }
+                if suspension.cause() == "idle" {
+                    let root = self.runtime.start_process_identity(member, incarnation).ok().flatten();
                     self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
-                        .before_suspend(&suspension.operation_id, &[]);
+                        .before_suspend(&suspension.operation_id, root);
                 }
                 stop(observation)?;
                 Ok(())
@@ -9079,6 +9086,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             "snapshotting" => {
                 if let Some(observation) = running {
                     self.record_member_as(subject, member, observation, true)?;
+                    if suspension.cause() == "idle" {
+                        let root = observation.incarnation_id.as_deref().and_then(|incarnation|
+                            self.runtime.start_process_identity(member, incarnation).ok().flatten());
+                        self.idle_residency_evidence.lock().unwrap_or_else(PoisonError::into_inner)
+                            .before_suspend(&suspension.operation_id, root);
+                    }
                     stop(observation)?;
                     return Ok(());
                 }
