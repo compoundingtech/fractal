@@ -168,6 +168,20 @@ pub enum Attestation {
     Asserted,
 }
 
+/// A directly observed input admission, retained independently of consumption and retries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputAcceptance {
+    pub incarnation: String,
+    pub accepted_at_unix_ms: u64,
+}
+
+pub(crate) fn acceptance_time() -> Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis().try_into()?)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
@@ -188,6 +202,12 @@ pub struct Entry {
     pub accepted_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negative: Option<NegativeReceipt>,
+    /// Old ledgers have no observed clock; never invent one from their phase.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_acceptances: Vec<InputAcceptance>,
+    /// Durable lower bound for an in-flight handoff whose native answer may still be buffered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempted_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +451,7 @@ impl Ledger {
                 entry.binding = begin.binding;
                 entry.correlation = begin.correlation;
                 entry.incarnation = begin.incarnation;
+                entry.attempted_at_unix_ms = Some(acceptance_time()?);
                 entry.phase = entry.phase.max(Phase::Attempted);
                 // This build is about to transport it, so the attempt is no longer someone
                 // else's claim about the world.
@@ -451,6 +472,8 @@ impl Ledger {
                     incarnation: begin.incarnation,
                     accepted_turn_id: None,
                     negative: None,
+                    input_acceptances: Vec::new(),
+                    attempted_at_unix_ms: Some(acceptance_time()?),
                 };
                 self.record.entries.push(entry.clone());
                 entry
@@ -472,8 +495,17 @@ impl Ledger {
         else {
             return Ok(None);
         };
+        let acceptance_changed = if evidence == Evidence::TransportAccepted {
+            record_input_acceptance(entry)?
+        } else {
+            false
+        };
         if phase <= entry.phase {
-            return Ok(Some(entry.phase));
+            let current_phase = entry.phase;
+            if acceptance_changed {
+                self.persist()?;
+            }
+            return Ok(Some(current_phase));
         }
         entry.phase = phase;
         // This build graded the evidence, so the phase is no longer a carried-forward claim.
@@ -511,13 +543,14 @@ impl Ledger {
                 );
             }
             let before = (entry.phase, entry.accepted_turn_id.clone());
+            let acceptance_changed = record_input_acceptance(entry)?;
             entry.phase = entry.phase.max(Phase::TransportAccepted);
             entry.accepted_turn_id = Some(turn_id.to_owned());
             entry.attestation = Attestation::Observed;
             entry.negative = None;
             (
                 entry.phase,
-                before != (entry.phase, entry.accepted_turn_id.clone()),
+                acceptance_changed || before != (entry.phase, entry.accepted_turn_id.clone()),
             )
         };
         if changed {
@@ -664,7 +697,40 @@ pub fn asserted(
         incarnation,
         accepted_turn_id: None,
         negative: None,
+        input_acceptances: Vec::new(),
+        attempted_at_unix_ms: None,
     }
+}
+
+/// Seal a snapshot taken after `cut` without claiming absence past an unresolved native RPC.
+/// The attempt is persisted before transport: a buffered/lost native answer therefore holds
+/// the frontier at its start, even when no acceptance record has reached the journal yet.
+pub fn input_acceptance_frontier(entries: &[Entry], incarnation: &str, cut: u64) -> Option<u64> {
+    let mut through = cut;
+    for entry in entries {
+        if entry.incarnation.as_deref().is_some_and(|owner| owner != incarnation)
+            || entry.negative.is_some()
+            || entry.input_acceptances.iter().any(|receipt| receipt.incarnation == incarnation)
+        {
+            continue;
+        }
+        through = through.min(entry.attempted_at_unix_ms?.saturating_sub(1));
+    }
+    Some(through)
+}
+
+fn record_input_acceptance(entry: &mut Entry) -> Result<bool> {
+    let Some(incarnation) = entry.incarnation.as_deref() else {
+        return Ok(false);
+    };
+    if entry.input_acceptances.iter().any(|receipt| receipt.incarnation == incarnation) {
+        return Ok(false);
+    }
+    entry.input_acceptances.push(InputAcceptance {
+        incarnation: incarnation.to_owned(),
+        accepted_at_unix_ms: acceptance_time()?,
+    });
+    Ok(true)
 }
 
 /// How many entries in the ledger at `path` carry a phase this build never observed.
@@ -739,6 +805,78 @@ mod tests {
                 incarnation: Some("incarnation-1".to_owned()),
             })
             .unwrap()
+    }
+
+    #[test]
+    fn source_frontier_stops_before_unresolved_native_rpc_and_never_invents_historical_coverage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = open(tmp.path(), Harness::Codex);
+        let entry = begin(&mut ledger, "native-main", FILE_A);
+        let start = entry.attempted_at_unix_ms.unwrap();
+        let cut = start + 1000;
+        assert_eq!(input_acceptance_frontier(ledger.entries(), "incarnation-1", cut), Some(start - 1));
+        assert_eq!(input_acceptance_frontier(open(tmp.path(), Harness::Codex).entries(),
+            "incarnation-1", cut), Some(start - 1));
+        ledger.accept_codex_turn(FILE_A, "turn-fixture").unwrap();
+        assert_eq!(input_acceptance_frontier(ledger.entries(), "incarnation-1", cut), Some(cut));
+        let mut historical = entry;
+        historical.attempted_at_unix_ms = None;
+        assert_eq!(input_acceptance_frontier(&[historical], "incarnation-1", cut), None);
+    }
+
+    #[test]
+    fn input_acceptance_is_first_observed_clock_per_incarnation_and_survives_reopen() {
+        for harness in [Harness::Codex, Harness::OpenCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut ledger = open(tmp.path(), harness);
+            begin(&mut ledger, "native-main", FILE_A);
+            assert!(ledger.entry(FILE_A).unwrap().input_acceptances.is_empty());
+            ledger.record(FILE_A, Evidence::TransportAccepted).unwrap();
+            let first = ledger.entry(FILE_A).unwrap().input_acceptances.clone();
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].incarnation, "incarnation-1");
+            assert!(first[0].accepted_at_unix_ms > 0);
+            ledger.record(FILE_A, Evidence::TransportAccepted).unwrap();
+            ledger.record(FILE_A, Evidence::Consumed).unwrap();
+            let mut reopened = open(tmp.path(), harness);
+            assert_eq!(reopened.entry(FILE_A).unwrap().input_acceptances, first);
+            reopened.record(FILE_A, Evidence::TransportAccepted).unwrap();
+            assert_eq!(open(tmp.path(), harness).entry(FILE_A).unwrap().input_acceptances, first);
+        }
+    }
+
+    #[test]
+    fn consumption_and_historical_phases_do_not_invent_acceptance_clocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = open(tmp.path(), Harness::Codex);
+        begin(&mut ledger, "native-main", FILE_A);
+        ledger.record(FILE_A, Evidence::Consumed).unwrap();
+        assert!(ledger.entry(FILE_A).unwrap().input_acceptances.is_empty());
+        let mut value = serde_json::to_value(ledger.entry(FILE_A).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("inputAcceptances");
+        let historical: Entry = serde_json::from_value(value).unwrap();
+        assert!(historical.input_acceptances.is_empty());
+    }
+
+    #[test]
+    fn a_new_incarnation_cannot_relabel_the_first_native_acceptance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = open(tmp.path(), Harness::OpenCode);
+        begin(&mut ledger, "native-main", FILE_A);
+        ledger.record(FILE_A, Evidence::TransportAccepted).unwrap();
+        let first = ledger.entry(FILE_A).unwrap().input_acceptances[0].clone();
+        ledger.negative(FILE_A, NegativeReceipt::Absent).unwrap();
+        ledger.begin(Begin {
+            filename: FILE_A.into(), binding: "native-main".into(),
+            correlation: Correlation::native(correlation("native-main", FILE_A)),
+            incarnation: Some("incarnation-2".into()),
+        }).unwrap();
+        ledger.record(FILE_A, Evidence::TransportAccepted).unwrap();
+        let reopened = open(tmp.path(), Harness::OpenCode);
+        let receipts = &reopened.entry(FILE_A).unwrap().input_acceptances;
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0], first);
+        assert_eq!(receipts[1].incarnation, "incarnation-2");
     }
 
     #[test]
@@ -961,6 +1099,7 @@ mod tests {
             ledger.accept_codex_turn(FILE_A, "turn-one").unwrap(),
             Some(Phase::TransportAccepted)
         );
+        let first_acceptance = ledger.entry(FILE_A).unwrap().input_acceptances.clone();
         assert_eq!(
             ledger.accept_codex_turn(FILE_A, "turn-one").unwrap(),
             Some(Phase::TransportAccepted)
@@ -971,6 +1110,9 @@ mod tests {
         let entry = reopened.entry(FILE_A).unwrap();
         assert_eq!(entry.phase, Phase::TransportAccepted);
         assert_eq!(entry.accepted_turn_id.as_deref(), Some("turn-one"));
+        assert_eq!(entry.input_acceptances, first_acceptance);
+        assert_eq!(first_acceptance.len(), 1);
+        assert_eq!(first_acceptance[0].incarnation, "incarnation-1");
     }
 
     #[test]
@@ -1074,6 +1216,8 @@ mod tests {
                     incarnation: None,
                     accepted_turn_id: None,
                     negative: None,
+                    input_acceptances: Vec::new(),
+                    attempted_at_unix_ms: None,
                 }],
             },
         )

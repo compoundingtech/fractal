@@ -822,6 +822,7 @@ async fn drive_st2_native_loop(
     task: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
     let settle = loop_state.settle;
+    paths.delivery_gate.bind_incarnation(&incarnation);
     let NativePaths {
         session_dir,
         agent_dir,
@@ -1636,6 +1637,15 @@ fn activate_channel_todo_observations(
     let dir = prepare_channel_todo_outbox(catalog, subject, &state.incarnation)?;
     fractal_drivers::harness_events::enable(&dir, &state.incarnation)?;
     let observations = NativeObservations::start(&dir, &state.incarnation)?;
+    state.pending.input_acceptances =
+        fractal_drivers::native_channel::input_acceptances(&dir)?;
+    if state.pending.input_source_dir.is_none() {
+        // An older replacement image may have handed off mail without pre-frame clocks.
+        for message in &state.delivered {
+            fractal_drivers::native_channel::record_input_attempt(&dir, message, None)?;
+        }
+    }
+    state.pending.input_source_dir = Some(dir.clone());
     state.todo_outbox = Some(dir);
     state.record_pending_todo()?;
     Ok(observations)
@@ -2081,7 +2091,7 @@ async fn run_pi_channel(
                             continue;
                         }
                     };
-                    let frame = pi_family_message_frame(&message, &body, identity, &attachments);
+                    let frame = pi_family_message_frame(&message, &body, identity, &incarnation, &attachments);
                     if let Some(text) = frame["content"].as_str()
                         && let Err(error) = publish_native_invocation_input(
                             client, subject, &incarnation, &message, text,
@@ -2089,6 +2099,10 @@ async fn run_pi_channel(
                     {
                         warn_pi_channel(subject, &error, &mut last_warning);
                     }
+                    let dir = state.todo_outbox.as_deref().context("native input source has no durable outbox")?;
+                    fractal_drivers::native_channel::record_input_attempt(
+                        dir, &message.subject, Some(u64::try_from(current_unix_ms()?)?),
+                    )?;
                     stdout.write_all(serde_json::to_string(&frame)?.as_bytes()).await?;
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;
