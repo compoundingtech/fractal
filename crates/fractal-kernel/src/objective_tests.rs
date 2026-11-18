@@ -397,3 +397,22 @@ fn gauge_lower_limits_are_exclusive_and_native_bindings_inherit_policy() {
     assert!(one(&native.replace("      on-breach", "      target \"p99\" within=\"1s\"\n      on-breach")).is_err());
     assert!(one(&native.replace("      on-breach", "      window \"1h\"\n      on-breach")).is_err());
 }
+
+#[test]
+fn native_row_reference_grammar_matches_the_typescript_corpus() {
+    let corpus: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h04cf92495779 owner=fractal_kernel::objective_tests TODO=trace-statement-and-value-representation */ include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
+    let binding = |row: &str| {
+        one(&format!(
+            "objective \"acme/native-owner\" {{\n  about \"Fleet ownership of a built-in row\"\n  indicator \"native\" {{ objective {row:?}; }}\n}}"
+        ))
+    };
+    for row in corpus["rows"].as_array().unwrap().iter().chain(corpus["valid"].as_array().unwrap()) {
+        let row = row.as_str().unwrap();
+        assert_eq!(binding(row).unwrap().indicator, Indicator::Native { objective: row.into() });
+    }
+    for row in corpus["invalid"].as_array().unwrap() {
+        let row = row.as_str().unwrap();
+        assert!(binding(row).is_err(), "{row:?}");
+    }
+    assert!(!valid_name("acme/writer_hold"));
+}
