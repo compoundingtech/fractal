@@ -120,6 +120,65 @@ fn request_history_branch_statuses_remain_independent_after_thread_close() {
 }
 
 #[test]
+fn request_history_distinct_asks_from_one_workstep_keep_original_text_and_answers() {
+    let (store, origin, mut input) = fixture();
+    store.configure_thread_write_rollout([]);
+    input.title = "Approve abc".into();
+    input.reason = "Approve revision abc, not a later revision.".into();
+    let first = store.ask_person(&input).unwrap();
+    let opening = request(&store.readers.get(), &first.subject).unwrap().unwrap();
+    let a = SourceEpisode { source_id: first.subject, episode: opening.id.clone() };
+    start(&store, &a, THREAD, AGENT);
+    finish(&store, &a, false);
+
+    // The real ask writer requires a live claim when the original workstep resumes.
+    // Reuse the fixture's ordinary claim projection, without detaching this ask's origin.
+    store.connection.batched(|tx| -> Result<()> {
+        let claim = append_claim_tx(tx, "alder", &origin.subject, "work.claimed", Some(AGENT),
+            &json!({"fields": {"attempt": origin.attempt, "status": "claimed", "claimant": AGENT,
+                "claim_incarnation": "history-resumed", "claim_expires_at_unix_ms": (now_ms()+600_000) as u64}}),
+            &[], None)?;
+        project_mission_run_update(tx, &claim).unwrap();
+        Ok(())
+    }).unwrap().unwrap();
+    input.incarnation = Some("history-resumed".into());
+    input.idempotency_key = "approve-new-revision".into();
+    input.title = "Approve def".into();
+    input.reason = "Approve revision def with a separate decision.".into();
+    let second = store.ask_person(&input).unwrap();
+    let next_opening = request(&store.readers.get(), &second.subject).unwrap().unwrap();
+    let b = SourceEpisode { source_id: second.subject, episode: next_opening.id.clone() };
+    assert_ne!(a.source_id, b.source_id);
+    for asking in [&opening, &next_opening] {
+        assert_eq!(asking.body["fields"]["origin_step"], origin.subject);
+        assert_eq!(asking.body["fields"]["origin_attempt"], origin.attempt);
+    }
+    attach(&store, &b, Some(&a), "new revision, independent approval");
+
+    let history = page(&store);
+    assert_eq!(keys(&history), BTreeSet::from([a.clone(), b.clone()]));
+    for (key, title, text) in [
+        (&a, "Approve abc", "Approve revision abc, not a later revision."),
+        (&b, "Approve def", "Approve revision def with a separate decision."),
+    ] {
+        let row = history.items.iter().find(|item| &item.key == key).unwrap();
+        assert!(matches!(&row.payload,
+            fractal_store::store::thread_metadata::request_history::HistoricalPayload::Available {
+                title: Some(actual_title), text: actual_text, ..
+            } if actual_title == title && actual_text == text));
+    }
+    assert_eq!(status(&history, &a), "completed");
+    assert_eq!(status(&history, &b), "ready");
+    let row = |key: &SourceEpisode| history.items.iter().find(|item| &item.key == key).unwrap();
+    assert!(matches!(&row(&a).state, EpisodeState::Available { answers, .. } if answers.len() == 1));
+    assert!(matches!(&row(&b).state, EpisodeState::Available { answers, .. } if answers.is_empty()));
+    assert_eq!(history.relations.len(), 1);
+    assert_eq!(history.relations[0].predecessor, a);
+    assert_eq!(history.relations[0].request, b);
+    assert_eq!(history.relations[0].reason, "new revision, independent approval");
+}
+
+#[test]
 fn request_history_same_ask_can_origin_multiple_threads_without_cross_thread_traversal() {
     let (store, _, input) = fixture();
     store.configure_thread_write_rollout([]);
