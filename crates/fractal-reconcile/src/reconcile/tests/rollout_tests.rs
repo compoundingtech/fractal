@@ -457,6 +457,39 @@ fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
 }
 
 #[test]
+fn manual_git_snapshot_receipt_omits_mode_for_older_members() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    for args in [
+        vec!["init", "-q"],
+        vec!["-c", "core.hooksPath=", "-c", "commit.gpgsign=false",
+            "-c", "user.name=Snapshot fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-qm", "Initial"],
+    ] {
+        assert!(std::process::Command::new("git").args(args)
+            .current_dir(seat.root.path()).status().unwrap().success());
+    }
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let request = seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "incarnation_id":"original-1"
+    }), vec![token], None);
+    let desired = seat.desired();
+    let member = desired.member.as_ref().unwrap();
+    let mut reconciler = Reconciler::new(
+        seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+    );
+    // Keep snapshot output outside the workspace it captures.
+    let state = tempfile::tempdir().unwrap();
+    reconciler.driver_state_dir = state.path().join("drivers");
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    let observation = seat.runtime.observation.lock().unwrap().clone();
+    reconciler.reconcile_suspension(&desired, member, observation.as_ref(), None, &suspension).unwrap();
+    let receipt = seat.store.operation_claim(&crate::suspension::suspend_snapshot_key(&request.id)).unwrap().unwrap();
+    assert!(receipt.body["fields"].get("mode").is_none());
+    assert_eq!(crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap().mode(), "git");
+}
+
+#[test]
 fn rollout_drains_then_resumes_once_across_disk_reopens() {
     let mut seat = Seat::new();
     let original = seat.runtime.launch_contract(&seat.store, &seat.desired(), seat.desired().member.as_ref().unwrap()).unwrap();

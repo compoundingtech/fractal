@@ -35,6 +35,8 @@ pub struct Manifest {
     pub harness: String,
     pub native_session_id: String,
     pub transcript: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<PathBuf>,
     pub transcript_sha256: String,
 }
 
@@ -309,6 +311,7 @@ pub fn seal(
         harness: harness.into(),
         native_session_id: id.into(),
         transcript: filename.clone(),
+        transcript_path: in_place.then(|| transcript.clone()),
         transcript_sha256: hex::encode(Sha256::digest(fs::read(&transcript)?)),
     };
     let mut archive = tar::Builder::new(fs::File::create(dir.join("payload.tmp"))?);
@@ -462,18 +465,18 @@ pub fn restore(
         if !workspace.is_dir() {
             return Err(refusal("workspace-path-mismatch", "the in-place workspace is missing"));
         }
-        // Publish a frozen native inventory beside the payload, never over the live binding.
-        // A retry validates and reuses the same bytes rather than replacing session state.
-        let destination = payload.parent().unwrap().join("restored-native");
-        if destination.exists() {
-            anyhow::ensure!(
-                hex::encode(Sha256::digest(fs::read(destination.join(&manifest.transcript))?))
-                    == manifest.transcript_sha256,
-                "restored transcript digest differs"
-            );
-        } else {
-            fs::rename(source_sessions, &destination)?;
-        }
+        // Resume the existing authoritative file, not an inventory-detached copy. Future
+        // ordinary restarts must see every post-resume turn through the same inventory.
+        let path = manifest.transcript_path.as_deref()
+            .filter(|path| path.is_absolute())
+            .context("in-place snapshot has no absolute native binding")?;
+        let current = fs::read(path).map_err(|_| refusal(
+            "transcript-missing", "the in-place native binding is missing",
+        ))?;
+        anyhow::ensure!(
+            hex::encode(Sha256::digest(&current)) == manifest.transcript_sha256,
+            "in-place transcript differs from its sealed content"
+        );
         return Ok(manifest);
     }
     if fs::symlink_metadata(workspace).is_ok() {
@@ -1046,20 +1049,34 @@ mod tests {
             let names: Vec<_> = tar::Archive::new(fs::File::open(&payload).unwrap())
                 .entries().unwrap().map(|entry| entry.unwrap().path().unwrap().into_owned()).collect();
             assert!(!names.contains(&PathBuf::from("workspace.bundle")));
-            // The live binding may disappear after stop: restore must use the sealed bytes.
+            // Missing native authority refuses instead of publishing a detached inventory copy.
+            let frozen = fs::read(&transcript).unwrap();
             fs::remove_file(&transcript).unwrap();
+            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "native").unwrap_err()), "transcript-missing");
+            fs::write(&transcript, &frozen).unwrap();
             for _restart in 0..2 {
                 let restored = restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "native").unwrap();
                 assert_eq!(restored.native_session_id, "native");
-                assert!(fs::read_to_string(dir.join("restored-native").join(restored.transcript)).unwrap().contains("frozen"));
+                assert_eq!(restored.transcript_path.as_ref(), Some(&transcript));
+                assert!(fs::read_to_string(&transcript).unwrap().contains("frozen"));
             }
             assert_eq!(fs::read_to_string(Path::new(&member.workspace).join("tracked")).unwrap(), "changed\n");
             let mut moved = member.clone();
             moved.host = "birch".into();
             assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &moved, "native").unwrap_err()), "snapshot-in-place");
             assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "wrong-session").is_err());
-            // Retry never overwrites a divergent restored transcript.
-            fs::write(dir.join("restored-native").join(&manifest.transcript), "corrupt").unwrap();
+            // A new turn after strict resume must remain visible to ordinary continuation,
+            // which selects by native ID from the managed inventory.
+            let inventory = sessions(&state.join("drivers"), "agent/sample", "omp");
+            let resumed = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, "native", Some(&transcript)).unwrap();
+            assert_eq!(resumed[2], transcript.to_string_lossy());
+            let mut continued = frozen;
+            continued.extend_from_slice(b"{\"role\":\"assistant\",\"content\":\"post-resume turn\"}\n");
+            fs::write(&transcript, &continued).unwrap();
+            let restarted = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, "native", None).unwrap();
+            assert_eq!(restarted, resumed);
+            assert!(fs::read_to_string(&restarted[2]).unwrap().contains("post-resume turn"));
+            // Another strict restore must not overwrite divergent native state.
             assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "native").is_err());
         }
     }

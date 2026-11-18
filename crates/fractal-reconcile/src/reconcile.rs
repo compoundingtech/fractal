@@ -8946,7 +8946,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                             Value::String("snapshotting".into()),
                         ),
                         ("harness".into(), Value::String(harness)),
-                        ("mode".into(), Value::String(mode.into())),
                         ("source_host".into(), Value::String(self.host.clone())),
                         ("native_session_id".into(), Value::String(session)),
                         ("incarnation_id".into(), Value::String(incarnation.into())),
@@ -8954,7 +8953,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             "runtime_id".into(),
                             Value::String(member.runtime_id.clone()),
                         ),
-                    ]),
+                    ]).into_iter().chain(
+                        (mode == "in-place").then(|| ("mode".into(), Value::String(mode.into())))
+                    ).collect(),
                 )?;
                 stop(observation)?;
                 Ok(())
@@ -9098,7 +9099,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let dir = crate::seat_snapshot::directory(self.driver_state_dir.parent().unwrap(), operation);
                     match crate::seat_snapshot::restore(&dir.join("payload.tar"), &self.driver_state_dir, agent, operation, member, &session) {
                         Ok(manifest) => {
-                            let path = dir.join("restored-native").join(manifest.transcript);
+                            let path = manifest.transcript_path.expect("validated in-place transcript path");
                             crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path.to_string_lossy().into_owned());
                         }
                         Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),

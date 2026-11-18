@@ -67,9 +67,14 @@ Idle-cause OMP operations may instead capture `in-place` when Git refuses with
 `workspace-submodule-unsupported`. The workspace stays untouched on its source host.
 The snapshot receipt records the mode before stopping; after the stop fence, the owner freezes
 the native transcript without a Git bundle. Same-host resume validates the frozen transcript's
-digest, native session header and absolute workspace path, then launches that exact session.
+digest, native session header and absolute workspace path, then checks that the original native
+binding still contains those bytes. It launches the original authoritative transcript, so later
+ordinary restarts retain post-resume turns rather than selecting a stale inventory copy.
 Missing or mismatched content fails rather than selecting a fresh conversation. Retrying after
-a daemon restart reuses the captured mode and checked native inventory.
+a daemon restart reuses the captured mode and original native inventory.
+
+Git snapshot receipts omit the mode field: absence already means `git`, preserving ordinary
+manual suspension interoperability with older members.
 
 An in-place suspension is pinned to its source host: `resume --host` elsewhere refuses with
 `snapshot-in-place` before changing placement. Converting the suspension to manual retains
