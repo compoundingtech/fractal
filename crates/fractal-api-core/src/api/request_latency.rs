@@ -530,6 +530,8 @@ mod tests {
                 .output().unwrap();
             assert!(output.status.success(), "isolated ledger regression failed:\n{}\n{}",
                 String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("blocked-writer projection regression completed"),
+                "isolated child did not execute the regression:\n{}", String::from_utf8_lossy(&output.stdout));
             return;
         }
 
@@ -539,30 +541,60 @@ mod tests {
                 const { std::cell::RefCell::new(None) };
         }
         let root = tempfile::tempdir().unwrap();
-        let app = crate::api::router(crate::api::tests_shared::state(root.path()));
+        let state = crate::api::tests_shared::state(root.path());
+        let app = crate::api::router(state.clone());
         let path = root.path().join("native-budget.sqlite");
         crate::slo::install_budget_ledger(&path, "node").unwrap();
         smallclaims::windows::budgets::set_busy_handler_for_tests(Some(|attempt| {
             if attempt == 0 {
-                BLOCKED.with(|sender| sender.borrow().as_ref().unwrap().send(()).unwrap());
+                BLOCKED.with(|sender| { let _ = sender.borrow().as_ref().unwrap().send(()); });
             }
             std::thread::sleep(Duration::from_millis(1));
             true
         })).unwrap();
-        let blocker = rusqlite::Connection::open(&path).unwrap();
 
         for (name, render) in [
             ("collector", crate::api::request_latency_target_windows as fn() -> Value),
             ("diagnostics", crate::api::request_latency_windows as fn() -> Value),
         ] {
+            let baseline = render();
+            let as_of = baseline["targets"][0]["budget"]["as_of_unix_ms"].clone();
+            let blocker = rusqlite::Connection::open(&path).unwrap();
             blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
             let (entered, blocked) = mpsc::channel();
-            let reporting = std::thread::spawn(move || {
+            let writer = std::thread::spawn(move || {
                 BLOCKED.with(|sender| *sender.borrow_mut() = Some(entered));
-                render()
+                crate::slo::checkpoint_budgets()
             });
-            // SQLite acknowledges its real wait, rather than guessing thread order.
+            // A real checkpoint owns LEDGER and SQLite acknowledges its actual wait.
             let entered_io = blocked.recv_timeout(Duration::from_secs(5));
+            let (reported, reports) = mpsc::channel();
+            let reporting = std::thread::spawn(move || {
+                let _ = reported.send(render());
+            });
+            let (projected, projected_rows) = mpsc::channel();
+            let projection = std::thread::spawn({
+                let state = state.clone();
+                move || {
+                    // Match the frozen assistant caller's pinned store-read boundary.
+                    let rows = state.store.read_snapshot(|_| {
+                        crate::api::operations::current_slo_rows(&state.store, &state.state_dir)
+                    });
+                    let _ = projected.send(rows);
+                }
+            });
+            let (native_sent, native_reports) = mpsc::channel();
+            let native = std::thread::spawn(move || {
+                let targets = crate::slo::targets();
+                let target = &targets.latency[0];
+                let event_stream = format!("latency/{}/local/{}", target.name, target.p99_ms);
+                let gauge_stream = format!("database/{}/{}",
+                    targets.database.max_live_gb, targets.database.max_growth_mb_per_day);
+                let event = smallclaims::windows::budgets::report(&event_stream);
+                let gauge = smallclaims::windows::budgets::gauge_report(&gauge_stream,
+                    smallclaims::windows::budgets::unix_ms(), 2 * 60 * 60 * 1000, 1.0);
+                let _ = native_sent.send((event, gauge));
+            });
             let (sent, completed) = mpsc::channel();
             let request = std::thread::spawn({
                 let app = app.clone();
@@ -571,18 +603,50 @@ mod tests {
                         .enable_all().build().unwrap();
                     let response = runtime.block_on(
                         crate::api::tests_shared_client_v0_tests::get_request(app, "/v1/health"));
-                    sent.send(response).unwrap();
+                    let _ = sent.send(response);
                 }
             });
             let response = completed.recv_timeout(Duration::from_secs(1));
-            let report_still_blocked = !reporting.is_finished();
-            // Release before asserting so the previous scope fails without stranding threads.
-            blocker.execute_batch("ROLLBACK").unwrap();
-            let report = reporting.join().unwrap();
-            request.join().unwrap();
-            assert!(entered_io.is_ok(), "{name} never reached SQLite busy wait: {entered_io:?}");
-            assert!(report_still_blocked, "{name} unexpectedly finished with disk still locked");
+            let report = reports.recv_timeout(Duration::from_secs(1));
+            let current_rows = projected_rows.recv_timeout(Duration::from_secs(1));
+            let native_result = native_reports.recv_timeout(Duration::from_secs(1));
+            let writer_still_blocked = !writer.is_finished();
+            // Never assert a timeout while a worker can still be stranded on LEDGER.
+            let rollback = blocker.execute_batch("ROLLBACK");
+            drop(blocker);
+            let written = writer.join();
+            let reported = reporting.join();
+            let projected = projection.join();
+            let native_joined = native.join();
+            let requested = request.join();
+            rollback.unwrap();
+            written.unwrap().unwrap();
+            reported.unwrap();
+            projected.unwrap();
+            native_joined.unwrap();
+            requested.unwrap();
+            assert!(entered_io.is_ok(), "{name} checkpoint never reached SQLite busy wait: {entered_io:?}");
+            assert!(writer_still_blocked, "{name} checkpoint finished with disk still locked");
             assert_eq!(response.expect("HTTP completion waited for ledger I/O").0, axum::http::StatusCode::OK);
+            let report = report.expect("report wrapper waited for the blocked native ledger writer");
+            let current_rows = current_rows.expect("current_slo_rows waited for the blocked native ledger writer").unwrap();
+            assert!(!current_rows.is_empty());
+            assert!(current_rows.iter().all(|row| row["id"].is_string()));
+            for id in [crate::slo::targets().latency[0].name.as_str(), "database", "transaction/read"] {
+                let row = current_rows.iter().find(|row| row["id"] == id)
+                    .unwrap_or_else(|| panic!("current_slo_rows omitted native objective {id}"));
+                assert_eq!(row["kind"], "objective");
+                assert_eq!(row["status"], "no-data");
+                assert!(row["remaining_percent"].is_null());
+            }
+            assert!(as_of.is_u64(), "installed native projection omitted its as-of timestamp");
+            let (event, gauge) = native_result.expect("public report APIs waited for the blocked native ledger writer");
+            for evidence in [event.unwrap(), gauge.unwrap()] {
+                assert_eq!(evidence["as_of_unix_ms"], as_of);
+                assert!(evidence["stale"].is_boolean());
+                assert_eq!(evidence["available"], !evidence["stale"].as_bool().unwrap());
+                assert!(evidence["windows"].is_object());
+            }
 
             let rows = report["targets"].as_array().unwrap();
             let targets = crate::slo::targets();
@@ -591,17 +655,20 @@ mod tests {
                 .collect::<Vec<_>>();
             for (row, target) in rows.iter().zip(&server) {
                 assert_eq!(row["name"], target.name);
-                assert_eq!(row["budget"]["available"], true);
+                assert_eq!(row["budget"]["as_of_unix_ms"], as_of);
+                assert_eq!(row["budget"]["available"], !row["budget"]["stale"].as_bool().unwrap());
                 assert!(row["windows"].is_object());
                 if target.remote_p99_ms.is_some() {
-                    assert_eq!(row["remote_budget"]["available"], true);
+                    assert_eq!(row["remote_budget"]["as_of_unix_ms"], as_of);
+                    assert_eq!(row["remote_budget"]["available"], !row["remote_budget"]["stale"].as_bool().unwrap());
                     assert!(row["remote_windows"].is_object());
                 }
             }
             let store = &rows[server.len()..server.len() + 5];
             assert_eq!(store.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>(),
                 ["sql-statement", "transaction", "writer-hold", "cpu", "database"]);
-            assert_eq!(store[4]["budget"]["available"], true);
+            assert_eq!(store[4]["budget"]["as_of_unix_ms"], as_of);
+            assert_eq!(store[4]["budget"]["available"], !store[4]["budget"]["stale"].as_bool().unwrap());
             let client = targets.latency.iter()
                 .filter(|latency| latency.paths.iter().any(|path| path.starts_with("client/ios/")))
                 .map(|latency| latency.name.as_str())
@@ -613,6 +680,7 @@ mod tests {
         let rows = crate::api::request_latency_snapshot();
         assert_eq!(rows.iter().find(|row| row["scope"] == "route" && row["route"] == "/v1/health")
             .unwrap()["count"], 2);
+        println!("blocked-writer projection regression completed");
     }
 
     const WORK: &str = "/v1/work/{action}/{*subject}";

@@ -117,13 +117,21 @@ restart partial minutes and collection gaps are unknown rather than inferred goo
 local observation history, not a reconstruction from diagnostic percentiles.
 Request and SQL completions append only to an independent in-memory minute buffer. The
 checkpoint swaps that buffer under its short recorder lock, releases it, then merges and
-persists receipts under a separate ledger lock. Checkpoint, report and gauge SQLite work
-never hold the recorder lock; a blocked disk operation cannot delay completion recording.
+persists receipts under a separate ledger lock. Checkpoint and gauge SQLite work never hold
+the recorder lock; a blocked disk operation cannot delay completion recording.
 Failed checkpoint snapshots remain available for retry while new completions collect separately.
-Reporting first takes an owned snapshot of request, client and CPU diagnostics under the Meter
-lock. After releasing that guard, it reads native budgets and renders store diagnostics. Store
-series and newest database-size guards likewise end before native ledger I/O; reporting cannot
-indirectly park a completion by retaining one of its diagnostic locks.
+
+Installation, checkpoints and gauge mutations publish a maintained immutable native evidence
+projection through a short in-memory Arc swap. Its explicit as-of accounting cut and covered/unknown
+time describe the evidence actually published. Every reader, including `current_slo_rows` inside
+an existing caller-owned read snapshot, reads only that projection and performs no ledger I/O.
+There is no reader-triggered refresh or TTL cache. If the current closed-minute cut has advanced
+beyond the published projection, readers expose stale/unknown evidence instead of an old green
+verdict. A failed publication cannot advance freshness or retain a pre-mutation healthy projection.
+
+Reporting also takes an owned snapshot of request, client and CPU diagnostics under the Meter
+lock and releases that guard before attaching native budgets and rendering store diagnostics.
+Neither a caller-owned PinnedRead nor a completion diagnostic lock spans native ledger I/O.
 
 Database capacity uses hourly readings with a two-hour maximum age. A violation of either
 capacity bound is known bad; known good requires both bounds to be readable and within limits.

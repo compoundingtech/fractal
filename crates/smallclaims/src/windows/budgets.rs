@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, ensure};
@@ -33,6 +33,54 @@ struct Ledger {
 
 static LEDGER: Mutex<Option<Ledger>> = Mutex::new(None);
 static RECORDER: OnceLock<Recorder> = OnceLock::new();
+
+// Writers build the entire immutable view while owning LEDGER. Readers only hold
+// this independent lock long enough to clone an Arc, never across SQL or rendering.
+static PROJECTION: RwLock<Option<Arc<Projection>>> = RwLock::new(None);
+
+struct Projection {
+    as_of_unix_ms: u64,
+    cut_ms: u64,
+    committed_through_ms: u64,
+    valid: bool,
+    events: BTreeMap<String, Value>,
+    gauges: BTreeMap<String, Vec<(u64, Option<f64>)>>,
+}
+
+fn projection_snapshot(store: &RwLock<Option<Arc<Projection>>>) -> Option<Arc<Projection>> {
+    store.read().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+fn swap_projection(store: &RwLock<Option<Arc<Projection>>>, next: Option<Arc<Projection>>) {
+    let previous = {
+        let mut guard = store.write().unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(&mut *guard, next)
+    };
+    // Retained gauge/history storage is reclaimed outside the reader's short lock.
+    drop(previous);
+}
+
+fn publish_projection(store: &RwLock<Option<Arc<Projection>>>, result: Result<Projection>) -> Result<()> {
+    match result {
+        Ok(projection) => {
+            let projection = Arc::new(projection);
+            swap_projection(store, Some(projection));
+            Ok(())
+        }
+        Err(error) => {
+            // A durable mutation may already have succeeded. An older same-cut
+            // green view is no longer authoritative, but failure must not advance as-of.
+            let previous = projection_snapshot(store);
+            let unavailable = previous.map(|previous| Arc::new(Projection {
+                as_of_unix_ms: previous.as_of_unix_ms, cut_ms: previous.cut_ms,
+                committed_through_ms: previous.committed_through_ms, valid: false,
+                events: BTreeMap::new(), gauges: BTreeMap::new(),
+            }));
+            swap_projection(store, unavailable);
+            Err(error)
+        }
+    }
+}
 
 /// The completion path shares only this in-memory buffer, never the ledger's I/O mutex.
 struct Recorder {
@@ -76,11 +124,14 @@ pub fn install(path: &Path, node: &str, streams: Vec<String>) -> Result<()> {
     db.execute(/* sqlite-large-value: allow-for-now lv-h1600ef705393 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_minutes_v1 WHERE slot >= ?1", [now / MINUTE])?;
     db.execute(/* sqlite-large-value: allow-for-now lv-h0a7bcaadb3af owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_gauges_v1 WHERE at_ms > ?1", [now])?;
     let streams: Arc<[String]> = streams.into();
+    let ledger = Ledger { db, streams: Arc::clone(&streams), pending: BTreeMap::new(), started_ms: now,
+        last_ms: now, last_instant: Instant::now(), committed_through_ms: now / MINUTE * MINUTE };
+    let projection = ledger.projection_at(now)?;
     ensure!(RECORDER.set(Recorder {
-        streams: Arc::clone(&streams), pending: Mutex::new(BTreeMap::new()),
+        streams, pending: Mutex::new(BTreeMap::new()),
     }).is_ok(), "native SLO recorder is already installed");
-    *guard = Some(Ledger { db, streams, pending: BTreeMap::new(), started_ms: now,
-        last_ms: now, last_instant: Instant::now(), committed_through_ms: now / MINUTE * MINUTE });
+    *guard = Some(ledger);
+    publish_projection(&PROJECTION, Ok(projection))?;
     Ok(())
 }
 
@@ -122,10 +173,10 @@ pub fn record(stream: &str, bad: bool) {
 /// or restart leaves a gap. Repeated checkpoints within a minute never duplicate counts.
 pub fn checkpoint() -> Result<()> {
     let Some(recorder) = RECORDER.get() else { return Ok(()); };
-    checkpoint_with(recorder, &LEDGER)
+    checkpoint_with(recorder, &LEDGER, &PROJECTION)
 }
 
-fn checkpoint_with(recorder: &Recorder, ledger: &Mutex<Option<Ledger>>) -> Result<()> {
+fn checkpoint_with(recorder: &Recorder, ledger: &Mutex<Option<Ledger>>, projection: &RwLock<Option<Arc<Projection>>>) -> Result<()> {
     let mut guard = ledger.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(ledger) = guard.as_mut() else { return Ok(()); };
     let (pending, now, instant) = {
@@ -139,7 +190,8 @@ fn checkpoint_with(recorder: &Recorder, ledger: &Mutex<Option<Ledger>>) -> Resul
         counts.eligible = counts.eligible.saturating_add(delta.eligible);
         counts.bad = counts.bad.saturating_add(delta.bad);
     }
-    ledger.checkpoint_at(now, instant)
+    let result = ledger.checkpoint_at(now, instant).and_then(|()| ledger.projection_at(now));
+    publish_projection(projection, result)
 }
 
 /// Configure the actual SQLite wait boundary for isolated cross-crate I/O regressions.
@@ -152,6 +204,32 @@ pub fn set_busy_handler_for_tests(handler: Option<fn(i32) -> bool>) -> Result<()
 }
 
 impl Ledger {
+    fn projection_at(&self, now: u64) -> Result<Projection> {
+        let mut streams = self.db.prepare("SELECT DISTINCT stream FROM native_slo_minutes_v1")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        streams.extend(self.streams.iter().cloned());
+        streams.sort_unstable();
+        streams.dedup();
+        let mut events = BTreeMap::new();
+        for stream in streams {
+            let evidence = summarize_event_at(self, &stream, now)?;
+            events.insert(stream, evidence);
+        }
+        let mut gauges: BTreeMap<String, Vec<(u64, Option<f64>)>> = BTreeMap::new();
+        let mut query = self.db.prepare("SELECT stream,at_ms,value FROM native_slo_gauges_v1 ORDER BY stream,at_ms")?;
+        let samples = query.query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, Option<f64>>(2)?,
+        )))?;
+        for sample in samples {
+            let (stream, at, value) = sample?;
+            gauges.entry(stream).or_default().push((at, value));
+        }
+        Ok(Projection {
+            as_of_unix_ms: now, cut_ms: now / MINUTE * MINUTE,
+            committed_through_ms: self.committed_through_ms, valid: true, events, gauges,
+        })
+    }
     fn checkpoint_at(&mut self, now: u64, instant: Instant) -> Result<()> {
         let end = now / MINUTE * MINUTE;
         let elapsed = instant.saturating_duration_since(self.last_instant).as_millis() as u64;
@@ -196,12 +274,11 @@ impl Ledger {
 /// Evidence, not a verdict. Windows advance with UTC time even if checkpointing stops.
 /// Incomplete source coverage cannot establish an event denominator for the missing time.
 pub fn report(stream: &str) -> Result<Value> {
-    let guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(ledger) = guard.as_ref() else { return Ok(json!({"available": false, "windows": {}})); };
-    report_at(ledger, stream, unix_ms())
+    let projection = projection_snapshot(&PROJECTION);
+    Ok(report_at(projection.as_deref(), stream, unix_ms()))
 }
 
-fn report_at(ledger: &Ledger, stream: &str, now_ms: u64) -> Result<Value> {
+fn summarize_event_at(ledger: &Ledger, stream: &str, now_ms: u64) -> Result<Value> {
     let end = now_ms / MINUTE * MINUTE;
     let newest_slot: Option<u64> = ledger.db.query_row(
         "SELECT max(slot) FROM native_slo_minutes_v1 WHERE stream=?1 AND slot<?2",
@@ -226,6 +303,43 @@ fn report_at(ledger: &Ledger, stream: &str, now_ms: u64) -> Result<Value> {
         "newest_receipt_through_unix_ms": newest_slot.map(|slot| (slot + 1) * MINUTE), "windows": windows}))
 }
 
+fn unknown_report(projection: Option<&Projection>, stream: &str, end: u64, source: &str, reason: &str) -> Value {
+    let windows = WINDOWS.into_iter().map(|(name, width)| (name.to_owned(), json!({
+        "eligible": 0, "bad": 0, "good": 0, "covered_ms": 0, "unknown_ms": width,
+        "receipt_count": 0, "samples": 0, "window_ms": width, "coverage": 0.0,
+        "from_unix_ms": end.saturating_sub(width), "through_unix_ms": end,
+    }))).collect::<serde_json::Map<_, _>>();
+    json!({"available": false, "source": source, "stream": stream, "stale": true,
+        "unavailable_reason": reason, "coverage": "unknown",
+        "as_of_unix_ms": projection.map(|p| p.as_of_unix_ms),
+        "accounting_cut_unix_ms": projection.map(|p| p.cut_ms),
+        "committed_through_unix_ms": projection.map(|p| p.committed_through_ms),
+        "through_unix_ms": end, "windows": windows})
+}
+
+fn unavailable_reason(projection: Option<&Projection>, now: u64) -> Option<&'static str> {
+    let Some(projection) = projection else { return Some("projection_unavailable"); };
+    if !projection.valid { return Some("projection_unavailable"); }
+    if now < projection.as_of_unix_ms { return Some("clock_regressed"); }
+    if now / MINUTE * MINUTE != projection.cut_ms { return Some("projection_stale"); }
+    None
+}
+
+fn report_at(projection: Option<&Projection>, stream: &str, now: u64) -> Value {
+    if let Some(reason) = unavailable_reason(projection, now) {
+        return unknown_report(projection, stream, now / MINUTE * MINUTE, "native-minute-ledger-v1", reason);
+    }
+    let projection = projection.expect("fresh projection exists");
+    let Some(evidence) = projection.events.get(stream) else {
+        return unknown_report(Some(projection), stream, now / MINUTE * MINUTE, "native-minute-ledger-v1", "stream_unavailable");
+    };
+    let mut evidence = evidence.clone();
+    evidence["as_of_unix_ms"] = json!(projection.as_of_unix_ms);
+    evidence["accounting_cut_unix_ms"] = json!(projection.cut_ms);
+    evidence["stale"] = json!(false);
+    evidence
+}
+
 /// Gauge samples are infrequent source observations, not request-path operations.
 /// Persist the source timestamp, never the time somebody read the newest sample.
 pub fn record_gauge(stream: &str, at_ms: u64, value: Option<f64>) -> Result<()> {
@@ -238,28 +352,35 @@ pub fn record_gauge(stream: &str, at_ms: u64, value: Option<f64>) -> Result<()> 
         params![stream, at_ms], |r| r.get(0)).optional()?;
     ensure!(prior.is_none_or(|p| p == value), "conflicting native SLO gauge sample");
     ledger.db.execute(/* sqlite-large-value: allow-for-now lv-ha0bcfcb764ac owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO native_slo_gauges_v1 VALUES(?1,?2,?3)", params![stream, at_ms, value])?;
-    Ok(())
+    publish_projection(&PROJECTION, ledger.projection_at(unix_ms()))
 }
 
 /// Integrate finite forward holds, clipped by the next observation and maximum age.
 /// Missing time remains unknown, not healthy or an extrapolated event rate.
 pub fn gauge_report(stream: &str, now: u64, max_age_ms: u64, bad_above: f64) -> Result<Value> {
-    let guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(ledger) = guard.as_ref() else { return Ok(json!({"available": false, "windows": {}})); };
-    let mut query = ledger.db.prepare("SELECT at_ms,value FROM native_slo_gauges_v1 WHERE stream=?1 AND at_ms<=?2 AND at_ms>=?3 ORDER BY at_ms")?;
-    let samples = query.query_map(params![stream, now, now.saturating_sub(HORIZON.saturating_add(max_age_ms))],
-        |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Option<f64>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let projection = projection_snapshot(&PROJECTION);
+    Ok(gauge_report_at(projection.as_deref(), stream, now, max_age_ms, bad_above))
+}
+
+fn gauge_report_at(projection: Option<&Projection>, stream: &str, now: u64, max_age_ms: u64, bad_above: f64) -> Value {
+    if let Some(reason) = unavailable_reason(projection, now) {
+        return unknown_report(projection, stream, now, "native-gauge-ledger-v1", reason);
+    }
+    let projection = projection.expect("fresh projection exists");
+    let samples = projection.gauges.get(stream).map_or(&[][..], Vec::as_slice);
     let mut windows = serde_json::Map::new();
     for (name, width) in WINDOWS {
-        let (covered, bad, contributing_samples) = integrate(&samples, now.saturating_sub(width), now, max_age_ms, bad_above);
+        let (covered, bad, contributing_samples) = integrate(samples, now.saturating_sub(width), now, max_age_ms, bad_above);
         windows.insert(name.to_owned(), json!({"eligible": covered, "bad": bad, "good": covered - bad,
             "covered_ms": covered, "unknown_ms": width.saturating_sub(covered), "window_ms": width,
             "samples": contributing_samples,
             "from_unix_ms": now.saturating_sub(width), "through_unix_ms": now,
             "coverage": covered as f64 / width as f64}));
     }
-    Ok(json!({"available": true, "source": "native-gauge-ledger-v1", "stream": stream,
-        "through_unix_ms": samples.last().map(|(at, _)| at), "max_age_ms": max_age_ms, "windows": windows}))
+    json!({"available": true, "source": "native-gauge-ledger-v1", "stream": stream,
+        "as_of_unix_ms": projection.as_of_unix_ms, "accounting_cut_unix_ms": projection.cut_ms, "stale": false,
+        "through_unix_ms": samples.iter().rev().find(|(at, _)| *at <= now).map(|(at, _)| at),
+        "max_age_ms": max_age_ms, "windows": windows})
 }
 
 fn integrate(samples: &[(u64, Option<f64>)], from: u64, through: u64, max_age: u64, threshold: f64) -> (u64, u64, u64) {
@@ -281,6 +402,120 @@ fn integrate(samples: &[(u64, Option<f64>)], from: u64, through: u64, max_age: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn projection_ledger() -> Result<Ledger> {
+        let now = 6 * MINUTE + 100;
+        let ledger = Ledger {
+            db: open(Path::new(":memory:"), "node")?, streams: vec!["x".into()].into(),
+            pending: BTreeMap::new(), started_ms: 0, last_ms: now,
+            last_instant: Instant::now(), committed_through_ms: 6 * MINUTE,
+        };
+        for slot in 1..=5 {
+            ledger.db.execute("INSERT INTO native_slo_minutes_v1 VALUES('x',?1,10,0)", [slot])?;
+        }
+        ledger.db.execute("INSERT INTO native_slo_gauges_v1 VALUES('g',?1,2)", [now - 1_000])?;
+        ledger.db.execute("INSERT INTO native_slo_gauges_v1 VALUES('g',?1,NULL)", [now - 500])?;
+        ledger.db.execute("INSERT INTO native_slo_gauges_v1 VALUES('g',?1,9)", [now + 5_000])?;
+        Ok(ledger)
+    }
+
+    #[test]
+    fn fresh_projection_survives_ledger_destruction_without_reader_io() -> Result<()> {
+        let ledger = projection_ledger()?;
+        let now = ledger.last_ms;
+        let store = RwLock::new(None);
+        publish_projection(&store, ledger.projection_at(now))?;
+        drop(ledger);
+        let projection = projection_snapshot(&store).unwrap();
+        let report = report_at(Some(&projection), "x", now + 1);
+        assert_eq!(report["available"], true);
+        assert_eq!(report["stale"], false);
+        assert_eq!(report["as_of_unix_ms"], now);
+        assert_eq!(report["windows"]["5m"]["covered_ms"], 5 * MINUTE);
+        assert_eq!(report["windows"]["5m"]["eligible"], 50);
+        assert_eq!(report["windows"]["30d"]["unknown_ms"], HORIZON - 5 * MINUTE);
+        Ok(())
+    }
+
+    #[test]
+    fn projection_next_cut_and_clock_regression_are_explicitly_unknown() -> Result<()> {
+        let ledger = projection_ledger()?;
+        let now = ledger.last_ms;
+        let projection = ledger.projection_at(now)?;
+        for (at, reason) in [(7 * MINUTE, "projection_stale"), (now - 1, "clock_regressed")] {
+            for report in [
+                report_at(Some(&projection), "x", at),
+                gauge_report_at(Some(&projection), "g", at, MINUTE, 1.0),
+            ] {
+                assert_eq!(report["available"], false);
+                assert_eq!(report["coverage"], "unknown");
+                assert_eq!(report["unavailable_reason"], reason);
+                assert_eq!(report["as_of_unix_ms"], now);
+                for (name, width) in WINDOWS {
+                    assert_eq!(report["windows"][name]["covered_ms"], 0);
+                    assert_eq!(report["windows"][name]["unknown_ms"], width);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gauge_projection_integrates_caller_age_and_threshold_from_memory() -> Result<()> {
+        let ledger = projection_ledger()?;
+        let now = ledger.last_ms;
+        let projection = ledger.projection_at(now)?;
+        drop(ledger);
+        let report = gauge_report_at(Some(&projection), "g", now, MINUTE, 1.0);
+        assert_eq!(report["available"], true);
+        assert_eq!(report["through_unix_ms"], now - 500);
+        assert_eq!(report["windows"]["5m"]["covered_ms"], 500);
+        assert_eq!(report["windows"]["5m"]["bad"], 500);
+        assert_eq!(report["windows"]["5m"]["samples"], 1);
+        let expired = gauge_report_at(Some(&projection), "g", now, 100, 3.0);
+        assert_eq!(expired["windows"]["5m"]["covered_ms"], 100);
+        assert_eq!(expired["windows"]["5m"]["bad"], 0);
+        Ok(())
+    }
+
+    #[test]
+    fn same_cut_checkpoint_publishes_asof_without_inventing_receipts() -> Result<()> {
+        let mut ledger = projection_ledger()?;
+        let now = ledger.last_ms;
+        let store = RwLock::new(None);
+        publish_projection(&store, ledger.projection_at(now))?;
+        let before = projection_snapshot(&store).unwrap();
+        ledger.checkpoint_at(now + 100, ledger.last_instant + std::time::Duration::from_millis(100))?;
+        publish_projection(&store, ledger.projection_at(now + 100))?;
+        let after = projection_snapshot(&store).unwrap();
+        assert_eq!(after.as_of_unix_ms, now + 100);
+        assert_eq!(after.cut_ms, before.cut_ms);
+        assert_eq!(after.events["x"]["windows"], before.events["x"]["windows"]);
+        assert_eq!(before.as_of_unix_ms, now);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_summary_after_mutation_invalidates_same_cut_without_advancing_asof() -> Result<()> {
+        let ledger = projection_ledger()?;
+        let now = ledger.last_ms;
+        let store = RwLock::new(None);
+        publish_projection(&store, ledger.projection_at(now))?;
+        let before = projection_snapshot(&store).unwrap();
+        ledger.db.execute("INSERT INTO native_slo_gauges_v1 VALUES('g',?1,100)", [now])?;
+        ledger.db.execute_batch("DROP TABLE native_slo_minutes_v1")?;
+        assert!(publish_projection(&store, ledger.projection_at(now + 100)).is_err());
+        let after = projection_snapshot(&store).unwrap();
+        assert_eq!(after.as_of_unix_ms, now);
+        assert_eq!(after.cut_ms, before.cut_ms);
+        assert_eq!(report_at(Some(&after), "x", now + 100)["available"], false);
+        let gauge = gauge_report_at(Some(&after), "g", now + 100, MINUTE, 1.0);
+        assert_eq!(gauge["available"], false);
+        assert_eq!(gauge["unavailable_reason"], "projection_unavailable");
+        assert_eq!(gauge["windows"]["5m"]["unknown_ms"], 5 * MINUTE);
+        assert_eq!(report_at(Some(&before), "x", now)["available"], true);
+        Ok(())
+    }
 
     #[test]
     fn gauge_holds_expire_and_clip_without_filling_gaps() {
@@ -363,9 +598,13 @@ mod tests {
         }
         let receipts: u64 = ledger.db.query_row("SELECT count(*) FROM native_slo_minutes_v1", [], |r| r.get(0))?;
         assert_eq!(receipts, 6); // The startup partial minute alone is excluded.
-        let active = report_at(&ledger, "x", 7 * MINUTE + 5)?;
+        let projection = ledger.projection_at(7 * MINUTE + 5)?;
+        let active = report_at(Some(&projection), "x", 7 * MINUTE + 5);
         assert_eq!(active["windows"]["5m"]["covered_ms"], 5 * MINUTE);
-        let stopped = report_at(&ledger, "x", 13 * MINUTE + 5)?;
+        let stopped = report_at(Some(&projection), "x", 13 * MINUTE + 5);
+        assert_eq!(stopped["available"], false);
+        assert_eq!(stopped["coverage"], "unknown");
+        assert_eq!(stopped["as_of_unix_ms"], 7 * MINUTE + 5);
         assert_eq!(stopped["through_unix_ms"], 13 * MINUTE);
         assert_eq!(stopped["committed_through_unix_ms"], 7 * MINUTE);
         assert_eq!(stopped["windows"]["5m"]["covered_ms"], 0);
@@ -416,7 +655,7 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(1));
                     true
                 }))?;
-                checkpoint_with(&recorder, &ledger)
+                checkpoint_with(&recorder, &ledger, &RwLock::new(None))
             }
         });
         // SQLite itself acknowledges the blocked checkpoint; no scheduling guess or fake I/O.
@@ -448,10 +687,11 @@ mod tests {
         let ledger = Mutex::new(Some(Ledger { db, streams, pending: BTreeMap::new(),
             started_ms: now, last_ms: now, last_instant: Instant::now(),
             committed_through_ms: now / MINUTE * MINUTE }));
+        let projection = RwLock::new(None);
         recorder.record("latency/300", false);
-        assert!(checkpoint_with(&recorder, &ledger).is_err());
+        assert!(checkpoint_with(&recorder, &ledger, &projection).is_err());
         recorder.record("latency/300", true);
-        assert!(checkpoint_with(&recorder, &ledger).is_err());
+        assert!(checkpoint_with(&recorder, &ledger, &projection).is_err());
         let guard = ledger.lock().unwrap();
         let retained = &guard.as_ref().unwrap().pending;
         assert_eq!(retained.values().map(|counts| counts.eligible).sum::<u64>(), 2);
