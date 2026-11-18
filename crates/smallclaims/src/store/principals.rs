@@ -30,9 +30,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str =
-    /* sqlite-large-value: allow-for-now lv-h5288143a4980 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */
-    r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5288143a4980 owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -206,20 +204,13 @@ fn position(connection: &Connection, claim_id: &str) -> Result<Option<Position>>
         .map(Position))
 }
 
-pub(super) fn stored_signature(
-    connection: &Connection,
-    claim_id: &str,
-) -> Result<Option<ClaimSignature>> {
+pub(super) fn stored_signature(connection: &Connection, claim_id: &str) -> Result<Option<ClaimSignature>> {
     let text = connection
         .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h072ee9f3dbb6 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, SqlValue>(0))
         .optional()?;
-    text.map(|value| {
-        Ok(serde_json::from_str(&references::resolve(
-            connection, claim_id, value,
-        )?)?)
-    })
-    .transpose()
+    text.map(|value| Ok(serde_json::from_str(&references::resolve(connection, claim_id, value)?)?))
+        .transpose()
 }
 
 /// Keep each distinct carried signature as current state: authority facts arriving later
@@ -289,11 +280,7 @@ fn store_candidate_tx(
     }
     let text = serde_json::to_string(signature)?;
     let (added, reference) = references::insert_candidate(
-        connection,
-        claim_id,
-        &text,
-        &signature.key,
-        &signature.nonce,
+        connection, claim_id, &text, &signature.key, &signature.nonce,
     )?;
     // Contract an inline provenance row in the same transaction as its newest-format
     // write, so an exact duplicate never inflates the carrying writer's count.
@@ -361,12 +348,7 @@ fn signature_fields(row: &ClaimRow) -> Value {
 
 fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
     crate::principal::facts::nonce_eligible(
-        &row.id,
-        &row.subject,
-        &row.kind,
-        row.actor.as_deref(),
-        &row.body,
-        signature,
+        &row.id, &row.subject, &row.kind, row.actor.as_deref(), &row.body, signature,
     )
 }
 
@@ -516,9 +498,7 @@ pub struct SignatureStateFault {
 
 // The primary-key order otherwise lets SQLite choose a scan of every ordinary claim.
 // Sort the sparse alert set after reading the existing threshold index instead.
-fn signature_alerts_query(
-    connection: &Connection,
-) -> rusqlite::Result<rusqlite::CachedStatement<'_>> {
+fn signature_alerts_query(connection: &Connection) -> rusqlite::Result<rusqlite::CachedStatement<'_>> {
     connection.prepare_cached("SELECT claim_id,candidates FROM claim_signature_counts INDEXED BY claim_signature_counts_alert_index WHERE candidates>=64 ORDER BY claim_id")
 }
 
@@ -578,11 +558,8 @@ impl Store {
             let sample=connection.prepare_cached("SELECT claim_id FROM claim_signature_judging INDEXED BY claim_signature_judging_pending WHERE complete=0 OR dirty=1 OR blocked=1 ORDER BY claim_id LIMIT 20")?.query_map([],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             faults.push(SignatureStateFault {code:"signature-judgment-incomplete".into(),subject:format!("host/{}",self.origin),detail:format!("{pending} claims have pending bounded candidate judgment; first {} claim ids: {sample:?}; serving model is {}; candidate authority remains Held until affected pages reconcile",sample.len(),if migration.serving_legacy { "legacy (P0 exposed)" } else { "candidate" })});
         }
-        let alerts = signature_alerts_query(&connection)?
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let alerts=signature_alerts_query(&connection)?
+            .query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         for (claim_id, count) in alerts {
             let writers=connection.prepare_cached("SELECT writer,COUNT(*) FROM claim_signature_sources WHERE claim_id=?1 GROUP BY writer ORDER BY writer")?
                 .query_map([&claim_id],|row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -716,9 +693,7 @@ impl Facts for StoreFacts<'_> {
     fn is_root(&self, subject: &str, key: &str) -> bool {
         self.links.borrow_mut().insert("root".into());
         crate::principal::facts::root_eligible(
-            subject,
-            key,
-            crate::principal::facts::RootContext::Runtime(self.roots),
+            subject, key, crate::principal::facts::RootContext::Runtime(self.roots),
         )
     }
 
@@ -1110,9 +1085,7 @@ fn requeue_pending(connection: &Connection) -> Result<bool> {
 fn held_verdict_counts(connection: &Connection) -> Result<BTreeMap<String, u64>> {
     let mut counts = connection
         .prepare_cached("SELECT verdict, COUNT(*) FROM claim_verdicts GROUP BY verdict")?
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-        })?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
     let held = connection
         .prepare_cached(
@@ -1268,9 +1241,10 @@ impl Store {
         input: &ClaimInput,
         signature: &ClaimSignature,
     ) -> Result<(ClaimRecord, bool), FractalError> {
-        let actor = input.actor.clone().ok_or_else(|| {
-            FractalError::new("invalid-signature", "a signed claim names its actor")
-        })?;
+        let actor = input
+            .actor
+            .clone()
+            .ok_or_else(|| FractalError::new("invalid-signature", "a signed claim names its actor"))?;
         let key = (input.subject.clone(), input.kind.clone(), actor);
         let text = serde_json::to_string(signature).map_err(internal)?;
         {
@@ -1348,10 +1322,7 @@ impl Store {
 
     /// Public trust anchor for local pairing, from the exact root enrollment uses.
     /// Returns no key on legacy unsigned nodes. Never exposes private key material.
-    pub fn person_root_grant(
-        &self,
-        person: &str,
-    ) -> Result<Option<(String, String)>, FractalError> {
+    pub fn person_root_grant(&self, person: &str) -> Result<Option<(String, String)>, FractalError> {
         if Family::of(person) != Some(Family::Person) {
             return Err(FractalError::new(
                 "invalid-person",
@@ -1367,11 +1338,7 @@ impl Store {
     }
 
     /// Sign a device-renewal offer with the person's local root.
-    pub fn sign_device_renewal_offer(
-        &self,
-        person: &str,
-        tuple: &Value,
-    ) -> Result<String, FractalError> {
+    pub fn sign_device_renewal_offer(&self, person: &str, tuple: &Value) -> Result<String, FractalError> {
         self.person_root_grant(person)?;
         let root = self.held_root(person).ok_or_else(|| {
             FractalError::new("no-person-key", "this member holds no person root")
@@ -1381,12 +1348,7 @@ impl Store {
     }
 
     /// Withdraw a device key of `person`, as the node.
-    pub fn revoke_device_key(
-        &self,
-        person: &str,
-        key: &str,
-        reason: &str,
-    ) -> Result<(), FractalError> {
+    pub fn revoke_device_key(&self, person: &str, key: &str, reason: &str) -> Result<(), FractalError> {
         self.append_claim(&ClaimInput {
             subject: person.into(),
             kind: KEY_REVOKED.into(),
@@ -1704,11 +1666,9 @@ impl Store {
         if legacy::active(&self.readers.get())? {
             return legacy::judge_claims(self, check_roots);
         }
-        let judged = self.record_judgment_failure(self.judge_claims_inner(
-            check_roots,
-            Some(VERDICT_SLICE_LOANS),
-            true,
-        ))?;
+        let judged = self.record_judgment_failure(
+            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS), true),
+        )?;
         self.hand_off_pending_verdicts()?;
         Ok(judged)
     }
@@ -1884,21 +1844,15 @@ impl Store {
             if track_bootstrap && candidates_judged != 0 {
                 migration::note_work(&transaction, candidates_judged)?;
             }
-            let drained = fresh_empty
-                && queued.is_empty()
-                && !requeuing
-                && (!fresh_only
-                    || !transaction.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue)",
-                        [],
-                        |row| row.get::<_, bool>(0),
-                    )?);
+            let drained = fresh_empty && queued.is_empty() && !requeuing
+                && (!fresh_only || !transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue)", [], |row| row.get::<_, bool>(0),
+                )?);
             if drained {
                 migration::finish_judging(&transaction)?;
             }
             transaction.commit()?;
-            if drained
-                || (fresh_only && fresh_empty && queued.is_empty())
+            if drained || (fresh_only && fresh_empty && queued.is_empty())
                 || max_loans.is_some_and(|max| loans >= max)
             {
                 return Ok(judged);
@@ -2310,11 +2264,7 @@ mod held_index_tests {
             let tx = connection.transaction().unwrap();
             for i in 0..10_000 {
                 let claim = format!("ordinary/{i:05}");
-                tx.execute(
-                    "INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,32)",
-                    [&claim],
-                )
-                .unwrap();
+                tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,32)", [&claim]).unwrap();
                 tx.execute("INSERT INTO claim_verdicts(claim_id,verdict,signer) VALUES (?1,'verified','node')", [&claim]).unwrap();
             }
             tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES ('many/1',33),('many/2',40)", []).unwrap();
@@ -2322,22 +2272,14 @@ mod held_index_tests {
             tx.commit().unwrap();
         }
         let connection = store.readers.get();
-        assert_eq!(
-            held_verdict_counts(&connection).unwrap(),
-            BTreeMap::from([("verified".into(), 10_000), ("held".into(), 2)])
-        );
+        assert_eq!(held_verdict_counts(&connection).unwrap(),
+            BTreeMap::from([("verified".into(), 10_000), ("held".into(), 2)]));
         let mut statement = connection.prepare(
             "SELECT COUNT(*) FROM claim_signature_counts c INDEXED BY claim_signature_counts_held_index WHERE c.candidates>32",
         ).unwrap();
-        assert_eq!(
-            statement.query_row([], |row| row.get::<_, u64>(0)).unwrap(),
-            2
-        );
+        assert_eq!(statement.query_row([], |row| row.get::<_, u64>(0)).unwrap(), 2);
         assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
-        assert!(
-            statement.get_status(StatementStatus::VmStep) < 100,
-            "the ordinary claims were read"
-        );
+        assert!(statement.get_status(StatementStatus::VmStep) < 100, "the ordinary claims were read");
     }
 
     /// A store opened by a build without the index gets it when this build opens it.
@@ -2345,19 +2287,13 @@ mod held_index_tests {
     fn a_store_without_the_held_index_gets_it_when_it_opens() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("claims.sqlite3");
-        let exists = |store: &Store| {
-            store.readers.get().query_row(
+        let exists = |store: &Store| store.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='claim_signature_counts_held_index')",
-            [], |row| row.get::<_, bool>(0)).unwrap()
-        };
+            [], |row| row.get::<_, bool>(0)).unwrap();
         {
             let store = Store::open(&path, "studio", Arc::new(runtime::Plain)).unwrap();
             assert!(exists(&store));
-            store
-                .connection
-                .write()
-                .execute_batch("DROP INDEX claim_signature_counts_held_index")
-                .unwrap();
+            store.connection.write().execute_batch("DROP INDEX claim_signature_counts_held_index").unwrap();
             assert!(!exists(&store));
         }
         let store = Store::open(&path, "studio", Arc::new(runtime::Plain)).unwrap();
@@ -2379,11 +2315,8 @@ mod signature_alert_tests {
             let tx = connection.transaction().unwrap();
             // The common population must not be visited when finding two exceptional claims.
             for i in 0..10_000 {
-                tx.execute(
-                    "INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,63)",
-                    [format!("ordinary/{i:05}")],
-                )
-                .unwrap();
+                tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,63)",
+                    [format!("ordinary/{i:05}")]).unwrap();
             }
             tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES ('a-alert',65),('z-alert',64)", []).unwrap();
             tx.commit().unwrap();
@@ -2391,27 +2324,16 @@ mod signature_alert_tests {
         {
             let connection = store.readers.get();
             let mut statement = signature_alerts_query(&connection).unwrap();
-            let alerts = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            assert_eq!(alerts, vec![("a-alert".into(), 65), ("z-alert".into(), 64)]);
+            let alerts = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(alerts, vec![("a-alert".into(),65),("z-alert".into(),64)]);
             assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
-            assert!(
-                statement.get_status(StatementStatus::VmStep) < 100,
-                "ordinary below-threshold rows must not contribute query work"
-            );
+            assert!(statement.get_status(StatementStatus::VmStep) < 100,
+                "ordinary below-threshold rows must not contribute query work");
         }
-        let faults = store
-            .signature_state_faults()
-            .unwrap()
-            .into_iter()
+        let faults = store.signature_state_faults().unwrap().into_iter()
             .filter(|fault| fault.code == "signature-candidate-count")
-            .map(|fault| (fault.subject, fault.detail))
-            .collect::<Vec<_>>();
+            .map(|fault| (fault.subject, fault.detail)).collect::<Vec<_>>();
         assert_eq!(faults.len(), 2);
         assert_eq!(faults[0].0, "claim/a-alert");
         assert!(faults[0].1.starts_with("65 distinct candidates retained;"));
@@ -2483,20 +2405,14 @@ mod paced_verdict_tests {
     #[test]
     fn bootstrap_verdict_loans_revalidate_changed_roots_before_activation() {
         let store = root_linked(REQUEUE_PAGE + 1);
-        store
-            .connection
-            .write()
-            .execute(
-                "UPDATE claim_signature_migration SET phase='judging' WHERE id=1",
-                [],
-            )
-            .unwrap();
+        store.connection.write().execute(
+            "UPDATE claim_signature_migration SET phase='judging' WHERE id=1",
+            [],
+        ).unwrap();
         // Skip the optional root-check preflight: bootstrap must revalidate inside each
         // bounded loan, including the transaction that eventually activates the fold.
         store.judge_claims_inner(false, Some(1), false).unwrap();
-        let before = fleet_meta(&store.readers.get(), VERDICT_ROOTS)
-            .unwrap()
-            .unwrap();
+        let before = fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap().unwrap();
         assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
         assert_eq!(store.signature_migration().unwrap().phase, "judging");
         {
@@ -2532,33 +2448,26 @@ mod paced_verdict_tests {
         // A single node with no fleet: nothing exchanges, so nothing else judges. Its node key
         // signs its claims as they are sealed.
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
-        store
-            .set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
-            .unwrap();
+        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
         store.judge_claims_slice(true).unwrap();
         let wakes = || crate::store::SIGNATURE_JOB_WAKES.with(std::cell::Cell::get);
         let start = wakes();
         let write = |subject: &str| {
-            store
-                .append_claim(&ClaimInput {
-                    subject: subject.into(),
-                    kind: "harness.observed".into(),
-                    actor: None,
-                    fields: BTreeMap::from([("state".into(), Value::from("ready"))]),
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: None,
-                })
-                .unwrap()
+            store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::from("ready"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
         };
         let first = write("agent/studio.first");
         // As a checkpoint capture does: seal, and judge nothing.
         store.seal_local_batches().unwrap();
         assert!(store.verdicts_pending().unwrap());
-        assert!(
-            store.verdicts_due.load(Ordering::Acquire),
-            "the next ordinary pass judges it too"
-        );
+        assert!(store.verdicts_due.load(Ordering::Acquire), "the next ordinary pass judges it too");
         assert_eq!(wakes(), start + 1);
         // A seal with nothing new to seal hands off nothing.
         store.seal_local_batches().unwrap();
@@ -2584,21 +2493,17 @@ mod paced_verdict_tests {
     #[tokio::test]
     async fn a_request_whose_deadline_ends_mid_judgment_leaves_the_work_to_the_job_unfaulted() {
         let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
-        store
-            .set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
-            .unwrap();
+        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
         store.judge_claims_slice(true).unwrap();
-        let claim = store
-            .append_claim(&ClaimInput {
-                subject: "agent/studio.first".into(),
-                kind: "harness.observed".into(),
-                actor: None,
-                fields: BTreeMap::from([("state".into(), Value::from("ready"))]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        let claim = store.append_claim(&ClaimInput {
+            subject: "agent/studio.first".into(),
+            kind: "harness.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("state".into(), Value::from("ready"))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
         store.seal_local_batches().unwrap();
         store.verdicts_due.store(false, Ordering::Release);
         let woken = store.signature_job_wake.notified();
@@ -2615,20 +2520,12 @@ mod paced_verdict_tests {
         let error = crate::read_budget::with(Some(request.clone()), || {
             store.advance_signature_judgment().unwrap_err()
         });
-        assert_eq!(
-            *store.signature_retrying.lock().unwrap(),
-            retrying,
-            "the lock episode goes on"
-        );
+        assert_eq!(*store.signature_retrying.lock().unwrap(), retrying, "the lock episode goes on");
         assert!(
             crate::read_budget::with(Some(request), || migration::cancelled_by_caller(&error)),
             "{error:#}"
         );
-        assert_eq!(
-            store.signature_migration().unwrap().fault,
-            None,
-            "{error:#}"
-        );
+        assert_eq!(store.signature_migration().unwrap().fault, None, "{error:#}");
         assert!(store.verdicts_due.load(Ordering::Acquire));
         tokio::time::timeout(std::time::Duration::from_secs(5), woken)
             .await
@@ -2653,10 +2550,7 @@ mod paced_verdict_tests {
     fn an_ordinary_pass_queues_at_most_one_page_and_defers_historical_judgments() {
         let store = root_linked(REQUEUE_PAGE * 2);
         store.judge_claims_slice(true).unwrap();
-        assert_eq!(
-            count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"),
-            REQUEUE_PAGE as u64
-        );
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), REQUEUE_PAGE as u64);
         assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
         assert!(store.verdicts_pending().unwrap());
         assert!(
@@ -2764,19 +2658,11 @@ mod paced_verdict_tests {
                     ).unwrap();
                 }
                 if let Some(candidates) = candidates {
-                    tx.execute(
-                        "INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,?2)",
-                        params![claim, candidates],
-                    )
-                    .unwrap();
+                    tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,?2)", params![claim, candidates]).unwrap();
                 }
             }
             for claim in ["claim/00001", "claim/00002", "claim/00009"] {
-                tx.execute(
-                    "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)",
-                    [claim],
-                )
-                .unwrap();
+                tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [claim]).unwrap();
             }
             tx.commit().unwrap();
         }
@@ -2799,8 +2685,7 @@ mod paced_verdict_tests {
             match cursor {
                 Some(cursor) => set_meta_tx(&tx, &format!("{REQUEUE}root"), cursor).unwrap(),
                 None => {
-                    tx.execute("DELETE FROM meta WHERE key=?1", [format!("{REQUEUE}root")])
-                        .unwrap();
+                    tx.execute("DELETE FROM meta WHERE key=?1", [format!("{REQUEUE}root")]).unwrap();
                 }
             }
             tx.commit().unwrap();

@@ -233,10 +233,7 @@ impl Store {
     /// Remember a transient storage error the signature work is retrying; any other outcome
     /// ends the episode. A permanent cannot-open then surfaces in doctor instead of only on stderr.
     pub fn note_signature_retry(&self, error: Option<&anyhow::Error>) {
-        let mut retrying = self
-            .signature_retrying
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut retrying = self.signature_retrying.lock().unwrap_or_else(PoisonError::into_inner);
         match error.filter(|error| transient_storage_error(error)) {
             Some(error) => {
                 let since = retrying.as_ref().map_or_else(now_ms, |(since, _)| *since);
@@ -247,19 +244,10 @@ impl Store {
     }
 
     pub(super) fn lasting_signature_retry(&self) -> Option<String> {
-        let retrying = self
-            .signature_retrying
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        retrying
-            .as_ref()
-            .filter(|(since, _)| now_ms().saturating_sub(*since) >= SIGNATURE_RETRY_VISIBLE_MS)
-            .map(|(since, error)| {
-                format!(
-                    "retrying for {}s, not persisted: {error}",
-                    now_ms().saturating_sub(*since) / 1_000
-                )
-            })
+        let retrying = self.signature_retrying.lock().unwrap_or_else(PoisonError::into_inner);
+        retrying.as_ref().filter(|(since, _)| now_ms().saturating_sub(*since) >= SIGNATURE_RETRY_VISIBLE_MS).map(|(since, error)| {
+            format!("retrying for {}s, not persisted: {error}", now_ms().saturating_sub(*since) / 1_000)
+        })
     }
 }
 
@@ -306,8 +294,7 @@ impl Store {
         let captured = self.signature_migration()?;
         if captured.done() && captured.references_pending && captured.fault.is_none() {
             let mut connection = self.connection.write_background();
-            let tx =
-                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let count = references::advance_page(&tx)?;
             note_work(&tx, count)?;
             let mut report = state(&tx)?;
@@ -527,8 +514,7 @@ impl Store {
             [],
         )?;
         // Claims admitted while the fault stood were never judged; the next pass takes them.
-        self.verdicts_due
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.verdicts_due.store(true, std::sync::atomic::Ordering::Release);
         self.signature_job_wake.notify_one();
         Ok(cleared)
     }
@@ -583,28 +569,16 @@ mod transient_tests {
 
     #[test]
     fn busy_locked_and_cannot_open_are_transient_and_corruption_is_not() {
-        for code in [
-            ffi::SQLITE_BUSY,
-            ffi::SQLITE_BUSY_SNAPSHOT,
-            ffi::SQLITE_LOCKED,
-            ffi::SQLITE_CANTOPEN,
-        ] {
+        for code in [ffi::SQLITE_BUSY, ffi::SQLITE_BUSY_SNAPSHOT, ffi::SQLITE_LOCKED, ffi::SQLITE_CANTOPEN] {
             assert!(transient_storage_error(&sqlite(code)), "{code}");
             // A failed read inside a candidate judgment carries this context.
-            assert!(
-                transient_storage_error(&sqlite(code).context("signature-state-corrupt")),
-                "{code}"
-            );
+            assert!(transient_storage_error(&sqlite(code).context("signature-state-corrupt")), "{code}");
         }
-        assert!(transient_storage_error(&anyhow::Error::new(
-            crate::error::internal(sqlite(ffi::SQLITE_LOCKED))
-        )));
+        assert!(transient_storage_error(&anyhow::Error::new(crate::error::internal(sqlite(ffi::SQLITE_LOCKED)))));
         for code in [ffi::SQLITE_CORRUPT, ffi::SQLITE_ERROR, ffi::SQLITE_NOTADB] {
             assert!(!transient_storage_error(&sqlite(code)), "{code}");
         }
-        assert!(!transient_storage_error(&anyhow::anyhow!(
-            "database is locked"
-        )));
+        assert!(!transient_storage_error(&anyhow::anyhow!("database is locked")));
     }
 
     #[tokio::test]
@@ -622,48 +596,24 @@ mod transient_tests {
         assert!(fault.starts_with("verdict reconciliation: "), "{fault}");
         assert!(!store.signature_migration().unwrap().done());
 
-        assert_eq!(
-            store.resume_signature_migration().unwrap().as_deref(),
-            Some(fault.as_str())
-        );
+        assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault.as_str()));
         assert!(store.signature_migration().unwrap().done());
-        assert!(
-            store
-                .verdicts_due
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            store.signature_job_wake.notified(),
-        )
-        .await
-        .expect("resume wakes the stopped bootstrap job");
+        assert!(store.verdicts_due.load(std::sync::atomic::Ordering::Acquire));
+        tokio::time::timeout(std::time::Duration::from_secs(5), store.signature_job_wake.notified())
+            .await
+            .expect("resume wakes the stopped bootstrap job");
         assert_eq!(store.resume_signature_migration().unwrap(), None);
     }
 
     #[test]
     fn a_transient_error_that_lasts_shows_in_doctor_and_success_ends_it() {
         let store = Store::open_memory("node", Arc::new(crate::store::runtime::Plain)).unwrap();
-        let codes = |store: &Store| {
-            store
-                .signature_state_faults()
-                .unwrap()
-                .into_iter()
-                .map(|fault| fault.code)
-                .collect::<Vec<_>>()
-        };
+        let codes = |store: &Store| store.signature_state_faults().unwrap().into_iter().map(|fault| fault.code).collect::<Vec<_>>();
         store.note_signature_retry(Some(&sqlite(ffi::SQLITE_CANTOPEN)));
-        assert!(
-            !codes(&store).contains(&"signature-storage-retrying".into()),
-            "a brief retry stays quiet"
-        );
+        assert!(!codes(&store).contains(&"signature-storage-retrying".into()), "a brief retry stays quiet");
         store.signature_retrying.lock().unwrap().as_mut().unwrap().0 -= SIGNATURE_RETRY_VISIBLE_MS;
         assert!(codes(&store).contains(&"signature-storage-retrying".into()));
-        assert_eq!(
-            store.signature_migration().unwrap().fault,
-            None,
-            "never persisted"
-        );
+        assert_eq!(store.signature_migration().unwrap().fault, None, "never persisted");
         store.note_signature_retry(None);
         assert!(!codes(&store).contains(&"signature-storage-retrying".into()));
     }
