@@ -18,7 +18,7 @@ impl HeldSilent {
         match self {
             Self::CaughtUp { oldest_accepted_ms: Some(at) } if at <= now_ms =>
                 Some(now_ms.saturating_sub(at) as f64 / 1000.),
-            // An empty mailbox is not an age-zero sample; neither is a lagging cut.
+            Self::CaughtUp { oldest_accepted_ms: None } => Some(0.),
             _ => None,
         }
     }
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn age_requires_caught_up_projection_and_a_real_timestamp() {
         assert_eq!(HeldSilent::Unavailable.age_seconds(10), None);
-        assert_eq!(HeldSilent::CaughtUp { oldest_accepted_ms: None }.age_seconds(10), None);
+        assert_eq!(HeldSilent::CaughtUp { oldest_accepted_ms: None }.age_seconds(10), Some(0.));
         assert_eq!(HeldSilent::CaughtUp { oldest_accepted_ms: Some(2000) }.age_seconds(1000), None);
         assert_eq!(HeldSilent::CaughtUp { oldest_accepted_ms: Some(1000) }.age_seconds(2500), Some(1.5));
     }

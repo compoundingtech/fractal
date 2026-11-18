@@ -158,17 +158,28 @@ impl Store {
     /// A false completeness bit forbids treating missing timestamps as an empty inbox.
     pub fn idle_residency_mail_summary(&self) -> Result<(bool, Option<i64>, Option<i64>)> {
         smallclaims::touched::note_read(|| "kind:message.sent".to_owned());
+        let before = graph_index(&self.readers.get())?;
+        let mut asleep = Vec::new();
+        for seat in self.idle_residency_episodes()? {
+            if crate::suspension::current(self, &seat)?.is_some_and(|state|
+                state.cause() == "idle" && state.phase == "suspended")
+            {
+                asleep.push(seat);
+            }
+        }
         let frontier = self.wake_demand("")?.frontier;
         let connection = self.readers.get();
         let tx = connection.unchecked_transaction()?;
         let (wake, silent) = tx.query_row(
             "SELECT MIN(CASE WHEN mail.class>0 THEN mail.sent_ms END),
                     MIN(CASE WHEN mail.class=0 THEN mail.sent_ms END)
-             FROM local_wake_demand_v1 mail JOIN desired ON desired.subject=mail.recipient
-             WHERE mail.pending=1 AND desired.kind='agent' AND json_extract(desired.member,'$.host')=?1",
-            [&self.origin], |row| Ok((row.get(0)?, row.get(1)?)),
+             FROM json_each(?2) seats JOIN local_wake_demand_v1 mail
+               ON mail.recipient=seats.value AND mail.pending=1
+             JOIN desired ON desired.subject=mail.recipient
+             WHERE desired.kind='agent' AND json_extract(desired.member,'$.host')=?1",
+            params![self.origin, serde_json::to_string(&asleep)?], |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        Ok((frontier_matches(self, &tx, &frontier)?, wake, silent))
+        Ok((before == frontier.graph && frontier_matches(self, &tx, &frontier)?, wake, silent))
     }
 
     /// The same signed fleet barrier used by the actual writes, for diagnostic callers.
@@ -662,5 +673,24 @@ mod tests {
         assert!(!store.commit_idle_stop_boundary(SEAT, &request, Some(0), Some(0), fields).unwrap());
         assert!(store.operation_claim(&crate::suspension::suspend_snapshot_key(&request)).unwrap().is_none());
         assert_eq!(crate::suspension::current(&store,SEAT).unwrap().unwrap().phase,"quiescing");
+    }
+    #[test]
+    fn silent_age_covers_only_idle_asleep_seats_at_a_caught_up_frontier() {
+        let root = tempfile::tempdir().unwrap();
+        let store = fixture(&root.path().join("graph.sqlite"), root.path());
+        claim(&store, "message/held-silent", "message.sent", Some("agent/birch"),
+            json!({"from":"agent/birch","to":SEAT,"content":"FYI","status":"sent","tags":["st3-silent"]}));
+        assert_eq!(store.idle_residency_mail_summary().unwrap(), (true,None,None),
+            "a running seat is not part of the asleep backlog");
+        let request = store.admit_idle_suspend(SEAT,Some(0),Some(0),i64::MAX as u128).unwrap().unwrap();
+        complete_suspend(&store,SEAT,&request);
+        let summary = store.idle_residency_mail_summary().unwrap();
+        assert!(summary.0 && summary.1.is_none() && summary.2.is_some());
+        claim(&store, "message/held-silent", "message.staged", Some(SEAT),json!({"status":"staged"}));
+        assert_eq!(store.idle_residency_mail_summary().unwrap(), (true,None,None),
+            "a proven cleared backlog supports an age-zero sample");
+        let lagging = Store::open(&root.path().join("graph.sqlite"),"alder").unwrap();
+        assert!(!lagging.idle_residency_mail_summary().unwrap().0,
+            "a reader without its configured source cannot prove a zero backlog");
     }
 }

@@ -260,7 +260,9 @@ impl RuntimeEvidence {
         let delta = self.reclaimed.unwrap_or_else(|| MemoryDelta::between(Memory::default(), Memory::default()));
         self.activate().publish(Summary {
             idle_suspended: Some(idle), manual_suspended: Some(manual), oldest_wake_seconds: age(oldest_wake),
-            oldest_silent_seconds: age(oldest_silent), host_available_delta_bytes: delta.host_available_delta_bytes,
+            oldest_silent_seconds: if caught_up {
+                HeldSilent::CaughtUp { oldest_accepted_ms: oldest_silent }.age_seconds(now_i64)
+            } else { None }, host_available_delta_bytes: delta.host_available_delta_bytes,
             private_reclaimed_bytes: delta.private_reclaimed_bytes,
         });
         let subject = format!("residency/{host}/host/{host}");
