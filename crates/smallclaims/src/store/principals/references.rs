@@ -55,11 +55,20 @@ pub(super) fn encode(connection: &Connection, claim_id: &str, text: &str) -> Res
     intern(connection, claim_id, text, false)
 }
 
-pub(super) fn encode_candidate(connection: &Connection, claim_id: &str, text: &str) -> Result<Vec<u8>> {
+pub(super) fn encode_candidate(
+    connection: &Connection,
+    claim_id: &str,
+    text: &str,
+) -> Result<Vec<u8>> {
     intern(connection, claim_id, text, true)
 }
 
-fn intern(connection: &Connection, claim_id: &str, text: &str, require_candidate: bool) -> Result<Vec<u8>> {
+fn intern(
+    connection: &Connection,
+    claim_id: &str,
+    text: &str,
+    require_candidate: bool,
+) -> Result<Vec<u8>> {
     let reference = reference(text);
     let candidate: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM claim_signature_candidates WHERE claim_id=?1 AND signature=?2)",
@@ -69,12 +78,18 @@ fn intern(connection: &Connection, claim_id: &str, text: &str, require_candidate
         !require_candidate || candidate,
         "signature-state-corrupt: signature reference has no canonical candidate for claim {claim_id}"
     );
-    let original: Option<String> = connection.query_row(
-        "SELECT signature FROM claim_signature_originals WHERE claim_id=?1 AND reference=?2",
-        params![claim_id, reference], |row| row.get(0),
-    ).optional()?;
+    let original: Option<String> = connection
+        .query_row(
+            "SELECT signature FROM claim_signature_originals WHERE claim_id=?1 AND reference=?2",
+            params![claim_id, reference],
+            |row| row.get(0),
+        )
+        .optional()?;
     if let Some(original) = original {
-        anyhow::ensure!(original == text, "signature-state-corrupt: signature reference collision for claim {claim_id}");
+        anyhow::ensure!(
+            original == text,
+            "signature-state-corrupt: signature reference collision for claim {claim_id}"
+        );
         if candidate {
             connection.execute(
                 /* sqlite-large-value: allow-for-now lv-h7365c5488037 owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_originals SET candidate=1 WHERE claim_id=?1 AND reference=?2 AND candidate=0",
@@ -95,27 +110,44 @@ pub(super) fn resolve(connection: &Connection, claim_id: &str, value: SqlValue) 
     match value {
         SqlValue::Text(text) => Ok(text),
         SqlValue::Blob(reference) => {
-            anyhow::ensure!(reference.len() == 32, "signature-state-corrupt: invalid signature reference for claim {claim_id}");
+            anyhow::ensure!(
+                reference.len() == 32,
+                "signature-state-corrupt: invalid signature reference for claim {claim_id}"
+            );
             let (text, candidate): (String, bool) = connection.query_row(
                 "SELECT signature,candidate FROM claim_signature_originals WHERE claim_id=?1 AND reference=?2",
                 params![claim_id, reference], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?.ok_or_else(|| anyhow::anyhow!("signature-state-corrupt: missing signature reference for claim {claim_id}"))?;
-            anyhow::ensure!(self::reference(&text) == reference, "signature-state-corrupt: signature reference digest mismatch for claim {claim_id}");
+            anyhow::ensure!(
+                self::reference(&text) == reference,
+                "signature-state-corrupt: signature reference digest mismatch for claim {claim_id}"
+            );
             if candidate {
                 let exists: bool = connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM claim_signature_candidates WHERE claim_id=?1 AND signature=?2)",
                     params![claim_id, text], |row| row.get(0),
                 )?;
-                anyhow::ensure!(exists, "signature-state-corrupt: missing canonical signature candidate for claim {claim_id}");
+                anyhow::ensure!(
+                    exists,
+                    "signature-state-corrupt: missing canonical signature candidate for claim {claim_id}"
+                );
             }
             Ok(text)
         }
-        _ => anyhow::bail!("signature-state-corrupt: invalid signature storage type for claim {claim_id}"),
+        _ => anyhow::bail!(
+            "signature-state-corrupt: invalid signature storage type for claim {claim_id}"
+        ),
     }
 }
 
 /// Insert canonical authority and its lookup atomically in the caller's transaction.
-pub(super) fn insert_candidate(connection: &Connection, claim_id: &str, text: &str, key: &str, nonce: &str) -> Result<(usize, Vec<u8>)> {
+pub(super) fn insert_candidate(
+    connection: &Connection,
+    claim_id: &str,
+    text: &str,
+    key: &str,
+    nonce: &str,
+) -> Result<(usize, Vec<u8>)> {
     // Check collisions before changing canonical authority, including for exact duplicates.
     let reference = encode(connection, claim_id, text)?;
     let added = connection.execute(
@@ -131,14 +163,27 @@ pub(super) fn insert_candidate(connection: &Connection, claim_id: &str, text: &s
 
 pub(super) fn pending(connection: &Connection) -> Result<bool> {
     let phase: String = connection.query_row(
-        "SELECT phase FROM claim_signature_reference_migration WHERE id=1", [], |row| row.get(0),
+        "SELECT phase FROM claim_signature_reference_migration WHERE id=1",
+        [],
+        |row| row.get(0),
     )?;
-    anyhow::ensure!(matches!(phase.as_str(), "candidates" | "sources" | "facade" | "judging" | "done"),
-        "signature-state-corrupt: unknown signature reference migration phase {phase}");
+    anyhow::ensure!(
+        matches!(
+            phase.as_str(),
+            "candidates" | "sources" | "facade" | "judging" | "done"
+        ),
+        "signature-state-corrupt: unknown signature reference migration phase {phase}"
+    );
     Ok(phase != "done")
 }
 
-fn checkpoint(connection: &Connection, phase: &str, claim: &str, signature: SqlValue, writer: &str) -> Result<()> {
+fn checkpoint(
+    connection: &Connection,
+    phase: &str,
+    claim: &str,
+    signature: SqlValue,
+    writer: &str,
+) -> Result<()> {
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h1c4e93a7a1d7 owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_reference_migration SET phase=?1,claim_id=?2,signature=?3,writer=?4 WHERE id=1",
         params![phase, claim, signature, writer],
@@ -164,7 +209,7 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
             for (claim, text) in &rows {
                 encode(connection, claim, text)?;
             }
-            if let Some((claim,text)) = rows.last() {
+            if let Some((claim, text)) = rows.last() {
                 checkpoint(connection, &phase, claim, SqlValue::Text(text.clone()), "")?;
             } else {
                 checkpoint(connection, "sources", "", SqlValue::Text(String::new()), "")?;
@@ -187,7 +232,7 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                     resolve(connection, claim, value.clone())?;
                 }
             }
-            if let Some((claim,signature,writer)) = rows.last() {
+            if let Some((claim, signature, writer)) = rows.last() {
                 checkpoint(connection, &phase, claim, signature.clone(), writer)?;
             } else {
                 checkpoint(connection, "facade", "", SqlValue::Text(String::new()), "")?;
@@ -207,7 +252,7 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                     resolve(connection, claim, value.clone())?;
                 }
             }
-            if let Some((claim,_)) = rows.last() {
+            if let Some((claim, _)) = rows.last() {
                 checkpoint(connection, &phase, claim, SqlValue::Text(String::new()), "")?;
             } else {
                 checkpoint(connection, "judging", "", SqlValue::Text(String::new()), "")?;
@@ -222,15 +267,22 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
             for (claim, last, best) in &rows {
                 let convert = |value: &SqlValue| -> Result<SqlValue> {
                     match value {
-                        SqlValue::Text(text) if !text.is_empty() => Ok(SqlValue::Blob(encode_candidate(connection, claim, text)?)),
-                        SqlValue::Blob(_) => { resolve(connection, claim, value.clone())?; Ok(value.clone()) }
+                        SqlValue::Text(text) if !text.is_empty() => {
+                            Ok(SqlValue::Blob(encode_candidate(connection, claim, text)?))
+                        }
+                        SqlValue::Blob(_) => {
+                            resolve(connection, claim, value.clone())?;
+                            Ok(value.clone())
+                        }
                         SqlValue::Text(_) | SqlValue::Null => Ok(value.clone()),
-                        _ => anyhow::bail!("signature-state-corrupt: invalid judging signature type for claim {claim}"),
+                        _ => anyhow::bail!(
+                            "signature-state-corrupt: invalid judging signature type for claim {claim}"
+                        ),
                     }
                 };
                 connection.execute(/* sqlite-large-value: allow-for-now lv-haaea4dc6f39b owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?2,best_signature=?3 WHERE claim_id=?1", params![claim,convert(last)?,convert(best)?])?;
             }
-            if let Some((claim,_,_)) = rows.last() {
+            if let Some((claim, _, _)) = rows.last() {
                 checkpoint(connection, &phase, claim, SqlValue::Text(String::new()), "")?;
             } else {
                 checkpoint(connection, "done", "", SqlValue::Text(String::new()), "")?;
@@ -238,7 +290,9 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
             Ok(rows.len())
         }
         "done" => Ok(0),
-        _ => anyhow::bail!("signature-state-corrupt: unknown signature reference migration phase {phase}"),
+        _ => anyhow::bail!(
+            "signature-state-corrupt: unknown signature reference migration phase {phase}"
+        ),
     }
 }
 
@@ -266,11 +320,31 @@ mod tests {
         let text = "{ \"nonce\": \"n\", \"key\":\"k\", \"signature\":\"s\" }\n";
         for index in 0..(PAGE + 3) {
             let claim = format!("claim-{index:04}");
-            connection.execute("INSERT INTO claim_signature_candidates VALUES(?1,?2,'k','n')", params![claim,text]).unwrap();
-            connection.execute("INSERT INTO claim_signature_sources VALUES(?1,?2,'writer')", params![claim,text]).unwrap();
-            connection.execute("INSERT INTO claim_signatures VALUES(?1,'signer','k','n',?2)", params![claim,text]).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO claim_signature_candidates VALUES(?1,?2,'k','n')",
+                    params![claim, text],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO claim_signature_sources VALUES(?1,?2,'writer')",
+                    params![claim, text],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO claim_signatures VALUES(?1,'signer','k','n',?2)",
+                    params![claim, text],
+                )
+                .unwrap();
         }
-        connection.execute("INSERT INTO claim_signature_nonce_uses VALUES('claim-0000','k','n')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO claim_signature_nonce_uses VALUES('claim-0000','k','n')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,best_signature,complete,dirty) VALUES('claim-0000',1,'roots','content',?1,?1,1,0)", [text]).unwrap();
         initialize_schema(&connection).unwrap();
         assert_eq!(advance(&connection), PAGE);
@@ -281,38 +355,106 @@ mod tests {
             assert!(advance(&connection) <= PAGE);
         }
         for table in ["claim_signatures", "claim_signature_sources"] {
-            let value: SqlValue = connection.query_row(&format!("SELECT signature FROM {table} WHERE claim_id='claim-0000'"), [], |row| row.get(0)).unwrap();
+            let value: SqlValue = connection
+                .query_row(
+                    &format!("SELECT signature FROM {table} WHERE claim_id='claim-0000'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert!(matches!(&value, SqlValue::Blob(bytes) if bytes.len()==32));
-            assert_eq!(resolve(&connection, "claim-0000", value).unwrap().as_bytes(), text.as_bytes());
+            assert_eq!(
+                resolve(&connection, "claim-0000", value)
+                    .unwrap()
+                    .as_bytes(),
+                text.as_bytes()
+            );
         }
-        let original: String = connection.query_row("SELECT signature FROM claim_signature_candidates WHERE claim_id='claim-0000'", [], |row| row.get(0)).unwrap();
+        let original: String = connection
+            .query_row(
+                "SELECT signature FROM claim_signature_candidates WHERE claim_id='claim-0000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(original, text);
-        let last: SqlValue = connection.query_row("SELECT last_signature FROM claim_signature_judging", [], |row| row.get(0)).unwrap();
-        assert_eq!(resolve(&connection,"claim-0000",last).unwrap(), text);
-        let evidence: i64 = connection.query_row("SELECT count(*) FROM claim_signature_nonce_uses", [], |row| row.get(0)).unwrap();
-        assert_eq!(evidence,1);
-        let count: i64 = connection.query_row("SELECT candidates FROM claim_signature_writer_counts WHERE writer='writer'", [], |row| row.get(0)).unwrap();
-        assert_eq!(count, (PAGE+3) as i64);
+        let last: SqlValue = connection
+            .query_row(
+                "SELECT last_signature FROM claim_signature_judging",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolve(&connection, "claim-0000", last).unwrap(), text);
+        let evidence: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM claim_signature_nonce_uses",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence, 1);
+        let count: i64 = connection
+            .query_row(
+                "SELECT candidates FROM claim_signature_writer_counts WHERE writer='writer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, (PAGE + 3) as i64);
     }
 
     #[test]
     fn legacy_only_facade_and_mixed_source_duplicates_survive() {
         let connection = old_schema();
         let original = "legacy original bytes\n";
-        connection.execute("INSERT INTO claim_signatures VALUES('legacy','s','k','n',?1)", [original]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO claim_signatures VALUES('legacy','s','k','n',?1)",
+                [original],
+            )
+            .unwrap();
         initialize_schema(&connection).unwrap();
-        insert_candidate(&connection,"candidate","candidate bytes","k","n").unwrap();
-        let reference = encode(&connection,"candidate","candidate bytes").unwrap();
+        insert_candidate(&connection, "candidate", "candidate bytes", "k", "n").unwrap();
+        let reference = encode(&connection, "candidate", "candidate bytes").unwrap();
         connection.execute("INSERT INTO claim_signature_sources VALUES('candidate','candidate bytes','writer')", []).unwrap();
-        connection.execute("INSERT INTO claim_signature_sources VALUES('candidate',?1,'writer')", [reference]).unwrap();
-        while pending(&connection).unwrap() { advance(&connection); }
-        let value: SqlValue = connection.query_row("SELECT signature FROM claim_signatures WHERE claim_id='legacy'", [], |row| row.get(0)).unwrap();
-        assert_eq!(resolve(&connection,"legacy",value).unwrap(), original);
-        let count: i64 = connection.query_row("SELECT candidates FROM claim_signature_writer_counts WHERE writer='writer'", [], |row| row.get(0)).unwrap();
-        assert_eq!(count,1);
-        connection.execute("DELETE FROM claim_signature_candidates WHERE claim_id='candidate'", []).unwrap();
-        let remaining: i64 = connection.query_row("SELECT count(*) FROM claim_signature_sources", [], |row| row.get(0)).unwrap();
-        assert_eq!(remaining,0);
+        connection
+            .execute(
+                "INSERT INTO claim_signature_sources VALUES('candidate',?1,'writer')",
+                [reference],
+            )
+            .unwrap();
+        while pending(&connection).unwrap() {
+            advance(&connection);
+        }
+        let value: SqlValue = connection
+            .query_row(
+                "SELECT signature FROM claim_signatures WHERE claim_id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolve(&connection, "legacy", value).unwrap(), original);
+        let count: i64 = connection
+            .query_row(
+                "SELECT candidates FROM claim_signature_writer_counts WHERE writer='writer'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        connection
+            .execute(
+                "DELETE FROM claim_signature_candidates WHERE claim_id='candidate'",
+                [],
+            )
+            .unwrap();
+        let remaining: i64 = connection
+            .query_row("SELECT count(*) FROM claim_signature_sources", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[test]
@@ -320,34 +462,63 @@ mod tests {
         let connection = old_schema();
         initialize_schema(&connection).unwrap();
         let reference = reference("original");
-        connection.execute("INSERT INTO claim_signature_originals VALUES('claim',?1,'different',0)", [&reference]).unwrap();
-        assert!(encode(&connection,"claim","original").is_err());
-        assert!(resolve(&connection,"claim",SqlValue::Blob(reference)).is_err());
-        assert!(resolve(&connection,"missing",SqlValue::Blob(vec![0;32])).is_err());
-        let reference = encode(&connection,"legacy","legacy").unwrap();
+        connection
+            .execute(
+                "INSERT INTO claim_signature_originals VALUES('claim',?1,'different',0)",
+                [&reference],
+            )
+            .unwrap();
+        assert!(encode(&connection, "claim", "original").is_err());
+        assert!(resolve(&connection, "claim", SqlValue::Blob(reference)).is_err());
+        assert!(resolve(&connection, "missing", SqlValue::Blob(vec![0; 32])).is_err());
+        let reference = encode(&connection, "legacy", "legacy").unwrap();
         assert!(encode_candidate(&connection, "legacy", "legacy").is_err());
-        connection.execute("UPDATE claim_signature_originals SET candidate=1 WHERE claim_id='legacy'", []).unwrap();
-        assert!(resolve(&connection,"legacy",SqlValue::Blob(reference)).is_err());
+        connection
+            .execute(
+                "UPDATE claim_signature_originals SET candidate=1 WHERE claim_id='legacy'",
+                [],
+            )
+            .unwrap();
+        assert!(resolve(&connection, "legacy", SqlValue::Blob(reference)).is_err());
     }
 
     #[test]
     fn rollback_keeps_cursor_and_judging_sentinels() {
         let connection = old_schema();
-        connection.execute("INSERT INTO claim_signature_candidates VALUES('claim','original','k','n')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO claim_signature_candidates VALUES('claim','original','k','n')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,best_signature,complete,dirty) VALUES('claim',1,'r','c','',NULL,0,1)", []).unwrap();
         initialize_schema(&connection).unwrap();
         {
             let tx = connection.unchecked_transaction().unwrap();
-            assert_eq!(advance_page(&tx).unwrap(),1);
+            assert_eq!(advance_page(&tx).unwrap(), 1);
             // Dropping the transaction models interruption before page commit.
         }
-        let count: i64 = connection.query_row("SELECT count(*) FROM claim_signature_originals", [], |row| row.get(0)).unwrap();
-        assert_eq!(count,0);
-        assert_eq!(advance(&connection),1);
-        while pending(&connection).unwrap() { advance(&connection); }
-        let (last,best): (SqlValue,SqlValue) = connection.query_row("SELECT last_signature,best_signature FROM claim_signature_judging", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
-        assert_eq!(last,SqlValue::Text(String::new()));
-        assert_eq!(best,SqlValue::Null);
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM claim_signature_originals",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(advance(&connection), 1);
+        while pending(&connection).unwrap() {
+            advance(&connection);
+        }
+        let (last, best): (SqlValue, SqlValue) = connection
+            .query_row(
+                "SELECT last_signature,best_signature FROM claim_signature_judging",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(last, SqlValue::Text(String::new()));
+        assert_eq!(best, SqlValue::Null);
     }
 
     #[test]
@@ -357,18 +528,42 @@ mod tests {
         fn logical_bytes(connection: &Connection) -> i64 {
             let tables = connection.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").unwrap()
                 .query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            tables.iter().map(|table| {
-                let columns = connection.prepare(&format!("PRAGMA table_info(\"{table}\")")).unwrap()
-                    .query_map([], |row| row.get::<_,String>(1)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-                let expression = columns.iter().map(|column| format!("coalesce(length(CAST(\"{column}\" AS BLOB)),0)")).collect::<Vec<_>>().join("+");
-                connection.query_row(&format!("SELECT coalesce(sum({expression}),0) FROM \"{table}\""), [], |row| row.get::<_,i64>(0)).unwrap()
-            }).sum()
+            tables
+                .iter()
+                .map(|table| {
+                    let columns = connection
+                        .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                        .unwrap()
+                        .query_map([], |row| row.get::<_, String>(1))
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap();
+                    let expression = columns
+                        .iter()
+                        .map(|column| format!("coalesce(length(CAST(\"{column}\" AS BLOB)),0)"))
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    connection
+                        .query_row(
+                            &format!("SELECT coalesce(sum({expression}),0) FROM \"{table}\""),
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap()
+                })
+                .sum()
         }
         fn occupied_bytes(connection: &Connection) -> i64 {
-            let pages: i64 = connection.pragma_query_value(None,"page_count",|row| row.get(0)).unwrap();
-            let free: i64 = connection.pragma_query_value(None,"freelist_count",|row| row.get(0)).unwrap();
-            let size: i64 = connection.pragma_query_value(None,"page_size",|row| row.get(0)).unwrap();
-            (pages-free)*size
+            let pages: i64 = connection
+                .pragma_query_value(None, "page_count", |row| row.get(0))
+                .unwrap();
+            let free: i64 = connection
+                .pragma_query_value(None, "freelist_count", |row| row.get(0))
+                .unwrap();
+            let size: i64 = connection
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .unwrap();
+            (pages - free) * size
         }
         fn fixture_signature(index: usize) -> String {
             serde_json::json!({
@@ -378,29 +573,51 @@ mod tests {
                 "nonce": format!("{index:032x}"),
                 "chain": ["b".repeat(64), "c".repeat(64), "d".repeat(64), "e".repeat(64)],
                 "signature": "f".repeat(128)
-            }).to_string()
+            })
+            .to_string()
         }
 
         const CLAIMS: usize = 20_000;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("signature-reference-fixture.sqlite3");
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None,"journal_mode","WAL").unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
         connection.execute_batch(PRINCIPAL_SCHEMA).unwrap();
         {
             let tx = connection.unchecked_transaction().unwrap();
             for index in 0..CLAIMS {
                 let claim = format!("{index:064x}");
                 let text = fixture_signature(index);
-                assert!((550..750).contains(&text.len()),"fixture must represent a realistic full signature");
-                tx.execute("INSERT INTO claim_signature_candidates VALUES(?1,?2,'key','nonce')", params![claim,text]).unwrap();
-                tx.execute("INSERT INTO claim_signature_sources VALUES(?1,?2,'fixture-writer')", params![claim,text]).unwrap();
-                tx.execute("INSERT INTO claim_signatures VALUES(?1,'signer','key','nonce',?2)", params![claim,text]).unwrap();
+                assert!(
+                    (550..750).contains(&text.len()),
+                    "fixture must represent a realistic full signature"
+                );
+                tx.execute(
+                    "INSERT INTO claim_signature_candidates VALUES(?1,?2,'key','nonce')",
+                    params![claim, text],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO claim_signature_sources VALUES(?1,?2,'fixture-writer')",
+                    params![claim, text],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO claim_signatures VALUES(?1,'signer','key','nonce',?2)",
+                    params![claim, text],
+                )
+                .unwrap();
                 tx.execute("INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,best_signature,complete,dirty) VALUES(?1,1,'roots','content',?2,?2,1,0)", params![claim,text]).unwrap();
             }
             // A multi-candidate claim makes lexical-order preservation non-vacuous.
             let alternate = fixture_signature(CLAIMS);
-            tx.execute("INSERT INTO claim_signature_candidates VALUES(?1,?2,'key','nonce')", params![format!("{:064x}",0),alternate]).unwrap();
+            tx.execute(
+                "INSERT INTO claim_signature_candidates VALUES(?1,?2,'key','nonce')",
+                params![format!("{:064x}", 0), alternate],
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         let before_candidates = connection.prepare("SELECT claim_id,signature FROM claim_signature_candidates ORDER BY claim_id,signature").unwrap()
@@ -413,44 +630,73 @@ mod tests {
         let mut max_page = Duration::ZERO;
         while pending(&connection).unwrap() {
             let started_page = Instant::now();
-            assert!(advance(&connection)<=PAGE);
+            assert!(advance(&connection) <= PAGE);
             max_page = max_page.max(started_page.elapsed());
             pages += 1;
         }
         let elapsed = started.elapsed();
         let new_logical = logical_bytes(&connection);
         let new_occupied = occupied_bytes(&connection);
-        let free_pages: i64 = connection.pragma_query_value(None,"freelist_count",|row| row.get(0)).unwrap();
-        let page_count: i64 = connection.pragma_query_value(None,"page_count",|row| row.get(0)).unwrap();
+        let free_pages: i64 = connection
+            .pragma_query_value(None, "freelist_count", |row| row.get(0))
+            .unwrap();
+        let page_count: i64 = connection
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
         // Occupied page bytes count all btrees/schema pages, excluding freelist; no
         // VACUUM/checkpoint is used to misrepresent freed pages as a smaller file.
         let database_bytes = std::fs::metadata(&path).unwrap().len();
-        let wal_bytes = std::fs::metadata(path.with_extension("sqlite3-wal")).map_or(0,|metadata| metadata.len());
-        assert!(new_logical<old_logical,"dictionary and all row values must be included in net logical saving");
+        let wal_bytes = std::fs::metadata(path.with_extension("sqlite3-wal"))
+            .map_or(0, |metadata| metadata.len());
+        assert!(
+            new_logical < old_logical,
+            "dictionary and all row values must be included in net logical saving"
+        );
         let after_candidates = connection.prepare("SELECT claim_id,signature FROM claim_signature_candidates ORDER BY claim_id,signature").unwrap()
             .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert_eq!(before_candidates,after_candidates);
-        for table in ["claim_signatures","claim_signature_sources","claim_signature_judging"] {
-            let fields = if table=="claim_signature_judging" {"last_signature,best_signature"} else {"signature"};
-            let mut statement = connection.prepare(&format!("SELECT claim_id,{fields} FROM {table} ORDER BY claim_id")).unwrap();
+        assert_eq!(before_candidates, after_candidates);
+        for table in [
+            "claim_signatures",
+            "claim_signature_sources",
+            "claim_signature_judging",
+        ] {
+            let fields = if table == "claim_signature_judging" {
+                "last_signature,best_signature"
+            } else {
+                "signature"
+            };
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT claim_id,{fields} FROM {table} ORDER BY claim_id"
+                ))
+                .unwrap();
             let mut rows = statement.query([]).unwrap();
             let mut index = 0;
             while let Some(row) = rows.next().unwrap() {
                 let claim: String = row.get(0).unwrap();
-                assert_eq!(claim,format!("{index:064x}"));
+                assert_eq!(claim, format!("{index:064x}"));
                 let expected = fixture_signature(index);
                 let value: SqlValue = row.get(1).unwrap();
                 assert!(matches!(&value,SqlValue::Blob(bytes) if bytes.len()==32));
-                assert_eq!(resolve(&connection,&claim,value).unwrap().as_bytes(),expected.as_bytes());
-                if table=="claim_signature_judging" {
+                assert_eq!(
+                    resolve(&connection, &claim, value).unwrap().as_bytes(),
+                    expected.as_bytes()
+                );
+                if table == "claim_signature_judging" {
                     let best: SqlValue = row.get(2).unwrap();
-                    assert_eq!(resolve(&connection,&claim,best).unwrap().as_bytes(),expected.as_bytes());
+                    assert_eq!(
+                        resolve(&connection, &claim, best).unwrap().as_bytes(),
+                        expected.as_bytes()
+                    );
                 }
                 index += 1;
             }
-            assert_eq!(index,CLAIMS);
+            assert_eq!(index, CLAIMS);
         }
-        eprintln!("signature-reference-migration claims={CLAIMS} pages={pages} total_ms={:.3} max_page_ms={:.3} old_logical_bytes={old_logical} new_logical_bytes={new_logical} old_occupied_btree_bytes={old_occupied} new_occupied_btree_bytes={new_occupied} page_count={page_count} freelist_pages={free_pages} database_file_bytes={database_bytes} wal_file_bytes={wal_bytes} vacuum=false",
-            elapsed.as_secs_f64()*1000.0,max_page.as_secs_f64()*1000.0);
+        eprintln!(
+            "signature-reference-migration claims={CLAIMS} pages={pages} total_ms={:.3} max_page_ms={:.3} old_logical_bytes={old_logical} new_logical_bytes={new_logical} old_occupied_btree_bytes={old_occupied} new_occupied_btree_bytes={new_occupied} page_count={page_count} freelist_pages={free_pages} database_file_bytes={database_bytes} wal_file_bytes={wal_bytes} vacuum=false",
+            elapsed.as_secs_f64() * 1000.0,
+            max_page.as_secs_f64() * 1000.0
+        );
     }
 }

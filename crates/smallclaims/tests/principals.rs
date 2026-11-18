@@ -32,19 +32,25 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
             let mut connection = store.connection.write();
             if tampered {
                 // Rejudgment must use the current transaction's body, never the earlier one.
-                connection.execute(
-                    "UPDATE claims SET body=json_set(body,'$.fields.text',?1) WHERE id=?2",
-                    rusqlite::params!["changed after signing", claim.id],
-                ).unwrap();
+                connection
+                    .execute(
+                        "UPDATE claims SET body=json_set(body,'$.fields.text',?1) WHERE id=?2",
+                        rusqlite::params!["changed after signing", claim.id],
+                    )
+                    .unwrap();
             }
-            connection.execute(
-                "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id=?1",
-                [&claim.id],
-            ).unwrap();
-            connection.execute(
-                "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
-                [&claim.id],
-            ).unwrap();
+            connection
+                .execute(
+                    "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id=?1",
+                    [&claim.id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
+                    [&claim.id],
+                )
+                .unwrap();
             BODY_READS.with(|reads| reads.borrow_mut().clear());
             connection.trace(Some(|sql| {
                 if sql.starts_with("SELECT id, subject, kind, actor, body FROM claims WHERE id=") {
@@ -1801,7 +1807,10 @@ fn a_removed_root_holds_its_dependents_before_their_requeue_page() {
     let reads = Arc::new(Mutex::new(Vec::new()));
     let record = reads.clone();
     let weak = Arc::downgrade(&store);
-    let ids = claims.iter().map(|claim| claim.id.clone()).collect::<Vec<_>>();
+    let ids = claims
+        .iter()
+        .map(|claim| claim.id.clone())
+        .collect::<Vec<_>>();
     let observer = store.observe_commits(move |connection| {
         let Some(cursor) = connection
             .query_row(
@@ -1827,9 +1836,15 @@ fn a_removed_root_holds_its_dependents_before_their_requeue_page() {
     store.judge_claims(true).unwrap();
     drop(observer);
     let reads = reads.lock().unwrap();
-    assert!(!reads.is_empty(), "a commit started the root requeue before queueing any page");
+    assert!(
+        !reads.is_empty(),
+        "a commit started the root requeue before queueing any page"
+    );
     for (id, read) in reads.iter() {
-        assert!(matches!(read, Verdict::Held(_)), "{id} read {read:?} before its page");
+        assert!(
+            matches!(read, Verdict::Held(_)),
+            "{id} read {read:?} before its page"
+        );
     }
     for claim in &claims {
         assert!(matches!(verdict(&store, claim), Verdict::Held(_)));
@@ -1885,7 +1900,10 @@ fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
     let cursor: String = connection
         .query_row(
             "SELECT value FROM meta WHERE key=?1",
-            [format!("claim_candidate_requeue:key:person/ada|{}", device.key)],
+            [format!(
+                "claim_candidate_requeue:key:person/ada|{}",
+                device.key
+            )],
             |row| row.get(0),
         )
         .unwrap();
@@ -1904,7 +1922,10 @@ fn a_revoked_delegated_key_holds_dependents_past_its_first_requeue_page() {
         );
     }
     let counts = store.claim_verdict_counts().unwrap();
-    assert!(counts.get("held").copied().unwrap_or(0) >= after.len() as u64, "{counts:?}");
+    assert!(
+        counts.get("held").copied().unwrap_or(0) >= after.len() as u64,
+        "{counts:?}"
+    );
     store.judge_claims(true).unwrap();
     for claim in &after {
         assert!(
@@ -2569,7 +2590,11 @@ fn candidate_judging_never_rewrites_the_whole_dependency_set_in_one_commit() {
 /// Immutable claims and authenticated carriers and the first-carried cache remain intact.
 fn remove_candidate_schema(connection: &rusqlite::Connection) {
     connection.execute("UPDATE claim_signatures SET signature=(SELECT signature FROM claim_signature_originals o WHERE o.claim_id=claim_signatures.claim_id AND o.reference=claim_signatures.signature) WHERE typeof(signature)='blob'", []).unwrap();
-    connection.execute_batch("DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;").unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE claim_signature_originals; DROP TABLE claim_signature_reference_migration;",
+        )
+        .unwrap();
     connection.execute_batch("DROP TABLE claim_signature_candidates; DROP TABLE claim_signature_sources; DROP TABLE claim_signature_counts; DROP TABLE claim_signature_writer_counts; DROP TABLE claim_signature_nonce_uses; DROP TABLE claim_signature_judging; DROP TABLE claim_signature_migration;
         DROP INDEX claim_candidate_verdicts_verdict_index; DROP INDEX claim_candidate_verdict_links_claim_index;
         CREATE INDEX claim_verdicts_verdict_index ON claim_verdicts(verdict);

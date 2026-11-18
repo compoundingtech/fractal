@@ -200,7 +200,9 @@ fn signers(connection: &Connection) -> Vec<(String, ClaimSignature)> {
         .unwrap()
         .map(|row| {
             let claim_id = row.unwrap();
-            let mut signature = principals::stored_signature(connection, &claim_id).unwrap().unwrap();
+            let mut signature = principals::stored_signature(connection, &claim_id)
+                .unwrap()
+                .unwrap();
             signature.nonce.clear();
             signature.signature.clear();
             (claim_id, signature)
@@ -332,7 +334,9 @@ fn a_claim_signed_while_preparing_is_signed_as_the_old_sealing_signs_it() {
         let claim = &payload.batch.claims[0];
         assert_eq!(
             payload.claim_signatures.get(&claim.id),
-            principals::stored_signature(&reader, &claim.id).unwrap().as_ref(),
+            principals::stored_signature(&reader, &claim.id)
+                .unwrap()
+                .as_ref(),
             "{subject} carries the signature stored for it"
         );
         assert!(
