@@ -401,7 +401,7 @@ impl Seat {
     }
 }
 
-fn seed_idle_sleep(seat: &Seat) -> String {
+fn enable_idle_reader(seat: &Seat) {
     let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
     let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     seat.store.bind_fleet(fleet).unwrap();
@@ -414,6 +414,10 @@ fn seed_idle_sleep(seat: &Seat) -> String {
         evidence:Vec::new(),expected_subject:None,idempotency_key:None,
     }).unwrap();
     seat.store.replication_snapshot().unwrap();
+}
+
+fn seed_idle_sleep(seat: &Seat) -> String {
+    enable_idle_reader(seat);
     let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
     let request = seat.suspension_claim("runtime.action.requested", json!({
         "action":"suspend","cause":"idle","incarnation_id":"original-1","idle_after_ms":60_000
@@ -482,6 +486,7 @@ fn manual_resume_ends_idle_sleep_without_becoming_an_automatic_wake() {
 #[test]
 fn wake_demand_before_idle_stop_cancels_without_touching_runtime() {
     let seat = Seat::new_with_owned_publication(false);
+    enable_idle_reader(&seat);
     seat.busy(false);
     let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
     seat.suspension_claim("runtime.action.requested", json!({
@@ -507,6 +512,15 @@ fn wake_demand_before_idle_stop_cancels_without_touching_runtime() {
     assert_eq!(cancelled.code.as_deref(), Some("wake-pending"));
     assert!(seat.runtime.stops.lock().unwrap().is_empty());
     assert!(seat.store.wake_demand(SUBJECT).unwrap().oldest.is_some());
+    let source = format!("version 2\nstop {SUBJECT:?}\n");
+    let input = crate::graph::parse_internal_intent(&source, "amber").unwrap();
+    let preview = seat.store.mission(&input, crate::model::IntentInput {
+        kdl:source,source_name:None,
+    }).unwrap();
+    seat.store.apply_as(&input,&preview.subject_tokens,"stop-after-idle-cancel",Some("person/operator")).unwrap();
+    seat.reconcile();
+    assert!(sleep_end_classes(&seat).is_empty(),
+        "a cancelled attempt followed by an explicit stop never slept");
 }
 
 #[test]

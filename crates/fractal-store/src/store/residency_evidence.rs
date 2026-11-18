@@ -41,7 +41,7 @@ fn append_input_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
-    validate_claim_input(&input)?;
+    validate_claim_input(input)?;
     let operation = identities::claim_operation(input)?;
     if let Some(record) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
         return Ok(record);
