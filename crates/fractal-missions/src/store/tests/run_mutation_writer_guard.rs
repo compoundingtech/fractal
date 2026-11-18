@@ -71,6 +71,10 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 1],
         },
         Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install launch_freeze schema before returning the store; these constructor-only writers make no run action decision",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
             reason: "finish_open, open_with_ivm_views and open_shared_memory install host-local hold schema at startup; no run action decision",
             counts: [3, 0, 0, 0, 0],
         },

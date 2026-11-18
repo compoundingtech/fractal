@@ -797,6 +797,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/hosts/holds", get(host_holds::list).post(host_holds::place))
         .route("/v1/hosts/holds/release", post(host_holds::release))
         .route("/v1/hosts/holds/recover", post(host_holds::recover))
+        .route("/v1/hosts/launch-freeze", get(host_holds::launch_freeze).post(host_holds::set_launch_freeze))
+        .route("/v1/hosts/launch-freeze/clear", post(host_holds::clear_launch_freeze))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -8434,6 +8436,7 @@ pub async fn guard_bound_request(
         "/v1/agents/native-session",
         "/v1/agents/lane/burst",
         "/v1/hosts/holds",
+        "/v1/hosts/launch-freeze",
         "/v1/delivery/hold",
         "/v1/hosts/holds",
         "/v1/lane-changes",

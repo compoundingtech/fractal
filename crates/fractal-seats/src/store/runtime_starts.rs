@@ -374,6 +374,8 @@ pub trait RuntimeStartsStore {
             limit: usize,
         ) -> Result<RuntimeStartAdmission>;
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool>;
+    /// Transfer a never-dispatched durable operation to the current daemon before dispatch.
+    fn adopt_queued_runtime_start(&self, id: &str, owner: &str) -> Result<bool>;
     fn runtime_start_failure(&self, subject: &str) -> Result<Option<String>>;
     fn runtime_start_counts(&self) -> Result<(u64, u64)>;
     fn unresolved_runtime_start_counts(&self) -> Result<(u64, u64)>;
@@ -979,6 +981,14 @@ impl RuntimeStartsStore for Store {
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
             Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-ha2a0e9b6e6e1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
+    fn adopt_queued_runtime_start(&self, id: &str, owner: &str) -> Result<bool> {
+        self.connection.batched(|tx| -> Result<bool> {
+            Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-h6ff77fe772f5 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET owner=?2
+                WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL",
+                params![id, owner])? == 1)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
