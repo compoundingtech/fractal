@@ -1322,7 +1322,7 @@ async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
     let payload = json!({"subject":subject, "actor":"person/test", "idempotency_key":"make-manual"});
     let (status, converted) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{converted}");
-    let (status, replay) = json_request(app.clone(), "/v1/agents/suspend", payload).await;
+    let (status, replay) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(converted["id"], replay["id"]);
     assert_eq!(converted["body"]["fields"]["operation_id"], before.operation_id);
@@ -1341,6 +1341,26 @@ async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
     let shown = client_suspension(&after);
     assert_eq!(shown["cause"], "manual");
     assert_eq!(shown["mode"], "in-place");
+
+    let resume = append("runtime.action.requested", json!({"action":"resume"}),
+        vec![token, suspend.id], None);
+    append("runtime.action.succeeded", json!({"action":"resume", "incarnation_id":"resumed"}),
+        vec![resume.id.clone()], Some(crate::suspension::resume_completed_key(&resume.id)));
+    append("runtime.observed", json!({"status":"running", "runtime_id":"seat", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.session-file", json!({"harness":"omp", "session_id":"native", "incarnation_id":"resumed"}), vec![], None);
+    append("harness.observed", json!({"state":"idle", "incarnation_id":"resumed", "quiescent":true, "blocking":[]}), vec![], None);
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().phase, "resumed");
+    assert!(crate::suspension::blockers(&state.store, subject, "resumed").unwrap().is_empty());
+    let requests = state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len();
+    let (status, replay) = json_request(app, "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], converted["id"]);
+    assert_eq!(state.store.claims_for(subject, Some("runtime.action.requested")).unwrap().len(), requests);
+    let resumed_path = root.path().join("resumed.sqlite3");
+    state.store.copy_store_to(&resumed_path).unwrap();
+    let resumed_store = Store::open(&resumed_path, "node").unwrap();
+    assert_eq!(resumed_store.suspension_manual_request(subject, "agent-suspend:agent/test/seat:make-manual")
+        .unwrap().unwrap().id, converted["id"].as_str().unwrap());
 }
 
 #[tokio::test]

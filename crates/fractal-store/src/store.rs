@@ -844,7 +844,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h709be0a6fbc5 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h921f972a6b71 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -878,6 +878,9 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
+ON claims(subject, json_extract(body, '$.fields.request_key'))
+WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';
 -- Last activity is the greatest numeric acceptance time, independent of local arrival.
 CREATE INDEX IF NOT EXISTS claims_actor_activity_time_index
 ON claims(actor, length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
@@ -5147,6 +5150,20 @@ impl Store {
             (None, Some(shard)) => messages_shard::stream_operations::operation_claim(&shard, &operation_id),
             (graph, _) => Ok(graph),
         }
+    }
+
+    /// Conversion requests remain replayable after their suspension lineage stops holding a seat.
+    pub fn suspension_manual_request(&self, subject: &str, key: &str) -> Result<Option<ClaimRecord>> {
+        let connection = self.readers.get();
+        Ok(connection.query_row(
+            "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
+                    predecessors, accepted_at_unix_ms
+             FROM claims INDEXED BY claims_suspend_manual_request_index
+             WHERE subject=?1 AND json_extract(body,'$.fields.request_key')=?2
+               AND kind='runtime.action.succeeded'
+               AND json_extract(body,'$.fields.operation_status')='manual'",
+            params![subject, key], claim_from_row,
+        ).optional()?)
     }
 
     /// Native occupants of an operation key, including divergent replicated requests.
