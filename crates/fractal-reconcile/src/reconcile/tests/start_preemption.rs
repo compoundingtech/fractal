@@ -410,7 +410,9 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
 #[tokio::test]
 async fn start_results_are_adopted_while_the_broad_pass_is_held() {
     for stale in [false, true] {
-        let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+        // A superseded producer deliberately ignores its launch guard, so this
+        // exercises refusal at completion application, not just before launch.
+        let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, !stale);
         let subject = "agent/example/worker";
         apply_source(
             &store,
