@@ -68,6 +68,7 @@
    "extra": [
     ".github/workflows/fleet.yml",
     "claude-channel",
+    "fixtures/objective-native-rows.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -242,6 +243,7 @@
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
     "crates/fractal-daemon/hooks/pi-channel.ts",
+    "fixtures/objective-native-rows.json",
     "slo/fractal-ci.kdl",
     "slo/objectives.kdl"
    ]
