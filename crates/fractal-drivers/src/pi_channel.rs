@@ -26,6 +26,7 @@ pub struct EventObserver {
     runtime: String,
     driver: &'static str,
     native_session: Option<String>,
+    channel_ready: bool,
 }
 impl EventObserver {
     pub fn new(
@@ -76,6 +77,7 @@ impl EventObserver {
             runtime: runtime_id.into(),
             driver,
             native_session: None,
+            channel_ready: false,
         })
     }
     /// Restore an authenticated native ID; durable confirmation alone consumes the cold fence.
@@ -98,6 +100,7 @@ impl EventObserver {
             if self.driver == "omp" {
                 let native = native.context("OMP channel has no native session id")?;
                 if frame["type"] == "session" {
+                    self.channel_ready = false;
                     harness_state::with_current_ownership(&self.agent_dir, &self.owner, self.ownership_seq, || {
                         crate::omp_session::record_channel_binding(&self.session_dir, &self.identity,
                             &self.runtime, &self.owner, native, self.resume_generation,
@@ -109,6 +112,7 @@ impl EventObserver {
                         self.resume_generation)?;
                     self.resume_generation = None;
                     self.expected_native_session = None;
+                    self.channel_ready = true;
                 }
             }
             self.native_session = native.map(str::to_owned);
@@ -159,7 +163,14 @@ impl EventObserver {
                 &self.agent_dir, "harness-todo", &serde_json::to_vec(&payload)?,
             )?;
         }
-        if let Some(observation) = state_observation(frame) {
+        if let Some(mut observation) = state_observation(frame) {
+            if self.driver == "omp" {
+                // A native idle frame alone is not a completed channel handshake. The binding
+                // becomes readable only after confirm_channel_binding accepted the ready frame.
+                observation.channel_ready = Some(crate::omp_session::bound_native_session(
+                    &self.session_dir, &self.identity, &self.runtime, &self.owner,
+                )?.as_deref().is_some_and(|bound| self.channel_ready && Some(bound) == self.native_session.as_deref()));
+            }
             self.state.observe(observation)?;
         }
         if let Some(context) = context_frame(frame) {
@@ -499,12 +510,29 @@ mod tests {
         assert_eq!(binding["resumeGeneration"], 2);
         assert_eq!(binding["ready"], false);
         assert!(!state.join("binding.json").exists());
+        observer.observe(&json!({"type":"state","state":"idle","backgroundJobs":0})).unwrap();
+        assert_eq!(harness_state::read(&harness_state::harness_state_path(&agent_dir), None)
+            .unwrap().channel_ready, Some(false));
 
         observer.observe(&json!({"type":"ready","sessionId":"session-exact"})).unwrap();
         let binding: Value =
             serde_json::from_slice(&std::fs::read(state.join("binding.json")).unwrap()).unwrap();
         assert_eq!(binding["ready"], true);
         assert!(!state.join("binding.pending.json").exists());
+        observer.observe(&json!({"type":"state","state":"idle","backgroundJobs":0})).unwrap();
+        let observed = harness_state::read(&harness_state::harness_state_path(&agent_dir), None).unwrap();
+        assert_eq!(observed.channel_ready, Some(true));
+        assert_eq!(observed.background_jobs, Some(0));
+        assert_eq!(observed.state, harness_state::Activity::Idle);
+        observer.observe(&json!({"type":"session","sessionId":"session-exact"})).unwrap();
+        observer.observe(&json!({"type":"state","state":"idle","backgroundJobs":0})).unwrap();
+        let reconnecting = harness_state::read(&harness_state::harness_state_path(&agent_dir), None).unwrap();
+        assert_eq!(reconnecting.channel_ready, Some(false), "an old durable binding is not a fresh handshake");
+        observer.observe(&json!({"type":"ready","sessionId":"session-exact"})).unwrap();
+        observer.observe(&json!({"type":"state","state":"idle","backgroundJobs":0})).unwrap();
+        let reconnected = harness_state::read(&harness_state::harness_state_path(&agent_dir), None).unwrap();
+        assert_eq!(reconnected.channel_ready, Some(true));
+        assert!(reconnected.transition_sequence > observed.transition_sequence);
     }
 
     #[test]
