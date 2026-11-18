@@ -326,27 +326,28 @@ fn wake_demand_receipts_clear_graph_marks_and_shard_sends() {
                 graph.append_claim(&send).unwrap();
             }
             assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_some());
-            if storage == "shard" {
-                step(&graph, subject, kind);
-                stream_mirror::mirror(&graph).unwrap();
-            } else if storage == "marks" {
-                message_marks::record(&graph, subject, kind, "agent/cedar").unwrap();
-            } else {
-                let statuses: &[&str] = match kind {
-                    "message.read" => &["delivered", "read"],
-                    "message.closed" => &["delivered", "read", "closed"],
-                    "message.staged" => &["staged"],
-                    _ => &["delivered"],
-                };
-                for status in statuses {
+            let statuses: &[&str] = match kind {
+                "message.read" => &["delivered", "read"],
+                "message.closed" => &["delivered", "read", "closed"],
+                "message.staged" => &["staged"],
+                _ => &["delivered"],
+            };
+            for status in statuses {
+                let receipt_kind = format!("message.{status}");
+                if storage == "shard" {
+                    step(&graph, subject, &receipt_kind);
+                    stream_mirror::mirror(&graph).unwrap();
+                } else if storage == "marks" {
+                    message_marks::record(&graph, subject, &receipt_kind, "agent/cedar").unwrap();
+                } else {
                     let receipt = ClaimInput {
-                        kind: format!("message.{status}"), actor: Some("agent/cedar".into()),
+                        kind: receipt_kind, actor: Some("agent/cedar".into()),
                         fields: serde_json::from_value(json!({"status": status})).unwrap(),
                         ..send.clone()
                     };
                     graph.append_claim(&receipt).unwrap();
-                    assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_none());
                 }
+                assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_none());
             }
             let demand = graph.wake_demand("agent/cedar").unwrap();
             assert!(demand.frontier.caught_up, "{storage} {kind}");
