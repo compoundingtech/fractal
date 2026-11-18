@@ -315,6 +315,7 @@ pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod idle_mail;
+pub mod wake_demand;
 pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
