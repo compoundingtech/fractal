@@ -3238,6 +3238,12 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["slo", "ls"],
         vec!["slo", "explain", "cpu"],
         vec!["slo", "chart", "cpu", "--over", "1h", "--width", "20"],
+        vec!["series", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec![
+            "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+            "--subject-prefix", "custom/acme/inbox/", "--group-by", "type",
+            "--from", "1000", "--to", "4000", "--bucket-seconds", "1",
+        ],
         vec!["terminals", "ls"],
         vec!["machines"],
         vec!["launch", "ls"],
@@ -3295,6 +3301,20 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 assert_eq!(response["value"]["mission"], "mission/example/inspect");
                 assert_eq!(response["value"]["person"], PERSON);
                 assert_eq!(response["value"]["inclusive"], 0);
+            }
+            if command.first() == Some(&"series") {
+                let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(response["from"], 1000);
+                assert_eq!(response["to"], 4000);
+                let grouped = command.contains(&"--group-by");
+                assert_eq!(response["bucket_seconds"], if grouped { 1 } else { 86_400 });
+                let buckets = response["buckets"].as_array().unwrap();
+                assert_eq!(buckets.len(), if grouped { 3 } else { 1 });
+                assert!(buckets.iter().all(|bucket| bucket["count"] == 0));
+                if grouped {
+                    assert_eq!(response["group_by"], "type");
+                    assert!(buckets.iter().all(|bucket| bucket["groups"] == json!([])));
+                }
             }
         }
         daemon.restart().await;
@@ -3448,17 +3468,37 @@ async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
             family, "rename-id", from, to, "--as", "person/robin",
             "--reason", "Clarify responsibility", "--idempotency-key", &key,
         ];
+        let before_plan = daemon.store().index().unwrap();
+        let mut plan_arguments = arguments.to_vec();
+        plan_arguments.push("--plan");
+        let plan = cli_value(daemon.cli("person/robin", &plan_arguments).await);
+        assert_eq!(plan["admissible"], true);
+        assert_eq!(plan["request"]["from"], from);
+        assert_eq!(plan["request"]["to"], to);
+        assert_eq!(daemon.store().index().unwrap(), before_plan);
+        let digest = plan["request_digest"].as_str().unwrap();
         let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(receipt["identity"], from);
         assert_eq!(receipt["canonical_id"], to);
         assert_eq!(receipt["applied"], "renamed");
         let claims = daemon.store().claims_for(from, None).unwrap();
         assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let proof_arguments = [family, "rename-proof", from, to, "--request-digest", digest];
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["request_digest"], digest);
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["claim"]["body"]["fields"]["request"], plan["request"]);
         let index = daemon.store().index().unwrap();
         daemon.restart().await;
         let replay = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(replay["claim_id"], receipt["claim_id"]);
         assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["request_digest"], digest);
         assert_eq!(daemon.store().index().unwrap(), index);
     }
 }

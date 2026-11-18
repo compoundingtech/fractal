@@ -22,6 +22,7 @@ pub mod deploy;
 pub mod host_holds;
 pub mod resource_membership;
 pub mod shell_resources;
+pub mod resource_exec_receipts;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -255,6 +256,7 @@ use smallclaims::windows::holds;
 pub mod accounts;
 pub mod declared_objectives;
 mod github_capture_config;
+pub mod objective_series;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
@@ -2419,6 +2421,8 @@ pub struct ObservationTrim {
 const TRIM_SCAN_PAGE: i64 = 5_000;
 
 pub struct Store {
+    /// Identity of this open, including same-process reopen or restore.
+    membership_lifetime: uuid::Uuid,
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
@@ -2841,6 +2845,10 @@ pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
 pub type HumanAttention = (BTreeSet<String>, Vec<fractal_ui_model::missions::Gate>);
 
 impl Store {
+    pub fn ordered_membership_lifetime(&self) -> uuid::Uuid {
+        self.membership_lifetime
+    }
+
     /// Decision reads must wait for the run's committed pending projection work.
     pub fn run_projection_pending(&self, subject: &str) -> Result<bool> {
         smallclaims::touched::note_read(|| subject.to_owned());
@@ -2933,6 +2941,7 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
@@ -2963,6 +2972,7 @@ impl Store {
         let resource_backfill = None;
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
@@ -2994,6 +3004,7 @@ impl Store {
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
@@ -11381,6 +11392,65 @@ fn migrate_occurrence_creation_projections_tx(transaction: &Transaction<'_>) -> 
     Ok(())
 }
 
+/// Re-derive cancellation episodes written before the fenced response reducer. Updating the
+/// reducer alone leaves an older writer's unfenced derived `ready` effect materialized forever.
+/// Select only affected run trees through the kind/subject indexes, never replay the claim log.
+fn migrate_person_cancellation_projections_tx(transaction: &Transaction<'_>) -> Result<()> {
+    if transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='person_cancellation_projection_rules' AND value='1')",
+        [], |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    let timing = std::env::var_os("ST3_PROJECTION_MIGRATION_TIMING")
+        .map(|_| std::time::Instant::now());
+    let subjects = transaction.prepare(
+        "SELECT DISTINCT json_extract(asking.body, '$.fields.origin_step')
+         FROM claims cancelled JOIN claims asking ON asking.subject=cancelled.subject
+         WHERE cancelled.kind='work.person-cancelled' AND asking.kind='work.person-asked'
+           AND json_extract(asking.body, '$.fields.origin_step') IS NOT NULL",
+    )?.query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut aggregates = BTreeSet::new();
+    let mut unresolved = 0usize;
+    for subject in subjects {
+        if let Some(aggregate) = run_part_of_tx(transaction, &subject).map_err(anyhow::Error::new)? {
+            aggregates.insert(aggregate);
+        } else {
+            unresolved += 1;
+        }
+    }
+    let selected = aggregates.len();
+    let mut degraded = 0usize;
+    for aggregate in aggregates {
+        let result = match aggregate {
+            Aggregate::RunPart(top) => rebuild_run_part_with_notifications_tx(transaction, &top, false),
+            Aggregate::RunTree(root) => rebuild_run_tree_with_notifications_tx(transaction, &root, false),
+            _ => unreachable!("run_part_of_tx only returns run aggregates"),
+        };
+        degraded += usize::from(!settle_run_refold_result(result).map_err(anyhow::Error::new)?);
+    }
+    // Missing historical owners and persistently degraded runs cannot become repairable by
+    // reopening. Keep their existing health state, but do not repeat every successful refold.
+    // Actual errors (including contention/deadlines) propagate and roll this marker back.
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h7f69e83e8327 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('person_cancellation_projection_rules','1')",
+        [],
+    )?;
+    if unresolved != 0 || degraded != 0 {
+        tracing::warn!(unresolved_origins = unresolved, degraded_aggregates = degraded,
+            "person cancellation projection migration skipped unrepairable history");
+    }
+    if let Some(started) = timing {
+        tracing::info!(migration = "person_cancellation", selected_aggregates = selected,
+            unresolved_origins = unresolved, degraded_aggregates = degraded,
+            elapsed_ms = %started.elapsed().as_millis(),
+            "projection migration completed");
+    }
+    Ok(())
+}
+
 fn work_extension_roots_tx(transaction: &Transaction<'_>) -> Result<(BTreeSet<String>, bool)> {
     let subjects = transaction
         .prepare("SELECT DISTINCT subject FROM claims WHERE kind='work.extended'")?
@@ -12135,13 +12205,15 @@ fn replicated_work_validation_fields<'a>(
     )?;
     insert_event(transaction, record.store_index, kind, subject, body)?;
     projectors::project_claim(projectors::APPEND, transaction, &record)?;
-    normalize_local_projection_timestamps_tx(
-        transaction,
-        subject,
-        kind,
-        body,
-        record.accepted_at_unix_ms,
-    )?;
+    if !is_derived_person_cancellation_tx(transaction, &record)? {
+        normalize_local_projection_timestamps_tx(
+            transaction,
+            subject,
+            kind,
+            body,
+            record.accepted_at_unix_ms,
+        )?;
+    }
     invocation_receipts::record_diagnostic_tx(transaction, origin, &record)?;
     Ok(record)
 }
@@ -12214,6 +12286,25 @@ fn mission_run_creation_time(fields: &Value, accepted_at: u128) -> u128 {
         .and_then(|(deadline, timeout)| deadline.checked_sub(timeout))
         .map(u128::from)
         .unwrap_or(accepted_at)
+}
+
+/// Older writers emitted an unfenced state effect after the authoritative cancellation.
+/// Every local projection side effect, including timestamp normalization, must ignore it.
+fn is_derived_person_cancellation_tx(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool> {
+    if claim.kind != "step-run.state"
+        || claim.actor.as_deref() != Some("daemon/runtime")
+        || !matches!(claim.body.pointer("/fields/status").and_then(Value::as_str), Some("ready" | "failed"))
+    {
+        return Ok(false);
+    }
+    for predecessor in &claim.predecessors {
+        if transaction.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND kind='work.person-cancelled')",
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-hc9b442dfc294 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [predecessor], |row| row.get::<_, bool>(0))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Local writers often prepare rows before appending their claim. Use the resulting claim's
@@ -17287,6 +17378,12 @@ pub fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
+    rebuild_run_part_with_notifications_tx(transaction, top, true)
+}
+
+fn rebuild_run_part_with_notifications_tx(
+    transaction: &Transaction<'_>, top: &str, notify: bool,
+) -> Result<(), FractalError> {
     let root = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.unwrap_or_else(|| top.to_owned());
     require_healthy_run_refold_tx(transaction, &root)?;
     #[cfg(any(test, feature = "test-support"))]
@@ -17417,7 +17514,7 @@ pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(
     }
     #[cfg(any(test, feature = "test-support"))]
     RUN_PART_RUNS.with(|count| count.set(count.get() + runs.len()));
-    rebuild_runs_tx(transaction, &runs)
+    rebuild_runs_tx(transaction, &runs, notify)
 }
 
 /// The generations of one run: projected, created by claims, or named by its asks.
@@ -17529,6 +17626,12 @@ fn claims_in_replay_order_tx(
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
 pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), FractalError> {
+    rebuild_run_tree_with_notifications_tx(transaction, root, true)
+}
+
+fn rebuild_run_tree_with_notifications_tx(
+    transaction: &Transaction<'_>, root: &str, notify: bool,
+) -> Result<(), FractalError> {
     require_healthy_run_refold_tx(transaction, root)?;
     #[cfg(any(test, feature = "test-support"))]
     let _rebuild = rebuild_observer::note_rebuild("run-tree", root, false);
@@ -17560,12 +17663,12 @@ pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<
         .into_iter()
         .map(|run| run.trim_start_matches("mission-run/").to_owned()),
     );
-    rebuild_runs_tx(transaction, &runs)
+    rebuild_runs_tx(transaction, &runs, notify)
 }
 
 /// Forget `runs` and their generations, steps and proposals, then project their claims again in
 /// the replay's order and passes.
-fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Result<(), FractalError> {
+fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>, notify: bool) -> Result<(), FractalError> {
     let strings = |sql: &str, value: &str| string_column_tx(transaction, sql, value);
     let mut generations = BTreeSet::new();
     let mut proposals = BTreeSet::new();
@@ -17674,7 +17777,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
         }
     }
     reapply_local_work_lease_renewals_tx(transaction)?;
-    if projection_work_pending_tx(transaction)? {
+    if notify && projection_work_pending_tx(transaction)? {
         // Claims already advanced their cursor in earlier chunks. Publish a durable local
         // change for every rebuilt run so incremental decision readers revisit skipped work.
         note_run_projection_finished_tx(transaction, runs)?;
@@ -19898,18 +20001,8 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     if claim.kind == "step-run.state" {
-        // Native cancellation is projected from the response itself with its attempt and
-        // asking-episode fence. Older writers also emitted an unfenced derived state claim;
-        // replay must not let that redundant effect fail a resumed origin or erase its lease.
-        if matches!(status, "failed" | "ready") && claim.actor.as_deref() == Some("daemon/runtime") {
-            for predecessor in &claim.predecessors {
-                if transaction.prepare_cached(
-                    "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND kind='work.person-cancelled')",
-                ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hc9b442dfc294 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [predecessor], |row| row.get::<_, bool>(0)).map_err(internal)?
-                {
-                    return Ok(());
-                }
-            }
+        if is_derived_person_cancellation_tx(transaction, claim).map_err(internal)? {
+            return Ok(());
         }
         // A retained completed projection can outlive its admission claim. A duplicate
         // completion is not a new admission and must not manufacture a fresh budget.
