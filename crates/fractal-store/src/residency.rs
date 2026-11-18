@@ -160,8 +160,11 @@ pub fn evaluate_at(
                     WorkAt { steps: &steps, live: None, as_of: accepted })?.is_some() {
                     break;
                 }
-                if let Some(semantics) = semantics { previous.insert(kind, semantics); }
-                else { previous.clear(); }
+                if let Some(semantics) = semantics {
+                    previous.insert(kind, semantics);
+                } else {
+                    previous.clear();
+                }
             }
             since = Some(accepted);
         }
