@@ -12,7 +12,7 @@ use fractal_store::store::invocation_receipts::{append_native_receipt_tx, Invoca
 /// Physical captures are synchronous and thread-scoped. Never carry the witness
 /// to another thread or allow a nested capture to erase its predecessor.
 pub struct RuntimeObservationCapture {
-    previous: Option<(std::path::PathBuf, u64)>,
+    previous: Option<(std::path::PathBuf, u64, u64)>,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
@@ -414,13 +414,16 @@ pub trait RuntimeStartsStore {
 impl RuntimeStartsStore for Store {
 
     fn capture_runtime_observations(&self) -> Result<RuntimeObservationCapture> {
-        let epoch = self.readers.get().query_row(
-            "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
+        // One SQLite snapshot binds the ledger epoch and claim frontier before
+        // physical reads. Ordinary runtime observations do not mutate the ledger.
+        let (epoch, store_index) = self.readers.get().query_row(
+            "SELECT value, (SELECT COALESCE(MAX(store_index),0) FROM claims)
+             FROM local_runtime_start_observation_generation WHERE id=1",
             [],
-            |row| row.get::<_, u64>(0),
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
         )?;
         let previous = RUNTIME_OBSERVATION_CAPTURE
-            .with(|capture| capture.replace(Some((self.path.clone(), epoch))));
+            .with(|capture| capture.replace(Some((self.path.clone(), epoch, store_index))));
         Ok(RuntimeObservationCapture {
             previous,
             _thread: std::marker::PhantomData,
@@ -439,8 +442,8 @@ impl RuntimeStartsStore for Store {
             capture
                 .borrow()
                 .as_ref()
-                .filter(|(path, _)| path == &self.path)
-                .map(|(_, epoch)| *epoch)
+                .filter(|(path, _, _)| path == &self.path)
+                .map(|(_, epoch, _)| *epoch)
         });
         let admission = |connection: &Connection| -> Result<(), FractalError> {
             let latest: Option<RuntimeStartOperation> = connection.query_row(
@@ -520,6 +523,11 @@ impl RuntimeStartsStore for Store {
             );
             validate_local_observation(input)?;
         }
+        let capture_index = RUNTIME_OBSERVATION_CAPTURE.with(|capture| {
+            capture.borrow().as_ref()
+                .filter(|(path, _, _)| path == &self.path)
+                .map(|(_, _, store_index)| *store_index)
+        });
         self.connection
             .batched(|tx| -> Result<bool> {
                 let operation =
@@ -675,9 +683,9 @@ impl RuntimeStartsStore for Store {
                             validate_local_observation(&input)?;
                         }
                         let claim = if input.kind == "runtime.observed" {
-                            // Reconciliation can observe a published child while its
-                            // launcher is still returning. A delayed completion must
-                            // not regress that exact runtime from running to starting.
+                            // Preserve a same-incarnation observation published after
+                            // the completion's physical capture, including terminal
+                            // evidence from the broad pass. Keep launch success separate.
                             let current: Option<String> = tx
                                 .query_row(
                                     /* sqlite-large-value: allow-for-now lv-h78cc0dbbbfdf owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!(
@@ -695,21 +703,17 @@ impl RuntimeStartsStore for Store {
                                 .map(|id| claim_by_id_tx(tx, &id))
                                 .transpose()?
                                 .flatten();
-                            if input
-                                .fields
-                                .get("status")
-                                .is_some_and(|status| status == "starting")
-                                && let Some(current) = current.filter(|current| {
-                                    current.origin == self.origin()
-                                        && current.body.pointer("/fields/incarnation_id")
-                                            == Some(&result["incarnation"])
-                                        && current.body.pointer("/fields/runtime_id")
-                                            == Some(&operation.body["member"]["runtime_id"])
-                                        && current
-                                            .body
-                                            .pointer("/fields/status")
-                                            .is_some_and(|status| status != "starting")
-                                })
+                            if let Some(current) = current.filter(|current| {
+                                current.origin == self.origin()
+                                    && current.body.pointer("/fields/incarnation_id")
+                                        == Some(&result["incarnation"])
+                                    && current.body.pointer("/fields/runtime_id")
+                                        == Some(&operation.body["member"]["runtime_id"])
+                            })
+                                && (capture_index.is_none_or(|captured| current.store_index > captured)
+                                    || (input.fields.get("status").is_some_and(|status| status == "starting")
+                                        && current.body.pointer("/fields/status")
+                                            .is_some_and(|status| status != "starting")))
                             {
                                 let key = canonical::claim_key(tx, &current.id)?;
                                 observation_receipt = Some(json!({"receipt":current,
@@ -1787,6 +1791,61 @@ mission "launch-publication" state="ready" {
             "writer-cost profile={}",
             output.join("slow.jsonl").display()
         );
+    }
+
+    #[test]
+    fn completion_preserves_terminal_observations_published_after_its_running_capture() {
+        for status in ["exited", "stopped", "vanished"] {
+            let store = Store::open_memory("node").unwrap();
+            let subject = "agent/example/reciprocal-exit";
+            let incarnation = "actual-incarnation";
+            let mut start = operation("reciprocal-exit", subject, None);
+            store.admit_runtime_start(&mut start, 2).unwrap();
+            store.finish_runtime_start(&start.id, &json!({
+                "incarnation": incarnation, "verification": "operation-incarnation"
+            })).unwrap();
+            // Completion physically sees running. The pass then observes the end
+            // and publishes it before completion reaches its writer transaction.
+            let _capture = store.capture_runtime_observations().unwrap();
+            let running = ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), Value::from("running")),
+                    ("runtime_id".into(), Value::from(subject)),
+                    ("terminal".into(), Value::from(true)),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                    ("adopted".into(), Value::from(true)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("start-observed:{}", start.id)),
+            };
+            let exit_evidence = json!({"incarnation": incarnation, "exit_code": 23});
+            let mut ended = running.clone();
+            ended.idempotency_key = None;
+            ended.fields.insert("status".into(), Value::from(status));
+            ended.fields.insert("exit_code".into(), Value::from(23));
+            ended.fields.insert("exit_evidence".into(), exit_evidence.clone());
+            let terminal = store.append_reconciled_runtime_observation(&ended).unwrap().unwrap();
+            assert!(store.apply_runtime_start_result(&start.id, &[receipt(subject), running]).unwrap());
+            store.runtime_start_applied(&start.id).unwrap();
+            let retained = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+            assert_eq!(retained.id, terminal.id);
+            assert_eq!(retained.body["fields"]["status"], status);
+            assert_eq!(retained.body["fields"]["incarnation_id"], incarnation);
+            assert_eq!(retained.body["fields"]["exit_code"], 23);
+            assert_eq!(retained.body["fields"]["exit_evidence"], exit_evidence);
+            assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
+            assert_eq!(store.latest_observation(subject, "runtime.action.succeeded").unwrap()
+                .unwrap().body["fields"]["operation"], start.id);
+            let completed = store.readers.get().query_row(
+                "SELECT * FROM local_runtime_starts WHERE id=?1", [&start.id], read,
+            ).unwrap();
+            assert!(completed.finished && completed.applied && completed.receipted);
+            assert_eq!(completed.result.unwrap()["runtime_observation"]["receipt"]["id"], terminal.id);
+        }
     }
 
     #[test]
