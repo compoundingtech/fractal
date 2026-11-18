@@ -130,6 +130,7 @@
   },
   "fractal-conversation-ui": {
    "extra": [
+    "fixtures/clients/ask-markdown.json",
     "fixtures/clients/conversation-style.json",
     "fixtures/clients/transcripts/claude-skill.json",
     "fixtures/clients/transcripts/claude.expected.json",
@@ -163,6 +164,7 @@
   },
   "fractal-delivery-base": {
    "extra": [
+    "fixtures/clients/ask-markdown.json",
     "scripts/ci-test-paths.rs"
    ]
   },
