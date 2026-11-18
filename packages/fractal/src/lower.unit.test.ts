@@ -10,7 +10,7 @@ import type { ProgramExit } from './program-engine.ts'
 const meta = { url: 'file:///tree/example/change/mission.ts' }
 const owner = { id: 'example/owner' }
 const worker = { id: 'example/worker' }
-const bindings = { id: 'example/change', host: 'local', workers: { 'example/worker': 'example/seat-turn' } }
+const bindings = { id: 'example/change', host: 'local', workers: { 'example/worker': { mission: 'example/seat-turn', goalInput: 'goal' } } }
 const base = { state: 'ready' as const, reportTo: owner, goal: 'Deliver the bounded change.' }
 const completed = (key: string): ProgramExit => ({ _tag: 'Success', value: { run: `mission-run/${key}`, status: 'completed' } })
 
@@ -28,13 +28,13 @@ const renewal = () => {
   const renew = Fractal.step({ id: 'renew', assignedTo: worker, dependsOn: approval, goal: 'Renew approved access.' })
   return Fractal.defineMission({ meta, intent: { ...base, steps: [approval, renew] } })
 }
-const review = () => {
+const review = (path = 'verdict', value = 'GO') => {
   const head = Fractal.input.text('head')
   const inspect = Fractal.step({ id: 'review', assignedTo: worker, goal: Fractal.t`Review ${head}.`, produces: {
     verdict: Fractal.product.resource({ kind: 'custom.example.verdict', subject: 'resource/mission-run/${ST_MISSION_RUN}/review/${input.head}/verdict', fields: { head: Fractal.t`${head}` } }),
     evidence: Fractal.product.resource({ kind: 'custom.example.evidence', fields: { present: true } }),
   } })
-  const check = Fractal.step({ id: 'check', agentless: true, dependsOn: inspect, gates: [Fractal.gate.fieldIs({ name: 'verdict-go', subject: Fractal.t`${inspect.products.verdict}`, path: 'verdict', value: 'GO' })] })
+  const check = Fractal.step({ id: 'check', agentless: true, dependsOn: inspect, gates: [Fractal.gate.fieldIs({ name: 'verdict-go', subject: Fractal.t`${inspect.products.verdict}`, path, value })] })
   return Fractal.mission({ meta, ...base, inputs: [head], steps: [inspect, check] })
 }
 const verify = () => {
@@ -117,6 +117,10 @@ describe('graph lowering golden parity', () => {
     } } } : exit] as const)
     const rejected = fakeHost({ payload: { head: 'abc' }, journal: noGo })
     expect(yield* start(compiled, rejected)).toMatchObject({ _tag: 'Failure', error: { _tag: 'GraphGateFailed', step: 'check', gate: 'verdict-go' } })
+    for (const [path, value] of [['missing', 'GO'], ['constructor.name', 'Object']] as const) {
+      const absent = fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded.slice(0, 1)) })
+      expect(yield* start(lower(review(path, value), bindings), absent)).toMatchObject({ _tag: 'Failure', error: { _tag: 'GraphGateFailed', step: 'check', gate: 'verdict-go' } })
+    }
   }))
 
   it.effect('runs exec gates inside a journaled activity and refuses nonzero exits', () => Effect.gen(function* () {
@@ -155,11 +159,17 @@ describe('typed compile refusals', () => {
     expect(() => lower(verify(), { ...bindings, host: 'other' })).toThrow(expect.objectContaining({ construct: 'gate.exec.host', step: 'verify' }))
   })
 
-  it('never overwrites a declared goal input with worker instructions', () => {
+  it.effect('preserves a declared goal input through explicit instruction-input binding', () => Effect.gen(function* () {
     const goal = Fractal.input.text('goal')
     const graph = Fractal.mission({ meta, ...base, inputs: [goal], steps: [Fractal.step({ id: 'work', assignedTo: worker, goal: Fractal.t`Implement ${goal}.` })] })
-    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'input.goal', step: bindings.id }))
-  })
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'worker input binding', step: 'work' }))
+    const compiled = lower(graph, { ...bindings, workers: { 'example/worker': { mission: 'example/seat-turn', goalInput: 'instructions' } } })
+    const host = fakeHost({ payload: { goal: 'requested change' }, child: async ({ key, input }) => {
+      expect(input).toEqual({ goal: 'requested change', instructions: 'Implement requested change.' })
+      return completed(key)
+    } })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success' })
+  }))
 
   it('uses explicit source-reference resolution and refuses a missing resolver', () => {
     const ref = Fractal.agent({ meta: { url: 'file:///tree/example/worker/agent.ts' } })

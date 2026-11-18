@@ -676,16 +676,18 @@ const graph = Fractal.mission({
 export default Fractal.lower(graph, {
   id: 'example/change',
   host: 'local',
-  workers: { 'example/worker': 'example/seat-turn' },
+  workers: { 'example/worker': { mission: 'example/seat-turn', goalInput: 'goal' } },
 })
 ```
 
-Bindings are explicit: `workers` maps an assigned agent id to a published child mission,
-not to an automatically invented worker protocol. Worker children receive the declared
-text inputs plus the expanded step `goal`. A text input named `goal` is refused when
-there are worker steps, rather than overwritten. A tree using imported agent references supplies
-`resolveAgent` using its existing reference resolver. Resolve context factories before
-calling `lower`. Missing worker bindings are compile refusals.
+Bindings are explicit: `workers` maps an assigned agent id to a published child mission
+and that mission's `goalInput` instruction parameter. Worker children receive every
+declared text input unchanged, plus the expanded step goal under `goalInput`. If that
+key collides with a declared graph input, compilation refuses the binding; choose an
+unused child parameter (for example `instructions` when the graph has `input.text('goal')`).
+A tree using imported agent references supplies `resolveAgent` using its existing
+reference resolver. Resolve context factories before calling `lower`. Missing worker
+bindings are compile refusals; the compiler invents no implicit seat-turn protocol.
 
 The compiler validates a completed-dependency DAG and precomputes its ready sets.
 Each ready set runs through `Effect.all` with unbounded sibling concurrency; a dependent

@@ -18,18 +18,25 @@ export class GraphGateFailed extends Schema.TaggedError<GraphGateFailed>()('Grap
   reason: Schema.String,
 }) {}
 
+/** The published child mission's explicit instruction-input protocol. */
+export interface WorkerBinding {
+  readonly mission: string
+  readonly goalInput: string
+}
+
 export interface LowerOptions {
   /** Path-derived mission id, supplied by the authoring tree. */
   readonly id: string
   /** The program's execution host; remote gate commands are not supported. */
   readonly host: string
   /** Explicit routing from graph agent id to a published seat-turn mission. */
-  readonly workers: Readonly<Record<string, string>>
+  readonly workers: Readonly<Record<string, WorkerBinding>>
   /** Resolve imported agent references using the same tree as the graph renderer. */
   readonly resolveAgent?: (value: unknown) => AgentReference
 }
 
 const Product = Schema.Record(Schema.String, Schema.Unknown)
+const Products = Schema.Record(Schema.String, Product)
 const refuse = (step: string, construct: string, reason = 'Not supported by W1 graph lowering'): never => {
   throw new GraphCompileRefusal({ step, construct, reason })
 }
@@ -78,6 +85,7 @@ export const lower = (
     if (step.agentless !== true && (agent === undefined || !('id' in agent))) refuse(step.id, 'assignedTo')
     const worker = step.agentless === true || agent === undefined || !('id' in agent) ? undefined : options.workers[agent.id]
     if (step.agentless !== true && worker === undefined) refuse(step.id, 'worker binding', 'No seat-turn mission bound to the assigned agent')
+    if (worker !== undefined && mission.inputs?.some((input) => input.name === worker.goalInput)) refuse(step.id, 'worker input binding', `Instruction input ${worker.goalInput} collides with a declared graph input; bind an unused child input key`)
     for (const product of step.produces ?? []) {
       if (!product.subject.startsWith('resource/mission-run/${ST_MISSION_RUN}/')) refuse(step.id, 'product.resource subject')
     }
@@ -125,7 +133,6 @@ export const lower = (
   }
   for (const input of mission.inputs ?? []) {
     if (input.kind !== 'text') refuse(options.id, `input.${input.kind}`)
-    if (input.name === 'goal' && steps.some((step) => step.worker !== undefined)) refuse(options.id, 'input.goal', 'Worker bindings reserve goal for the expanded step goal')
   }
   const input = Schema.Struct(Object.fromEntries((mission.inputs ?? []).map((field) => [field.name, Schema.String])))
   const plan = steps.map((step) => ({ id: step.id, dependsOn: (step.dependsOn ?? []).map((dependency) => dependency.step), gates: step.gates ?? [] }))
@@ -148,10 +155,10 @@ export const lower = (
       const declaredProducts = step.produces ?? []
       if (step.worker !== undefined) {
         const paths = declaredProducts.map((product) => expand(product.subject.slice('resource/mission-run/${ST_MISSION_RUN}/'.length)))
-        const worker = Native.Worker.layer({ mission: step.worker, input: { ...values, goal: expand((step.goal ?? []).join('\n')) }, ...(paths.length === 0 ? {} : { product: paths }) })
+        const worker = Native.Worker.layer({ mission: step.worker.mission, input: { ...values, [step.worker.goalInput]: expand((step.goal ?? []).join('\n')) }, ...(paths.length === 0 ? {} : { product: paths }) })
         if (paths.length === 0) yield* Native.step({ id: step.id }).pipe(Effect.provide(worker))
         else {
-          const values = yield* Native.step({ id: step.id, success: Schema.Record(Schema.String, Product) }).pipe(Effect.provide(worker))
+          const values = yield* Native.step({ id: step.id, success: Products }).pipe(Effect.provide(worker))
           yield* Native.step({ id: `${step.id}/product` }, Effect.gen(function* () {
             for (const [index, product] of declaredProducts.entries()) {
               const value = values[paths[index]!]!
@@ -188,7 +195,7 @@ export const lower = (
         } else if (gate.kind === 'field') {
           yield* Native.step({ id }, Effect.gen(function* () {
             let value: unknown = products.get(expand(gate.subject))
-            for (const field of gate.path.split('.')) value = typeof value === 'object' && value !== null && field in value ? Reflect.get(value, field) : undefined
+            for (const field of gate.path.split('.')) value = typeof value === 'object' && value !== null && !Array.isArray(value) && Object.hasOwn(value, field) ? Reflect.get(value, field) : undefined
             if (value !== (typeof gate.value === 'string' ? expand(gate.value) : gate.value)) return yield* fail(gate.name, `Field ${gate.path} does not match`)
           }))
         }
