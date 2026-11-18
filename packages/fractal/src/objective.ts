@@ -212,6 +212,13 @@ export const validWord = (word: string): boolean =>
 export const validName = (name: string): boolean =>
   name.length <= 128 && name.split('/').every(validWord)
 
+/** Built-in row segments also contain underscore-joined words, such as `writer_hold`. */
+const validNativeName = (name: string): boolean =>
+  name.length <= 128 &&
+  // Enforce ASCII through the true end of input (JavaScript `$` also matches before a final newline).
+  !/[^a-z0-9/_-]/u.test(name) &&
+  name.split('/').every((segment) => segment.split('_').every(validWord))
+
 const units = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const
 
 /** A native duration in milliseconds; bare integers are seconds, as the native reader reads them. */
@@ -511,7 +518,7 @@ const parseIndicator = ({ value, fail }: { readonly value: unknown; readonly fai
       return parseNumeric({ value, fail })
     case 'native':
       allow(['objective'])
-      if (typeof value.objective !== 'string' || !validName(value.objective)) return fail('native objective must name a well-formed built-in row')
+      if (typeof value.objective !== 'string' || !validNativeName(value.objective)) return fail('native objective must name a well-formed built-in row')
       return freeze({ kind, objective: value.objective })
     default:
       return fail(`has an unknown indicator \`${kind}\``)

@@ -638,6 +638,29 @@ pub fn find<'a>(rows: &'a [Value], id: &str) -> Result<&'a Value, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_row_corpus_covers_every_shipped_row() {
+        use crate::objective::Indicator;
+
+        let targets: Vec<_> = crate::slo::shipped().iter()
+            .filter(|objective| !matches!(objective.indicator, Indicator::Divergence))
+            .map(|objective| {
+                let mut target = json!({"name": objective.name});
+                if objective.target("p99", true).is_some() {
+                    target["remote_windows"] = json!({});
+                }
+                target
+            })
+            .collect();
+        let mut emitted = rows(&json!({"targets": targets}), &[], 0, 0);
+        emitted.push(divergence(0));
+        let mut actual: Vec<_> = emitted.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        actual.sort_unstable();
+        let corpus: Value = serde_json::from_str(include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
+        let expected: Vec<_> = corpus["rows"].as_array().unwrap().iter().map(|row| row.as_str().unwrap()).collect();
+        assert_eq!(actual, expected, "update the shared Rust/TypeScript native row corpus when emitted rows change");
+    }
+
     fn window(count: u64, p99: f64, over: u64) -> Value {
         json!({"count": count, "p50_ms": 1.0, "p99_ms": p99, "max_ms": p99 + 1.0,
             "over_target": over, "over_target_share": over as f64 / count.max(1) as f64})
