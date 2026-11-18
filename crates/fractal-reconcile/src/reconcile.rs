@@ -8963,9 +8963,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 else {
                     unreachable!("blockers require a bound native session");
                 };
-                if let Err(error) = crate::seat_snapshot::workspace(self.driver_state_dir.parent().unwrap(), agent, &suspension.operation_id, member) {
-                    return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new());
+                if suspension.cause() == "idle" && harness != "omp" {
+                    return self.fail_suspension(agent, suspension, "driver-unsupported", "idle suspension requires omp".into(), Vec::new());
                 }
+                let mode = match crate::seat_snapshot::capture(self.driver_state_dir.parent().unwrap(), agent, member, suspension) {
+                    Ok(mode) => mode,
+                    Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),
+                };
                 let blocking = suspended::blockers(&self.store, agent, incarnation)?;
                 if !blocking.is_empty() {
                     return self.fail_suspension(agent, suspension, "not-quiescent", "the seat became active while its workspace was captured".into(), blocking);
@@ -8988,7 +8992,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             "runtime_id".into(),
                             Value::String(member.runtime_id.clone()),
                         ),
-                    ]),
+                    ]).into_iter().chain(
+                        (mode == "in-place").then(|| ("mode".into(), Value::String(mode.into())))
+                    ).collect(),
                 )?;
                 stop(observation)?;
                 Ok(())
@@ -9013,9 +9019,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                     member.shutdown_timeout_ms,
                     None,
                 )?;
-                // A missing portable transcript does not discard single-host continuity.
-                // Cross-host fetch will refuse until a complete archive exists.
-                let _ = crate::seat_snapshot::seal(self.driver_state_dir.parent().unwrap(), &self.store, agent, member, suspension);
+                // In-place continuity requires a frozen transcript, not only a live path.
+                let sealed = crate::seat_snapshot::seal(self.driver_state_dir.parent().unwrap(), &self.store, agent, member, suspension);
+                if suspension.mode() == "in-place" {
+                    match sealed {
+                        Ok(Some(_)) => {}
+                        // A stopped seat must retain its hold if sealing cannot finish.
+                        // A failed suspend receipt would release it to ordinary fresh launch.
+                        Ok(None) => return Err(crate::model::FractalError::new("driver-unsupported", "in-place suspension requires a portable native transcript").into()),
+                        Err(error) => return Err(error),
+                    }
+                }
                 // The stop is now verified, so a fault from an earlier attempt that timed out
                 // while the process was still exiting is over. Clear it before the completion: a
                 // reader that waits for the suspended phase must not find the seat failed.
@@ -9114,6 +9128,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .source_host
                     .as_deref()
                     .is_some_and(|source| source != self.host);
+                if suspension.mode() == "in-place" {
+                    if moved {
+                        return self.fail_suspension(agent, suspension, "snapshot-in-place", "an in-place suspension can only resume on its source host".into(), Vec::new());
+                    }
+                    let Some(operation) = suspension.suspend_operation_id.as_deref() else {
+                        return self.fail_suspension(agent, suspension, "snapshot-incomplete", "the suspension has no capture operation".into(), Vec::new());
+                    };
+                    let dir = crate::seat_snapshot::directory(self.driver_state_dir.parent().unwrap(), operation);
+                    match crate::seat_snapshot::restore(&dir.join("payload.tar"), &self.driver_state_dir, agent, operation, member, &session) {
+                        Ok(manifest) => {
+                            let path = manifest.transcript_path.expect("validated in-place transcript path");
+                            crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path.to_string_lossy().into_owned());
+                        }
+                        Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),
+                    }
+                } else
                 if moved {
                     crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 } else if let (Some(incarnation), Some(harness)) =
