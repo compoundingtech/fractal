@@ -255,3 +255,24 @@ fn a_long_body_stays_in_the_shard_and_the_mirror_row_stays_small() {
     assert_eq!(coordination(&graph, "message/mirror-long"), Some((false, true)));
     assert_eq!(idle(&graph, "message/mirror-long"), Some(("agent/cedar".into(), true, false)));
 }
+
+#[test]
+fn wake_demand_is_shard_aware_and_does_not_hide_mirror_lag() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    assert!(graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
+    append(&graph, &sent("message/wake-index", "agent/cedar", &[]));
+    let lagging = graph.wake_demand("agent/cedar").unwrap();
+    assert!(lagging.oldest.is_none());
+    assert!(!lagging.frontier.caught_up);
+    stream_mirror::mirror(&graph).unwrap();
+    let current = graph.wake_demand("agent/cedar").unwrap();
+    assert!(current.frontier.caught_up);
+    assert_eq!(current.oldest.unwrap().subject, "message/wake-index");
+    step(&graph, "message/wake-index", "message.staged");
+    assert!(!graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
+    stream_mirror::mirror(&graph).unwrap();
+    let offered = graph.wake_demand("agent/cedar").unwrap();
+    assert!(offered.frontier.caught_up);
+    assert!(offered.oldest.is_none());
+}
