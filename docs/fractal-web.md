@@ -665,6 +665,8 @@ before chat or thread send grants become available. Each scoped connection share
 initialization barrier: later capability refreshes and recovery inspection do not demote
 that connection's own in-flight sends. A new tab independently restores unresolved
 dispatch markers as unknown; the original dispatcher can still retain a correlated receipt.
+Live-source startup recovery and the first send-grant observation share the same capabilities
+response, including while it is in flight; reconnects still read current capabilities.
 Never-dispatched preparing and ready records remain pending without automatic submission.
 Restored Start and reply packets require explicit original-target revalidation before
 their one-shot dispatch permit can be consumed. Failed startup leaves sending unavailable

@@ -467,6 +467,7 @@ describe('outbox startup admission', () => {
     saved.close()
     yield* withGateway((live, gateway) => Effect.gen(function* () {
       yield* Effect.promise(() => live.ready)
+      expect(gateway.capabilityReads).toBe(1)
       const inspected = yield* openIndexedDbOutbox({ indexedDB: factory, scope, recoverOnOpen: false })
       try {
         expect(yield* Effect.promise(() => inspected.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
@@ -475,10 +476,31 @@ describe('outbox startup admission', () => {
         live.registry.mount(live.source.grants)
         yield* settle
         expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
+        expect(gateway.capabilityReads).toBe(1)
         expect(gateway.messageActions).toEqual([])
       } finally { inspected.close() }
     }), { issuerPair })
   }))
+
+  it.live('shares the in-flight capabilities read between startup recovery and mounted grants', () => {
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    return withGateway((live, gateway) => Effect.gen(function* () {
+      const answer = Promise.withResolvers<void>()
+      gateway.capabilityGate = answer.promise
+      const release = live.registry.mount(live.source.grants)
+      try {
+        yield* settle
+        expect(gateway.capabilityReads).toBe(1)
+        expect(live.registry.get(live.source.grants)).toHaveProperty('unread', true)
+        answer.resolve()
+        yield* Effect.promise(() => live.ready)
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
+        expect(gateway.capabilityReads).toBe(1)
+        expect(gateway.messageActions).toEqual([])
+      } finally { answer.resolve(); release() }
+    }), { issuerPair })
+  })
 
   it.live('keeps protected startup storage unavailable without granting sends or inventing corrupt entries', () => {
     vi.stubGlobal('indexedDB', { open: () => { throw new DOMException('Storage disabled', 'SecurityError') } })
