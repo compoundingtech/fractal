@@ -36,7 +36,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(spec) = crate::mission::find_step(mission, &step.step) else { continue; };
             let step_policies = policies(&spec.escalation, declared);
             has_policy |= !step_policies.is_empty();
-            let state = fractal_store::client_values::client_work_state(&step.status);
+            let state = crate::client_values::client_work_state(&step.status);
             for policy in step_policies {
                 if policy.state.as_str() != state { continue; }
                 let episode = self.store.escalation_episode(&step.subject, state, step.created_at_unix_ms,
