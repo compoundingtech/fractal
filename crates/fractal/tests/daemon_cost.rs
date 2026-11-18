@@ -2615,7 +2615,7 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
             let mut samples = Vec::new();
             for _ in 0..4 {
                 let scope = work::SqliteWorkScope::start();
-                let rows = fractal_daemon::api::slo_rows(&store).unwrap();
+                let rows = fractal_daemon::api::slo_rows(&store, Vec::new()).unwrap();
                 let spent = scope.finish();
                 if configured {
                     let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();

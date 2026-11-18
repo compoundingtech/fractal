@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "summary": "Measure canonical rolling GitHub merges and final ready-to-merged cycles with native objectives",
+  "rules": {"status": "changed", "detail": "Native objective rows evaluate distinct merged PR identities across all authors under an explicit effective-dated scope. Merge counts require PR and merge coverage, while latency also requires lifecycle coverage. A finite evidence horizon and per-window coverage preserve covered civil days when other windows or families are unknown. Final-ready latency is measured-only. GitHub target scopes obey the same remote-scope validation as native declarations."},
+  "compatibility": {"status": "changed", "detail": "GitHub source-backed declarations compose with the shared ratio/gauge/native objective platform. Domain rows are available before native owner bindings evaluate, retain the shared row statuses and unknown-episode semantics, and cannot override inherited measurement policies. The TypeScript subject tree admits all declaration families through one contract. Measurement reports source lag, correction revision and partial civil-day bars; the old queue-based merge-latency proxy declaration is retired."},
+  "manual": {"status": "changed", "detail": "No source, roster history, throughput target or latency policy is installed by default. Operators author the scope dates and throughput target explicitly; acquisition activation remains separately admitted."},
+  "recovery": {"status": "unchanged", "detail": "Measurement is derived from durable capture claims. Corrections and retractions replace prior samples; projection loss rebuilds without synthesizing successful windows."}
+}
