@@ -90,7 +90,7 @@ export const openNativeOutbox = async (scope: OutboxScope, authorize: (scope: Ou
           authorize(storage.scope);
           return serializeFiles(() => acceptProtectedOutboxIntent(repository, bridge, directory, sha256, id, text, captured, capturedMetadata));
         },
-        commitRetry: (child: OutboxPreparingRecord): Promise<boolean> => {
+        commitRetry: (child: OutboxPreparingRecord, validate: () => Promise<void>): Promise<boolean> => {
           const captured: OutboxPreparingRecord = JSON.parse(JSON.stringify(child));
           return serializeFiles(async () => {
             authorize(storage.scope);
@@ -98,6 +98,7 @@ export const openNativeOutbox = async (scope: OutboxScope, authorize: (scope: Ou
             for (const attachment of captured.intent.attachments) {
               await readOutboxAttachment(bridge, directory, sha256, attachment.reference);
             }
+            await validate();
             return repository.commit(captured);
           });
         },

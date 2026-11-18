@@ -14,7 +14,7 @@ import type { Picked } from './images.ts';
 export interface OutboxOwner {
   repository: IosOutboxRepository;
   acceptIntent(id: string, text: string, images: readonly Picked[], metadata: OutboxMessageMetadata): Promise<OutboxPreparingRecord>;
-  commitRetry(child: OutboxPreparingRecord): Promise<boolean>;
+  commitRetry(child: OutboxPreparingRecord, validate: () => Promise<void>): Promise<boolean>;
   readAttachment(reference: string): Promise<Uint8Array>;
   authorize(): void;
   cleanup(now: number): Promise<void>;
@@ -23,6 +23,7 @@ export interface OutboxOwner {
 export interface OutboxTransport {
   /** Also validates the captured person, actor, profile slot and original connection. */
   authorize(intent: OutboxMessageIntent): void;
+  validateRetry(intent: OutboxMessageIntent): Promise<'retired' | 'reassigned' | 'unassigned' | undefined>;
   prepare(record: OutboxPreparingRecord, intent: OutboxMessageIntent): Promise<PreparedPacket>;
   post(packet: PreparedPacket): Promise<EnvelopeOf<ActionResult>>;
   /** Direct original-member authoritative read only; absence never proves nonapplication. */
@@ -186,7 +187,19 @@ export class OutboxRuntime {
       this.authorize(intent);
       const childIntent: OutboxMessageIntent = { ...intent, parentAttemptId: id };
       const child = createOutboxRecord(childId, childIntent);
-      if (!await this.owner.commitRetry(child)) return;
+      let recipientBlocked = false;
+      if (!await this.owner.commitRetry(child, async () => {
+        const state = await this.transport.validateRetry(intent);
+        this.authorize(intent);
+        if (state) {
+          recipientBlocked = true;
+          this.notices.set(id, `Recipient ${state}. No new attempt was created; the original recovery is kept.`);
+          throw new Error(`Recipient ${state}`);
+        }
+      }).catch(error => {
+        if (recipientBlocked) return false;
+        throw error;
+      })) { await this.refresh(); return; }
       await this.refresh();
       this.launch(childId);
     } catch (error) { this.signalIssue(error); }

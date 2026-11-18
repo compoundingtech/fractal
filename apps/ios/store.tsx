@@ -737,6 +737,32 @@ function useAppStore(proof?: FabricProfile) {
       };
       const runtime = new OutboxRuntime(owner, {
         authorize: authorizeIntent,
+        validateRetry: async intent => {
+          authorizeIntent(intent);
+          const message = intent.message;
+          const agent = message.kind === 'chat' ? message.to : message.kind === 'start' ? message.origin.agentId : message.agentId;
+          try {
+            if (message.kind === 'start') {
+              const context = (await original.threadStartContext(message.origin.sourceId, message.origin.episode)).value;
+              if (context.start_recipient.agent_id !== agent) return 'reassigned';
+            } else if (message.kind === 'reply') {
+              const thread = (await original.threadGet(message.target)).value;
+              if (thread.agent_id !== agent) return 'reassigned';
+            }
+            if (agent.startsWith('agent/')) {
+              const recipient = (await original.agentsGet(agent)).value;
+              if (recipient.kind !== 'agent' || recipient.id !== agent) return 'reassigned';
+              if (recipient.state === 'retired') return 'retired';
+            }
+            return undefined;
+          } catch (error) {
+            if (error instanceof ClientError) {
+              if (error.response.code === 'recipient-retired') return 'retired';
+              if (error.response.code === 'recipient-unassigned' || error.status === 404) return 'unassigned';
+            }
+            throw error;
+          }
+        },
         sha256: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))),
         errorText,
         changed: () => setThreadRefresh(value => value + 1),
@@ -767,7 +793,10 @@ function useAppStore(proof?: FabricProfile) {
             const parameters = await signMessage(id, unsigned, profileKey);
             if (!parameters.signature || parameters.signature.key !== intent.binding.signingKey) throw new Error('The original signing key changed. Recovery content is kept without dispatch.');
             authorizeIntent(intent);
-            return prepareMessageSendPacket({ id, idempotency_key: id, fence: await sendFences(lastSnapshot.current, fence)(), parameters });
+            const currentFence = intent.parentAttemptId
+              ? { snapshot_id: (await original.capabilities()).snapshot.id, subject_revisions: {} }
+              : await sendFences(lastSnapshot.current, fence)();
+            return prepareMessageSendPacket({ id, idempotency_key: id, fence: currentFence, parameters });
           }
           if (message.kind === 'start') {
             const context = (await original.threadStartContext(message.origin.sourceId, message.origin.episode)).value;

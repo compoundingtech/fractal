@@ -86,6 +86,11 @@ the parent id. It never resends the parent's signed packet. Unknown has no Retry
 and lifecycle restoration never redispatches terminal not-applied attempts.
 Child acceptance shares the filesystem acceptance/cleanup barrier and verifies every
 retained attachment before committing; unavailable bytes prevent child creation.
+Immediately before that commit, the original client rereads the canonical Start
+recipient or reply thread and the agent's retirement state. Retired, reassigned or
+unassigned recipients leave the parent intact with a specific recovery status and
+no child or POST. A permitted child prepares a new packet with a freshly read fence;
+ordinary retries bypass the initial-send cached snapshot optimization.
 There is no exclusion/seal protocol, and no claim to reconcile every lost receipt.
 Storage failure preserves drafts and recovery, with a retry-later storage action.
 Saved Start metadata remains packetless unknown. Protected-profile migration commits

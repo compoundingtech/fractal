@@ -44,10 +44,11 @@ const fixture = async t => {
   let authorized = true;
   const owner = { repository, authorize: () => { if (!authorized) throw new Error('re-pair required'); },
     acceptIntent: (id, text, images, context) => acceptProtectedOutboxIntent(repository, bridge, '/private/outbox', hash, id, text, images, context),
-    commitRetry: child => repository.commit(child),
+    commitRetry: async (child, validate) => { await validate(); return repository.commit(child); },
     readAttachment: async reference => new Uint8Array(Buffer.from(files.get(reference), 'base64')),
     cleanup: now => repository.cleanup(now, async ref => files.delete(ref)), close: async () => {} };
   const transport = { authorize: () => owner.authorize(),
+    validateRetry: async () => undefined,
     prepare: async (record, intent) => { events.push('prepare'); return packetFor(record.id, intent); },
     post: async packet => {
       events.push('post'); const ids = await expectedPreparedPacketIdentities(packet, 'person/avery', hash);
@@ -168,6 +169,10 @@ for (const message of messages) for (const applied of ['none', undefined]) {
     assert.equal(parent.state, applied ? 'not-applied' : 'unknown');
     await runtime.restore(); await runtime.settled();
     assert.equal(f.events.filter(event => event === 'post').length, 1);
+    f.transport.prepare = async (record, intent) => {
+      const packet = packetFor(record.id, intent);
+      return { ...packet, fence: { snapshot_id: 'snapshot/fresh', subject_revisions: {} } };
+    };
     await runtime.retry('action/parent', 'action/child'); await runtime.settled();
     assert.deepEqual(await f.repository.read('action/parent'), parent);
     const child = await f.repository.read('action/child');
@@ -177,10 +182,28 @@ for (const message of messages) for (const applied of ['none', undefined]) {
       assert.deepEqual(child.intent.message, parent.intent.message);
       assert.deepEqual(child.intent.binding, parent.intent.binding);
       assert.notEqual(child.packet.id, parent.packet.id);
+      assert.notEqual(child.packet.fence.snapshot_id, parent.packet.fence.snapshot_id);
       assert.equal(f.events.filter(event => event === 'post').length, 2);
     } else {
       assert.equal(child, undefined);
       assert.equal(f.events.filter(event => event === 'post').length, 1);
     }
+  });
+}
+
+for (const message of messages) for (const state of ['retired', 'reassigned', 'unassigned']) {
+  test(`${message.kind}: retry recipient ${state} keeps parent and commits no child or POST`, async t => {
+    const f = await fixture(t), runtime = f.runtime();
+    f.transport.post = async () => { throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+      request_id: 'request/original', code: 'stale-fence', message: 'Refresh required', retryable: true, applied: 'none' }, 409); };
+    await runtime.accept('action/parent', 'kept draft', [], metadata(message)); await runtime.settled();
+    const parent = await f.repository.read('action/parent');
+    f.transport.validateRetry = async intent => { assert.deepEqual(intent.message, message); return state; };
+    f.transport.post = async () => assert.fail('blocked recipient cannot POST');
+    await runtime.retry(parent.id, 'action/blocked-child'); await runtime.settled();
+    assert.equal(await f.repository.read('action/blocked-child'), undefined);
+    assert.deepEqual(await f.repository.read(parent.id), parent);
+    assert.match(runtime.attempts.getSnapshot().find(entry => entry.id === parent.id).draft.status, new RegExp(`Recipient ${state}`));
+    assert.equal(runtime.issue, '');
   });
 }

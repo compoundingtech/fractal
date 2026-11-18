@@ -99,7 +99,8 @@ test('native wrapper snapshots scope before await and authorizes only the immuta
   await owner.repository.compareAndSwap(1, dispatched);
   await owner.repository.compareAndSwap(2, observeOutbox(dispatched, { kind: 'failure', applied: 'none' }));
   const child = createOutboxRecord('action/image-child', intent);
-  const accepting = owner.commitRetry(child);
+  let validated = false;
+  const accepting = owner.commitRetry(child, async () => { validated = true; assert.equal(exists, true); });
   await started;
   let deleted = false;
   const cleanup = owner.repository.cleanup(Date.now() + 8 * 86400_000, async () => { deleted = true; exists = false; });
@@ -107,6 +108,7 @@ test('native wrapper snapshots scope before await and authorizes only the immuta
   assert.equal(deleted, false);
   releaseRead();
   assert.equal(await accepting, true);
+  assert.equal(validated, true);
   await cleanup;
   assert.equal(deleted, false); // Committed child now protects the reference.
   assert.deepEqual((await owner.repository.read(child.id)).intent, intent);
@@ -119,6 +121,6 @@ test('native wrapper snapshots scope before await and authorizes only the immuta
   await owner.repository.cleanup(Date.now() + 8 * 86400_000, async () => { exists = false; });
   assert.equal(exists, false);
   ports.readAttachment = async () => { throw new Error('Stored image unavailable'); };
-  await assert.rejects(owner.commitRetry(createOutboxRecord('action/too-late', intent)), /Storage unavailable, retry later/);
+  await assert.rejects(owner.commitRetry(createOutboxRecord('action/too-late', intent), async () => assert.fail('missing bytes must fail first')), /Storage unavailable, retry later/);
   assert.equal(await owner.repository.read('action/too-late'), undefined);
 });
