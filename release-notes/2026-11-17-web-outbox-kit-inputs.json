@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Include durable outbox story dependencies in kit CI detection",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Kit CI now explicitly covers the attachment adapter, recovery component and recovery state bundled by existing stories. Generated workflow detectors match the source detector."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Production outbox and recovery behavior are unchanged; only CI dependency selection is repaired."}
+}
