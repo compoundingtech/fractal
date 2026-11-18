@@ -24,7 +24,8 @@ suspend still captures Git, and no daemon automatically writes idle suspensions.
 
 An explicit suspend of an already idle-suspended seat converts the hold to manual, preserving
 the original suspend operation, snapshot and native session. Repeating the same request is
-idempotent. A manual hold must not be automatically woken. This is a reader-first prerequisite
+idempotent even after the seat resumes: replay returns the conversion receipt, never a new
+suspend. A manual hold must not be automatically woken. This is a reader-first prerequisite
 for [idle residency](https://github.com/compoundingtech/fractal/pull/6720), not its activation.
 
 ## When a seat can suspend
