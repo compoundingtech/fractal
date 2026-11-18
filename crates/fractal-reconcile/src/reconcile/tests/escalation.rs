@@ -103,3 +103,31 @@ fn progress_resets_only_since_progress_and_same_state_renewals_do_not_reset_entr
     worker.escalate_run(&run, &definition, progress.since + 1_000).unwrap();
     assert_eq!(delivered(&store).len(), 6);
 }
+
+#[test]
+fn terminal_stage_deadlines_remain_in_the_restart_roster_until_delivered() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Arc::new(Store::open(&path, "node").unwrap());
+    let (run, mut definition) = setup(&store, EscalationClock::SinceEntered);
+    let EscalationOverride::Replace { policies } = &mut definition.steps.get_mut("work").unwrap().escalation else {
+        panic!("fixture needs a replacement ladder");
+    };
+    policies[0].state = EscalationState::Completed;
+    let worker = reconciler(store.clone());
+    worker.escalate_run(&run, &definition, run.created_at_unix_ms).unwrap();
+    store.set_step_state(&run.steps[0].subject, "completed", None).unwrap();
+    store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+    let (terminal, _) = store.mission_run_for_evaluation(&run.id).unwrap();
+    let entered = store.escalation_episode(&terminal.steps[0].subject, "completed",
+        terminal.steps[0].created_at_unix_ms, false).unwrap();
+    assert_eq!(worker.escalate_run(&terminal, &definition, entered.since).unwrap(), Some(entered.since + 10));
+    assert_eq!(store.escalation_run_ids("node").unwrap(), vec![run.id.clone()]);
+    drop(worker);
+    drop(store);
+    let store = Arc::new(Store::open(&path, "node").unwrap());
+    assert_eq!(store.escalation_run_ids("node").unwrap(), vec![run.id.clone()]);
+    reconciler(store.clone()).escalate_run(&terminal, &definition, entered.since + 100).unwrap();
+    assert_eq!(delivered(&store).len(), 3);
+    assert!(store.escalation_run_ids("node").unwrap().is_empty());
+}

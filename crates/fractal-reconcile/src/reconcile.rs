@@ -11241,7 +11241,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::record_due(|| {
                 self.isolate("mission-run", &subject, || {
                     smallclaims::touched::note_read(|| subject.clone());
-                    let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    let (run, mut mission) = self.store.mission_run_for_evaluation(id)?;
                     // Eager cancellation (§6): a program step that left its attempt in this run's
                     // latest transition stops now, with its child runs and asks, before an
                     // inactive run returns below. Then what the run's programs wait on is started
@@ -11261,6 +11261,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     // From the view the evaluation started with: a write it makes changes subjects
                     // it read, so the next pass evaluates it again and takes the new times.
                     due = crate::incremental::run_due(&run, now_ms());
+                    if mission.is_none() && run.steps.is_empty() {
+                        let mission_id = run.mission.strip_prefix("mission/").unwrap_or(&run.mission);
+                        mission = self.store.mission_spec(mission_id, Some(&run.revision))?;
+                    }
                     if let Some(definition) = mission.as_ref() {
                         match self.escalate_run(&run, definition, now_ms()) {
                             Ok(escalation_due) => {

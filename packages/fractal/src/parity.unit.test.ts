@@ -3,12 +3,12 @@ import { fileURLToPath } from 'node:url'
 
 import { NodeFileSystem } from '@effect/platform-node'
 import { describe, expect, it } from '@effect/vitest'
-import { Effect } from 'effect'
+import { Duration, Effect } from 'effect'
 
 import { encodeKdl, type Agent, type Mission } from '@fractal/declarations'
 import { parse, type Node as KdlNode } from '@overeng/kdl'
 
-import { agent, emit, mission, type MissionInput } from './mod.ts'
+import { agent, emit, mission, person, residency, silence, type MissionInput } from './mod.ts'
 import { prLanding } from './pr-landing.fixture.ts'
 import { loadSubjectTree, type Subject } from './tree.ts'
 import { upstreamRepin } from './upstream-repin.fixture.ts'
@@ -94,6 +94,28 @@ describe('KDL parity', () => {
       )
     }),
   )
+
+  it('renders the escalation fixture shared with the native parser', () => {
+    const reporter = { id: 'example/reporter' }
+    const stages = [
+      { after: Duration.minutes(30), action: { _tag: 'notify' as const, recipient: reporter } },
+      { after: Duration.hours(24), action: { _tag: 'ask' as const, recipient: person('person/reviewer') } },
+    ] as const
+    const output = emit([mission({
+      id: 'example/escalation',
+      state: 'ready',
+      reportTo: reporter,
+      goal: 'Escalation parity.',
+      escalation: { _tag: 'replace', policies: [silence({ id: 'silence', state: 'running', stages })] },
+      steps: [
+        { id: 'work', agentless: true, escalation: {
+          _tag: 'replace', policies: [residency({ id: 'residency', state: 'ready', stages })],
+        } },
+        { id: 'muted', agentless: true, escalation: { _tag: 'disable' } },
+      ],
+    })])
+    expect(declarations(output)).toEqual(declarations(golden('escalation.kdl')))
+  })
 
   it('renders the shared fixtures to their committed goldens', () => {
     expect(emit([prLanding()])).toBe(golden('pr-landing.kdl'))
