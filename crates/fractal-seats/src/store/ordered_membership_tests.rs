@@ -179,6 +179,8 @@ fn membership_page_generation_is_transactional_and_survives_reopen() {
     let path = root.path().join("claims.sqlite3");
     let store = Store::open(&path, "membership-page-generation").unwrap();
     create(&store);
+    let lifetime = store.ordered_membership_lifetime();
+    assert_eq!(lifetime, store.ordered_membership_lifetime());
     let before = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
     assert!(before.items.is_empty());
     {
@@ -204,6 +206,87 @@ fn membership_page_generation_is_transactional_and_survives_reopen() {
     drop(store);
     let reopened = Store::open(&path, "membership-page-generation").unwrap();
     assert_eq!(reopened.ordered_membership_page(CONTAINER, None, 1).unwrap().generation, rebuilt.generation);
+    assert_ne!(reopened.ordered_membership_lifetime(), lifetime);
+}
+
+#[test]
+fn membership_lifetime_changes_on_same_index_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let backup = root.path().join("backup.sqlite3");
+    let store = Store::open(&path, "membership-restore").unwrap();
+    create(&store);
+    let before = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    let lifetime = store.ordered_membership_lifetime();
+    store.connection.write().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    std::fs::copy(&path, &backup).unwrap();
+    drop(store);
+    std::fs::copy(&backup, &path).unwrap();
+    let restored = Store::open(&path, "membership-restore").unwrap();
+    let after = restored.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!((after.store_index, after.generation, after.state),
+        (before.store_index, before.generation, before.state));
+    assert_ne!(restored.ordered_membership_lifetime(), lifetime);
+}
+
+#[test]
+fn membership_page_isolates_other_containers_and_imports() {
+    let source = Store::open_memory("membership-import-source").unwrap();
+    let target = Store::open_memory("membership-import-target").unwrap();
+    create(&source);
+    declare(&source, SEAT_A, "true", "import-a");
+    declare(&source, SEAT_B, "true", "import-b");
+    edit(&source, json!([place(SEAT_A, None, "a0"), place(SEAT_B, None, "a1")]));
+    sync(&source, &target);
+    let before = target.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    let other = CONTAINER.replace("000000000101", "000000000102");
+    let input = claim(&other, "arrangement.edited",
+        json!({"owner":"person/ada","version":2,"operations":[{"op":"create","name":"Other"}]}));
+    source.edit_arrangement(&input, &BTreeMap::new()).unwrap();
+    let input = claim(&other, "ordered-membership.edited",
+        json!({"owner":"person/ada","operations":[place(SEAT_A, None, "a0")]}));
+    source.edit_ordered_memberships(&input, &BTreeMap::new()).unwrap();
+    declare(&source, SEAT_C, "true", "import-irrelevant");
+    sync(&source, &target);
+    let unchanged = target.ordered_membership_page(CONTAINER, Some(("", "a0", SEAT_A)), 1).unwrap();
+    assert_eq!((unchanged.state, unchanged.generation), (before.state, before.generation));
+    assert_eq!(unchanged.items[0]["member"], SEAT_B);
+    edit(&source, json!([place(SEAT_B, None, "a2")]));
+    sync(&source, &target);
+    let changed = target.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!(changed.state.live_count, before.state.live_count);
+    assert!(changed.state.changed_index > before.state.changed_index);
+}
+
+#[test]
+fn membership_page_frontier_changes_for_every_relevant_edit_beyond_prefix() {
+    let store = Store::open_memory("membership-relevant-edits").unwrap();
+    create(&store);
+    for (member, key) in [(SEAT_A, "relevant-a"), (SEAT_B, "relevant-b")] {
+        declare(&store, member, "true", key);
+    }
+    edit(&store, json!([place(SEAT_A, None, "a0")]));
+    folder_edit(&store, json!([{"op":"folder.create","id":FOLDER_A,"name":"Folder","parent":null,"key":"a0"}]));
+    for operations in [
+        json!([place(SEAT_B, None, "a1")]),
+        json!([place(SEAT_B, None, "a2")]),
+        json!([place(SEAT_B, Some(FOLDER_A), "a2")]),
+        json!([{"op":"remove","member":SEAT_B}]),
+        json!([place(SEAT_B, None, "a2")]),
+    ] {
+        let before = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+        edit(&store, operations);
+        let after = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+        assert!(after.state.changed_index > before.state.changed_index);
+        assert_eq!(before.items[0]["member"], after.items[0]["member"]);
+    }
+    edit(&store, json!([place(SEAT_B, Some(FOLDER_A), "a2")]));
+    let before = store.ordered_membership_state(CONTAINER).unwrap();
+    folder_edit(&store, json!([{"op":"folder.delete","id":FOLDER_A}]));
+    assert!(store.ordered_membership_state(CONTAINER).unwrap().changed_index > before.changed_index);
+    let before = store.ordered_membership_state(CONTAINER).unwrap();
+    desired_retirement_fixture(&store, SEAT_B, "relevant-retirement");
+    assert!(store.ordered_membership_state(CONTAINER).unwrap().changed_index > before.changed_index);
 }
 
 #[test]
