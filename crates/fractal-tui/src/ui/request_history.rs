@@ -501,6 +501,116 @@ mod tests {
     }
 
     #[test]
+    fn decoded_branch_and_same_source_episodes_preserve_text_status_answers_and_navigation() {
+        // Literal wire values exercise the shared generated DTO, not a second client
+        // lifecycle model. An authored source can have two episodes without a relation.
+        let available = |source: &str, episode: &str, title: &str, text: &str, status: &str, answers: serde_json::Value| json!({
+            "key": {"source_id": source, "episode": episode},
+            "payload": {
+                "availability": "available", "title": title, "text": text,
+                "request": null, "references": [],
+                "provenance": {"kind": "runtime-ask", "asking_claim_id": episode}
+            },
+            "state": {"availability": "available", "status": status, "answers": answers},
+            "complete": true
+        });
+        let a = json!({"source_id": "step-run/g/ask-a", "episode": "claim/a"});
+        let ci = json!({"source_id": "step-run/g/ask-ci", "episode": "claim/ci"});
+        let b = json!({"source_id": "step-run/g/ask-b", "episode": "claim/b"});
+        let old = json!({"source_id": "step-run/g/review", "episode": "run-generation/g:1:1"});
+        let new = json!({"source_id": "step-run/g/review", "episode": "run-generation/g:2:3"});
+        let wire = json!({
+            "items": [
+                available("step-run/g/ask-a", "claim/a", "Approve abc", "Original abc request", "completed",
+                    json!([{"summary": "Approved abc"}])),
+                available("step-run/g/ask-ci", "claim/ci", "Run CI", "Independent CI request", "ready", json!([])),
+                available("step-run/g/ask-b", "claim/b", "Approve def", "Separate def request", "cancelled", json!([])),
+                {
+                    "key": old,
+                    "payload": {
+                        "availability": "available", "title": "Review", "text": "Authored abc",
+                        "request": null, "references": [],
+                        "provenance": {"kind": "authored-episode", "mission_revision": "revision/retained", "opening_claim_id": "claim/old"}
+                    },
+                    "state": {"availability": "available", "status": "completed", "answers": [{"fields": {"summary": "Old answer"}}]},
+                    "complete": true
+                },
+                {
+                    "key": new,
+                    "payload": {"availability": "unavailable", "reason": "historical-interpolation-unavailable"},
+                    "state": {"availability": "available", "status": "ready", "answers": []},
+                    "complete": false
+                }
+            ],
+            "relations": [
+                {"predecessor": a, "request": ci, "reason": "Separate CI request"},
+                {"predecessor": a, "request": b, "reason": "Alternative revision"}
+            ],
+            "source_episodes": [{"source_id": "step-run/g/review", "episodes": [old, new]}],
+            "boundary_items": [], "source_support": "person-step",
+            "next_cursor": "opaque/server+cursor", "complete": false
+        });
+        let decoded: RequestHistoryPage = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+        let (doc, lines) = draw_at(&decoded, 120);
+        let text = lines.join("\n");
+        for expected in [
+            "Original abc request", "Separate def request", "Authored abc",
+            "episode claim/a · completed", "episode claim/ci · ready", "episode claim/b · cancelled",
+            "episode run-generation/g:1:1 · completed", "episode run-generation/g:2:3 · ready · incomplete",
+            "↳ Approved abc", "↳ Old answer",
+            "after step-run/g/ask-a · claim/a: Separate CI request",
+            "after step-run/g/ask-a · claim/a: Alternative revision",
+            "Request as asked is unavailable: its values at the time are unavailable.",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}: {text}");
+        }
+        assert_eq!(text.matches("after ").count(), 2, "same-source grouping adds no invented relation");
+        assert_eq!(lines.iter().filter(|line| *line == "step-run/g/review").count(), 1);
+        assert!(!text.contains("opaque/server+cursor"));
+        let destinations = links(&doc, &lines).into_iter().map(|(_, hit)| hit).collect::<Vec<_>>();
+        for source in ["step-run/g/ask-a", "step-run/g/ask-ci", "step-run/g/ask-b", "step-run/g/review"] {
+            assert!(destinations.contains(&Hit::Open(source.into())));
+        }
+    }
+
+    #[test]
+    fn decoded_page_boundary_keeps_only_supplied_predecessor_navigation() {
+        let wire = json!({
+            "items": [{
+                "key": {"source_id": "step-run/g/child", "episode": "claim/child"},
+                "payload": {"availability": "unavailable", "reason": "payload-unavailable"},
+                "state": {"availability": "unavailable"}, "complete": false
+            }],
+            "boundary_items": [{
+                "key": {"source_id": "step-run/g/parent", "episode": "claim/parent"},
+                "payload": {"availability": "unavailable", "reason": "opening-unavailable"},
+                "state": {"availability": "unavailable"}, "complete": false
+            }],
+            "relations": [{
+                "predecessor": {"source_id": "step-run/g/parent", "episode": "claim/parent"},
+                "request": {"source_id": "step-run/g/child", "episode": "claim/child"},
+                "reason": "Independent follow-up"
+            }],
+            "source_episodes": [], "source_support": "person-step",
+            "next_cursor": null, "complete": false
+        });
+        // The server has already removed the denied branch, including its IDs,
+        // reason, counts and cursor. The UI cannot infer or recreate that branch.
+        let decoded: RequestHistoryPage = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+        let (doc, lines) = draw_at(&decoded, 120);
+        let text = lines.join("\n");
+        assert!(text.contains("after step-run/g/parent · claim/parent: Independent follow-up"));
+        assert!(!text.contains("episode claim/parent"), "a boundary endpoint is not another entry");
+        assert_eq!(links(&doc, &lines), [
+            (CURRENT_SOURCE.to_owned(), Hit::Open("step-run/g/child".into())),
+            (CURRENT_SOURCE.to_owned(), Hit::Open("step-run/g/parent".into())),
+        ]);
+        assert!(!text.contains("denied"));
+    }
+
+    #[test]
     fn an_unsupported_source_shows_no_entries() {
         let mut history = page(vec![item(key("work/acme/ask", "claim/e1"), "Title", "Body", "done")]);
         history.source_support = Some(HistorySourceSupport::UnsupportedSource);
