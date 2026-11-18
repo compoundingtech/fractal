@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+pub mod budgets;
 pub mod cpu_minutes;
 pub mod holds;
 mod intervals;
@@ -251,12 +252,14 @@ impl StoreWork {
 struct StoreSeries {
     /// A sample longer than this missed its target; `None` before a target is set.
     target: Option<Duration>,
+    budget_stream: Option<String>,
     series: Series,
 }
 
 static STORE: [Mutex<StoreSeries>; StoreWork::ALL.len()] = [const {
     Mutex::new(StoreSeries {
         target: None,
+        budget_stream: None,
         series: Series {
             rings: [Vec::new(), Vec::new(), Vec::new()],
         },
@@ -269,10 +272,9 @@ fn store(kind: StoreWork) -> &'static Mutex<StoreSeries> {
 
 /// The target a store sample is counted over, from the daemon's targets file.
 pub fn set_store_target(kind: StoreWork, target: Option<Duration>) {
-    store(kind)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .target = target;
+    let mut series = store(kind).lock().unwrap_or_else(PoisonError::into_inner);
+    series.target = target;
+    series.budget_stream = target.map(|duration| format!("{}/{}", kind.name(), duration.as_millis()));
 }
 
 /// Count one sample of the store's work, and say whether it missed its target.
@@ -281,6 +283,9 @@ pub fn record_store(kind: StoreWork, duration: Duration) -> bool {
     let mut store = store(kind).lock().unwrap_or_else(PoisonError::into_inner);
     let over = store.target.is_some_and(|target| duration > target);
     store.series.record(now, duration, over);
+    if let Some(stream) = &store.budget_stream {
+        budgets::record(stream, over);
+    }
     over
 }
 
