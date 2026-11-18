@@ -1,9 +1,0 @@
-{
-  "kind":"page", "collection":"messages", "filters":{},
-  "items":[
-    {"kind":"message","id":"message/expired","revision":"1","updated_at":"2026-11-10T00:00:00Z","from":"agent/sender","to":"agent/recipient","content":"Fixture","state":"expired","sent_at":"2026-11-10T00:00:00Z","status_from":{"host":"host/offline","state":"unknown","reason":"remote-unavailable"}},
-    {"kind":"message","id":"message/delivered","revision":"2","updated_at":"2026-11-10T00:00:00Z","from":"agent/sender","to":"agent/recipient","content":"Fixture","state":"delivered","sent_at":"2026-11-10T00:00:00Z"},
-    {"kind":"message","id":"message/read","revision":"3","updated_at":"2026-11-10T00:00:00Z","from":"agent/sender","to":"agent/recipient","content":"Fixture","state":"read","sent_at":"2026-11-10T00:00:00Z"}
-  ],
-  "page":{"limit":100,"has_more":false}
-}
