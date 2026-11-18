@@ -1050,6 +1050,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
     get("GET /v1/client/slo", "/v1/client/slo"),
     get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
+    get(
+        "GET /v1/client/series",
+        "/v1/client/series?objective=cost%2Fseries&from=1000&to=4000&bucket_seconds=1",
+    ),
     post("POST /v1/messages/cleanup", "/v1/messages/cleanup", |_, _| {
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
@@ -1195,6 +1199,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
     get("GET /v1/slo/history", "/v1/slo/history?id=cpu"),
+    get(
+        "GET /v1/series",
+        "/v1/series?kind=custom.cost.series-event&kind=custom.cost.series-other&subject_prefix=custom%2Fcost%2Fseries%2F&group_by=category&from=1000&to=4000&bucket_seconds=1",
+    ),
     get("GET /v1/reviews", "/v1/reviews"),
     get("GET /v1/attention", "/v1/attention"),
     get(
@@ -1582,6 +1590,18 @@ const PROBES: &[Probe] = &[
     ),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
+    post("POST /v1/agents/rename-id/plan", "/v1/agents/rename-id/plan", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id/plan", "/v1/missions/rename-id/plan", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
     post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
         "from": format!("agent/bench/cost/rename-{attempt}"),
         "to": format!("agent/bench/cost/renamed-{attempt}"),
@@ -1594,6 +1614,10 @@ const PROBES: &[Probe] = &[
         "actor": "person/bench-operator", "reason": "Invented rename",
         "idempotency_key": format!("cost-mission-rename-{attempt}"),
     })),
+    get("GET /v1/agents/rename-proof",
+        "/v1/agents/rename-proof?from=agent%2Fbench%2Fcost%2Frename-0&to=agent%2Fbench%2Fcost%2Frenamed-0"),
+    get("GET /v1/missions/rename-proof",
+        "/v1/missions/rename-proof?from=mission%2Fcost-rename-0&to=mission%2Fcost-renamed-0"),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -3334,6 +3358,40 @@ async fn prepare_start_context(
     }))
 }
 
+/// Keep both series answers fixed while same-kind timestamp history outside the window grows.
+fn seed_series_reads(store: &Store, scale: f64) {
+    let intent = fractal_daemon::parse_intent(r#"version 2
+objective "cost/series" {
+  about "Cost fixture events"
+  indicator "count" {
+    subject-prefix "custom/cost/series/"
+    event "custom.cost.series-event" at="at"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, NODE).unwrap();
+    store.apply_internal(&intent, "cost-series-objective").unwrap();
+    let history = ((scale * 10_000.0).round() as usize).max(1);
+    for (name, kind, at) in [
+        ("first".to_owned(), "custom.cost.series-event", 1000),
+        ("second".to_owned(), "custom.cost.series-other", 2000),
+        ("boundary".to_owned(), "custom.cost.series-event", 4000),
+    ].into_iter().chain((0..history).map(|n| {
+        (format!("history-{n}"), "custom.cost.series-event", 10_000)
+    })) {
+        store.append_claim(&ClaimInput {
+            subject: format!("custom/cost/series/{name}"),
+            kind: kind.into(),
+            actor: None,
+            fields: BTreeMap::from([("at".into(), json!(at)), ("category".into(), json!("event"))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+}
+
 async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u64, u64)) -> Measured {
     let work_directory = tempfile::tempdir().unwrap();
     let root = work_directory.path();
@@ -3418,6 +3476,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     {
         let store = store.clone();
         tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_series_reads(&store, scale))
             .await
             .unwrap();
     }
@@ -3769,7 +3833,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/work/start" {
             prepare_handoffs(&store, &mut fixture);
         }
-        if probe.route == "POST /v1/agents/rename-id" {
+        if probe.route == "POST /v1/agents/rename-id/plan" {
             prepare_renames(&store);
         }
         if probe.route == "POST /v1/mission-runs/{run}/retry" {
@@ -4005,6 +4069,32 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                         && period["until_ms"].as_u64() == Some(usage_window.1)
                                         && period["rows"].as_array().is_some_and(Vec::is_empty),
                                     "the usage cost probe must answer its exact empty fixture period",
+                                );
+                            }
+                            if matches!(probe.route, "GET /v1/series" | "GET /v1/client/series") {
+                                let series = value.get("value").unwrap_or(&value);
+                                let grouped = probe.route == "GET /v1/series";
+                                let mut expected = json!({
+                                    "from": 1000, "to": 4000, "bucket_seconds": 1,
+                                    "buckets": [
+                                        {"start": 1000, "end": 2000, "count": 1},
+                                        {"start": 2000, "end": 3000, "count": if grouped { 1 } else { 0 }},
+                                        {"start": 3000, "end": 4000, "count": 0},
+                                    ],
+                                });
+                                if grouped {
+                                    expected["group_by"] = json!("category");
+                                    for bucket in expected["buckets"].as_array_mut().unwrap() {
+                                        bucket["groups"] = if bucket["count"] == 0 {
+                                            json!([])
+                                        } else {
+                                            json!([{"value": "event", "count": 1}])
+                                        };
+                                    }
+                                }
+                                anyhow::ensure!(
+                                    *series == expected,
+                                    "series cost probes must return their exact fixed, populated histogram",
                                 );
                             }
                             if probe.route == "POST /v1/internal/client-read/forward"

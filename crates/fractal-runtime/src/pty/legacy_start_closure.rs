@@ -265,7 +265,7 @@ struct ManagerUnit {
 
 #[cfg(target_os = "linux")]
 fn manager_units() -> Result<(Vec<ManagerUnit>, std::time::Instant)> {
-    let snapshot = crate::systemd::snapshot()?;
+    let snapshot = crate::systemd::snapshot_after_admission()?;
     Ok((snapshot.units.iter().map(|(name, unit)| ManagerUnit {
         unit: name.clone(), load: unit.load.clone(), active: unit.active.clone(), sub: unit.sub.clone(),
     }).collect(), snapshot.captured_at))

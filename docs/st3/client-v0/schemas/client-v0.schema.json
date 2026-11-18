@@ -822,6 +822,9 @@
       "unsupported-capability",
       "peer-too-old",
       "validation-failed",
+      "unknown-objective",
+      "invalid-series",
+      "unsupported-objective-series",
       "idempotency-conflict",
       "legacy-action-receipt-untrusted",
       "issuer-required",
@@ -1237,6 +1240,7 @@
             { "$ref": "#/$defs/MailBacklog" },
             { "$ref": "#/$defs/SloList" },
             { "$ref": "#/$defs/SloHistory" },
+            { "$ref": "#/$defs/Series" },
             { "$ref": "#/$defs/GithubPluginRead" }
           ]
         }
@@ -1888,6 +1892,38 @@
         "until_ms": { "type": "integer", "minimum": 0 },
         "samples": { "type": "integer", "minimum": 0 },
         "steps": { "type": "array", "items": { "type": ["number", "null"], "minimum": 0, "maximum": 100 } }
+      }
+    },
+    "Series": {
+      "description": "Half-open count histogram over selected claims or a declared count/interval objective; no percentiles. At most 31 days and 1000 buckets, with the final bucket clipped to to.",
+      "type": "object", "additionalProperties": false,
+      "required": ["from", "to", "bucket_seconds", "buckets"],
+      "properties": {
+        "from": { "type": "integer", "minimum": 0 },
+        "to": { "type": "integer", "minimum": 0 },
+        "bucket_seconds": { "type": "integer", "minimum": 1 },
+        "group_by": { "type": "string" },
+        "buckets": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/SeriesBucket" } }
+      }
+    },
+    "SeriesBucket": {
+      "description": "Half-open Unix millisecond bucket. groups is present only when group_by was requested and is empty for an empty bucket.",
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "end", "count"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "count": { "type": "integer", "minimum": 0 },
+        "groups": { "type": "array", "items": { "$ref": "#/$defs/SeriesGroup" } }
+      }
+    },
+    "SeriesGroup": {
+      "description": "Count grouped by the exact JSON field value; a missing field has value null.",
+      "type": "object", "additionalProperties": false,
+      "required": ["value", "count"],
+      "properties": {
+        "value": {},
+        "count": { "type": "integer", "minimum": 0 }
       }
     },
     "UsageHubQuota": {

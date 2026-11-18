@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """The pre-push hook and its installer, through real `git push`es to a bare remote, with a stub fractal-test."""
+from contextlib import redirect_stderr
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -640,6 +645,84 @@ class Hook(unittest.TestCase):
                  '  mail-redelivery-canaries not covered            no record\n'
                  '  fractal-web              CI runs it             no local command')
 
+    def accept_prepush_policy(self, policies, raw=False):
+        git(self.work, 'checkout', '-q', 'main')
+        for directory, policy in policies.items():
+            path = self.work / directory / 'prepush-policy.json'
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(policy if raw else json.dumps(policy))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'accepted pre-push policy')
+        git(self.work, '-c', 'core.hooksPath=/dev/null', 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+
+    def test_hosted_policy_skips_all_local_work_for_everyone_including_a_listed_agent(self):
+        self.accept_prepush_policy({'.st': {'pr-proof': 'hosted'}})
+        for branch, env in (('agent', {'ST_AGENT': 'agent/some/seat'}),
+                            ('person', {}), ('background', {'ST_SKIP_EVIDENCE': '1'})):
+            with self.subTest(branch):
+                done = self.push(f'feature:refs/heads/{branch}', STUB_STATUS='3', **env)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual([line for line in done.stderr.splitlines() if line.startswith('evidence:')],
+                                 ['evidence: PR proof is hosted CI at the exact head (policy on main); no local evidence run'])
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(self.receipts()[-1]['outcome'], 'hosted_proof')
+                self.assertTrue(self.remote_has(f'refs/heads/{branch}'))
+
+    def test_hosted_policy_does_not_bypass_the_content_guard(self):
+        self.accept_prepush_policy({'.st': {'pr-proof': 'hosted'}})
+        (self.work / 'private.txt').write_text('person' + '/unknown-fixture')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'unsafe candidate content')
+        done = self.push(ST_AGENT='agent/some/seat')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertFalse(self.remote_has('refs/heads/feature'))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.receipts(), [])
+
+    def test_hosted_policy_in_the_candidate_tree_cannot_change_the_absent_base_policy(self):
+        for directory in ('.st', '.fractal'):
+            path = self.work / directory / 'prepush-policy.json'
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({'pr-proof': 'hosted'}))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'candidate hosted policy')
+        done = self.push(STUB_STATUS='3', STUB_STATUS_OUT=self.UNCOVERED, ST_AGENT='agent/some/seat')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(self.receipts()[-1]['outcome'], 'refused')
+        self.assertEqual([c['argv'] for c in self.calls()], [['--status', '--base', 'origin/main']])
+        self.assertFalse(self.remote_has('refs/heads/feature'))
+
+    def test_new_layout_hosted_policy_is_read_from_the_base(self):
+        self.accept_prepush_policy({'.fractal': {'pr-proof': 'hosted'}})
+        done = self.push(STUB_STATUS='3', ST_AGENT='agent/some/seat')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.receipts()[-1]['outcome'], 'hosted_proof')
+
+    def test_present_new_layout_policy_does_not_fall_back_to_legacy_hosted_policy(self):
+        self.accept_prepush_policy({'.st': {'pr-proof': 'hosted'}, '.fractal': {}})
+        done = self.push(STUB_STATUS='3', STUB_STATUS_OUT=self.UNCOVERED, ST_AGENT='agent/some/seat')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(self.receipts()[-1]['outcome'], 'refused')
+        self.assertEqual([c['argv'] for c in self.calls()], [['--status', '--base', 'origin/main']])
+
+    def test_invalid_base_policy_keeps_the_default_agent_refusal_and_receipt(self):
+        for raw, problem in (('{', 'invalid JSON'), ('null', 'expected a JSON object'),
+                             ('[]', 'expected a JSON object'),
+                             ('{"pr-proof": "unknown"}', "unknown pr-proof value 'unknown'")):
+            with self.subTest(raw):
+                self.accept_prepush_policy({'.st': raw}, raw=True)
+                before = len(self.calls())
+                done = self.push(STUB_STATUS='3', STUB_STATUS_OUT=self.UNCOVERED, ST_AGENT='agent/some/seat')
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn(f'origin/main:.st/prepush-policy.json: {problem}; using the default local evidence flow',
+                              done.stderr)
+                self.assertEqual(done.stderr.count(problem), 1)
+                self.assertEqual(self.receipts()[-1]['outcome'], 'refused')
+                self.assertEqual([c['argv'] for c in self.calls()[before:]], [['--status', '--base', 'origin/main']])
+                self.assertFalse(self.remote_has('refs/heads/feature'))
+
     def test_an_agents_covered_tree_is_pushed_silently_after_asking_about_all_checks(self):
         done = self.push(STUB_STATUS='0', ST_AGENT='agent/some/seat')
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -784,6 +867,58 @@ class Hook(unittest.TestCase):
             done = subprocess.run(['bash', str(self.work / 'scripts/install-git-hooks')], capture_output=True, text=True,
                                   env=dict(self.env(), **{name: 'true'}), cwd=self.work)
             self.assertEqual((done.returncode, done.stdout, hook.exists()), (0, '', False), name)
+
+
+class PolicyLookupFailures(unittest.TestCase):
+    def test_unreadable_policy_and_lookup_exceptions_preserve_agent_refusal(self):
+        loader = importlib.machinery.SourceFileLoader('prepush_policy', str(ROOT / 'scripts/evidence-prepush'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        head, tree = 'a' * 40, 'b' * 40
+        for failure in ('layout_probe', 'policy_probe', 'unreadable_blob', 'lookup_exception'):
+            with self.subTest(failure):
+                probes = 0
+
+                def git_fixture(*args):
+                    nonlocal probes
+                    stdout, code = '', 0
+                    if args == ('rev-parse', 'HEAD'):
+                        stdout = head
+                    elif args == ('rev-parse', '--show-toplevel'):
+                        stdout = str(ROOT)
+                    elif args == ('rev-parse', 'HEAD^{tree}'):
+                        stdout = tree
+                    elif args == ('remote',):
+                        stdout = 'origin'
+                    elif args[0] == 'ls-tree':
+                        probes += 1
+                        if failure == 'lookup_exception':
+                            raise OSError('policy lookup unavailable')
+                        code = int((failure == 'layout_probe' and probes == 1)
+                                   or (failure == 'policy_probe' and probes == 2))
+                        stdout = '100644 blob fixture\t.fractal/prepush-policy.json'
+                    elif args[0] == 'show':
+                        code = 1  # Fixture: the selected policy blob is unavailable.
+                    else:
+                        self.fail(f'unexpected git call: {args}')
+                    return subprocess.CompletedProcess(args, code, stdout, '')
+
+                status = subprocess.CompletedProcess([], 3, Hook.UNCOVERED, '')
+                errors = io.StringIO()
+                with patch.dict(os.environ, {'ST_AGENT': 'agent/some/seat'}, clear=True), \
+                        patch.object(module, 'git', side_effect=git_fixture), \
+                        patch.object(module, 'has_signer', return_value=True), \
+                        patch.object(module, 'signer_listed', return_value=True), \
+                        patch.object(module, 'receipt') as receipt, \
+                        patch.object(module.subprocess, 'run', return_value=status) as run, \
+                        patch.object(sys, 'stdin', io.StringIO(f'refs/heads/feature {head} refs/heads/feature {"0" * 40}\n')), \
+                        redirect_stderr(errors):
+                    self.assertEqual(module.hook(['origin']), module.REFUSED)
+                self.assertEqual(errors.getvalue().count('using the default local evidence flow'), 1)
+                receipt.assert_called_once_with(tree, ['refs/heads/feature'], 'refused',
+                                                uncovered=['linux-gate', 'mail-redelivery-canaries'])
+                self.assertEqual(run.call_count, 1)
+                self.assertIn('--status', run.call_args.args[0])
 
 
 if __name__ == '__main__':
