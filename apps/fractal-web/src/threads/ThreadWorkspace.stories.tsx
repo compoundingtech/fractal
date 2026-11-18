@@ -341,7 +341,9 @@ export const EmptyStart: Story = {
     await AllStates.play?.(context)
     const details = await alertDetails(context.canvasElement)
     const agentName = await details.findByText('Worker tests', { selector: 'span' })
-    await expect(agentName.closest('p')).toHaveTextContent(/^Ask Worker tests about this item without answering it\.$/)
+    await expect(agentName.parentElement).toHaveTextContent(/^Ask Worker tests about this item without answering it\.$/)
+    await expect(details.getByText('agent/build-host-a/worker-tests', { selector: 'code' })).toBeVisible()
+    await expect(details.getByText('Original recipient')).toBeVisible()
     await expect(details.getByRole('button', { name: 'Start thread' })).toBeTruthy()
   },
 }
@@ -356,7 +358,10 @@ export const CustomInboxSource: Story = {
     const details = await alertDetails(context.canvasElement)
     await details.findByRole('textbox', { name: 'Message' })
     await expect(details.getByRole('textbox', { name: 'Thread title' })).toHaveValue('Worker report ready')
-    await expect(details.getByText((_content, element) => element?.tagName === 'P' && element.textContent === 'To Worker tests')).toBeTruthy()
+    const agentName = await details.findByText('Worker tests', { selector: 'span' })
+    await expect(agentName.parentElement).toHaveTextContent(/^To Worker tests$/)
+    await expect(details.getByText('agent/build-host-a/worker-tests', { selector: 'code' })).toBeVisible()
+    await expect(details.getByText('Configured recipient')).toBeVisible()
   },
 }
 
