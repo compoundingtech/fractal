@@ -906,6 +906,10 @@ WHERE kind='harness.timeline'
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
+-- Retained ownership, including operator-authored and carried work, at client snapshots.
+CREATE INDEX IF NOT EXISTS claims_residency_claimant_index
+ON claims(json_extract(body, '$.fields.claimant'), store_index, subject)
+WHERE kind IN ('work.claimed', 'work.progress', 'work.renewed', 'step-run.carried');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
