@@ -472,12 +472,15 @@ class ReleaseDeliveryTests(unittest.TestCase):
                         'echo closed > "$FETCH_PACK/tmp_pack_concurrent_closed"\n'
                         'echo "$stage" > "$FETCH_STARTED"\n'
                         'if [ "$FETCH_MODE" = term ]; then kill -TERM "$FETCH_WORKER_PID"; fi\n'
+                        'if [ "$FETCH_MODE" = child_term ]; then\n'
+                        '  "$FETCH_PYTHON" -c \'import os, signal; os.killpg(os.getpgrp(), signal.SIGTERM)\'\n'
+                        'fi\n'
                         "exec /bin/sleep 30\n")
         hook.chmod(0o755)
         started = self.root / "fetch-started"
         config = self.root / "fetch.gitconfig"
         config.write_text(f"[uploadpack]\n\tpackObjectsHook = {hook}\n")
-        for mode in ("timeout", "term", "early_term"):
+        for mode in ("timeout", "term", "early_term", "child_term"):
             with self.subTest(mode=mode):
                 for name in ("tmp_pack_old", "tmp_idx_old", "tmp_pack_busy"):
                     candidate = pack / name
@@ -516,6 +519,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
                         cwd=SCRIPT.parent, env={**self.env,
                             "GIT_CONFIG_GLOBAL": str(config), "FETCH_MODE": mode,
                             "FETCH_PACK": str(pack), "FETCH_STARTED": str(started),
+                            "FETCH_PYTHON": sys.executable,
                             "FETCH_STAGE_FILE": str(self.root / "stage-path")},
                         capture_output=True, text=True, timeout=30)
                     if mode != "early_term":
@@ -523,6 +527,9 @@ class ReleaseDeliveryTests(unittest.TestCase):
                         self.assertFalse(Path(started.read_text().strip()).exists())
                     if mode == "timeout":
                         self.assertIn("TimeoutExpired", result.stderr)
+                    elif mode == "child_term":
+                        self.assertIn("CalledProcessError", result.stderr)
+                        self.assertNotIn("TimeoutExpired", result.stderr)
                     else:
                         self.assertEqual(result.returncode, 143, result.stderr)
                     expected = ["tmp_pack_busy", "tmp_pack_recent"]
@@ -572,6 +579,43 @@ class ReleaseDeliveryTests(unittest.TestCase):
         result = self.invoke()
         self.assertIn("source_not_published", result.stdout)
         self.assertEqual(self.saved_state()["trusted_head"], newer)
+
+    def test_partial_object_promotion_preserves_fetch_head_and_connectivity(self):
+        target = self.root / "promotion.git"
+        self.git("init", "--bare", str(target), cwd=self.root)
+        self.git("fetch", str(self.origin), "main", cwd=target)
+        fetch_head = target / "FETCH_HEAD"
+        previous = fetch_head.read_bytes()
+        newer = self.change_js("promotion-failure")
+        code = """
+import fcntl
+import pathlib
+import sys
+from release_delivery import fetch_local
+lock = open(sys.argv[1] + '/delivery.lock', 'a')
+fcntl.flock(lock, fcntl.LOCK_EX)
+def fail_index(event, args):
+    if event == 'os.link' and str(args[1]).endswith('.idx'):
+        raise OSError('injected index promotion failure')
+if sys.argv[4] == 'fail':
+    sys.addaudithook(fail_index)
+fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3])
+"""
+        for mode in ("fail", "success"):
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(target), str(self.origin), newer, mode],
+                cwd=SCRIPT.parent, env=self.env, capture_output=True, text=True, timeout=60)
+            if mode == "fail":
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("injected index promotion failure", result.stderr)
+                self.assertEqual(fetch_head.read_bytes(), previous)
+                self.assertEqual(self.git("rev-parse", "FETCH_HEAD", cwd=target), self.initial_commit)
+                self.assertTrue(list((target / "objects/pack").glob("*.pack")))
+            else:
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.git("rev-parse", "FETCH_HEAD", cwd=target), newer)
+            self.git("fsck", "--connectivity-only", cwd=target)
+            self.assertEqual(list(target.glob("delivery-fetch-*")), [])
 
     def configure(self, **values):
         control = json.loads(self.control_path.read_text())
@@ -1262,7 +1306,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
 
 
 
-    def test_fetch_failure_does_not_block_retrying_successful_pending_artifact(self):
+    def test_missing_source_snapshot_blocks_pending_retry_until_verified_again(self):
         self.configure(install_exit=1)
         self.invoke()
         pending = self.saved_state()["pending"]
@@ -1272,6 +1316,11 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.configure(install_exit=0)
         self.reconcile()
         self.assertIn("fetch_failed", self.outcomes())
+        self.assertFalse(self.saved_state().get("installed"))
+        self.assertEqual(self.saved_state()["pending"], pending)
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.git("fetch", "origin")
+        self.reconcile()
         self.assert_installed(self.initial_commit)
         self.assertEqual(self.saved_state()["observed"]["commit"], self.initial_commit)
         self.assertEqual(len(self.commands("xcodebuild")), 1)
@@ -1291,21 +1340,22 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state()["observed"]["commit"], newer)
         self.assertIn("pending_discarded", self.outcomes())
         self.lose_source_snapshot()
-        # Offline, the last observed revision is retried from the local
-        # checkout; while it keeps failing the superseded artifact is never installed.
+        # A missing source snapshot cannot authorize cached delivery or a retry.
         self.configure(install_exit=0)
         self.invoke()
-        self.assertEqual(self.outcomes()[-3:], ["fetch_failed", "build_started", "build_failed"])
+        self.assertEqual(self.outcomes()[-1], "fetch_failed")
+        self.assertEqual(len(self.commands("xcodebuild")), 2)
         self.assertEqual(self.saved_state()["observed"]["commit"], newer)
         self.assertFalse(self.saved_state().get("pending"))
         self.assertFalse(self.saved_state().get("installed"))
         self.assertEqual(len(self.device_commands("install")), 1)
         self.assertEqual(self.device_commands("launch"), [])
-        # Once the newer revision builds it delivers, even while offline.
+        # Retry only after source snapshot and publication are verified again.
         self.configure(install_exit=0, build_exit=0)
+        self.git("fetch", "origin")
         self.reconcile()
         self.assert_installed(newer)
-        self.assertEqual(len(self.commands("xcodebuild")), 4)
+        self.assertEqual(len(self.commands("xcodebuild")), 3)
 
     def test_fetch_failure_with_changed_inputs_rebuilds_desired_not_superseded_revision(self):
         self.configure(install_exit=1)
@@ -1320,6 +1370,10 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.configure(install_exit=0, build_exit=0)
         self.reconcile()
         self.assertIn("fetch_failed", self.outcomes())
+        self.assertFalse(self.saved_state().get("installed"))
+        self.assertEqual(len(self.commands("xcodebuild")), 2)
+        self.git("fetch", "origin")
+        self.reconcile()
         self.assertIn("inputs_changed", self.outcomes())
         self.assertEqual(self.saved_state()["observed"]["commit"], newer)
         self.assert_installed(newer)
@@ -1342,7 +1396,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.lose_source_snapshot()
         self.configure(build_exit=0)
         self.reconcile()
-        self.assertEqual(self.outcomes()[-2:], ["fetch_failed", "unchanged"])
+        self.assertEqual(self.outcomes()[-1], "fetch_failed")
         self.assert_installed(self.initial_commit)
         self.assertEqual(len(self.commands("xcodebuild")), 2)
         self.assertEqual(len(self.device_commands("install")), 1)

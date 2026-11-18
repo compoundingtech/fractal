@@ -71,22 +71,31 @@ def fetch_local(repo, source, commit, *, timeout=60):
         # SIGTERM remains blocked until the new process group is registered.
         process = subprocess.Popen(
             ["git", "-C", str(repo), "fetch", "--no-tags", "--no-auto-maintenance",
-             str(source), commit], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True, env=env)
+             "--no-write-fetch-head", "--keep", str(source), commit],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True, env=env,
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask))
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         stdout, stderr = process.communicate(timeout=timeout)
         if process.returncode:
             raise subprocess.CalledProcessError(process.returncode, process.args, stdout, stderr)
-        # Same-filesystem hard links publish complete immutable Git objects
-        # without replacing anything another fetch already installed.
-        for path in staging.rglob("*"):
-            if path.is_file():
-                destination = objects / path.relative_to(staging)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.link(path, destination)
-                except FileExistsError:
-                    pass
+        # Keep downloaded objects packed. Publish complete packs before indexes
+        # advertise them; .keep is private transfer bookkeeping, not retention.
+        paths = [path for path in staging.rglob("*")
+                 if path.is_file() and path.suffix != ".keep"]
+        order = {".pack": 1, ".idx": 2, ".rev": 3}
+        for path in sorted(paths, key=lambda path: order.get(path.suffix, 0)):
+            destination = objects / path.relative_to(staging)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(path, destination)
+            except FileExistsError:
+                pass
+        # Never expose a FETCH_HEAD whose object promotion has not completed.
+        fetch_head = Path(git(repo, "rev-parse", "--absolute-git-dir")) / "FETCH_HEAD"
+        pending_head = staging / "FETCH_HEAD"
+        pending_head.write_text(commit + "\t\tlocal verified snapshot\n")
+        os.replace(pending_head, fetch_head)
     except BaseException:
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
         if process is not None:
@@ -694,19 +703,23 @@ class Delivery:
         published = [line.split()[0] for line in publication.splitlines()]
         try:
             snapshot = git(self.args.repo, "rev-parse", "--verify", ref + "^{commit}")
-            if snapshot not in published:
-                # Pinned historical commits may be ancestors of a published tip,
-                # but only using tips already present in the local object DB.
-                accepted = pinned and any(subprocess.run(
-                    ["git", "-C", str(self.args.repo), "merge-base", "--is-ancestor",
-                     snapshot, tip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                ).returncode == 0 for tip in published)
-                if not accepted:
-                    self.record("fetch_failed", reason="source_not_published")
-                    return
-            snapshot_time = git(self.args.repo, "show", "-s", "--format=%cI", snapshot)
-            self.record("source_snapshot", commit=snapshot, ref=ref,
-                        commit_time=snapshot_time)
+        except (OSError, subprocess.SubprocessError):
+            self.record("fetch_failed", reason="source_snapshot_unavailable")
+            return
+        if snapshot not in published:
+            # Pinned historical commits may be ancestors of a published tip,
+            # but only using tips already present in the local object DB.
+            accepted = pinned and any(subprocess.run(
+                ["git", "-C", str(self.args.repo), "merge-base", "--is-ancestor",
+                 snapshot, tip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ).returncode == 0 for tip in published)
+            if not accepted:
+                self.record("fetch_failed", reason="source_not_published")
+                return
+        snapshot_time = git(self.args.repo, "show", "-s", "--format=%cI", snapshot)
+        self.record("source_snapshot", commit=snapshot, ref=ref,
+                    commit_time=snapshot_time)
+        try:
             fetch_local(repo, self.args.repo, snapshot)
             head = git(repo, "rev-parse", "FETCH_HEAD^{commit}")
             if head != snapshot:
