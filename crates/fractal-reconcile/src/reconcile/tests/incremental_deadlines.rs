@@ -1557,7 +1557,7 @@ fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocke
         "code":"omp-channel-ready","driver":"omp","incarnation_id":"one","reason":"confirmed"
     }));
     residency_report(&store, true);
-    reconciler.set_idle_residency(IdleResidencySettings { after_ms: Some(5_000) });
+    reconciler.set_idle_residency(IdleResidencySettings { after_ms: Some(5_000), ..Default::default() });
     let first = crate::residency::evaluate_at(&store, "agent/garden", None, Some(5_000)).unwrap()
         .not_before(Some(START), Some(5_000));
     let due = first.due_at_unix_ms.unwrap();
@@ -1593,7 +1593,7 @@ fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocke
     assert!(store.claims_for("agent/garden", Some("runtime.action.requested")).unwrap().is_empty());
     smallclaims::store::set_thread_clock(Some(START + 10_000));
     let restarted = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
-    restarted.set_idle_residency(IdleResidencySettings { after_ms: Some(5_000) });
+    restarted.set_idle_residency(IdleResidencySettings { after_ms: Some(5_000), ..Default::default() });
     let (_, after_restart) = smallclaims::touched::record_due(|| {
         restarted.evaluate_idle_residency("agent/garden", START + 10_000).unwrap();
     });
