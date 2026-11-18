@@ -308,7 +308,9 @@ objective "acme/person-read" {
 ```
 
 Use `Fractal.indicator.native({ objective: 'person-read/remote' })` in TypeScript. The reference
-may identify a built-in subrow such as `transaction/read`. A native binding inherits the source
+may identify a built-in subrow such as `transaction/read` or `transaction/writer_hold`. References
+allow underscore-joined words within a path segment; declaration names retain their hyphen-only
+word grammar. A native binding inherits the source
 row's measurements and budget and forbids `target`, `window` and `budget` overrides. The parser
 checks reference syntax; evaluation resolves it against actual built-in rows, so an unknown
 reference is explicit no-data, never a healthy fallback. Responses use the declaration's owner

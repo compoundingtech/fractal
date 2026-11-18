@@ -22,6 +22,11 @@ const genie = (await import(new URL('../../../slo/objectives.kdl.genie.ts', impo
 const builtins = genie.default
 const objectives = genie.objectives
 
+// Rust's emitted-row test checks this shared corpus against every shipped built-in row.
+const nativeRows = JSON.parse(
+  readFileSync(new URL('../../../fixtures/objective-native-rows.json', import.meta.url), 'utf8'),
+) as { readonly rows: readonly string[]; readonly valid: readonly string[]; readonly invalid: readonly string[] }
+
 const render = (input: ObjectiveInput & { readonly name: string }) => emit([objectiveNode(input)])
 
 const rollout = {
@@ -241,6 +246,37 @@ objective "acme/merge-latency" {
     expect(render({ name: 'shipped', about: 'Measured', indicator, ...(targets === undefined ? {} : { targets }) })).toBe(
       `version 2\nobjective "shipped" {\n  about "Measured"\n${kdl}}\n`,
     )
+  })
+
+  it.each([...nativeRows.rows, ...nativeRows.valid])('binds native row %s without changing its identity', (row) => {
+    expect(
+      render({
+        name: 'acme/native-owner',
+        about: 'Fleet ownership of a built-in row',
+        indicator: Fractal.indicator.native({ objective: row }),
+        onBreach: Fractal.response.fault({ owner: 'agent/acme/ops', condition: 'native-budget' }),
+      }),
+    ).toContain(`  indicator "native" {\n    objective "${row}"\n  }\n`)
+  })
+
+  it.each(nativeRows.invalid)('rejects malformed native row %j', (row) => {
+    expect(() =>
+      render({
+        name: 'acme/native-owner',
+        about: 'Fleet ownership of a built-in row',
+        indicator: Fractal.indicator.native({ objective: row }),
+      }),
+    ).toThrow('native objective must name a well-formed built-in row')
+  })
+
+  it('does not widen the declaration name grammar for native row references', () => {
+    expect(() =>
+      render({
+        name: 'acme/writer_hold',
+        about: 'Fleet ownership of a built-in row',
+        indicator: Fractal.indicator.native({ objective: 'transaction/writer_hold' }),
+      }),
+    ).toThrow()
   })
 
   it('returns frozen, checked values and keeps an unnamed objective for the subject tree', () => {
