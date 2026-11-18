@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn stable_submission_id_never_relaunches_or_replaces_semantic_intent() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path().join("store.db"), "host-a").unwrap();
+        let store = Store::open(&directory.path().join("store.db"), "host-a").unwrap();
         let first = command("stable");
         let accepted = store.submit_shell_resource(first.clone(), 10).unwrap();
         let mut retry = first.clone();
