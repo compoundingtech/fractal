@@ -64,6 +64,64 @@ mission "example/report" state="ready" {
         Self { root, state, request }
     }
 
+    fn program() -> Self {
+        let mut fixture = Self::new();
+        fixture.state.store.apply_internal(&parse_intent(r#"version 2
+mission "program-report" state="ready" {
+  goal "Send one program report."
+  authority { write "message/*"; }
+  step "program" { agentless }
+}
+"#, "origin").unwrap(), "declare-program-report").unwrap();
+        let created = fixture.state.store.create_mission_run(&MissionRunRequest {
+            mission: "program-report".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/example".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "program-report-run".into(),
+        }).unwrap();
+        let step = created.steps[0].clone();
+        fixture.state.store.set_step_run_state_for_tests(&step.subject, "working", 1);
+        let run = fixture.state.store.mission_run(&step.run).unwrap().unwrap();
+        fixture.request.from = run.subject;
+        fixture.request.idempotency_key = "program-report-ready".into();
+        fixture.request.owner = Some(EffectOwner {
+            mission: run.mission,
+            key: fixture.request.idempotency_key.clone(),
+            step: step.subject,
+            attempt: 1,
+            incarnation: "program:1".into(),
+        });
+        fixture
+    }
+
+    fn program_binding(&self) -> BoundRun {
+        let credential = self.state.store.issue_run_credential(
+            &self.owner().step, self.owner().attempt, 60_000,
+        ).unwrap();
+        BoundRun(self.state.store.run_binding(&credential).unwrap())
+    }
+
+    async fn send_program(&self, request: MessageSendRequest) -> Result<MessageSendReceipt, ApiError> {
+        messages::send_message(
+            State(self.state.clone()), Some(BoundActor::Run(self.request.from.clone())),
+            None, None, None, Some(Extension(self.program_binding())), Json(request),
+        ).await.map(|Json(receipt)| receipt)
+    }
+
+    async fn accept_program(&self) -> Result<MessageSendReceipt, ApiError> {
+        let mut request = self.request.clone();
+        // This owner is only a fixture oracle for the durable record. The handler must
+        // derive the real owner from the authenticated binding, never accept it as input.
+        request.owner = None;
+        self.send_program(request).await
+    }
+
+    fn next_program_attempt(&mut self) {
+        let owner = self.request.owner.as_mut().unwrap();
+        owner.attempt += 1;
+        owner.incarnation = format!("program:{}", owner.attempt);
+        self.state.store.set_step_run_state_for_tests(&owner.step, "working", owner.attempt);
+    }
+
     fn owner(&self) -> &EffectOwner { self.request.owner.as_ref().unwrap() }
 
     fn admit(&self) -> EffectRecord {
@@ -493,7 +551,7 @@ fn unattested_effect_caller_is_refused_before_admission() {
 async fn native_handler_refuses_an_unattested_caller_before_any_effect_is_admitted() {
     let fixture = Fixture::new();
     let error = messages::send_message(
-        State(fixture.state.clone()), None, None, None, None, Json(fixture.request.clone()),
+        State(fixture.state.clone()), None, None, None, None, None, Json(fixture.request.clone()),
     ).await.unwrap_err();
     assert_eq!(error.code, "effect-caller-refused");
     assert!(fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().is_none());
@@ -816,5 +874,148 @@ fn dead_original_lease_recovers_committed_native_message_only_by_key() {
     assert_eq!(record.lease_incarnation, effect.lease_incarnation);
     assert!(record.resolution.is_none());
     assert!(!fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
+    assert_message_count(&fixture.state, 1);
+}
+
+#[tokio::test]
+async fn program_message_handler_derives_owner_and_journals_confirmation_before_replay() {
+    let fixture = Fixture::program();
+    let sent = fixture.accept_program().await.unwrap();
+    assert!(!sent.already_sent);
+    assert_eq!(sent.message.from, fixture.request.from);
+    assert_eq!(sent.idempotency_key, native_message_key(fixture.owner()).unwrap());
+    let effect = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+    assert_eq!(effect.bound_step_run, fixture.owner().step);
+    assert_eq!(effect.bound_attempt, 1);
+    assert_eq!(effect.lease_owner, fixture.request.from);
+    assert_eq!(effect.lease_incarnation, "program:1");
+    assert_eq!(effect.provider_ref.as_deref(), Some(sent.message.subject.as_str()));
+    let confirmed = fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap();
+    assert_eq!(confirmed.len(), 1);
+    assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.in-flight")).unwrap().len(), 1);
+    let operation = fixture.state.store.operation_claim(&sent.idempotency_key).unwrap().unwrap();
+    assert!(effect.evidence.contains(&operation.id));
+
+    for _ in 0..2 {
+        let replay = fixture.accept_program().await.unwrap();
+        assert!(replay.already_sent);
+        assert_eq!(replay.message.subject, sent.message.subject);
+        assert_eq!(replay.idempotency_key, sent.idempotency_key);
+    }
+    assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.in-flight")).unwrap().len(), 1);
+    assert_message_count(&fixture.state, 1);
+}
+
+#[tokio::test]
+async fn program_durable_intent_adopts_one_committed_message_after_reopen_and_retry() {
+    let mut fixture = Fixture::program();
+    let effect = fixture.admit();
+    let sent = fixture.seed_message();
+    fixture.restart();
+    fixture.next_program_attempt();
+    for _ in 0..2 {
+        let adopted = fixture.accept_program().await.unwrap();
+        assert!(adopted.already_sent);
+        assert_eq!(adopted.message.subject, sent.message.subject);
+        assert_eq!(adopted.idempotency_key, native_message_key(fixture.owner()).unwrap());
+    }
+    let confirmed = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+    assert_eq!(confirmed.effect_id, effect.effect_id);
+    assert_eq!(confirmed.bound_attempt, 1);
+    assert_eq!(confirmed.lease_incarnation, "program:1");
+    assert_eq!(confirmed.provider_ref.as_deref(), Some(sent.message.subject.as_str()));
+    assert!(!fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+    assert!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.in-flight")).unwrap().is_empty());
+    assert_message_count(&fixture.state, 1);
+}
+
+#[tokio::test]
+async fn program_intent_or_in_flight_without_commit_parks_after_reopen_and_never_resends() {
+    for in_flight in [false, true] {
+        let mut fixture = Fixture::program();
+        let effect = fixture.admit();
+        if in_flight {
+            fixture.state.store.effect_in_flight(&effect).unwrap();
+        }
+        fixture.restart();
+        fixture.next_program_attempt();
+        assert_eq!(fixture.accept_program().await.unwrap_err().code, "effect-unresolved");
+        fixture.assert_parked(&effect);
+        assert!(fixture.accept_program().await.is_err());
+        assert!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+        assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.in-flight")).unwrap().len(),
+            usize::from(in_flight));
+        assert!(fixture.state.store.operation_claim(&native_message_key(fixture.owner()).unwrap()).unwrap().is_none());
+        assert_message_count(&fixture.state, 0);
+    }
+}
+
+#[tokio::test]
+async fn program_same_key_with_changed_payload_parks_without_resending() {
+    for field in ["to", "content", "title", "tags"] {
+        let mut fixture = Fixture::program();
+        let sent = fixture.accept_program().await.unwrap();
+        let effect = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+        fixture.restart();
+        fixture.next_program_attempt();
+        let mut changed = fixture.request.clone();
+        changed.owner = None;
+        match field {
+            "to" => changed.to = "agent/example/worker".into(),
+            "content" => changed.content.push_str(" Changed."),
+            "title" => changed.title = Some("Changed title".into()),
+            "tags" => changed.tags.push("changed".into()),
+            _ => unreachable!(),
+        }
+        assert_eq!(fixture.send_program(changed.clone()).await.unwrap_err().code, "idempotency-mismatch", "{field}");
+        fixture.assert_parked(&effect);
+        assert!(fixture.send_program(changed).await.is_err());
+        let stored = fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().unwrap();
+        assert_eq!(stored.effect_id, effect.effect_id);
+        assert_eq!(stored.payload_digest, effect.payload_digest);
+        assert_eq!(fixture.state.store.operation_claim(&sent.idempotency_key).unwrap().unwrap().subject,
+            sent.message.subject);
+        assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.in-flight")).unwrap().len(), 1);
+        assert_message_count(&fixture.state, 1);
+    }
+}
+
+#[tokio::test]
+async fn program_recovery_refuses_conflicting_native_operation_without_resending() {
+    let mut fixture = Fixture::program();
+    let effect = fixture.admit();
+    let mut conflicting = fixture.request.clone();
+    conflicting.owner = None;
+    conflicting.idempotency_key = native_message_key(fixture.owner()).unwrap();
+    conflicting.content = "A different committed program message.".into();
+    accept_message_receipt(&fixture.state, conflicting, None, None).unwrap();
+    fixture.restart();
+    fixture.next_program_attempt();
+    assert_eq!(fixture.accept_program().await.unwrap_err().code, "idempotency-mismatch");
+    fixture.assert_parked(&effect);
+    assert!(fixture.accept_program().await.is_err());
+    assert!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+    assert!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.in-flight")).unwrap().is_empty());
+    assert_message_count(&fixture.state, 1);
+}
+
+#[tokio::test]
+async fn program_handler_refuses_foreign_sender_supplied_owner_and_empty_key_before_admission() {
+    let fixture = Fixture::program();
+    for invalid in ["foreign-agent", "foreign-run", "owner", "empty-key"] {
+        let mut request = fixture.request.clone();
+        request.owner = None;
+        match invalid {
+            "foreign-agent" => request.from = "agent/example/worker".into(),
+            "foreign-run" => request.from = "mission-run/another-run".into(),
+            "owner" => request.owner = Some(fixture.owner().clone()),
+            "empty-key" => request.idempotency_key = " \t ".into(),
+            _ => unreachable!(),
+        }
+        assert_eq!(fixture.send_program(request).await.unwrap_err().code, "effect-caller-refused", "{invalid}");
+        assert!(fixture.state.store.resolve_effect_by_key(fixture.owner()).unwrap().is_none());
+        assert_message_count(&fixture.state, 0);
+    }
+    assert!(!fixture.accept_program().await.unwrap().already_sent);
     assert_message_count(&fixture.state, 1);
 }

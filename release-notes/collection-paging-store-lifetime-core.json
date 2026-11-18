@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Internal collection paging captures authoritative metadata and uses a per-store-open epoch, including same-process reopen and restore.",
+  "replay": {"status": "none", "detail": "No projection replay."},
+  "schema": {"status": "none", "detail": "No persisted schema change; existing maintenance generation is retained."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Internal collection cursors reset after store reopen. Unrelated host writes do not invalidate them. Same-epoch frontier regression remains inconsistent, not reset. No new HTTP selector, stream, capability or client activation; legacy serialization is unchanged."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "No stored state changes. Reverting restores the previous internal epoch behavior."}
+}
