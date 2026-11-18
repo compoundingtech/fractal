@@ -129,6 +129,10 @@ There is no reader-triggered refresh or TTL cache. If the current closed-minute 
 beyond the published projection, readers expose stale/unknown evidence instead of an old green
 verdict. A failed publication cannot advance freshness or retain a pre-mutation healthy projection.
 
+All ledger mutation paths run through one publish/invalidate boundary, including their prerequisite
+SQL reads. A gauge SELECT or INSERT failure therefore invalidates a same-cut healthy projection
+just like a checkpoint or summary-rebuild failure; no database error can bypass invalidation.
+
 Reporting also takes an owned snapshot of request, client and CPU diagnostics under the Meter
 lock and releases that guard before attaching native budgets and rendering store diagnostics.
 Neither a caller-owned PinnedRead nor a completion diagnostic lock spans native ledger I/O.

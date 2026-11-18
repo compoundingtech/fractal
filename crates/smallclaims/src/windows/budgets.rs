@@ -60,12 +60,17 @@ fn swap_projection(store: &RwLock<Option<Arc<Projection>>>, next: Option<Arc<Pro
     drop(previous);
 }
 
-fn publish_projection(store: &RwLock<Option<Arc<Projection>>>, result: Result<Projection>) -> Result<()> {
-    match result {
-        Ok(projection) => {
+/// All ledger mutations, including their reads and summary rebuild, run inside this
+/// boundary. Every error invalidates the published view before returning to its caller.
+fn publish_mutation<T>(
+    store: &RwLock<Option<Arc<Projection>>>,
+    mutation: impl FnOnce() -> Result<(T, Projection)>,
+) -> Result<T> {
+    match mutation() {
+        Ok((output, projection)) => {
             let projection = Arc::new(projection);
             swap_projection(store, Some(projection));
-            Ok(())
+            Ok(output)
         }
         Err(error) => {
             // A durable mutation may already have succeeded. An older same-cut
@@ -119,19 +124,22 @@ pub fn install(path: &Path, node: &str, streams: Vec<String>) -> Result<()> {
         "native SLO stream identity must contain 1..=256 bytes");
     let mut guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
     ensure!(guard.is_none(), "native SLO evidence is already installed");
-    let db = open(path, node)?;
-    let now = unix_ms();
-    db.execute(/* sqlite-large-value: allow-for-now lv-h1600ef705393 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_minutes_v1 WHERE slot >= ?1", [now / MINUTE])?;
-    db.execute(/* sqlite-large-value: allow-for-now lv-h0a7bcaadb3af owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_gauges_v1 WHERE at_ms > ?1", [now])?;
+    ensure!(RECORDER.get().is_none(), "native SLO recorder is already installed");
     let streams: Arc<[String]> = streams.into();
-    let ledger = Ledger { db, streams: Arc::clone(&streams), pending: BTreeMap::new(), started_ms: now,
-        last_ms: now, last_instant: Instant::now(), committed_through_ms: now / MINUTE * MINUTE };
-    let projection = ledger.projection_at(now)?;
-    ensure!(RECORDER.set(Recorder {
-        streams, pending: Mutex::new(BTreeMap::new()),
-    }).is_ok(), "native SLO recorder is already installed");
+    let ledger = publish_mutation(&PROJECTION, || {
+        let db = open(path, node)?;
+        let now = unix_ms();
+        db.execute(/* sqlite-large-value: allow-for-now lv-h1600ef705393 owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_minutes_v1 WHERE slot >= ?1", [now / MINUTE])?;
+        db.execute(/* sqlite-large-value: allow-for-now lv-h0a7bcaadb3af owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM native_slo_gauges_v1 WHERE at_ms > ?1", [now])?;
+        let ledger = Ledger { db, streams: Arc::clone(&streams), pending: BTreeMap::new(), started_ms: now,
+            last_ms: now, last_instant: Instant::now(), committed_through_ms: now / MINUTE * MINUTE };
+        let projection = ledger.projection_at(now)?;
+        Ok((ledger, projection))
+    })?;
+    // LEDGER serializes initialization and the precondition above excludes prior setup.
+    RECORDER.set(Recorder { streams, pending: Mutex::new(BTreeMap::new()) })
+        .unwrap_or_else(|_| unreachable!("native SLO recorder initialization is serialized"));
     *guard = Some(ledger);
-    publish_projection(&PROJECTION, Ok(projection))?;
     Ok(())
 }
 
@@ -190,8 +198,10 @@ fn checkpoint_with(recorder: &Recorder, ledger: &Mutex<Option<Ledger>>, projecti
         counts.eligible = counts.eligible.saturating_add(delta.eligible);
         counts.bad = counts.bad.saturating_add(delta.bad);
     }
-    let result = ledger.checkpoint_at(now, instant).and_then(|()| ledger.projection_at(now));
-    publish_projection(projection, result)
+    publish_mutation(projection, || {
+        ledger.checkpoint_at(now, instant)?;
+        Ok(((), ledger.projection_at(now)?))
+    })
 }
 
 /// Configure the actual SQLite wait boundary for isolated cross-crate I/O regressions.
@@ -348,11 +358,20 @@ pub fn record_gauge(stream: &str, at_ms: u64, value: Option<f64>) -> Result<()> 
     ensure!(value.is_none_or(f64::is_finite), "native SLO gauge must be finite");
     let guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(ledger) = guard.as_ref() else { return Ok(()); };
-    let prior: Option<Option<f64>> = ledger.db.query_row("SELECT value FROM native_slo_gauges_v1 WHERE stream=?1 AND at_ms=?2",
-        params![stream, at_ms], |r| r.get(0)).optional()?;
-    ensure!(prior.is_none_or(|p| p == value), "conflicting native SLO gauge sample");
-    ledger.db.execute(/* sqlite-large-value: allow-for-now lv-ha0bcfcb764ac owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO native_slo_gauges_v1 VALUES(?1,?2,?3)", params![stream, at_ms, value])?;
-    publish_projection(&PROJECTION, ledger.projection_at(unix_ms()))
+    record_gauge_with(ledger, &PROJECTION, stream, at_ms, value)
+}
+
+fn record_gauge_with(
+    ledger: &Ledger, projection: &RwLock<Option<Arc<Projection>>>,
+    stream: &str, at_ms: u64, value: Option<f64>,
+) -> Result<()> {
+    publish_mutation(projection, || {
+        let prior: Option<Option<f64>> = ledger.db.query_row("SELECT value FROM native_slo_gauges_v1 WHERE stream=?1 AND at_ms=?2",
+            params![stream, at_ms], |r| r.get(0)).optional()?;
+        ensure!(prior.is_none_or(|p| p == value), "conflicting native SLO gauge sample");
+        ledger.db.execute(/* sqlite-large-value: allow-for-now lv-ha0bcfcb764ac owner=smallclaims::windows::budgets TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO native_slo_gauges_v1 VALUES(?1,?2,?3)", params![stream, at_ms, value])?;
+        Ok(((), ledger.projection_at(unix_ms())?))
+    })
 }
 
 /// Integrate finite forward holds, clipped by the next observation and maximum age.
@@ -424,7 +443,7 @@ mod tests {
         let ledger = projection_ledger()?;
         let now = ledger.last_ms;
         let store = RwLock::new(None);
-        publish_projection(&store, ledger.projection_at(now))?;
+        publish_mutation(&store, || Ok(((), ledger.projection_at(now)?)))?;
         drop(ledger);
         let projection = projection_snapshot(&store).unwrap();
         let report = report_at(Some(&projection), "x", now + 1);
@@ -483,10 +502,10 @@ mod tests {
         let mut ledger = projection_ledger()?;
         let now = ledger.last_ms;
         let store = RwLock::new(None);
-        publish_projection(&store, ledger.projection_at(now))?;
+        publish_mutation(&store, || Ok(((), ledger.projection_at(now)?)))?;
         let before = projection_snapshot(&store).unwrap();
         ledger.checkpoint_at(now + 100, ledger.last_instant + std::time::Duration::from_millis(100))?;
-        publish_projection(&store, ledger.projection_at(now + 100))?;
+        publish_mutation(&store, || Ok(((), ledger.projection_at(now + 100)?)))?;
         let after = projection_snapshot(&store).unwrap();
         assert_eq!(after.as_of_unix_ms, now + 100);
         assert_eq!(after.cut_ms, before.cut_ms);
@@ -500,11 +519,11 @@ mod tests {
         let ledger = projection_ledger()?;
         let now = ledger.last_ms;
         let store = RwLock::new(None);
-        publish_projection(&store, ledger.projection_at(now))?;
+        publish_mutation(&store, || Ok(((), ledger.projection_at(now)?)))?;
         let before = projection_snapshot(&store).unwrap();
         ledger.db.execute("INSERT INTO native_slo_gauges_v1 VALUES('g',?1,100)", [now])?;
         ledger.db.execute_batch("DROP TABLE native_slo_minutes_v1")?;
-        assert!(publish_projection(&store, ledger.projection_at(now + 100)).is_err());
+        assert!(publish_mutation(&store, || Ok(((), ledger.projection_at(now + 100)?))).is_err());
         let after = projection_snapshot(&store).unwrap();
         assert_eq!(after.as_of_unix_ms, now);
         assert_eq!(after.cut_ms, before.cut_ms);
@@ -514,6 +533,39 @@ mod tests {
         assert_eq!(gauge["unavailable_reason"], "projection_unavailable");
         assert_eq!(gauge["windows"]["5m"]["unknown_ms"], 5 * MINUTE);
         assert_eq!(report_at(Some(&before), "x", now)["available"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn gauge_select_and_insert_failures_invalidate_healthy_same_cut_evidence() -> Result<()> {
+        for failure in ["PRAGMA query_only=ON", "DROP TABLE native_slo_gauges_v1"] {
+            let ledger = projection_ledger()?;
+            let now = ledger.last_ms;
+            ledger.db.execute("DELETE FROM native_slo_gauges_v1", [])?;
+            ledger.db.execute("INSERT INTO native_slo_gauges_v1 VALUES('g',?1,2)", [now - 5 * MINUTE])?;
+            let store = RwLock::new(None);
+            publish_mutation(&store, || Ok(((), ledger.projection_at(now)?)))?;
+            let before = projection_snapshot(&store).unwrap();
+            let healthy = gauge_report_at(Some(&before), "g", now, 5 * MINUTE, 3.0);
+            assert_eq!(healthy["available"], true);
+            assert_eq!(healthy["windows"]["5m"]["bad"], 0);
+            assert_eq!(healthy["windows"]["5m"]["covered_ms"], 5 * MINUTE);
+
+            // Real SQLite failures: SELECT succeeds but INSERT is read-only in the
+            // first case; SELECT itself fails on the missing table in the second.
+            ledger.db.execute_batch(failure)?;
+            let error = record_gauge_with(&ledger, &store, "g", now, Some(100.0)).unwrap_err();
+            assert!(error.downcast_ref::<rusqlite::Error>().is_some(), "{error:#}");
+            let after = projection_snapshot(&store).unwrap();
+            assert_eq!(after.as_of_unix_ms, before.as_of_unix_ms);
+            assert_eq!(after.cut_ms, before.cut_ms);
+            let unknown = gauge_report_at(Some(&after), "g", now, 5 * MINUTE, 3.0);
+            assert_eq!(unknown["available"], false);
+            assert_eq!(unknown["unavailable_reason"], "projection_unavailable");
+            assert_eq!(unknown["windows"]["5m"]["covered_ms"], 0);
+            assert_eq!(unknown["windows"]["5m"]["unknown_ms"], 5 * MINUTE);
+            assert_eq!(report_at(Some(&after), "x", now)["available"], false);
+        }
         Ok(())
     }
 
