@@ -147,6 +147,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  residency?: (AgentResidency | null);
   resources?: Array<DeclaredResource>;
   rollout?: {
 
@@ -191,6 +192,7 @@ export type AgentDeclaration = {
   accountable?: string;
   declared_admission?: DeclaredAdmission;
   id: Id;
+  idle_suspend?: "never" | "member";
   kdl: string;
   revision: string;
   revisions: Array<string>;
@@ -386,6 +388,13 @@ export type AgentRepository = {
   agent_ids: Array<string>;
   path: string;
   workspaces: Array<string>;
+};
+
+export type AgentResidency = {
+  due_at: string | null;
+  eligible_since: string | null;
+  policy: string;
+  refusal_reason: string | null;
 };
 
 export type AgentResumeParameters = {

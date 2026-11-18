@@ -51,6 +51,7 @@ Storage digest: `e91bf306edf1a9f7579fb61a08e92441685725ff5298f5fb0cd4db8dbf0ba57
 | `pty` | `pty/RUN/LOCAL_ID` | no | A mission-run terminal runtime. |
 | `read-position` | `read-position/person/NAME` | no | One person's forward-only read positions across conversations. |
 | `repair` | `repair/ID` | yes | An immutable receipt for a bounded graph or replication repair. |
+| `residency` | `residency/HOST/EPISODE/ID` | no | Durable residency evidence, scoped to an owner host and logical episode. |
 | `resource` | `resource/NAME` | yes | An observed external or durable fact bag. |
 | `revision-proposal` | `revision-proposal/ID` | no | A mission revision proposal. |
 | `rule` | `rule/NAME` | no | A permission rule, its mode, and the writes it audited. |
@@ -221,6 +222,14 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `record.repaired` | `repair` | `ordinary-client` | `once` | `durable` | `reason!:string`, `record!:string`, `replacement!:string` | `repair` |
 | `render.applied` | `agent`, `exec`, `pty` | `system-only` | `append` | `local` | `warnings:array`, `writes:array` |  |
 | `repair.applied` | `repair` | `system-only` | `once` | `durable` | `affected_subjects:array`, `item_count:integer`, `reason!:string`, `token!:string` |  |
+| `residency.eligibility-outcome` | `residency` | `system-only` | `once` | `durable` | `decided_at!:integer`, `eligible_since!:integer`, `host!:string`, `reason!:string`, `refused!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.first-turn` | `residency` | `system-only` | `once` | `durable` | `first_turn_at!:integer`, `host!:string`, `seat:subject-reference(agent)`, `turn_id!:string` |  |
+| `residency.host-sample` | `residency` | `system-only` | `append` | `durable` | `asleep_seats!:integer`, `held_silent_age_seconds:number`, `host!:string`, `host_available_delta_bytes:integer`, `memory_coverage!:string`, `observed_at!:integer`, `private_reclaimed_bytes:integer`, `seat:subject-reference(agent)` |  |
+| `residency.outcome` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `observed_at!:integer`, `reason!:string`, `resume_failed!:integer`, `seat:subject-reference(agent)`, `useless!:integer` |  |
+| `residency.resumed` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `incarnation!:string`, `native_session!:string`, `resumed_at!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.sleep-ended` | `residency` | `system-only` | `once` | `durable` | `end_class!:string`, `ended_at!:integer`, `host!:string`, `seat:subject-reference(agent)`, `short_sleep!:integer`, `suspended_at!:integer` |  |
+| `residency.unrouted` | `residency` | `system-only` | `once` | `durable` | `host!:string`, `kind!:string`, `observed_at!:integer`, `seat:subject-reference(agent)` |  |
+| `residency.wake-demand` | `residency` | `system-only` | `once` | `durable` | `demand_at!:integer`, `host!:string`, `origin_accepted_at!:integer`, `seat:subject-reference(agent)`, `source_message!:string`, `suspended_incarnation!:string` |  |
 | `resource.exec-receipt` | `resource` | `system-only` | `once` | `durable` | `class!:string`, `clean_end:boolean`, `clean_start:boolean`, `coverage!:string`, `disk_reserved_bytes!:integer`, `exec_id!:string`, `exit_code:integer`, `exit_signal:integer`, `head_end:string`, `head_start:string`, `host!:string`, `io:string`, `memory_bytes:integer`, `memory_peak_bytes:integer`, `owner!:object`, `queue_wait_ms!:integer`, `state!:string`, `wall_duration_ms!:integer` |  |
 | `resource.observed` | `resource` | `ordinary-client` | `append` | `durable` | `attribution_only:boolean`, `kind:string`, `observed_at:integer`, `state:any` | `resource` |
 | `revision-proposal.applied` | `revision-proposal` | `system-only` | `once` | `durable` | `reason:string`, `status:string`, `successor_generation:subject-reference` |  |
@@ -331,6 +340,19 @@ only the newest quota snapshot. Older members retain this unknown kind as retrya
 `unknown-claim-kind` evidence, without projecting it or granting authority. Known
 claims continue replicating, and an upgraded member replays the retained observations.
 
+
+## Agent idle-suspend grammar
+
+An agent may declare one optional `idle-suspend "never"` or `idle-suspend "member"`
+child. It takes exactly one string, with no properties, body, or type annotations.
+Duplicate children and all other values are refused. Omitting it and declaring
+`member` both inherit the host's idle-suspend policy; `never` opts the seat out.
+
+The canonical declaration retains this child, and agent declaration reads expose
+it as optional `idle_suspend`. It is policy metadata, not a launch-contract field:
+publishing only this change does not supersede the live seat, restart its process,
+or replace its native session. Residency diagnostics evaluate the current
+declaration and host policy; this grammar alone does not suspend a seat.
 
 ## Agent principal grammar
 
