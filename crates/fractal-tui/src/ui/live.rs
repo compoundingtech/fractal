@@ -3790,7 +3790,7 @@ mod tests {
         assert!(unknown.downcast_ref::<ClientError>().unwrap().outcome_unknown());
         assert_eq!(
             super::plain(&unknown),
-            "Fractal may have taken it and has not confirmed it yet; it will not be sent again"
+            "Fractal may have taken it and has not confirmed it yet; do not send it again"
         );
         // `applied: "none"` with a full queue (rate limited): nothing was queued, so try again.
         assert!(not_applied(&answer("none", fractal_client::ErrorCode::RateLimited), &send));
@@ -3973,7 +3973,7 @@ mod tests {
         assert!(!not_applied(&error, &send));
         assert_eq!(
             super::plain(&error),
-            "Fractal may have taken it and has not confirmed it yet; it will not be sent again"
+            "Fractal may have taken it and has not confirmed it yet; do not send it again"
         );
         assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
         // Even an explicit resend after a session change must not make another POST.

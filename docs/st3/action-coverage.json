@@ -3409,9 +3409,9 @@
     {
       "effect": "Forget",
       "tests": [
-        "crates/fractal-tui/src/ui/glass.rs::a_message_that_did_not_arrive_can_be_sent_again_or_cleared"
+        "crates/fractal-tui/src/ui/glass.rs::unknown_message_can_be_copied_but_never_retried"
       ],
-      "verification": "UI reducer and corresponding real daemon action; local effects have no graph fence"
+      "verification": "UI reducer proves copying unknown text retains the original attempt without resend or graph mutation"
     },
     {
       "effect": "Snooze",

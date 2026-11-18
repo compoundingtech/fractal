@@ -824,7 +824,10 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     // While sending, the recipient preview is frozen to the exact packet recipient.
     pending_layout.splice(
         slot + 1..=panel_end,
-        ["Original delivery to Atlas is pending or unconfirmed. It may already have arrived and will not be sent again.".to_owned()],
+        [
+            "Original delivery to Atlas is pending or unconfirmed. It may already have arrived and will not be".to_owned(),
+            "sent again.".to_owned(),
+        ],
     );
     assert_eq!(
         queued, pending_layout,
@@ -1397,8 +1400,9 @@ fn the_shell_flashes_a_refused_thread_send_as_a_warning() {
     ui.key(enter);
     assert_eq!(
         said(&ui).as_deref(),
-        Some("The original action is still being sent")
+        Some("The original action is pending or unknown and will not be sent again")
     );
+    assert!(ui.threads.writes().is_empty(), "repeated Enter never resends");
     assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
     super::super::flash::capture_shell(&ui, "p1-6-pending-enter-warn");
 
@@ -1410,8 +1414,9 @@ fn the_shell_flashes_a_refused_thread_send_as_a_warning() {
     ));
     assert_eq!(
         said(&ui).as_deref(),
-        Some("The original action is still being sent")
+        Some("The original action is pending or unknown and will not be sent again")
     );
+    assert!(ui.threads.writes().is_empty(), "clicking Send never resends");
 }
 
 #[test]

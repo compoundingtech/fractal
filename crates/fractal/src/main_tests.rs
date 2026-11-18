@@ -750,6 +750,8 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
 
 #[test]
 fn client_api_errors_print_in_plain_words_with_their_code() {
+    // A legacy refusal without application metadata cannot claim nonapplication
+    // merely because its code or message mentions a stale snapshot.
     let api = fractal_client::ClientError::Api(
         fractal_client::ErrorCode::StaleFence,
         "the client snapshot changed before the action was submitted".into(),
@@ -767,12 +769,12 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
     let error = anyhow::Error::new(api).context("start the terminal");
     assert_eq!(
         plain_error(&error),
-        "start the terminal: st changed while this was on its way, so it was not applied (stale-fence)"
+        "start the terminal: st changed while this was on its way (stale-fence)"
     );
     assert_eq!(plain_error(&anyhow::anyhow!("plain")), "plain");
     assert_eq!(
         cli_error_message(&error, false),
-        "start the terminal: Fractal changed while this was on its way, so it was not applied (stale-fence)"
+        "start the terminal: Fractal changed while this was on its way (stale-fence)"
     );
     assert_eq!(cli_error_message(&error, true), plain_error(&error));
 }
