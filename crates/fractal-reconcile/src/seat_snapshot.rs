@@ -1008,6 +1008,8 @@ mod tests {
             "workspace-not-root", "workspace-submodule-unsupported"] {
             let root = tempfile::tempdir().unwrap();
             let (mut member, mut suspension, store) = fixture(root.path());
+            let native = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
+            suspension.native_session_id = Some(native.into());
             let original = PathBuf::from(&member.workspace);
             match refusal_class {
                 "workspace-not-git" => fs::remove_dir_all(original.join(".git")).unwrap(),
@@ -1028,9 +1030,9 @@ mod tests {
                 }
             }
             let transcript = sessions(&root.path().join("state/drivers"), "agent/sample", "omp")
-                .join("time_native.jsonl");
+                .join(format!("2026-11-18_{native}.jsonl"));
             fs::write(&transcript, format!("{}\n{}\n",
-                serde_json::json!({"type":"session", "id":"native", "cwd":member.workspace}),
+                serde_json::json!({"type":"session", "id":native, "cwd":member.workspace}),
                 serde_json::json!({"role":"user", "content":"frozen"}))).unwrap();
             let state = root.path().join("state");
             // Manual requests retain every original refusal, without stopping the seat.
@@ -1052,32 +1054,32 @@ mod tests {
             // Missing native authority refuses instead of publishing a detached inventory copy.
             let frozen = fs::read(&transcript).unwrap();
             fs::remove_file(&transcript).unwrap();
-            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "native").unwrap_err()), "transcript-missing");
+            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap_err()), "transcript-missing");
             fs::write(&transcript, &frozen).unwrap();
             for _restart in 0..2 {
-                let restored = restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "native").unwrap();
-                assert_eq!(restored.native_session_id, "native");
+                let restored = restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap();
+                assert_eq!(restored.native_session_id, native);
                 assert_eq!(restored.transcript_path.as_ref(), Some(&transcript));
                 assert!(fs::read_to_string(&transcript).unwrap().contains("frozen"));
             }
             assert_eq!(fs::read_to_string(Path::new(&member.workspace).join("tracked")).unwrap(), "changed\n");
             let mut moved = member.clone();
             moved.host = "birch".into();
-            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &moved, "native").unwrap_err()), "snapshot-in-place");
+            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &moved, native).unwrap_err()), "snapshot-in-place");
             assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "wrong-session").is_err());
             // A new turn after strict resume must remain visible to ordinary continuation,
             // which selects by native ID from the managed inventory.
             let inventory = sessions(&state.join("drivers"), "agent/sample", "omp");
-            let resumed = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, "native", Some(&transcript)).unwrap();
+            let resumed = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, native, Some(&transcript)).unwrap();
             assert_eq!(resumed[2], transcript.to_string_lossy());
             let mut continued = frozen;
             continued.extend_from_slice(b"{\"role\":\"assistant\",\"content\":\"post-resume turn\"}\n");
             fs::write(&transcript, &continued).unwrap();
-            let restarted = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, "native", None).unwrap();
+            let restarted = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, native, None).unwrap();
             assert_eq!(restarted, resumed);
             assert!(fs::read_to_string(&restarted[2]).unwrap().contains("post-resume turn"));
             // Another strict restore must not overwrite divergent native state.
-            assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "native").is_err());
+            assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).is_err());
         }
     }
 
