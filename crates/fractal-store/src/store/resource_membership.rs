@@ -412,7 +412,7 @@ impl Store {
         anyhow::ensure!(host == self.origin, "only the execution host may own resource authority");
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        transaction.execute("INSERT INTO resource_authorities_v1 VALUES(?1,?2)
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h466c8225b3a9 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO resource_authorities_v1 VALUES(?1,?2)
             ON CONFLICT(host) DO UPDATE SET epoch=excluded.epoch", rusqlite::params![host,epoch])?;
         super::resource_admission_objectives::recover(&transaction, host, epoch)?;
         transaction.commit()?;
