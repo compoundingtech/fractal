@@ -2800,6 +2800,29 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+#[test]
+fn agent_card_suspension_shows_cause_and_mode_with_legacy_defaults() {
+    for (metadata, expected) in [
+        (serde_json::json!({}), "manual · git"),
+        (serde_json::json!({"cause":"idle", "mode":"in-place"}), "idle · in-place"),
+        (serde_json::json!({"cause":"future", "mode":"future-mode"}), "future · future-mode"),
+    ] {
+        let mut suspension = serde_json::json!({
+            "action":"suspend", "phase":"suspended", "operation_id":"operation",
+            "updated_at":"2026-11-18T00:00:00Z", "blocking":[]
+        });
+        suspension.as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+            "kind":"agent", "id":"agent/sample", "revision":"one", "name":"Sample",
+            "updated_at":"2026-11-18T00:00:00Z", "state":"suspended",
+            "reachability":"local", "runtime_ids":[], "suspension":suspension
+        })).unwrap();
+        assert!(render_client_agent(&agent, &[], 0).contains(
+            &format!("SUSPENSION   suspend suspended · {expected}\n")
+        ));
+    }
+}
+
 fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
     serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/garden/worker", "revision": "one",
@@ -7673,6 +7696,72 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
         .is_err(),
         "read-only and full-control pairing must be mutually exclusive"
     );
+}
+
+#[test]
+fn person_scope_pairing_parses_exact_scopes_and_conflicts() {
+    let base = ["fractal", "devices", "--as", "person/alex", "pair", "tag-reader"];
+    let scopes = [
+        "--person-scope", "read.projections",
+        "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ];
+    let cli = Cli::try_parse_from(base.into_iter().chain(scopes)).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Pair { person_scopes, .. }), ..
+    }) = cli.command else {
+        panic!("expected a person pairing command")
+    };
+    assert_eq!(person_scopes, ["read.projections", "read.glasses", "read.arrangements"]);
+    for conflict in ["--read-only", "--full-control", "--assistant"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(scopes).chain([conflict])).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--person-scope"])).is_err());
+    for rejected in ["unknown.scope", "control.messages", "terminal.write"] {
+        let error = Cli::try_parse_from(base.into_iter().chain(["--person-scope", rejected])).err().unwrap();
+        assert!(error.to_string().contains(rejected), "{error}");
+        assert!(error.to_string().contains("limited pairing scopes"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn person_scope_pairing_sends_exact_request_and_preserves_daemon_error() {
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send(body).unwrap();
+                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({
+                    "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                    "request_id": "request/pairing-test", "code": "validation",
+                    "message": "daemon scope validation detail", "retryable": false, "details": {}
+                })))
+            }
+        }),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("pairing.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let endpoint = Endpoint::Unix(socket);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cli = Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/alex", "pair", "tag-reader",
+        "--person-scope", "read.projections", "--person-scope", "read.glasses",
+        "--person-scope", "read.arrangements",
+    ]).unwrap();
+    let Command::Devices(args) = cli.command else { panic!("expected devices") };
+    let error = run_devices(endpoint, &Config::default(), args, true).await.unwrap_err();
+    assert!(error.to_string().contains("daemon scope validation detail"), "{error}");
+    let request: PersonPairingBegin = serde_json::from_value(received.await.unwrap()).unwrap();
+    assert_eq!(request.device_name, "tag-reader");
+    assert_eq!(request.person_id, "person/alex");
+    assert_eq!(request.scopes.unwrap(), ["read.projections", "read.glasses", "read.arrangements"]);
+    assert_eq!(request.full_control, None);
+    assert_eq!(request.fabric_gateway, None);
+    server.abort();
 }
 
 #[test]

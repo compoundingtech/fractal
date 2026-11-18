@@ -2261,6 +2261,30 @@ const READ_ONLY_PAIRING_SCOPES: &[&str] = &[
     "terminal.read",
 ];
 
+/// CLI mirror of the daemon's person-pairing ceiling; the daemon revalidates the grant.
+const PERSON_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
+    "read.glasses",
+    "control.glasses",
+    "read.arrangements",
+    "control.arrangements",
+    "terminal.read",
+    "control.attention",
+    "control.launches",
+];
+
+fn parse_person_pairing_scope(value: &str) -> std::result::Result<String, String> {
+    if PERSON_PAIRING_SCOPES.contains(&value) {
+        Ok(value.to_owned())
+    } else {
+        Err(format!("person pairing scope `{value}` is not one of the limited pairing scopes: {}", PERSON_PAIRING_SCOPES.join(", ")))
+    }
+}
+
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
 /// Hard maximum grant lifetime.
@@ -2295,6 +2319,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// One exact person-device scope from the limited pairing ceiling; repeat for each scope.
+        /// Nothing is granted implicitly. Use --scope instead for assistant grants.
+        #[arg(long = "person-scope", value_name = "SCOPE", value_parser = parse_person_pairing_scope, conflicts_with_all = ["read_only", "full_control", "assistant"])]
+        person_scopes: Vec<String>,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
@@ -6723,6 +6751,10 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
+        Command::Hosts { command: hosts_cli::HostsCommand::LaunchFreeze {
+            command: hosts_cli::LaunchFreezeCommand::Set { actor, .. }
+                | hosts_cli::LaunchFreezeCommand::Clear { actor, .. },
+        } } => actor.as_deref(),
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
@@ -7769,6 +7801,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             open_daemon_store(&config, &state_identity)
         })
     })?);
+    fractal_daemon::slo::install_budget_ledger(&config.state_dir.join("slo-budgets.sqlite3"), &config.node)
+        .context("opening native SLO accounting before serving requests")?;
     store
         .extension::<fractal_daemon::config::AgentPopulationEnabled>()
         .0
@@ -7902,6 +7936,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "mission_resource_lane": 2,
+                    "per_run_missions": 1,
                     "shell_resource_exec": 1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
@@ -8076,10 +8111,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     {
         let store = store.clone();
+        let state_dir = config.state_dir.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let mut rows = fractal_daemon::api::slo_rows(&store)?;
+                let domain = fractal_daemon::declared_objectives::github_rows(&store, &state_dir, now_ms() as u64)?;
+                let mut rows = fractal_daemon::api::slo_rows(&store, domain)?;
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
@@ -10361,6 +10398,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            person_scopes,
             fabric_gateway,
             gateway,
             assistant: None,
@@ -10380,23 +10418,29 @@ async fn run_devices(
                     );
                 }
             }
-            let response = client
-                .pairing_begin_person(&PersonPairingBegin {
-                    api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name,
-                    person_id: person.clone(),
-                    full_control: full_control.then_some(true),
-                    scopes: read_only.then(|| {
+            let request = PersonPairingBegin {
+                api_version: CLIENT_V0_API_VERSION.into(),
+                device_name,
+                person_id: person.clone(),
+                full_control: full_control.then_some(true),
+                scopes: if person_scopes.is_empty() {
+                    read_only.then(|| {
                         READ_ONLY_PAIRING_SCOPES
                             .iter()
                             .map(|scope| (*scope).to_owned())
                             .collect()
-                    }),
-                    fabric_gateway: fabric_gateway.then_some(true),
-                })
-                .await?;
+                    })
+                } else {
+                    Some(person_scopes)
+                },
+                fabric_gateway: fabric_gateway.then_some(true),
+            };
+            let response = client.pairing_begin_person(&request).await?;
             print_client_value(&response, json_output)?;
             if !json_output {
+                if let Some(scopes) = &request.scopes {
+                    println!("Requested scopes: {}", scopes.join(", "));
+                }
                 if let Some(fingerprint) = &response.value.person_root_fingerprint {
                     println!(
                         "Person-root fingerprint: {fingerprint}\nCopy this separately from the pairing code to the new device's fingerprint field or --fingerprint option."
@@ -10713,6 +10757,7 @@ async fn run_devices_complete(
             },
             path.display()
         );
+        println!("Granted scopes: {}", device.session.scopes.join(", "));
     }
     Ok(())
 }
@@ -15438,8 +15483,10 @@ fn render_client_agent(
         };
         let _ = writeln!(
             output,
-            "SUSPENSION   {} {}{session}{failure}",
-            suspension.action, suspension.phase
+            "SUSPENSION   {} {} · {} · {}{session}{failure}",
+            suspension.action, suspension.phase,
+            suspension.cause.as_deref().unwrap_or("manual"),
+            suspension.mode.as_deref().unwrap_or("git"),
         );
     }
     if let Some(rollout) = &agent.rollout {

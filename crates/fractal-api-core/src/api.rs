@@ -121,6 +121,8 @@ mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
 mod exec_only;
+mod github_capture;
+mod github_capture_authority;
 mod github_plugin;
 mod github_watch;
 pub mod harness_events;
@@ -797,6 +799,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/hosts/holds", get(host_holds::list).post(host_holds::place))
         .route("/v1/hosts/holds/release", post(host_holds::release))
         .route("/v1/hosts/holds/recover", post(host_holds::recover))
+        .route("/v1/hosts/launch-freeze", get(host_holds::launch_freeze).post(host_holds::set_launch_freeze))
+        .route("/v1/hosts/launch-freeze/clear", post(host_holds::clear_launch_freeze))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -1065,6 +1069,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", get(github_plugin::pull))
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
         .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
+        .route("/v1/plugins/github/capture/v1/replay", get(github_capture::replay))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/authority/root", post(github_capture_authority::root))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/authority/successor", post(github_capture_authority::successor))
+        .route("/v1/plugins/github/capture/v1/sources/{source}/fence", post(github_capture_authority::fence))
         .route("/v1/work/done", post(work::done_person_step))
         .route("/v1/work/override", post(work::override_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
@@ -1701,12 +1709,14 @@ pub fn request_latency_snapshot() -> Vec<Value> {
 
 /// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
-    request_latency().lock().unwrap().targets_only(Instant::now())
+    let snapshot = request_latency().lock().unwrap().targets_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
-    request_latency().lock().unwrap().windows(Instant::now())
+    let snapshot = request_latency().lock().unwrap().windows_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Note what keeps this minute of the member's CPU from being idle.
@@ -1765,6 +1775,11 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .cpu_minutes()
                 .settle(check, busy);
+        }
+        match tokio::task::spawn_blocking(crate::slo::checkpoint_budgets).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("fractal: native SLO accounting checkpoint failed: {error:#}"),
+            Err(error) => eprintln!("fractal: native SLO accounting checkpoint task failed: {error}"),
         }
         let now = client_now_ms() as u64;
         tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
@@ -3723,6 +3738,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     json!({
         "action": suspension.action,
         "phase": suspension.phase,
+        "cause": suspension.cause(),
+        "mode": suspension.mode(),
         "operation_id": suspension.operation_id,
         "harness": suspension.harness,
         "native_session_id": suspension.native_session_id,
@@ -8434,6 +8451,7 @@ pub async fn guard_bound_request(
         "/v1/agents/native-session",
         "/v1/agents/lane/burst",
         "/v1/hosts/holds",
+        "/v1/hosts/launch-freeze",
         "/v1/delivery/hold",
         "/v1/hosts/holds",
         "/v1/lane-changes",
@@ -11227,6 +11245,11 @@ pub fn request_suspend(
     {
         return Ok(prior);
     }
+    if let Some(prior) = state.store.suspension_manual_request(&subject, &key)
+        .map_err(ApiError::internal)?
+    {
+        return Ok(prior);
+    }
     if crate::rollout::status(&state.store, &subject)
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
@@ -11246,6 +11269,36 @@ pub fn request_suspend(
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
         && suspension.holds_seat()
     {
+        let manual_key = crate::suspension::suspend_manual_key(
+            suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id),
+        );
+        if suspension.cause() == "idle" && suspension.phase == "suspended" {
+            check_suspension_fence(
+                fence.as_ref(), suspension.incarnation_id.as_deref(), &token,
+            )?;
+            let (claim, _) = state.store.append_source_gated(
+                &subject,
+                &ClaimInput {
+                    subject: subject.clone(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: Some(actor),
+                    fields: BTreeMap::from([
+                        ("action".into(), json!("suspend")),
+                        ("operation_status".into(), json!("manual")),
+                        ("cause".into(), json!("manual")),
+                        ("request_key".into(), json!(key)),
+                        ("operation_id".into(), json!(suspension.operation_id)),
+                    ]),
+                    evidence: vec![token, suspension.suspend_operation_id.clone().unwrap_or_else(|| suspension.operation_id.clone())],
+                    expected_subject: None,
+                    idempotency_key: Some(manual_key),
+                },
+                crate::store::owned_sets::Verb::Suspend,
+                force_reason,
+            ).map_err(ApiError::bad)?;
+            signal_changed(state);
+            return Ok(claim);
+        }
         return Err(ApiError::bad(
             FractalError::new(
                 "already-suspended",
@@ -11358,6 +11411,14 @@ pub fn request_resume(
         return Err(ApiError::bad(FractalError::new(
             "invalid-host",
             "resume needs a host name",
+        )));
+    }
+    if suspension.mode() == "in-place"
+        && suspension.source_host.as_deref() != Some(host.as_str())
+    {
+        return Err(ApiError::bad(FractalError::new(
+            "snapshot-in-place",
+            "an in-place suspension can only resume on its source host",
         )));
     }
     let launch_token = if let Some((incumbent, old)) =
@@ -11678,8 +11739,9 @@ async fn finish_claim_publication(
     Ok(Json(response))
 }
 
-/// Every objective and budget as one list: see `objectives`.
-pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
+/// Every native, source-backed and declared objective and budget as one list.
+/// Domain rows precede declaration evaluation so native bindings see their real source rows.
+pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow::Result<Vec<Value>> {
     let limits = store.account_limits()?;
     let fresh_ms = crate::config::reload_daemon_limits()
         .and_then(|reloaded| reloaded.ok())
@@ -11700,7 +11762,10 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         rows.insert(budgets, crate::objectives::divergence(open));
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
-    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
+    drop(rows.splice(budgets..budgets, domain_rows));
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    let declared = crate::declared_objectives::rows(store, now, &rows)?;
+    drop(rows.splice(budgets..budgets, declared));
     Ok(rows)
 }
 

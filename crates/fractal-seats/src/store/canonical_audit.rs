@@ -206,12 +206,16 @@ fn every_persistent_table_has_a_projection_scope() {
         "read_positions",
         // Host-authoritative admission state is local, not a replicated projection.
         "local_host_holds",
+        // The connected host's expiring launch barrier is never replicated.
+        "local_launch_freeze",
         // Host-local execution authority, immutable lane policies and membership custody;
         // these are authoritative local records, not replicated claim projections.
         "resource_authorities_v1",
         "resource_lane_policies_v1",
         "resource_memberships_v1",
         "shell_resources_v1",
+        // Settled teardown receipts belong only to this host's runtime cleanup.
+        "local_runtime_cleanup_settled",
         // Person attention controls: order-free earliest-seen and newest-snooze registers
         // refolded from replicated claims on open, repair and replay; the claims carry the
         // shared digest coverage.

@@ -23,6 +23,7 @@ pub struct Objective {
     pub indicator: Indicator,
     /// The span an interval's budget is measured over; native telemetry keeps its own windows.
     pub window: Option<Window>,
+    pub budget: Option<BudgetPolicy>,
     pub targets: Vec<Target>,
     pub on_breach: Option<Breach>,
 }
@@ -47,8 +48,24 @@ pub enum Indicator {
     Divergence,
     /// Work that starts and stops in claims, one sample per subject.
     Interval(Box<Interval>),
+    /// Corrected normalized GitHub facts, never raw claim intervals.
+    GithubMergedCount(Github),
+    GithubReadyToMerged(Github),
     /// Events in claims per hour, one per subject.
     Count(Box<Count>),
+    Ratio(Box<Ratio>),
+    Gauge(Box<Gauge>),
+    /// Fleet-owned response binding to an existing built-in row; all measurements are inherited.
+    Native { objective: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Github {
+    pub source: String,
+    pub roster: String,
+    pub timezone: String,
+    pub as_of_watermark: bool,
+    pub measured_only: bool,
 }
 
 impl Indicator {
@@ -64,6 +81,11 @@ impl Indicator {
             Self::Divergence => "divergence",
             Self::Interval(_) => "interval",
             Self::Count(_) => "count",
+            Self::GithubMergedCount(_) => "github-merged-count",
+            Self::GithubReadyToMerged(_) => "github-ready-to-merged",
+            Self::Ratio(_) => "ratio",
+            Self::Gauge(_) => "gauge",
+            Self::Native { .. } => "native",
         }
     }
 }
@@ -126,6 +148,69 @@ pub struct Count {
     pub excludes: Vec<Exclude>,
     /// Each must hold of the event claim for the event to be kept.
     pub only: Vec<Only>,
+}
+
+/// Numeric events, deduplicated by subject and event timestamp. A value strictly above the
+/// threshold is bad; absent or malformed values are unknown, never good.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ratio {
+    pub subject_prefix: String,
+    pub event: String,
+    pub at: String,
+    pub field: String,
+    pub bad_above: f64,
+    pub labels: Vec<String>,
+    pub excludes: Vec<Exclude>,
+    pub only: Vec<Only>,
+}
+
+/// A numeric reading holds forward only until the next reading or `max_age_ms`.
+/// Uncovered duration stays unknown. Cadence determines which burn pairs are eligible.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gauge {
+    pub subject_prefix: String,
+    pub event: String,
+    pub at: String,
+    pub field: String,
+    pub threshold: Threshold,
+    pub labels: Vec<String>,
+    pub excludes: Vec<Exclude>,
+    pub only: Vec<Only>,
+    pub max_age_ms: u64,
+    pub cadence_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Threshold {
+    Above(f64),
+    Below(f64),
+}
+
+impl Threshold {
+    pub fn is_bad(self, value: f64) -> bool {
+        match self {
+            Self::Above(limit) => value > limit,
+            Self::Below(limit) => value < limit,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BurnWindow {
+    pub burn_rate: f64,
+    pub long_ms: u64,
+    pub short_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BudgetPolicy {
+    /// Allowed bad fraction, not a percentage.
+    pub allowance: f64,
+    pub horizon_ms: u64,
+    pub min_coverage: f64,
+    pub min_samples: u64,
+    pub fast: BurnWindow,
+    pub slow: BurnWindow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,12 +277,19 @@ impl Objective {
         self.targets.iter().find(|target| target.stat == stat && target.remote == remote)
     }
 
-    /// Whether a fleet may declare it: an interval or count over claims, named `NAMESPACE/NAME` or
-    /// deeper so it never takes the name of one Fractal ships, which are one word each. Native
-    /// telemetry counts each path, series and reading toward the one objective the daemon was
-    /// built with.
+    /// Fleet claim indicators and native owner bindings live under a namespaced name so they
+    /// never replace built-in telemetry definitions.
     pub fn declarable(&self) -> bool {
-        matches!(self.indicator, Indicator::Interval(_) | Indicator::Count(_)) && self.name.contains('/')
+        matches!(
+            self.indicator,
+            Indicator::Interval(_)
+                | Indicator::Count(_)
+                | Indicator::GithubMergedCount(_)
+                | Indicator::GithubReadyToMerged(_)
+                | Indicator::Ratio(_)
+                | Indicator::Gauge(_)
+                | Indicator::Native { .. }
+        ) && self.name.contains('/')
     }
 }
 
@@ -225,6 +317,11 @@ pub fn valid_word(word: &str) -> bool {
 /// One or more words joined by `/`: `cpu`, `ops/change-rollout`.
 pub fn valid_name(name: &str) -> bool {
     name.len() <= 128 && name.split('/').all(valid_word)
+}
+
+/// Built-in row segments also contain underscore-joined words, such as `writer_hold`.
+fn valid_native_name(name: &str) -> bool {
+    name.len() <= 128 && name.split('/').all(|segment| segment.split('_').all(valid_word))
 }
 
 fn error(name: &str, message: impl std::fmt::Display) -> FractalError {
@@ -276,6 +373,7 @@ pub fn parse(node: &Value) -> Result<Objective, FractalError> {
     let mut window = None;
     let mut targets = Vec::new();
     let mut on_breach = None;
+    let mut budget = None;
     for child in children(node) {
         let child_name = child["name"].as_str().unwrap_or_default();
         let once = |slot: bool| if slot { Err(fail(format!("repeats `{child_name}`"))) } else { Ok(()) };
@@ -304,6 +402,10 @@ pub fn parse(node: &Value) -> Result<Objective, FractalError> {
                     .unwrap_or(1);
                 window = Some(Window { ms, min_samples });
             }
+            "budget" => {
+                once(budget.is_some())?;
+                budget = Some(parse_budget(child, &fail)?);
+            }
             "target" => {
                 no_children(child, &fail)?;
                 targets.push(parse_target(child, &fail)?);
@@ -320,6 +422,7 @@ pub fn parse(node: &Value) -> Result<Objective, FractalError> {
         indicator: indicator.ok_or_else(|| fail("has no `indicator`".into()))?,
         name: name.clone(),
         window,
+        budget,
         targets,
         on_breach,
     };
@@ -354,6 +457,28 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
         }
     };
     Ok(match kind {
+        "github-merged-count" | "github-ready-to-merged" => {
+            allow(&["source", "roster", "timezone", "cut", "measurement"])?;
+            let source = single("source")?;
+            let roster = single("roster")?;
+            let timezone = single("timezone")?;
+            if source.trim().is_empty() || roster.trim().is_empty() || timezone.trim().is_empty() {
+                return Err(fail("GitHub source, roster and timezone must be nonempty".into()));
+            }
+            let as_of_watermark = match single("cut")?.as_str() {
+                "now" => false,
+                "watermark" => true,
+                _ => return Err(fail("GitHub cut must be now or watermark".into())),
+            };
+            let measured_only = match single("measurement")?.as_str() {
+                "only" => true,
+                "targeted" => false,
+                _ => return Err(fail("GitHub measurement must be only or targeted".into())),
+            };
+            let config = Github { source, roster, timezone, as_of_watermark, measured_only };
+            if kind == "github-merged-count" { Indicator::GithubMergedCount(config) }
+            else { Indicator::GithubReadyToMerged(config) }
+        }
         "latency" => {
             allow(&["path"])?;
             let paths = strings("path")?;
@@ -399,8 +524,118 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
         }
         "interval" => Indicator::Interval(Box::new(parse_interval(&kids, fail)?)),
         "count" => Indicator::Count(Box::new(parse_count(&kids, fail)?)),
+        "ratio" | "gauge" => parse_numeric(kind, &kids, fail)?,
+        "native" => {
+            allow(&["objective"])?;
+            let objective = single("objective")?;
+            if !valid_native_name(&objective) {
+                return Err(fail("native objective must name a well-formed built-in row".into()));
+            }
+            Indicator::Native { objective }
+        }
         other => return Err(fail(format!("has an unknown indicator `{other}`"))),
     })
+}
+
+fn parse_numeric(kind: &str, kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Result<Indicator, FractalError> {
+    let mut value = None;
+    let mut max_age_ms = None;
+    let mut cadence_ms = None;
+    let mut event_kids = Vec::new();
+    for kid in kids {
+        match kid["name"].as_str().unwrap_or_default() {
+            "value" => {
+                no_children(kid, fail)?;
+                only_properties(kid, if kind == "gauge" { &["bad-above", "bad-below"] } else { &["bad-above"] }, fail)?;
+                let field = one_string(kid, fail)?;
+                if !is_field(field) {
+                    return Err(fail("`value` needs a field name".into()));
+                }
+                let (threshold, below) = match (property(kid, "bad-above"), property(kid, "bad-below")) {
+                    (Some(value), None) => (number(value, "bad-above", fail)?, false),
+                    (None, Some(value)) if kind == "gauge" => (number(value, "bad-below", fail)?, true),
+                    _ => return Err(fail("`value` needs exactly one threshold".into())),
+                };
+                if threshold < 0.0 || value.replace((field.to_owned(), threshold, below)).is_some() {
+                    return Err(fail("`value` is repeated or its threshold is negative".into()));
+                }
+            }
+            name @ ("max-age" | "cadence") if kind == "gauge" => {
+                no_children(kid, fail)?;
+                only_properties(kid, &[], fail)?;
+                let ms = duration(one_string(kid, fail)?, fail)?;
+                let slot = if name == "max-age" { &mut max_age_ms } else { &mut cadence_ms };
+                if slot.replace(ms).is_some() {
+                    return Err(fail(format!("the gauge repeats `{name}`")));
+                }
+            }
+            _ => event_kids.push(*kid),
+        }
+    }
+    let count = parse_count(&event_kids, fail)?;
+    let (field, bad_above, below) = value.ok_or_else(|| fail(format!("a {kind} needs `value`")))?;
+    if kind == "ratio" {
+        return Ok(Indicator::Ratio(Box::new(Ratio {
+            subject_prefix: count.subject_prefix, event: count.event, at: count.at,
+            field, bad_above, labels: count.labels, excludes: count.excludes, only: count.only,
+        })));
+    }
+    let max_age_ms = max_age_ms.ok_or_else(|| fail("a gauge needs `max-age`".into()))?;
+    let cadence_ms = cadence_ms.ok_or_else(|| fail("a gauge needs `cadence`".into()))?;
+    if max_age_ms < cadence_ms {
+        return Err(fail("a gauge's `max-age` must cover at least one cadence".into()));
+    }
+    Ok(Indicator::Gauge(Box::new(Gauge {
+        subject_prefix: count.subject_prefix, event: count.event, at: count.at,
+        field, threshold: if below { Threshold::Below(bad_above) } else { Threshold::Above(bad_above) },
+        labels: count.labels, excludes: count.excludes, only: count.only,
+        max_age_ms, cadence_ms,
+    })))
+}
+
+fn parse_budget(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Result<BudgetPolicy, FractalError> {
+    if !arguments(node).is_empty() {
+        return Err(fail("`budget` takes no arguments".into()));
+    }
+    only_properties(node, &["allowance", "horizon", "min-coverage", "min-samples"], fail)?;
+    let required = |key: &str| property(node, key).ok_or_else(|| fail(format!("`budget` needs `{key}`")));
+    let allowance = positive_number(required("allowance")?, "allowance", fail)?;
+    let min_coverage = positive_number(required("min-coverage")?, "min-coverage", fail)?;
+    let horizon_ms = duration(required("horizon")?.as_str().ok_or_else(|| fail("horizon is not a duration".into()))?, fail)?;
+    let min_samples = positive_integer(required("min-samples")?, "min-samples", fail)?;
+    if allowance >= 1.0 || min_coverage > 1.0 {
+        return Err(fail("allowance must be in (0,1) and min-coverage in (0,1]".into()));
+    }
+    let mut fast = None;
+    let mut slow = None;
+    for kid in children(node) {
+        let name = kid["name"].as_str().unwrap_or_default();
+        let slot = match name {
+            "fast" => &mut fast,
+            "slow" => &mut slow,
+            _ => return Err(fail(format!("`budget` has an unknown child `{name}`"))),
+        };
+        no_children(kid, fail)?;
+        only_properties(kid, &["burn-rate", "long", "short"], fail)?;
+        if !arguments(kid).is_empty() || slot.is_some() {
+            return Err(fail(format!("`{name}` repeats or takes arguments")));
+        }
+        let required = |key: &str| property(kid, key).ok_or_else(|| fail(format!("`{name}` needs `{key}`")));
+        let burn_rate = positive_number(required("burn-rate")?, "burn-rate", fail)?;
+        let span = |key: &str| duration(required(key)?.as_str().ok_or_else(|| fail(format!("`{key}` is not a duration")))?, fail);
+        let long_ms = span("long")?;
+        let short_ms = span("short")?;
+        if burn_rate <= 1.0 || short_ms >= long_ms || long_ms > horizon_ms {
+            return Err(fail("burn-rate must exceed 1 and short < long <= horizon".into()));
+        }
+        *slot = Some(BurnWindow { burn_rate, long_ms, short_ms });
+    }
+    let fast = fast.ok_or_else(|| fail("`budget` needs `fast`".into()))?;
+    let slow = slow.ok_or_else(|| fail("`budget` needs `slow`".into()))?;
+    if fast.burn_rate <= slow.burn_rate || fast.long_ms >= slow.long_ms || fast.short_ms >= slow.short_ms {
+        return Err(fail("fast burn must be higher and its windows shorter than slow burn".into()));
+    }
+    Ok(BudgetPolicy { allowance, horizon_ms, min_coverage, min_samples, fast, slow })
 }
 
 fn parse_interval(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Result<Interval, FractalError> {
@@ -679,6 +914,29 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
         }
     }
     let kind = objective.indicator.kind();
+    if let Indicator::GithubMergedCount(config) | Indicator::GithubReadyToMerged(config) = &objective.indicator {
+        if objective.window.is_some() {
+            return Err(fail("GitHub indicators own their rolling hour and calendar windows".into()));
+        }
+        if objective.budget.is_some() {
+            return Err(fail("GitHub indicators own their measurement policy and take no `budget`".into()));
+        }
+        if config.measured_only {
+            if !objective.targets.is_empty() || objective.on_breach.is_some() {
+                return Err(fail("measurement only has neither targets nor on-breach".into()));
+            }
+            return Ok(());
+        }
+        if matches!(objective.indicator, Indicator::GithubReadyToMerged(_)) {
+            return Err(fail("ready-to-merged is measured-only until latency policy is approved".into()));
+        }
+        if objective.targets.len() != 1 || !objective.targets.iter().all(|target| {
+            target.stat == "per-hour" && matches!(target.bound, Bound::Min(value) if value.is_finite() && value > 0.0)
+        }) {
+            return Err(fail("targeted GitHub merged count needs one per-hour minimum".into()));
+        }
+        return Ok(());
+    }
     let stat_bound = |target: &Target| -> bool {
         let within = matches!(target.bound, Bound::Within(ms) if ms > 0);
         let max = |integer: bool, zero: bool| match target.bound {
@@ -718,7 +976,18 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
     if let Some(missing) = required.iter().find(|stat| objective.target(stat, false).is_none()) {
         return Err(fail(format!("a `{kind}` indicator needs target `{missing}`")));
     }
-    if objective.targets.is_empty() {
+    let numeric = matches!(objective.indicator, Indicator::Ratio(_) | Indicator::Gauge(_));
+    let native = matches!(objective.indicator, Indicator::Native { .. });
+    if native && (objective.budget.is_some() || objective.window.is_some() || !objective.targets.is_empty()) {
+        return Err(fail("a native binding inherits targets, window and budget; none may be overridden".into()));
+    }
+    if numeric && (objective.budget.is_none() || !objective.targets.is_empty() || objective.window.is_some()) {
+        return Err(fail("ratio and gauge need `budget` and take no diagnostic `target` or `window`".into()));
+    }
+    if objective.budget.is_some() && matches!(objective.indicator, Indicator::Interval(_) | Indicator::Count(_)) {
+        return Err(fail("interval and count take `window` and targets, not `budget`".into()));
+    }
+    if objective.targets.is_empty() && !numeric && !native {
         return Err(fail("has no `target`".into()));
     }
     if let (Some(local), Some(remote)) = (objective.target("p99", false), objective.target("p99", true))
@@ -752,8 +1021,8 @@ fn check_targets(objective: &Objective, fail: &dyn Fn(String) -> FractalError) -
         (false, Some(_)) => return Err(fail("only an interval or a count takes a `window`; native telemetry keeps its own".into())),
         (false, None) => {}
     }
-    if objective.on_breach.is_some() && !claims {
-        return Err(fail("only an interval or a count takes `on-breach`; native objectives respond as they are built".into()));
+    if objective.on_breach.is_some() && !claims && !numeric && !native {
+        return Err(fail("only claim indicators take `on-breach`; native objectives respond as they are built".into()));
     }
     Ok(())
 }

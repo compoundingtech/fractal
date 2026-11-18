@@ -1103,6 +1103,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         /// How many keys `send_key_if` takes before it fails, when set.
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
+        settled_leftovers: Mutex<BTreeSet<(String, String)>>,
         lanes_ended: Mutex<Vec<String>>,
         pub lanes_resized: Mutex<Vec<(String, fractal_runtime::Capacity)>>,
         pub lane_held: Mutex<Option<u64>>,
@@ -1911,6 +1912,10 @@ mission "shell-owner" state="ready" {{
                 .lock()
                 .unwrap()
                 .push((runtime_id.into(), terminal));
+        }
+        fn leftovers_settled(&self, runtime_id: &str, incarnation: &str) -> Result<bool> {
+            Ok(self.settled_leftovers.lock().unwrap()
+                .contains(&(runtime_id.into(), incarnation.into())))
         }
         fn end_lane(&self, runtime_id: &str) {
             self.lanes_ended.lock().unwrap().push(runtime_id.into());
@@ -5100,6 +5105,15 @@ mission "legacy-child" state="ready" {
 
     #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
+        exact_produced_mission_revision(false);
+    }
+
+    #[test]
+    fn a_step_uses_its_run_scoped_output_revision() {
+        exact_produced_mission_revision(true);
+    }
+
+    fn exact_produced_mission_revision(per_run: bool) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let bootstrap = r#"
 version 2
@@ -5120,6 +5134,9 @@ version 2
   }
 
 "#;
+        let bootstrap = if per_run {
+            bootstrap.replace("produces-mission \"project/work\"", "produces-mission \"project/${ST_MISSION_RUN}/work\"")
+        } else { bootstrap.to_owned() };
         let first_work = r#"
 version 2
 
@@ -5131,12 +5148,7 @@ version 2
   }
 
 "#;
-        apply_source(&store, bootstrap, "publish-bootstrap");
-        apply_source(&store, first_work, "publish-first-work");
-        let first = store
-            .mission_spec("project/work", None)
-            .unwrap()
-            .expect("first work mission");
+        apply_source(&store, &bootstrap, "publish-bootstrap");
         let run = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "bootstrap".into(),
@@ -5148,6 +5160,10 @@ version 2
                 idempotency_key: "run-bootstrap".into(),
             })
             .unwrap();
+        let mission_id = if per_run { format!("project/{}/work", run.id) } else { "project/work".into() };
+        let first_work = first_work.replace("project/work", &mission_id);
+        apply_source(&store, &first_work, "publish-first-work");
+        let first = store.mission_spec(&mission_id, None).unwrap().expect("first work mission");
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -5183,7 +5199,7 @@ version 2
                 &compile.subject,
                 "agent/node.planner",
                 Some("test"),
-                "project/work",
+                &mission_id,
                 &first,
                 "bind-first-work",
             )
@@ -5213,7 +5229,8 @@ version 2
   }
 
 "#;
-        apply_source(&store, second_work, "publish-second-work");
+        let second_work = second_work.replace("project/work", &mission_id);
+        apply_source(&store, &second_work, "publish-second-work");
         for _ in 0..4 {
             reconciler.reconcile_once().unwrap();
         }
@@ -8730,6 +8747,57 @@ agent "good" { workspace "/tmp"; command "true" }
             &[("exec.node.app.web".to_owned(), false)]
         );
         assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn historical_exec_cleanup_settlement_survives_reconciler_and_store_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cleanup.sqlite");
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        apply_source(&store, r#"version 2
+agent "app" {
+  workspace "/tmp"
+  exec "settled" { command "sleep infinity" }
+  exec "unsettled" { command "sleep infinity" }
+}
+"#, "cleanup-root");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new())).skipping_unneeded(false);
+        reconciler.reconcile_once().unwrap();
+        for name in ["settled", "unsettled"] {
+            let id = format!("exec.node.app.{name}");
+            runtime.execs.lock().unwrap().insert(id.clone(), RuntimeObservation {
+                runtime_id: id, terminal: false, status: "exited".into(),
+                exit_code: Some(0), incarnation_id: Some(format!("{name}-one")),
+            });
+        }
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "cleanup-stop");
+        // Both have stopped leaders, but neither yet has whole-scope empty proof.
+        reconciler.reconcile_once().unwrap();
+        let calls = |name: &str| runtime.leftovers.lock().unwrap().iter()
+            .filter(|(id, _)| id == &format!("exec.node.app.{name}")).count();
+        assert_eq!((calls("settled"), calls("unsettled")), (1, 1));
+        runtime.settled_leftovers.lock().unwrap()
+            .insert(("exec.node.app.settled".into(), "settled-one".into()));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 2));
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 3));
+        drop(reconciler);
+        drop(store);
+        // Forget native in-memory proof too: only the daemon's durable receipt remains.
+        runtime.settled_leftovers.lock().unwrap().clear();
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new())).skipping_unneeded(false);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (2, 4));
+        // The durable receipt cannot settle a later incarnation using the same runtime ID.
+        runtime.execs.lock().unwrap().get_mut("exec.node.app.settled").unwrap()
+            .incarnation_id = Some("settled-two".into());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!((calls("settled"), calls("unsettled")), (3, 5));
     }
 
     #[test]
@@ -23550,6 +23618,54 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["event"], "closed");
         assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
+    }
+
+    /// Capture replaces only the durable merge writer. Historical merged baselines stay
+    /// silent; live mirror transitions remain visible and unrelated events still replicate.
+    #[test]
+    fn capture_retires_only_configured_durable_merge_events() {
+        for (enabled, repository, canonical) in [
+            (Some(true), "ACME/GARDEN", true),
+            (Some(false), "acme/garden", false),
+            (Some(true), "acme/other", false),
+            (None, "acme/garden", false),
+        ] {
+            let store = Store::open_memory("node").unwrap();
+            if let Some(enabled) = enabled {
+                apply_source(&store, &format!(r#"version 2
+github-source "public-capture" {{
+  host "github.com"; generation 1; authority-grant "grant-one"
+  repository "{repository}"; enabled #{enabled}; checkpoint-every-ms 60000; replicate-private #false
+}}"#), "capture-event-ownership");
+            }
+            let plugin = github_plugin_store::GithubPluginStore::memory();
+            let spec = crate::model::ObserverSpec {
+                resource: "resource/github/acme/garden".into(),
+                provider: "github.repository".into(), locator: "acme/garden".into(),
+                fields: Vec::new(), every_ms: None, stopped: false,
+            };
+            let item = |number, state: &str, merged| crate::model::RecordedItem {
+                subject: format!("{}/pull-request/{number}", spec.resource),
+                kind: "vcs.pull-request".into(),
+                facts: serde_json::json!({"number": number, "state": state, "merged": merged}),
+                claim: format!("claim-{number}"),
+            };
+            let observer = "observer/github/acme/garden";
+            let baseline = [item(7, "open", false), item(8, "closed", true), item(9, "open", false)];
+            mirror_observation(&store, &plugin, observer, &spec, None, Some("c1"), &baseline);
+            assert!(plugin.events(&spec.resource, None, 10).unwrap().is_empty(), "history is not live");
+            assert!(store.github_events(&spec.resource, None, 10).unwrap().is_empty());
+            let changed = [item(7, "closed", true), item(8, "closed", true), item(9, "closed", false)];
+            mirror_observation(&store, &plugin, observer, &spec, Some("c1"), Some("c2"), &changed);
+            let live = plugin.events(&spec.resource, Some(7), 10).unwrap();
+            assert_eq!(live.len(), 1, "the live merge remains in the operational mirror");
+            assert_eq!(live[0]["event"], "merged");
+            assert_eq!(store.github_events(&spec.resource, Some(7), 10).unwrap().len(), usize::from(!canonical));
+            assert_eq!(store.github_events(&spec.resource, Some(9), 10).unwrap()[0]["event"], "closed");
+            mirror_observation(&store, &plugin, observer, &spec, Some("c2"), Some("c3"), &changed);
+            assert_eq!(plugin.events(&spec.resource, Some(7), 10).unwrap().len(), 1, "no repeated merge");
+            assert!(plugin.events(&spec.resource, Some(8), 10).unwrap().is_empty(), "backfill never emits");
+        }
     }
 
     /// In compact mode a poller records a change confined to compact facts as `vcs.item.state`

@@ -1610,6 +1610,7 @@ dependencies = [
  "fractal-api-core",
  "fractal-client",
  "fractal-drivers",
+ "fractal-github",
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
@@ -2065,6 +2066,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-tz",
  "fractal-evidence",
  "fractal-github",
  "fractal-schema",
@@ -2093,6 +2095,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-github-base",
  "fractal-runtime",
+ "fractal-schema",
  "fractal-secrets",
  "futures-util",
  "hex",
@@ -2320,6 +2323,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "uuid",
 ]

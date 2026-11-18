@@ -2,7 +2,7 @@
 // Source: objectives.kdl.genie.ts
 version 2
 objective "person-read" {
-  about "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents"
+  about "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents; 5% slow-event allowance at 300ms, local and remote separately; p99 remains the aspiration"
   indicator "latency" {
     path "GET /v1/client/agents"
     path "GET /v1/client/agents/{*id}"
@@ -28,6 +28,10 @@ objective "person-read" {
   }
   target "p99" within="300ms"
   target "p99" scope="remote" within="300ms"
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
 }
 objective "person-read-fresh" {
   about "An agents list with legacy fresh=true or an explicit min_cut asks to wait for publication; ordinary st agents ls and tree do not. Explicit waits have their own target and count toward no other"
@@ -35,18 +39,26 @@ objective "person-read-fresh" {
     path "GET /v1/client/agents (fresh)"
   }
   target "p99" within="300ms"
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
 }
 objective "projection-fresh" {
-  about "From a commit to the published missions, agents or attention view that carries it, timed by each refresher; refreshers fold at most once a second"
+  about "From a commit to the published missions, agents or attention view that carries it, timed by each refresher; 5% slow-publication allowance at 1500ms; p99 remains the aspiration"
   indicator "latency" {
     path "publish missions"
     path "publish agents"
     path "publish attention"
   }
   target "p99" within="1500ms"
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
 }
 objective "write-ack" {
-  about "Writes and acks: send, work actions, harness events"
+  about "Writes and acks: send, work actions, harness events; 5% slow-event allowance at 300ms; p99 remains the aspiration"
   indicator "latency" {
     path "POST /v1/messages"
     path "POST /v1/client/actions"
@@ -63,6 +75,10 @@ objective "write-ack" {
     path "POST /v1/messages/read/{*subject}"
   }
   target "p99" within="300ms"
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
 }
 objective "terminal-attach" {
   about "Terminal attach to first screen"
@@ -71,6 +87,10 @@ objective "terminal-attach" {
     path "stream terminal"
   }
   target "p99" within="200ms"
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
 }
 objective "sql-statement" {
   about "One SQL statement"
@@ -79,9 +99,13 @@ objective "sql-statement" {
   target "max" within="100ms"
 }
 objective "transaction" {
-  about "Any transaction, read or write, and any hold of the store's writer"
+  about "Read transactions, write transactions and holds of the store's writer: independent 1% slow-event allowances at 300ms; max remains diagnostic"
   indicator "transaction"
   target "max" within="300ms"
+  budget allowance=0.01 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
 }
 objective "writer-hold" {
   about "Each hold of the store's single writer, and each read transaction past the same target, by who held it: a request route or background task, its client, and the code that asked"
@@ -152,8 +176,12 @@ objective "projection-divergence" {
   target "open" max=0
 }
 objective "database" {
-  about "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run"
+  about "This member's store: live pages at most 8GB and growth at most 300MB/day; 5% bad covered capacity-hours, sampled hourly with finite coverage"
   indicator "database"
   target "live-gb" max=8
   target "growth-mb-per-day" max=300
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=1 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
 }

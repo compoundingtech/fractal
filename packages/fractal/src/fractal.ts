@@ -24,15 +24,21 @@ export {
   type PinnedMissionRef,
 } from './define.ts'
 export type { AgentRef, MissionRef, SubjectRef, SubjectDefinition } from './subject-ref.ts'
+export { githubSource, githubScope, type GithubSourceInput, type GithubScopeInput, type GithubScopeMember } from './github.ts'
 export {
   objective,
   indicator,
   response,
   type AgentTarget,
+  type Ratio,
+  type Gauge,
+  type BudgetPolicy,
+  type BurnWindow,
   type ClaimEvent,
   type Duration,
   type Fault,
   type Indicator,
+  type GithubMeasurement,
   type Interval,
   type Objective,
   type ObjectiveInput,

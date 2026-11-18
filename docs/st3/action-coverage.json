@@ -1587,6 +1587,30 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st hosts launch-freeze show",
+      "description": "Inspect the connected host's launch freeze and deferred starts",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; inspect absent, active and cleared host-local barriers"
+    },
+    {
+      "command": "st hosts launch-freeze set",
+      "description": "Drain earlier spawns and arm an owned bounded launch barrier",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; verify barrier identity, owner, reason and expiry"
+    },
+    {
+      "command": "st hosts launch-freeze clear",
+      "description": "Release a matching owned launch barrier",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_launch_freeze_sets_shows_and_clears_owned_barriers"
+      ],
+      "verification": "real CLI over private Unix socket; reject wrong identity and actor before clearing"
+    },
+    {
       "command": "st hosts hold",
       "description": "Place an authenticated execution-host admission hold",
       "tests": [
