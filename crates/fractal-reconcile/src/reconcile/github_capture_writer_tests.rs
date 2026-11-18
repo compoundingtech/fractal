@@ -39,7 +39,7 @@ fn renamed_checkpoint_without_authored_binding_is_refused() {
     let checkpoint = ScanCheckpoint { repository_id: "R_example".into(), pass_started_at_ms: 100,
         cursor: Some(serde_json::to_string(&legacy).unwrap()), pass_complete: true,
         pull_request_id: None, upstream_updated_at_ms: None };
-    commit(&store, &mut connection, &definition, &grant, vec![], Some(checkpoint), vec![], 100).unwrap();
+    commit(&store, &mut connection, &definition, &grant, CommitContent { checkpoint: Some(checkpoint), ..Default::default() }, 100).unwrap();
     let error = configured_checkpoint(&connection, &definition, LOCATOR).unwrap_err();
     assert!(error.to_string().contains("no authored repository binding"));
 }
@@ -124,7 +124,7 @@ fn publication_failure_discards_advanced_acquisition_and_replays_durable_frontie
     let page = page();
     let mut work = cached_work(&definition, page.checkpoint.clone());
     // Fail the cache transaction after facts and coverage are durably claimed, at checkpoint application.
-    connection.execute_batch("CREATE TRIGGER fail_checkpoint BEFORE INSERT ON capture_v1_checkpoints BEGIN SELECT RAISE(ABORT,'simulated crash'); END;").unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3c8316ee30c4 owner=fractal_reconcile::reconcile::github_capture_writer_tests TODO=stage-generation-and-keyed-reclamation */ "CREATE TRIGGER fail_checkpoint BEFORE INSERT ON capture_v1_checkpoints BEGIN SELECT RAISE(ABORT,'simulated crash'); END;").unwrap();
     let failure = publish_page(&mut work, LOCATOR, &page,
         || publish(&store, &mut connection, &definition, &grant, LOCATOR, &page, 100));
     assert!(failure.is_err());
@@ -372,7 +372,7 @@ fn coverage_publication_crash_never_certifies_uncommitted_checkpoint() {
     let (store, mut connection, definition, grant) = fixture();
     let page = page();
     let mut work = cached_work(&definition, page.checkpoint.clone());
-    connection.execute_batch("CREATE TRIGGER fail_coverage BEFORE INSERT ON capture_v1_coverage BEGIN SELECT RAISE(ABORT,'simulated coverage crash'); END;").unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3fc1c5936921 owner=fractal_reconcile::reconcile::github_capture_writer_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_coverage BEFORE INSERT ON capture_v1_coverage BEGIN SELECT RAISE(ABORT,'simulated coverage crash'); END;").unwrap();
     assert!(publish_page(&mut work, LOCATOR, &page,
         || publish(&store, &mut connection, &definition, &grant, LOCATOR, &page, 100)).is_err());
     assert!(work.acquisitions.is_empty());

@@ -30,11 +30,14 @@ const SNAPSHOT_PAGE: usize = 128;
 const KINDS: &[&str] = &[FACT_KIND, COMMIT_KIND, AUTHORITY_KIND, FENCED_KIND];
 
 type SnapshotKey = (PathBuf, String, String, String);
-static SNAPSHOTS: LazyLock<Mutex<BTreeMap<SnapshotKey, Snapshot>>> = LazyLock::new(Mutex::default);
+static SNAPSHOTS: LazyLock<Mutex<SnapshotCache>> = LazyLock::new(Mutex::default);
 
-enum Snapshot {
-    Building(SnapshotBuilder),
-    Complete(MeasurementSnapshot),
+// Completed reads retain only their shared projection, not a builder-sized map slot.
+// Separate typed maps avoid boxing builders or allocating another projection copy.
+#[derive(Default)]
+struct SnapshotCache {
+    building: BTreeMap<SnapshotKey, SnapshotBuilder>,
+    complete: BTreeMap<SnapshotKey, MeasurementSnapshot>,
 }
 
 /// A coherent committed read and its actual half-open bounds, pinned during paged completion.
@@ -56,7 +59,7 @@ struct SnapshotBuilder {
 }
 
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS capture_v1_meta(id INTEGER PRIMARY KEY CHECK(id=1),cursor INTEGER NOT NULL);
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h6b101dd45bbc owner=fractal_reconcile::reconcile::github_capture TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS capture_v1_meta(id INTEGER PRIMARY KEY CHECK(id=1),cursor INTEGER NOT NULL);
         INSERT OR IGNORE INTO capture_v1_meta VALUES(1,0);
         CREATE TABLE IF NOT EXISTS capture_v1_claims(id TEXT PRIMARY KEY,kind TEXT NOT NULL,origin TEXT NOT NULL,source TEXT NOT NULL,sequence INTEGER,record TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS capture_v1_source_sequence ON capture_v1_claims(source,kind,sequence,id);
@@ -112,7 +115,7 @@ fn ingest(store: &Store, connection: &mut Connection) -> Result<bool> {
             FENCED_KIND => (decode::<FenceReceipt>(record)?.source, None),
             _ => unreachable!(),
         };
-        transaction.execute("INSERT OR IGNORE INTO capture_v1_claims(id,kind,origin,source,sequence,record) VALUES(?1,?2,?3,?4,?5,?6)",
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h8b8be878a0a1 owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO capture_v1_claims(id,kind,origin,source,sequence,record) VALUES(?1,?2,?3,?4,?5,?6)",
             params![claim.id,claim.kind,claim.origin,source_key(&source)?,sequence,serde_json::to_string(record)?])?;
         if let Some(sequence)=sequence {
             let source=source_key(&source)?;
@@ -122,12 +125,12 @@ fn ingest(store: &Store, connection: &mut Connection) -> Result<bool> {
             for head in heads {
                 let divergent:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM capture_v1_history WHERE source=?1 AND sequence=?2 AND commit_id<>?3)",params![head,sequence,claim.id],|row|row.get(0))?;
                 if divergent {
-                    transaction.execute("INSERT OR IGNORE INTO capture_v1_conflicts(source,claim_id) VALUES(?1,?2)",params![head,claim.id])?;
+                    transaction.execute(/* sqlite-large-value: allow-for-now lv-hd1bc48ebaa1b owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO capture_v1_conflicts(source,claim_id) VALUES(?1,?2)",params![head,claim.id])?;
                 }
             }
         }
     }
-    transaction.execute("UPDATE capture_v1_meta SET cursor=?1 WHERE id=1", [through])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h822e800d8a42 owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "UPDATE capture_v1_meta SET cursor=?1 WHERE id=1", [through])?;
     transaction.commit()?;
     Ok(page.next_cursor.is_none())
 }
@@ -191,7 +194,7 @@ fn projection_key(definition: &SourceDefinition) -> Result<String> {
 /// A changed authority gets a fresh rebuild namespace, never a synchronous history deletion.
 fn prepare_source(connection: &mut Connection, definition: &SourceDefinition) -> Result<String> {
     let key = projection_key(definition)?;
-    connection.execute("INSERT OR IGNORE INTO capture_v1_heads(source,grant_id,sequence,commit_id,error) VALUES(?1,?2,0,NULL,NULL)", params![key,selected_authority(definition)?])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h6a2ba291f8fd owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO capture_v1_heads(source,grant_id,sequence,commit_id,error) VALUES(?1,?2,0,NULL,NULL)", params![key,selected_authority(definition)?])?;
     Ok(key)
 }
 
@@ -211,7 +214,7 @@ fn apply_fact(connection: &Connection, source: &str, sequence: u64, claim_id: &s
         _ => (None, None, None),
     };
     // Keep retraction revisions so a later correction must supersede the tombstone, not absence.
-    connection.execute("INSERT OR REPLACE INTO capture_v1_entities(source,family,repository_id,entity_id,digest,claim_id,sequence,occurred_ms,pr_id,transition_kind,record) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hdf91a9ae9fee owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO capture_v1_entities(source,family,repository_id,entity_id,digest,claim_id,sequence,occurred_ms,pr_id,transition_kind,record) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![source,family(kind),repository,id,digest,claim_id,sequence,occurred,pr_id,transition,serde_json::to_string(&fact.fact)?])?;
     Ok(())
 }
@@ -228,17 +231,17 @@ fn apply_one(connection: &mut Connection, key: &str, id: &str, commit: &CaptureC
     let transaction = connection.transaction()?;
     for (reference, fact) in facts { apply_fact(&transaction, key, commit.sequence, &reference.claim_id, &fact, &reference.digest)?; }
     for coverage in &commit.coverage {
-        transaction.execute("INSERT OR REPLACE INTO capture_v1_coverage(source,repository_id,family,sequence,record) VALUES(?1,?2,?3,?4,?5)",
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0e8f2194bce1 owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO capture_v1_coverage(source,repository_id,family,sequence,record) VALUES(?1,?2,?3,?4,?5)",
             params![key,coverage.repository_id,family(coverage.family),commit.sequence,serde_json::to_string(coverage)?])?;
     }
     if let Some(checkpoint) = &commit.checkpoint {
-        transaction.execute("INSERT OR REPLACE INTO capture_v1_checkpoints(source,repository_id,record) VALUES(?1,?2,?3)", params![key,checkpoint.repository_id,serde_json::to_string(checkpoint)?])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hf86388bd4ff5 owner=fractal_reconcile::reconcile::github_capture TODO=stage-generation-and-keyed-reclamation */ "INSERT OR REPLACE INTO capture_v1_checkpoints(source,repository_id,record) VALUES(?1,?2,?3)", params![key,checkpoint.repository_id,serde_json::to_string(checkpoint)?])?;
         if let (Some(pr), Some(updated)) = (&checkpoint.pull_request_id, checkpoint.upstream_updated_at_ms) {
-            transaction.execute("INSERT OR REPLACE INTO capture_v1_receipts(source,repository_id,pr_id,updated_ms,pass_ms) VALUES(?1,?2,?3,?4,?5)", params![key,checkpoint.repository_id,pr,updated,checkpoint.pass_started_at_ms])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h4ed2b30a6d8e owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO capture_v1_receipts(source,repository_id,pr_id,updated_ms,pass_ms) VALUES(?1,?2,?3,?4,?5)", params![key,checkpoint.repository_id,pr,updated,checkpoint.pass_started_at_ms])?;
         }
     }
-    transaction.execute("INSERT INTO capture_v1_history(source,sequence,commit_id) VALUES(?1,?2,?3)", params![key,commit.sequence,id])?;
-    transaction.execute("UPDATE capture_v1_heads SET sequence=?2,commit_id=?3,error=NULL WHERE source=?1", params![key,commit.sequence,id])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hd74cfac88e82 owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO capture_v1_history(source,sequence,commit_id) VALUES(?1,?2,?3)", params![key,commit.sequence,id])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hbd54d59b8187 owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "UPDATE capture_v1_heads SET sequence=?2,commit_id=?3,error=NULL WHERE source=?1", params![key,commit.sequence,id])?;
     transaction.commit()?;
     Ok(true)
 }
@@ -257,7 +260,7 @@ fn audit_late_candidates(connection:&Connection,key:&str,epochs:&BTreeMap<u64,Ep
                 || epoch.final_sequence.is_some_and(|last|commit.sequence>last),
                 "a late admitted capture diverges from an already applied source sequence");
         }
-        connection.execute("DELETE FROM capture_v1_conflicts WHERE source=?1 AND claim_id=?2",params![key,id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h0fde81c700c9 owner=fractal_reconcile::reconcile::github_capture TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM capture_v1_conflicts WHERE source=?1 AND claim_id=?2",params![key,id])?;
     }
     Ok(complete)
 }
@@ -357,41 +360,40 @@ pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, ro
     // each other's differently bounded reads. The caller supplies that stable view identity.
     let cache_key = (state_dir.to_path_buf(), source.clone(), serde_json::to_string(&roster)?, format!("{view_id}:{required:?}"));
     let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(Snapshot::Complete(snapshot)) = snapshots.get(&cache_key) {
+    if let Some(snapshot) = snapshots.complete.get(&cache_key) {
         if snapshot.projection.revision == head && snapshot.start_ms == start_ms && snapshot.end_ms == end_ms {
             return Ok(Some(snapshot.clone()));
         }
-        snapshots.remove(&cache_key);
+        snapshots.complete.remove(&cache_key);
     }
-    if !snapshots.contains_key(&cache_key) {
+    if !snapshots.building.contains_key(&cache_key) {
         let records = coverage(&connection, &source, &roster)?;
         let frontier_ms = measurement_horizon(&records, &roster, required).unwrap_or(0);
         let projection = Projection { source: definition.source,revision:head,frontier_ms,roster,pull_requests:Vec::new(),lifecycle:Vec::new(),merges:Vec::new(),coverage:records,ready_cycles:BTreeMap::new() };
         // Keep a bounded number of independent requests, rather than an unbounded query cache.
-        if snapshots.len() >= 8 { snapshots.clear(); }
+        if snapshots.building.len() + snapshots.complete.len() >= 8 {
+            snapshots.building.clear();
+            snapshots.complete.clear();
+        }
         // A separate WAL read transaction preserves corrected images across continuations.
         let reader = Connection::open_with_flags(connection.path().context("capture plugin has no database path")?, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        reader.execute_batch("BEGIN DEFERRED")?;
+        reader.execute_batch(/* sqlite-large-value: allow-for-now lv-h5234cc786356 owner=fractal_reconcile::reconcile::github_capture TODO=trace-statement-and-value-representation */ "BEGIN DEFERRED")?;
         ensure!(current_head(&reader, &source)?.1.as_deref() == Some(projection.revision.as_str()), "capture head changed while pinning snapshot");
         let mut builder = SnapshotBuilder::new(projection);
         builder.reader = Some(reader);
         builder.start_ms = start_ms;
         builder.end_ms = end_ms;
-        snapshots.insert(cache_key.clone(), Snapshot::Building(builder));
+        snapshots.building.insert(cache_key.clone(), builder);
     }
-    let snapshot = snapshots.get_mut(&cache_key).context("snapshot cache entry disappeared")?;
-    if let Snapshot::Building(builder) = snapshot {
-        let reader = builder.reader.take().context("snapshot reader is absent")?;
-        let advanced = builder.advance(&reader, &source, builder.start_ms, builder.end_ms);
-        builder.reader = Some(reader);
-        if !advanced? { return Ok(None); }
-        let Snapshot::Building(builder) = snapshots.remove(&cache_key).context("snapshot cache entry disappeared")? else { unreachable!() };
-        let snapshot = MeasurementSnapshot { projection: Arc::new(builder.projection), start_ms: builder.start_ms, end_ms: builder.end_ms };
-        snapshots.insert(cache_key, Snapshot::Complete(snapshot.clone()));
-        return Ok(Some(snapshot));
-    }
-    let Snapshot::Complete(snapshot) = snapshot else { unreachable!() };
-    Ok(Some(snapshot.clone()))
+    let builder = snapshots.building.get_mut(&cache_key).context("snapshot cache entry disappeared")?;
+    let reader = builder.reader.take().context("snapshot reader is absent")?;
+    let advanced = builder.advance(&reader, &source, builder.start_ms, builder.end_ms);
+    builder.reader = Some(reader);
+    if !advanced? { return Ok(None); }
+    let builder = snapshots.building.remove(&cache_key).context("snapshot cache entry disappeared")?;
+    let snapshot = MeasurementSnapshot { projection: Arc::new(builder.projection), start_ms: builder.start_ms, end_ms: builder.end_ms };
+    snapshots.complete.insert(cache_key, snapshot.clone());
+    Ok(Some(snapshot))
 }
 
 impl SnapshotBuilder {
