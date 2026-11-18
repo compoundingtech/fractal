@@ -319,6 +319,11 @@ pub fn valid_name(name: &str) -> bool {
     name.len() <= 128 && name.split('/').all(valid_word)
 }
 
+/// Built-in row segments also contain underscore-joined words, such as `writer_hold`.
+fn valid_native_name(name: &str) -> bool {
+    name.len() <= 128 && name.split('/').all(|segment| segment.split('_').all(valid_word))
+}
+
 fn error(name: &str, message: impl std::fmt::Display) -> FractalError {
     FractalError::new("invalid-objective", format!("objective `{name}`: {message}"))
 }
@@ -523,7 +528,7 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
         "native" => {
             allow(&["objective"])?;
             let objective = single("objective")?;
-            if !valid_name(&objective) {
+            if !valid_native_name(&objective) {
                 return Err(fail("native objective must name a well-formed built-in row".into()));
             }
             Indicator::Native { objective }
