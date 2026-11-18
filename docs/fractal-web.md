@@ -671,8 +671,10 @@ fresh, including the first composer mount, and initialize the outbox from that r
 Recovery discovery or reconnect cannot make a late composer restore an old startup scope.
 Identity reads are ordered by a monotonic sequence reserved when they start, not when responses
 arrive. A late older startup response cannot replace a newer protected or unprotected scope,
-open its old repository, or recover its old records. Grants recheck that their observation is
-still current after awaiting initialization.
+open its old repository, or recover its old records. After initialization, grants may publish if
+newer observations retain the same principal, deployment, member and protection mode. A different
+identity starts another fresh read and initialization instead of leaving access checking forever;
+disposal aborts this evaluation without publication.
 Never-dispatched preparing and ready records remain pending without automatic submission.
 Restored Start and reply packets require explicit original-target revalidation before
 their one-shot dispatch permit can be consumed. Failed startup leaves sending unavailable

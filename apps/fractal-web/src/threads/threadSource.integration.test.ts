@@ -870,3 +870,50 @@ it.each([false, true])('waits for protected startup before granting thread sends
     expect(fetchImpl.mock.calls.every(([input]) => String(input).endsWith('/capabilities'))).toBe(true)
   } finally { release(); stop(); registry.dispose(); outbox.close() }
 })
+
+it.each(['same', 'different', 'dispose'] as const)('settles thread access after a %s recovery observation during initialization', async change => {
+  const entered = Promise.withResolvers<void>()
+  const storage = Promise.withResolvers<boolean>()
+  let changed = false
+  const fetchImpl = vi.fn(async () => Response.json({ ...base, value: { ...base.value,
+    session_actor: changed ? 'person/other' : base.value.session_actor,
+    issuer: 'person/example', issuer_key: changed ? 'issuer-key/b' : 'issuer-key/a', transport: 'local-web',
+    capabilities: [...base.value.capabilities,
+      { id: 'threads-v1', version: 3, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: changed ? 'ungranted' : 'granted' }],
+  } }))
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl })
+  const registry = AtomRegistry.make()
+  const outbox = createScopedChatOutbox(client, { indexedDB: new IDBFactory(), storage: { persist: () => {
+    entered.resolve()
+    return storage.promise
+  } } })
+  const source = gatewayThreads(client, registry, undefined, undefined, outbox)
+  let publications = 0
+  const stop = registry.subscribe(source.access, () => { publications++ })
+  const unmount = registry.mount(source.access)
+  try {
+    await entered.promise
+    changed = change !== 'same'
+    const recovery = outbox.recovery.list().catch(() => [])
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+    if (change === 'dispose') {
+      registry.dispose()
+      const before = publications
+      storage.resolve(false)
+      await recovery
+      expect(publications).toBe(before)
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+    } else {
+      storage.resolve(false)
+      await recovery
+      await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({
+        read: true, actor: changed ? 'person/other' : base.value.session_actor,
+      }))
+      expect(registry.get(source.access)).not.toHaveProperty('unknown')
+      expect(registry.get(source.access).actions.has('thread.start')).toBe(!changed)
+      expect(fetchImpl).toHaveBeenCalledTimes(changed ? 3 : 2)
+    }
+  } finally { storage.resolve(false); stop(); unmount(); registry.dispose(); outbox.close() }
+})

@@ -8,7 +8,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
-import { createScopedChatOutbox, type ScopedChatOutbox } from '../data/outbox/scoped.ts'
+import { createScopedChatOutbox, readOutboxAccess, type ScopedChatOutbox } from '../data/outbox/scoped.ts'
 import { createThreadOutboxSender, revalidateThreadOutboxTarget, type ThreadOutboxInput } from '../data/outbox/threadSender.ts'
 import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
 import { readRequestHistoryPages, RequestHistoryPagingError } from './requestHistoryPages.ts'
@@ -157,13 +157,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     if (transportLive !== undefined && !get(transportLive) && observedAccess !== undefined) return observedAccess
     const abort = new AbortController()
     get.addFinalizer(() => abort.abort())
-    const sequence = outbox.beginObservation()
-    void client.capabilities({ signal: abort.signal }).then(async response => {
-      const caps = outbox.observe(response, sequence)
-      let sendUnavailable: string | undefined
-      try { await outbox.initialize(response, sequence) }
-      catch { sendUnavailable = 'Saved messages are unavailable. Retry later.' }
-      if (!outbox.isCurrentObservation(response)) return
+    void readOutboxAccess(client, outbox, abort.signal).then(({ capabilities: caps, storageAvailable }) => {
+      const sendUnavailable = storageAvailable ? undefined : 'Saved messages are unavailable. Retry later.'
       const upgradeRequired = ([['threads-v1', threadProtocolVersion], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
       const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= threadProtocolVersion && capability.state === 'granted')
       const read = inboxOrigins && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')

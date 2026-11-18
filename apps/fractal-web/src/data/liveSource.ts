@@ -42,7 +42,7 @@ import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAvailability } from '../availability/availability-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
-import { createScopedChatOutbox } from './outbox/scoped.ts'
+import { createScopedChatOutbox, readOutboxAccess } from './outbox/scoped.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
@@ -1219,19 +1219,13 @@ export const liveSource = ({
       if (!get(transportLive) && observedGrants !== undefined) return observedGrants
       const deny = () => get.setSelf(noGrants)
       deniedReaders.add(deny)
+      const abort = new AbortController()
       const fiber = runtime.runFork(
         Effect.gen(function* () {
-          const sequence = outbox.beginObservation()
-          const response = yield* Effect.tryPromise({
-            try: () => client.capabilities(),
-            catch: (cause) => cause,
+          const { capabilities: discovered, storageAvailable } = yield* Effect.tryPromise({
+            try: () => readOutboxAccess(client, outbox, abort.signal),
+            catch: cause => cause,
           })
-          const discovered = outbox.observe(response, sequence)
-          const startup = yield* Effect.tryPromise({
-            try: () => outbox.initialize(response, sequence),
-            catch: (cause) => cause,
-          }).pipe(Effect.result)
-          if (!outbox.isCurrentObservation(response)) return
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1241,17 +1235,18 @@ export const liveSource = ({
           observedGrants = {
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
-            messageSend: startup._tag === 'Success' && allowed.has('message.send') ? 'granted' : 'ungranted',
+            messageSend: storageAvailable && allowed.has('message.send') ? 'granted' : 'ungranted',
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
             terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
             sendProtection: outbox.protection(),
-            ...(startup._tag === 'Failure' ? { sendUnavailable: 'Saved messages are unavailable. Retry later.' } : {}),
+            ...(!storageAvailable ? { sendUnavailable: 'Saved messages are unavailable. Retry later.' } : {}),
           }
           get.setSelf(observedGrants)
         }),
       )
       get.addFinalizer(() => {
+        abort.abort()
         deniedReaders.delete(deny)
         fiber.interruptUnsafe()
       })

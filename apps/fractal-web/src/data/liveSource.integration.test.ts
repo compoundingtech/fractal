@@ -502,6 +502,48 @@ describe('outbox startup admission', () => {
     }), { issuerPair })
   })
 
+  for (const change of ['same', 'different', 'dispose'] as const) {
+    it.live(`settles chat grants after a ${change} recovery observation during storage initialization`, () => {
+      const entered = Promise.withResolvers<void>()
+      const storage = Promise.withResolvers<boolean>()
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      vi.stubGlobal('navigator', { onLine: true, storage: { persist: () => { entered.resolve(); return storage.promise } } })
+      return withGateway((live, gateway) => Effect.gen(function* () {
+        yield* Effect.promise(() => live.ready)
+        gateway.issuerPair = issuerPair
+        let publications = 0
+        const unmount = live.registry.mount(live.source.grants)
+        const stop = live.registry.subscribe(live.source.grants, () => { publications++ })
+        try {
+          yield* Effect.promise(() => entered.promise)
+          if (change !== 'same') {
+            gateway.issuerPair = { issuer: 'person/other', issuer_key: 'issuer-key/b' }
+            gateway.messageGrant = 'ungranted'
+          }
+          const recovery = live.source.outboxRecovery!.list().catch(() => [])
+          yield* settle
+          expect(gateway.capabilityReads).toBe(3) // Startup, grants and recovery.
+          if (change === 'dispose') {
+            yield* Effect.promise(() => live.dispose())
+            const before = publications
+            storage.resolve(false)
+            yield* Effect.promise(() => recovery)
+            yield* settle
+            expect(publications).toBe(before)
+            expect(gateway.capabilityReads).toBe(3)
+          } else {
+            storage.resolve(false)
+            yield* Effect.promise(() => recovery)
+            yield* settle
+            expect(live.registry.get(live.source.grants)).not.toHaveProperty('unread')
+            expect(live.registry.get(live.source.grants).messageSend).toBe(change === 'same' ? 'granted' : 'ungranted')
+            expect(gateway.capabilityReads).toBe(change === 'same' ? 3 : 4)
+          }
+        } finally { storage.resolve(false); stop(); unmount() }
+      }))
+    })
+  }
+
   it.live('does not let delayed startup A replace composer B after B grants initialize', () => Effect.gen(function* () {
     vi.stubGlobal('indexedDB', new IDBFactory())
     const gateway = new Gateway()

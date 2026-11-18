@@ -26,10 +26,27 @@ export interface ScopedChatOutbox extends ChatOutbox {
   readonly beginObservation: () => number
   readonly initialize: (response?: EnvelopeOf<Capabilities>, sequence?: number) => Promise<void>
   readonly observe: (response: EnvelopeOf<Capabilities>, sequence?: number) => typeof Native.Capabilities.Type
-  readonly isCurrentObservation: (response: EnvelopeOf<Capabilities>) => boolean
+  readonly isCurrentIdentity: (response: EnvelopeOf<Capabilities>) => boolean
   readonly recovery: OutboxRecoveryPort
   readonly protection: () => 'durable' | 'unprotected'
   readonly close: () => void
+}
+
+/** A changed identity requires another fresh read; equal-identity recovery reads do not starve grants. */
+export const readOutboxAccess = async (client: FractalClient, outbox: ScopedChatOutbox, signal: AbortSignal) => {
+  while (true) {
+    signal.throwIfAborted()
+    const sequence = outbox.beginObservation()
+    const response = await client.capabilities({ signal })
+    signal.throwIfAborted()
+    const capabilities = outbox.observe(response, sequence)
+    let storageAvailable = true
+    try { await outbox.initialize(response, sequence) }
+    catch { storageAvailable = false }
+    signal.throwIfAborted()
+    if (outbox.isCurrentIdentity(response)) return { capabilities, storageAvailable }
+    // Only a genuinely newer, different identity can reach the next iteration.
+  }
 }
 
 /** Each connection keeps its original tuple. New identity observations never rebind old attempts. */
@@ -90,8 +107,15 @@ export const createScopedChatOutbox = (
     }
     return capabilities
   }
-  const isCurrentObservation = (response: EnvelopeOf<Capabilities>) =>
-    cached !== undefined && observations.get(response) === cached.sequence
+  const isCurrentIdentity = (response: EnvelopeOf<Capabilities>) => {
+    if (cached === undefined) return false
+    const capabilities = Native.decodeUnknownSync(Native.Capabilities)(response.value)
+    const current = Native.decodeUnknownSync(Native.Capabilities)(cached.response.value)
+    const scope = decodedScope(capabilities, response.snapshot.host_id)
+    return capabilities.session_actor === current.session_actor
+      && response.snapshot.host_id === cached.response.snapshot.host_id
+      && (scope === undefined ? cached.scope === undefined : cached.scope !== undefined && sameScope(scope, cached.scope))
+  }
   const discover = async (): Promise<Identity> => {
     if (discovering !== undefined) return discovering
     const started = beginObservation()
@@ -144,7 +168,8 @@ export const createScopedChatOutbox = (
     else {
       try {
         observe(response, started)
-        if (cached === undefined || observations.get(response) !== cached.sequence) return
+        if (cached === undefined || !isCurrentIdentity(response)) return
+        // Join only the current identity's barrier, never initialize an obsolete tuple.
         identity = cached
       } catch { throw new OutboxIdentityUnavailable() }
     }
@@ -169,7 +194,7 @@ export const createScopedChatOutbox = (
     return { repo, record }
   }
   return {
-    beginObservation, initialize, observe, isCurrentObservation, repository,
+    beginObservation, initialize, observe, isCurrentIdentity, repository,
     protection: () => cached?.scope === undefined ? 'unprotected' : 'durable',
     recovery: {
       ...createRecoveryCommands(client, locate),

@@ -282,9 +282,9 @@ describe('verified browser outbox scope', () => {
       respond(expected)
       await owner.initialize(expected, b)
       if (order.includes('delayed A')) await owner.initialize(base, a)
-      expect(owner.isCurrentObservation(base)).toBe(false)
+      expect(owner.isCurrentIdentity(base)).toBe(false)
     }
-    expect(owner.isCurrentObservation(expected)).toBe(true)
+    expect(owner.isCurrentIdentity(expected)).toBe(true)
     expect(owner.protection()).toBe(order.startsWith('unprotected') ? 'unprotected' : 'durable')
     expect((await owner.repository())?.scope).toEqual(scopeFromCapabilities(expected))
   })
