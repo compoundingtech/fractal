@@ -466,16 +466,18 @@ class ReleaseDeliveryTests(unittest.TestCase):
         pack = target / "objects/pack"
         hook = self.root / "pack-hook"
         hook.write_text("#!/bin/sh\n"
-                        'echo partial > "$FETCH_PACK/tmp_pack_interrupted"\n'
-                        'echo partial > "$FETCH_PACK/tmp_idx_interrupted"\n'
-                        'echo started > "$FETCH_STARTED"\n'
+                        'stage=$(cat "$FETCH_STAGE_FILE")\n'
+                        'echo partial > "$stage/pack/tmp_pack_interrupted"\n'
+                        'echo partial > "$stage/pack/tmp_idx_interrupted"\n'
+                        'echo closed > "$FETCH_PACK/tmp_pack_concurrent_closed"\n'
+                        'echo "$stage" > "$FETCH_STARTED"\n'
                         'if [ "$FETCH_MODE" = term ]; then kill -TERM "$FETCH_WORKER_PID"; fi\n'
                         "exec /bin/sleep 30\n")
         hook.chmod(0o755)
         started = self.root / "fetch-started"
         config = self.root / "fetch.gitconfig"
         config.write_text(f"[uploadpack]\n\tpackObjectsHook = {hook}\n")
-        for mode in ("timeout", "term"):
+        for mode in ("timeout", "term", "early_term"):
             with self.subTest(mode=mode):
                 for name in ("tmp_pack_old", "tmp_idx_old", "tmp_pack_busy"):
                     candidate = pack / name
@@ -495,31 +497,52 @@ class ReleaseDeliveryTests(unittest.TestCase):
                     self.assertEqual(holder.stdout.readline().strip(), "open")
                     result = subprocess.run([
                         sys.executable, "-c",
-                        "import fcntl, os, pathlib, sys; "
+                        "import fcntl, os, pathlib, signal, sys; "
                         "from release_delivery import fetch_local; "
                         "os.environ['FETCH_WORKER_PID'] = str(os.getpid()); "
                         "lock = open(sys.argv[1] + '/delivery.lock', 'a'); "
                         "fcntl.flock(lock, fcntl.LOCK_EX); "
+                        "sys.addaudithook(lambda event, args: "
+                        "pathlib.Path(os.environ['FETCH_STAGE_FILE']).write_text("
+                        "args[3]['GIT_OBJECT_DIRECTORY']) "
+                        "if event == 'subprocess.Popen' and 'fetch' in args[1] else None); "
+                        "sys.addaudithook(lambda event, args: "
+                        "os.kill(os.getpid(), signal.SIGTERM) "
+                        "if os.environ['FETCH_MODE'] == 'early_term' "
+                        "and event == 'subprocess.Popen' and 'fetch' in args[1] else None); "
                         "fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), "
                         "sys.argv[3], timeout=2)",
                         str(target), str(self.origin), self.initial_commit],
                         cwd=SCRIPT.parent, env={**self.env,
                             "GIT_CONFIG_GLOBAL": str(config), "FETCH_MODE": mode,
-                            "FETCH_PACK": str(pack), "FETCH_STARTED": str(started)},
+                            "FETCH_PACK": str(pack), "FETCH_STARTED": str(started),
+                            "FETCH_STAGE_FILE": str(self.root / "stage-path")},
                         capture_output=True, text=True, timeout=30)
-                    self.assertTrue(started.exists(), result.stdout + result.stderr)
+                    if mode != "early_term":
+                        self.assertTrue(started.exists(), result.stdout + result.stderr)
+                        self.assertFalse(Path(started.read_text().strip()).exists())
                     if mode == "timeout":
                         self.assertIn("TimeoutExpired", result.stderr)
                     else:
                         self.assertEqual(result.returncode, 143, result.stderr)
+                    expected = ["tmp_pack_busy", "tmp_pack_recent"]
+                    if mode != "early_term" or (pack / "tmp_pack_concurrent_closed").exists():
+                        expected.append("tmp_pack_concurrent_closed")
                     self.assertEqual(sorted(path.name for path in pack.glob("tmp_pack_*")),
-                                     ["tmp_pack_busy", "tmp_pack_recent"])
+                                     sorted(expected))
+                    self.assertEqual(list(target.glob("delivery-fetch-*")), [])
                     self.assertEqual(list(pack.glob("tmp_idx_*")), [])
                 finally:
                     holder.communicate(timeout=5)
 
-    def test_local_snapshot_delivers_without_network_origin_and_logs_identity(self):
-        self.origin.rename(self.root / "offline-origin.git")
+    def test_publication_unavailable_skips_delivery_and_verified_snapshot_logs_identity(self):
+        offline = self.root / "offline-origin.git"
+        self.origin.rename(offline)
+        self.reconcile()
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertFalse(self.saved_state().get("installed"))
+        self.assertFalse(self.saved_state().get("trusted_head"))
+        offline.rename(self.origin)
         result = self.reconcile()
         snapshot = next(json.loads(line) for line in result.stdout.splitlines()
                         if line.startswith("{") and json.loads(line).get("outcome") == "source_snapshot")
@@ -536,12 +559,18 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.git("commit", "-m", "Unpublished")
         self.reconcile()
         self.assertEqual(self.saved_state()["trusted_head"], self.initial_commit)
+        self.git("update-ref", "refs/remotes/origin/main", self.git("rev-parse", "HEAD"))
+        before = len(self.commands("xcodebuild"))
+        result = self.reconcile()
+        self.assertIn("source_not_published", result.stdout)
+        self.assertEqual(len(self.commands("xcodebuild")), before)
+        self.assertEqual(self.saved_state()["trusted_head"], self.initial_commit)
         self.publish()
         newer = self.git("rev-parse", "HEAD")
         self.reconcile()
         self.git("update-ref", "refs/remotes/origin/main", self.initial_commit)
         result = self.invoke()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source_not_published", result.stdout)
         self.assertEqual(self.saved_state()["trusted_head"], newer)
 
     def configure(self, **values):

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import signal
+import tempfile
 import time
 
 BUNDLE_ID = "com.compoundingtech.fractal"
@@ -22,12 +23,11 @@ def fetch_local(repo, source, commit, *, timeout=60):
     if not pack.is_absolute():
         pack = repo / pack
     started = time.time_ns()
-    existing = {path for pattern in ("tmp_pack_*", "tmp_idx_*") for path in pack.glob(pattern)}
     lsof = shutil.which("lsof")
     if not lsof and sys.platform == "darwin":
         lsof = "/usr/sbin/lsof"
 
-    def clean_before(cutoff, *, failed=False):
+    def clean_before(cutoff):
         if not lsof:
             return  # No liveness proof: retain the file.
         for pattern in ("tmp_pack_*", "tmp_idx_*"):
@@ -36,9 +36,8 @@ def fetch_local(repo, source, commit, *, timeout=60):
                     before = path.stat()
                     if not path.is_file() or before.st_mtime_ns >= cutoff:
                         continue
-                    if path in existing or not failed:
-                        if before.st_mtime_ns >= started - 3600 * 1_000_000_000:
-                            continue
+                    if before.st_mtime_ns >= started - 3600 * 1_000_000_000:
+                        continue
                     owners = subprocess.run([lsof, "-t", "--", str(path)],
                         capture_output=True, text=True, timeout=5)
                     # lsof returns 1 with no output for a file with no open users.
@@ -53,33 +52,55 @@ def fetch_local(repo, source, commit, *, timeout=60):
                     continue
 
     clean_before(started)
-    # Kill and reap the transfer group before removing files it could still use.
-    # Capture diagnostics: a configured Git URL may contain credentials.
-    process = subprocess.Popen(
-        ["git", "-C", str(repo), "fetch", "--no-tags", "--no-auto-maintenance",
-         str(source), commit], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True)
+    # Isolate transfer objects: fresh shared pack names do not prove ownership,
+    # even when index-pack briefly closes them before its final rename.
+    objects = pack.parent.resolve()
+    staging = Path(tempfile.mkdtemp(prefix="delivery-fetch-", dir=objects.parent))
+    (staging / "pack").mkdir()
+    env = {**os.environ, "GIT_OBJECT_DIRECTORY": str(staging),
+           "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(objects)}
     previous_term = signal.getsignal(signal.SIGTERM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    process = None
 
     def terminate(signum, frame):
         raise SystemExit(128 + signum)
 
-    signal.signal(signal.SIGTERM, terminate)
     try:
+        signal.signal(signal.SIGTERM, terminate)
+        # SIGTERM remains blocked until the new process group is registered.
+        process = subprocess.Popen(
+            ["git", "-C", str(repo), "fetch", "--no-tags", "--no-auto-maintenance",
+             str(source), commit], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True, env=env)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         stdout, stderr = process.communicate(timeout=timeout)
         if process.returncode:
             raise subprocess.CalledProcessError(process.returncode, process.args, stdout, stderr)
+        # Same-filesystem hard links publish complete immutable Git objects
+        # without replacing anything another fetch already installed.
+        for path in staging.rglob("*"):
+            if path.is_file():
+                destination = objects / path.relative_to(staging)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(path, destination)
+                except FileExistsError:
+                    pass
     except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
-        # Include the just-failed transfer, not just earlier abandoned packs.
-        clean_before(time.time_ns(), failed=True)
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
         raise
     finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        shutil.rmtree(staging)
         signal.signal(signal.SIGTERM, previous_term)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def policy_digest(policy):
@@ -660,8 +681,29 @@ class Delivery:
                else self.args.ref)
         observed = self.data.get("observed")
         trusted_head = self.data.get("trusted_head", self.args.trusted_commit)
+        branch = self.args.ref.removeprefix("origin/")
+        pinned = len(branch) == 40 and all(c in "0123456789abcdef" for c in branch)
+        try:
+            publication = subprocess.run(
+                ["git", "ls-remote", "--heads", self.args.expected_origin,
+                 "refs/heads/*" if pinned else "refs/heads/" + branch],
+                check=True, capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            self.record("fetch_failed", reason="publication_unavailable")
+            return  # No publication proof: no build, install or cached delivery.
+        published = [line.split()[0] for line in publication.splitlines()]
         try:
             snapshot = git(self.args.repo, "rev-parse", "--verify", ref + "^{commit}")
+            if snapshot not in published:
+                # Pinned historical commits may be ancestors of a published tip,
+                # but only using tips already present in the local object DB.
+                accepted = pinned and any(subprocess.run(
+                    ["git", "-C", str(self.args.repo), "merge-base", "--is-ancestor",
+                     snapshot, tip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                ).returncode == 0 for tip in published)
+                if not accepted:
+                    self.record("fetch_failed", reason="source_not_published")
+                    return
             snapshot_time = git(self.args.repo, "show", "-s", "--format=%cI", snapshot)
             self.record("source_snapshot", commit=snapshot, ref=ref,
                         commit_time=snapshot_time)
