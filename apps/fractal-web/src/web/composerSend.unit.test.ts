@@ -137,6 +137,19 @@ describe('composer send contract', () => {
     expect(send).not.toHaveBeenCalled()
   })
 
+  it('keeps the composer unavailable with its startup storage reason instead of claiming authorization was denied', async () => {
+    const send = vi.fn<AttachmentPort['send']>()
+    const binding = composerSendBinding({
+      source: { attachments: { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send } },
+      agentRef: seat, grants: { ...grants, messageSend: 'ungranted', sendUnavailable: 'Saved messages are unavailable. Retry later.' },
+      readable: true, items: [], onRefused: vi.fn(),
+    })
+    expect(binding.disabledReason).toBe('Saved messages are unavailable. Retry later.')
+    expect(binding.runtime.isDisabled).toBe(true)
+    await binding.runtime.onNew(message)
+    expect(send).not.toHaveBeenCalled()
+  })
+
   it('stages local images without uploads and passes their original bytes alongside existing blob references', async () => {
     const blob = `blob/${'a'.repeat(64)}`
     const upload = vi.fn<AttachmentPort['upload']>()

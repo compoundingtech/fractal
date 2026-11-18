@@ -104,6 +104,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     : source.attachments === undefined ? 'This view cannot send messages.'
     // Before Fractal has answered which operations this browser holds, the default grants are not a refusal.
     : grants.unread === true ? 'Checking whether this browser can send messages…'
+    : grants.sendUnavailable !== undefined ? grants.sendUnavailable
     : grants.messageSend !== 'granted' ? 'Message send is not granted for this device.'
     : !readable ? 'Messages can be sent once this conversation loads.' : undefined
   const uploads = attachmentAdapter !== undefined && disabledReason === undefined && grants.attachmentUpload === 'granted' ? attachmentAdapter : undefined

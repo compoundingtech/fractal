@@ -15,6 +15,10 @@ import { Effect, Layer, SubscriptionRef } from 'effect'
 import * as Option from 'effect/Option'
 import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
+import { createOutboxRecord, outboxDeploymentId, prepareOutboxRecord } from '@fractal/client/outbox'
+import { prepareMessageSendPacket } from '@fractal/client/prepared-packet'
+import { openIndexedDbOutbox } from './outbox/indexedDb.ts'
 
 /** Cold-selection admission through the real live source and SDK. */
 
@@ -85,6 +89,7 @@ class Gateway {
   /** Take the send, then answer Fractal's 503 `message-send-unconfirmed` instead of its result. */
   unconfirmSend = false
   capabilityReads = 0
+  issuerPair: { readonly issuer: string; readonly issuer_key: string } | undefined
   readonly messageActions: MessageSendAction[] = []
   /** Fractal's durable answer per idempotency key, with the digest of the request that earned it. */
   private readonly sendReceipts = new Map<string, { readonly digest: string; readonly value: unknown }>()
@@ -138,6 +143,7 @@ class Gateway {
         schemas: ['client-v0'],
         session_actor: 'person/operator',
         transport: 'fabric-loopback',
+        ...this.issuerPair,
       }
     } else if (path.startsWith('/v1/client/runtimes/')) {
       this.runtimeReads.push(decodeURIComponent(path.slice('/v1/client/runtimes/'.length)))
@@ -413,13 +419,17 @@ const settle = Effect.promise(async () => {
 
 const withGateway = <E,>(
   test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void, E>,
-  { maxFollows = 2, sessionTraceLayer }: {
+  { maxFollows = 2, sessionTraceLayer, issuerPair, capabilityFailure = false }: {
     readonly maxFollows?: number
     readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider>
+    readonly issuerPair?: { readonly issuer: string; readonly issuer_key: string }
+    readonly capabilityFailure?: boolean
   } = {},
 ) =>
   Effect.gen(function* () {
     const gateway = new Gateway()
+    gateway.issuerPair = issuerPair
+    gateway.capabilityFailure = capabilityFailure
     const live = yield* Effect.acquireRelease(
       Effect.sync(() =>
         liveSource({
@@ -437,6 +447,53 @@ const withGateway = <E,>(
     )
     yield* test(live, gateway)
   }).pipe(Effect.scoped)
+
+describe('outbox startup admission', () => {
+  const issuerPair = { issuer: 'person/example', issuer_key: 'issuer-key/startup' }
+  it.live('restores dispatched storage before readiness and only then publishes send-capable grants', () => Effect.gen(function* () {
+    const factory = new IDBFactory()
+    vi.stubGlobal('indexedDB', factory)
+    const scope = { principalId: 'person/operator', deploymentId: outboxDeploymentId(issuerPair.issuer, issuerPair.issuer_key), memberId: snapshot.host_id }
+    const saved = yield* openIndexedDbOutbox({ indexedDB: factory, scope })
+    const intent = createOutboxRecord('attempt/startup-message', { text: 'Saved content', attachments: [] })
+    const packet = prepareMessageSendPacket({ id: 'action/startup', idempotency_key: intent.id,
+      fence: { snapshot_id: snapshot.id, subject_revisions: {} },
+      parameters: { to: agent.id, content: intent.intent.text, tags: [], attachments: [] } })
+    const ready = prepareOutboxRecord(intent, packet)
+    if (ready === undefined) throw new TypeError('Expected ready packet')
+    yield* Effect.promise(() => saved.commit(intent))
+    yield* Effect.promise(() => saved.compareAndSwap(intent.revision, ready))
+    yield* Effect.promise(() => saved.acquireDispatchPermit(intent.id, ready.revision))
+    saved.close()
+    yield* withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      const inspected = yield* openIndexedDbOutbox({ indexedDB: factory, scope, recoverOnOpen: false })
+      try {
+        expect(yield* Effect.promise(() => inspected.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
+        expect(gateway.messageActions).toEqual([])
+        expect(live.registry.get(live.source.grants)).toMatchObject({ unread: true, messageSend: 'ungranted' })
+        live.registry.mount(live.source.grants)
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
+        expect(gateway.messageActions).toEqual([])
+      } finally { inspected.close() }
+    }), { issuerPair })
+  }))
+
+  it.live('keeps protected startup storage unavailable without granting sends or inventing corrupt entries', () => {
+    vi.stubGlobal('indexedDB', { open: () => { throw new DOMException('Storage disabled', 'SecurityError') } })
+    return withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      live.registry.mount(live.source.grants)
+      yield* settle
+      expect(live.registry.get(live.source.grants)).toMatchObject({
+        messageSend: 'ungranted', sendUnavailable: 'Saved messages are unavailable. Retry later.',
+      })
+      yield* Effect.promise(() => expect(live.source.outboxRecovery!.list()).rejects.toBeDefined())
+      expect(gateway.messageActions).toEqual([])
+    }), { issuerPair })
+  })
+})
 
 describe('session inventory independence', () => {
   it.live('reads selected threads before the roster and reconnects without listing sessions', () =>
@@ -1847,6 +1904,7 @@ describe('optimistic conversation sends', () => {
         expect(gateway.messageActions).toHaveLength(0)
         expect(live.registry.get(conversation)).toMatchObject({ _tag: 'Observed', value: { items: [] } })
       }),
+      { capabilityFailure: true },
     ),
   )
 

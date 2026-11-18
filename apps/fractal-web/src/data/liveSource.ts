@@ -1210,10 +1210,15 @@ export const liveSource = ({
       deniedReaders.add(deny)
       const fiber = runtime.runFork(
         Effect.gen(function* () {
-          const discovered = outbox.observe(yield* Effect.tryPromise({
+          const response = yield* Effect.tryPromise({
             try: () => client.capabilities(),
             catch: (cause) => cause,
-          }))
+          })
+          const discovered = outbox.observe(response)
+          const startup = yield* Effect.tryPromise({
+            try: () => outbox.initialize(response),
+            catch: (cause) => cause,
+          }).pipe(Effect.result)
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1223,11 +1228,12 @@ export const liveSource = ({
           observedGrants = {
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
-            messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
+            messageSend: startup._tag === 'Success' && allowed.has('message.send') ? 'granted' : 'ungranted',
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
             terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
             sendProtection: outbox.protection(),
+            ...(startup._tag === 'Failure' ? { sendUnavailable: 'Saved messages are unavailable. Retry later.' } : {}),
           }
           get.setSelf(observedGrants)
         }),
@@ -1245,7 +1251,9 @@ export const liveSource = ({
     ready: runtime.runPromise(Effect.gen(function* () {
       sdk = yield* Fractal
       if (!online) yield* sdk.setNetworkOnline(false)
-    })),
+      // Rendering may proceed read-only when identity/storage is unavailable; send grants await the same barrier.
+      yield* Effect.tryPromise({ try: () => outbox.initialize(), catch: (cause) => cause }).pipe(Effect.catch(() => Effect.void))
+    })).catch(cause => { if (!disposed) throw cause }),
     suspendSockets: () => sdk?.suspendSockets(),
     resumeSockets: () => {
       if (!disposed && sdk !== undefined) runtime.runFork(sdk.resumeSockets)

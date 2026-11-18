@@ -828,3 +828,45 @@ it('retains a protected Start retry and its accepted child when fresh capabiliti
     expect(registry.get(source.pendingStarts!())).toEqual([])
   } finally { stop(); registry.dispose(); outbox.close() }
 })
+
+it.each([false, true])('waits for protected startup before granting thread sends and preserves a newer draft (unavailable: %s)', async unavailable => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const initializing = new Promise<void>(resolve => { entered = resolve })
+  const fetchImpl = vi.fn(async (_input: RequestInfo | URL) => Response.json({ ...base, value: { ...base.value,
+    issuer: 'person/example', issuer_key: 'issuer-key/startup', transport: 'local-web',
+    capabilities: [...base.value.capabilities,
+      { id: 'threads-v1', version: 3, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: 'granted' }],
+  } }))
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl })
+  const registry = AtomRegistry.make()
+  const outbox = createScopedChatOutbox(client, { indexedDB: new IDBFactory(), storage: { persist: async () => {
+    entered()
+    await gate
+    if (unavailable) throw new DOMException('Storage disabled', 'SecurityError')
+    return false
+  } } })
+  const source = gatewayThreads(client, registry, undefined, undefined, outbox)
+  registry.set(source.draft('draft/startup'), { content: 'Earlier draft' })
+  const stop = registry.mount(source.access)
+  try {
+    await initializing
+    expect(registry.get(source.access).actions.size).toBe(0)
+    const newer = { content: 'New typing while startup waits' }
+    registry.set(source.draft('draft/startup'), newer)
+    release()
+    if (unavailable) {
+      await vi.waitFor(() => expect(registry.get(source.access).failure).toMatchObject({
+        _tag: 'Unavailable', detail: 'Saved messages are unavailable. Retry later.',
+      }))
+      expect(registry.get(source.access).actions.size).toBe(0)
+    } else {
+      await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    }
+    expect(registry.get(source.draft('draft/startup'))).toBe(newer)
+    expect(fetchImpl.mock.calls.every(([input]) => String(input).endsWith('/capabilities'))).toBe(true)
+  } finally { release(); stop(); registry.dispose(); outbox.close() }
+})

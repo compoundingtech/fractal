@@ -253,6 +253,8 @@ export interface Grants {
   readonly terminalControl: 'granted' | 'ungranted'
   /** Absent outside live chat; unprotected is explicit identity mode, never a storage fallback. */
   readonly sendProtection?: 'durable' | 'unprotected'
+  /** Protected startup failed; drafts remain editable, but no send is accepted until storage is ready. */
+  readonly sendUnavailable?: string
   /** No capabilities answer has been read yet: every grant above is a default, not a refusal. */
   readonly unread?: true
 }

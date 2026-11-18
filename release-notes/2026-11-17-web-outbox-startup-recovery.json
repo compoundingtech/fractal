@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Initialize scoped browser outbox recovery before enabling message composers",
+  "replay": {"status": "none", "detail": "Startup never submits, re-signs or retargets saved actions. Unknown delivery remains non-retryable; only explicit applied:none permits a deliberate freshly prepared child attempt."},
+  "schema": {"status": "none", "detail": "Reuses the existing browser-local IndexedDB database and envelopes; no browser or server schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "Live startup and chat/thread send grants wait for verified scoped storage initialization. Missing issuer remains visibly unprotected; unavailable protected storage blocks sending with a retry-later explanation instead of falling back. Restored never-dispatched thread Start and reply require original-target revalidation before dispatch."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator actions, re-pairing or configuration changes are required."},
+  "recovery": {"status": "changed", "detail": "A single initialization barrier per scoped connection preserves never-dispatched pending records, quarantines readable corruption, and restores unresolved dispatched records as unknown. New tabs recover independently while receipt retention can settle a demoted attempt. Drafts are not cleared by startup. No original-member correlated outcome-read capability is exposed by the current client, so unknown attempts are not reconciled or resent. Recovery entries remain discard-only; a continuation UI is not added here."}
+}

@@ -660,6 +660,20 @@ manufactured into a corrupt entry. Storage failures are typed, without a memory 
 and persistent-storage permission is reported as granted, denied or unsupported. Browser
 eviction, site-data deletion and device loss are not covered by this durability guarantee.
 
+Startup opens and recovers the authenticated outbox before the live page is ready and
+before chat or thread send grants become available. Each scoped connection shares one
+initialization barrier: later capability refreshes and recovery inspection do not demote
+that connection's own in-flight sends. A new tab independently restores unresolved
+dispatch markers as unknown; the original dispatcher can still retain a correlated receipt.
+Never-dispatched preparing and ready records remain pending without automatic submission.
+Restored Start and reply packets require explicit original-target revalidation before
+their one-shot dispatch permit can be consumed. Failed startup leaves sending unavailable
+with a retry-later explanation, not an unprotected fallback or a fabricated corrupt entry.
+Initialization never edits composer drafts; late delivery still settles by attempt/message identity.
+The client currently exposes no correlated outcome-read capability for the original member:
+operation reads are not action receipt lookup. Startup therefore performs no outcome
+reconciliation, no speculative status requests, and no replay of unknown attempts.
+
 Cleanup never expires unresolved attempts. Terminal content/spool lasts seven days (delivered
 content additionally waits for exact timeline observation), then minimal identity/evidence
 tombstones last another thirty days. Explicit dismissal preserves uncertainty in a tombstone;
