@@ -13,10 +13,13 @@ Status: **specified, not implemented.** Today only `fractal agents resume` ends 
   idleness. Harnesses, clients and fleet tooling never do, and no peer originates a second resume.
 - **IDLE-R02 Member opt-in, seat opt-out:** Idle suspension is off unless the owner member enables
   it. An enabled member applies it to every eligible seat it owns except seats whose declaration
-  opts out.
+  opts out. Turning the policy off or opting out stops new idle suspends, not automatic wakes of
+  seats already idle-suspended.
 - **IDLE-R03 Existing safety only:** An idle suspend never weakens a [suspend](suspend.md#when-a-seat-can-suspend)
   refusal. A seat that holds claimed work, runs a subagent, has a turn, prompt, unsent input or
-  background job, or has no bound native session stays resident.
+  background job, or has no bound native session stays resident. Eligibility also requires a driver
+  that declares idle-residency support and reports its delivery channel ready; otherwise refuse
+  with `driver-unsupported` or a channel-not-ready refusal. Only omp declares support initially.
 - **IDLE-R04 Eligible-time TTL:** A seat suspends after it has been continuously eligible for the
   member's idle time, measured from when it became eligible. Silent mail does not restart the
   clock; anything that makes the seat ineligible does.
@@ -70,6 +73,10 @@ agent "example/responder" {
 `idle-suspend` takes `"never"` or `"member"` (the default: follow the member's setting). Any other
 value is refused at validation.
 
+Setting `idle_suspend_after = "off"` or `idle-suspend "never"` must leave existing idle suspensions
+wakeable through the same demand, admission and strict resume path. These settings must not turn
+an idle suspension into a manual suspension.
+
 ## Lifecycle
 
 ```mermaid
@@ -91,13 +98,25 @@ stateDiagram-v2
 The suspension records its **cause**: `manual` for `fractal agents suspend`, `idle` for this
 policy. The runtime state stays `suspended` for both; cause is a separate field so the phases in
 [suspend](suspend.md#phases) keep their meaning. An explicit suspend of an idle-suspended seat
-changes the cause to `manual`, which turns off automatic wake.
+changes the cause to `manual`, preserving its snapshot and native session and disabling automatic
+wake. This conversion is idempotent; a manual suspension never converts to idle automatically.
+
+### Compatibility
+
+Under [R49](compatibility.md#required-rolling-window), readers for new residency claim kinds and
+suspension fields must ship before their writers. A missing cause reads as `manual`; a missing
+snapshot mode reads as `git`. Writers must remain gated until every active member advertises
+support for reading the new kinds and fields, including evidence claims. Current-only tests do
+not satisfy this gate. Downgrade is not promised. Rollback means setting the policy off and
+rolling forward with compatible readers and the wake path for existing idle suspensions intact.
 
 ## Eligibility and the idle clock (IDLE-R03, IDLE-R04, IDLE-R12)
 
 A seat is eligible when its member enables idle suspension, its declaration does not opt out, and
-every [suspend refusal](suspend.md#when-a-seat-can-suspend) is clear on the latest observations.
-Missing or indeterminate observations are not eligible.
+the driver declares idle-residency support, its delivery channel is ready, and every
+[suspend refusal](suspend.md#when-a-seat-can-suspend) is clear on the latest observations.
+Unsupported drivers refuse with `driver-unsupported`; only omp declares support initially.
+Missing or indeterminate observations, including channel readiness, are not eligible.
 
 The **eligible epoch** is the time the seat last became eligible. It is derived from the claims
 that change eligibility (`harness.observed`, work claims and leases, subagent claims, runtime
@@ -134,10 +153,12 @@ a manual suspend keeps today's refusals. Resume in either mode uses the same str
 demand frontier and not yet offered. It is derived from the native message stream: every
 `message.sent` claim for the recipient, wherever the store keeps it, including the messages
 shard, joined with its staged, delivered and read receipts. The primary claim log alone is not
-enough: it does not hold sends kept in the messages shard. The existing local message index that
-the idle-holder check uses records pending wake-class input per seat, so a seat's demand is one
-indexed read. After a restart, demand is derived again from accepted sends and receipts; nothing
-in memory is load-bearing.
+enough: it does not hold sends kept in the messages shard. The existing idle-mail pending index
+tracks any pending input; it is neither wake-class-aware nor staging-aware. It must not be reused
+as wake demand. A new wake-class, staged/receipt-aware per-seat pending projection must cover
+both stores and make demand one indexed read. A lagging source mirror cannot prove no demand.
+After a restart, the projection rebuilds from accepted sends, staging and receipts; nothing in
+memory is load-bearing.
 
 Classification is the one [silent and wake](silent-messages.md) rule, decided at acceptance:
 person messages, ready steps, faults, GitHub watch events, handoffs, run reports and daemon
@@ -153,7 +174,8 @@ Demand to a manually suspended, stopped or retired seat stays in the mailbox and
 2. The member runs at most `idle_resume_concurrency` resumes. Queued seats are ordered by their
    oldest person message, then by oldest demand.
 3. Resume runs the existing restore and verify phases. The seat is resumed only when the live
-   native session matches and the driver reports its delivery channel ready.
+   native session matches and the driver reports its delivery channel ready for that incarnation.
+   Process liveness or session equality alone must not complete resume or release pending mail.
 4. Pending mail is then offered through the ordinary mailbox stream: wake messages first in
    canonical order, plus the held silent batch. Delivery is at least once; a crash between native
    delivery and its receipt can replay a message.
@@ -184,8 +206,9 @@ Every label is a closed vocabulary; seat identity stays in spans and `agents sho
 | `st.residency.pending.oldest_age` | Observable gauge | `s` | `class`: `wake`, `silent` | oldest pending demand and held silent mail |
 | `st.residency.reclaimed` | Observable gauge | `By` | `measure`: `host-available`, `private` | measured change around the latest suspend, never a sum of resident sizes |
 
-Latency percentiles come from the wake objectives' `interval` rows rather than a histogram, which
-keeps the residency instruments to a few dozen series.
+Latency percentiles come from the wake objectives' `interval` rows rather than a histogram.
+Residency's allocation is taken from the HTTP duration cap, not additional headroom; the
+[shared allocation](observability.md#cardinality-budget) must be inventoried before activation.
 
 Each suspend and resume operation is one trace with the seat in span attributes and the phase as
 `span.label`.
@@ -227,6 +250,8 @@ uses seven-day windows, because one-day windows on a member with few wakes are m
 | unrouted activity | `count` over `unrouted` | max 0 per hour |
 
 ```kdl
+version 2
+
 objective "example/residency-first-turn" {
   about "Accepted wake demand to the first native turn on one member, unfinished demand included"
   indicator "interval" {
@@ -248,9 +273,9 @@ liveness signal.
 
 ## Design questions
 
-- **DQ1 Metric headroom:** O11Y-R14 caps a daemon at 2,000 active series, and existing
-  instruments already claim most of it. The residency instruments need a measured allocation, or
-  existing series reallocated, before they ship.
+- **DQ1 Metric allocation:** Residency series come out of the HTTP duration cap under O11Y-R14,
+  not a larger daemon budget. The provisional estimate is 64 series; activation requires a full
+  closed-vocabulary inventory and churn check, with the HTTP cap reduced by the final footprint.
 - **DQ2 Harness-local timers:** a harness timer or loop that would start a turn without a message
   never fires while the seat is suspended. A 13-day replay of one fleet's claim log found under one
   turn start a day with no message behind it, and every sampled start traced to a message.
