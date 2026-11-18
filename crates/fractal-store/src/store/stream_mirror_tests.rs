@@ -332,14 +332,21 @@ fn wake_demand_receipts_clear_graph_marks_and_shard_sends() {
             } else if storage == "marks" {
                 message_marks::record(&graph, subject, kind, "agent/cedar").unwrap();
             } else {
-                // A replicated receipt can be further along than the member's local view.
-                let status = kind.strip_prefix("message.").unwrap();
-                let receipt = ClaimInput {
-                    kind: kind.into(), actor: Some("agent/cedar".into()),
-                    fields: serde_json::from_value(json!({"status": status})).unwrap(),
-                    ..send
+                let statuses: &[&str] = match kind {
+                    "message.read" => &["delivered", "read"],
+                    "message.closed" => &["delivered", "read", "closed"],
+                    "message.staged" => &["staged"],
+                    _ => &["delivered"],
                 };
-                graph.append_claim(&receipt).unwrap();
+                for status in statuses {
+                    let receipt = ClaimInput {
+                        kind: format!("message.{status}"), actor: Some("agent/cedar".into()),
+                        fields: serde_json::from_value(json!({"status": status})).unwrap(),
+                        ..send.clone()
+                    };
+                    graph.append_claim(&receipt).unwrap();
+                    assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_none());
+                }
             }
             let demand = graph.wake_demand("agent/cedar").unwrap();
             assert!(demand.frontier.caught_up, "{storage} {kind}");
