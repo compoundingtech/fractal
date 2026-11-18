@@ -11,8 +11,10 @@ const render = (rows, issue = '') => {
   const store = { outboxIssue: issue, retryOutbox: () => events.push('storage-retry'), outbox: {
     attempts: { subscribe: () => () => {}, getSnapshot: () => rows.map(draft => ({ draft })) },
     checkStatus: async id => events.push(['check', id]), discard: async id => events.push(['discard', id]),
+    retry: async (id, childId) => events.push(['retry-child', id, childId]),
   } };
   const modules = { react: { useSyncExternalStore: (_subscribe, snapshot) => snapshot() },
+    'expo-crypto': { randomUUID: () => 'fresh-child' },
     'react-native': { View: 'View', Alert: { alert: (_title, message, buttons) => { events.push(['warning', message]); buttons.find(button => button.text === 'Discard').onPress(); } } },
     'expo-clipboard': { setStringAsync: async text => events.push(['copy', text]) }, './ui': { Button: 'Button', T: 'T' }, './store': { useStore: () => store } };
   new Function('require', 'exports', 'React', outputText)(name => { assert.ok(name in modules, name); return modules[name]; }, exports, React);
@@ -44,4 +46,15 @@ test('unavailable storage offers storage retry later, not a message retry', () =
   const r = render([], 'Storage unavailable, retry later.');
   assert.deepEqual(r.labels, ['Retry storage later']);
   r.buttons[0].props.onPress(); assert.deepEqual(r.events, ['storage-retry']);
+});
+
+test('only proven not-applied recovery offers Retry as a fresh child attempt', async () => {
+  const r = render([{ ...row, state: 'not-applied', status: 'Not applied' }]);
+  const retry = r.buttons.find(button => button.props.label === 'Retry as new attempt');
+  assert.ok(retry);
+  await retry.props.onPress();
+  assert.deepEqual(r.events, [['retry-child', row.id, 'action/ios-fresh-child']]);
+  for (const state of ['unknown', 'pending', 'delivered', 'legacy', 'corrupt']) {
+    assert.equal(render([{ ...row, state }]).labels.includes('Retry as new attempt'), false);
+  }
 });

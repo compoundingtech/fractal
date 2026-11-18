@@ -1,7 +1,7 @@
 import { actionReceiptCheck, appliedAnswer } from '../../clients/typescript/fractal-client/index.ts';
 import { expectedPreparedPacketIdentities } from '../../clients/typescript/fractal-client/preparedPacket.ts';
 import type { PreparedPacket } from '../../clients/typescript/fractal-client/preparedPacket.ts';
-import { markOutboxDispatched, observeOutbox, prepareOutboxRecord, restoreOutboxEntries, restoreOutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
+import { createOutboxRecord, markOutboxDispatched, observeOutbox, prepareOutboxRecord, restoreOutboxEntries, restoreOutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { OutboxPreparingRecord, OutboxRecord } from '../../clients/typescript/fractal-client/outbox.ts';
 import type { ActionResult, EnvelopeOf } from '../../clients/typescript/fractal-client/Models.generated.ts';
 import { ConversationAttempts } from './conversationAttempts.ts';
@@ -173,6 +173,25 @@ export class OutboxRuntime {
       await this.refresh();
     } catch (error) { this.notices.set(id, this.transport.errorText(error)); await this.refresh().catch(error => this.signalIssue(error)); }
   };
+  /** Explicit new attempt only: never restore dispatch permission on the parent packet. */
+  retry = async (id: string, childId: string): Promise<void> => {
+    if (this.stopped || this.busy.has(id) || id === childId) return;
+    this.busy.add(id);
+    try {
+      const parent = await this.owner.repository.read(id);
+      if (!parent || parent.state !== 'not-applied' || parent.ambiguous) return;
+      const intent = messageIntent(parent.intent);
+      if (!intent) return;
+      this.authorize(intent);
+      const childIntent: OutboxMessageIntent = { ...intent, parentAttemptId: id };
+      const child = createOutboxRecord(childId, childIntent);
+      if (!await this.owner.repository.commit(child)) return;
+      await this.refresh();
+      this.launch(childId);
+    } catch (error) { this.signalIssue(error); }
+    finally { this.busy.delete(id); }
+  };
+
   discard = async (id: string): Promise<void> => {
     try {
       await this.owner.repository.discard(id);

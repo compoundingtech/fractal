@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { Alert, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
+import * as Crypto from 'expo-crypto';
 import { Button, T } from './ui';
 import { useStore } from './store';
 import type { OutboxRecoveryRow } from './outboxMessage.ts';
@@ -33,6 +34,7 @@ export function OutboxRecovery({ chat, thread, starts, onOpen }: {
       <T dim>{row.member} · {row.status}</T>
       {row.text !== undefined ? <T selectable>{row.text}</T> : null}
       {row.images ? <T dim>{row.images} privately stored image{row.images === 1 ? '' : 's'}</T> : null}
+      {row.state === 'not-applied' ? <Button label="Retry as new attempt" onPress={() => { void outbox?.retry(row.id, `action/ios-${Crypto.randomUUID()}`); }} /> : null}
       {row.canCheck ? <Button label="Check status" onPress={() => { void outbox?.checkStatus(row.id); }} /> : null}
       {row.message ? <Button label="Open conversation" onPress={() => {
         const message = row.message!;

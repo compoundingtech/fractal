@@ -80,6 +80,10 @@ member. Dispatched work restores unknown and is never automatically replayed.
 Recovery offers Check status, Open conversation, Copy and warned local Discard;
 damaged entries expose only status and Discard. Check status uses exact authoritative
 timeline identities only; absent/unsupported lookup remains unknown, not not-applied.
+Only proven not-applied recovery offers Retry as new attempt: an explicit user action
+commits a fresh child id with the original draft, attachments and binding, retaining
+the parent id. It never resends the parent's signed packet. Unknown has no Retry,
+and lifecycle restoration never redispatches terminal not-applied attempts.
 There is no exclusion/seal protocol, and no claim to reconcile every lost receipt.
 Storage failure preserves drafts and recovery, with a retry-later storage action.
 Saved Start metadata remains packetless unknown. Protected-profile migration commits

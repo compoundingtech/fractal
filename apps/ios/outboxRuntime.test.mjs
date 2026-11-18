@@ -153,3 +153,33 @@ test('post refusal is observed once without retry; unknown has no generic retry 
   assert.equal(f.events.filter(event => event === 'post').length, 1);
   assert.equal(runtime.attempts.getSnapshot()[0].retry, undefined);
 });
+
+for (const message of messages) for (const applied of ['none', undefined]) {
+  test(`${message.kind}: stale fence ${applied ?? 'missing'} permits only explicit proven-not-applied child retry`, async t => {
+    const f = await fixture(t), runtime = f.runtime();
+    f.transport.post = async () => {
+      f.events.push('post');
+      throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0', request_id: 'request/original',
+        code: 'stale-fence', message: 'Refresh required', retryable: true, ...(applied ? { applied } : {}) }, 409);
+    };
+    await runtime.accept('action/parent', 'same draft', [], metadata(message)); await runtime.settled();
+    const parent = await f.repository.read('action/parent');
+    assert.equal(parent.state, applied ? 'not-applied' : 'unknown');
+    await runtime.restore(); await runtime.settled();
+    assert.equal(f.events.filter(event => event === 'post').length, 1);
+    await runtime.retry('action/parent', 'action/child'); await runtime.settled();
+    assert.deepEqual(await f.repository.read('action/parent'), parent);
+    const child = await f.repository.read('action/child');
+    if (applied) {
+      assert.equal(child.intent.parentAttemptId, parent.id);
+      assert.equal(child.intent.text, parent.intent.text);
+      assert.deepEqual(child.intent.message, parent.intent.message);
+      assert.deepEqual(child.intent.binding, parent.intent.binding);
+      assert.notEqual(child.packet.id, parent.packet.id);
+      assert.equal(f.events.filter(event => event === 'post').length, 2);
+    } else {
+      assert.equal(child, undefined);
+      assert.equal(f.events.filter(event => event === 'post').length, 1);
+    }
+  });
+}
