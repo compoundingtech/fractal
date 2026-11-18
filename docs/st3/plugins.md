@@ -14,6 +14,10 @@ the implementation does not grant credentials, select a fleet member or activate
 
 - **One local database per plugin.** A plugin owns `<state>/plugins/<name>/` and one SQLite file
   there, `<name>.sqlite3`. The daemon opens it and runs the plugin's migrations at start.
+- **SQLite work is accounted.** Plugin connections use the same `smallclaims::sqlite::observe`
+  registration as graph writers and readers: production profiling includes their statements,
+  and test-support cost samples include their SQLite VM work. Pinned capture read connections
+  register independently; a plugin cache is not an unmeasured request-path database.
 - **A cache, never synced.** The file never syncs to another member and is not in the graph's
   backup. Operational mirror content rebuilds from the source; normalized capture projections
   rebuild from committed claims. A file this build cannot use (damaged, or written by a newer
