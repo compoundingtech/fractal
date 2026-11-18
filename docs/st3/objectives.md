@@ -38,10 +38,11 @@ objective "ops/change-rollout" {
   `max`, `cores`, `per-hour`, ...) and the bound is `within=DURATION`, `max=NUMBER`, `min=NUMBER`
   or `min-percent=NUMBER`. Each indicator names its rows (table below). A percentile over claims or
   CI is the row `NAME/pNN` (`ops/change-rollout/p95`), one per target.
-- `window` is the span the budget is measured over, and `min-samples` the samples an interval needs
-  before it is met or missed; with fewer it is `no-data`. Only an indicator over claims takes a
-  window.
-  Native telemetry keeps its own windows, below.
+- `window` is the span an interval or count is measured over, and `min-samples` the samples an
+  interval needs before it is met or missed; with fewer it is `no-data`.
+- `budget` declares the bad-event or bad-covered-time allowance, horizon, evidence gates and
+  paired burn windows for ratio and gauge indicators. Built-in telemetry may carry this policy
+  alongside its existing diagnostic targets.
 - `on-breach` is what happens when a row is missed. It is optional; without it a miss is shown and
   nothing is delivered.
 
@@ -75,6 +76,120 @@ named as the table's rows say (`sql-statement`, `transaction`, `writer-hold`, `c
 
 These keep the meanings they had as built-in targets: a p99 is missed in a window when more than
 1% of its samples are over, and a max when any one is.
+
+### Native ratios, covered-time gauges and ownership
+
+The native budget contract measures failures directly rather than turning a percentile miss
+into an event count. Ratio denominator events are deduplicated by subject and event timestamp;
+the numeric field is bad only when it is strictly above `bad-above`. Missing or malformed
+numeric values and timestamps are not successful events. Times use the same RFC 3339 or Unix
+millisecond field representation as other claim indicators, but `at` is required.
+
+```kdl
+objective "acme/request-budget" {
+  about "Interactive requests completing within 100ms"
+  indicator "ratio" {
+    subject-prefix "custom/acme/request/"
+    event "custom.acme.request" at="observed_at"
+    value "duration_ms" bad-above=100
+    label "route"
+    only "class" "interactive"
+  }
+  budget allowance=0.05 horizon="30d" min-coverage=0.9 min-samples=20 {
+    fast burn-rate=14.4 long="1h" short="5m"
+    slow burn-rate=6 long="6h" short="30m"
+  }
+  on-breach "fault" owner="agent/acme/ops" condition="request-budget"
+}
+```
+
+`allowance` and `min-coverage` are fractions, not percentages. Burn is observed bad fraction
+divided by allowance. Each burn pair requires **both** its long and short windows above the
+declared rate, with enough evidence; fast and slow are alternative breach conditions. The
+30-day horizon is the budget accounting period, not a claim that a newly started member already
+has 30 days of evidence. Coverage and unknown time remain visible. Shipped allowances are 5% for
+latency, 1% for transactions and 5% for database capacity. Existing max and p99 diagnostics stay
+visible and independent rather than becoming a substitute denominator.
+
+Native telemetry persists independent closed UTC-minute receipts for 30 days in
+`state_dir/slo-budgets.sqlite3`. The durable ledger preserves closed evidence across restarts;
+restart partial minutes and collection gaps are unknown rather than inferred good. This is
+local observation history, not a reconstruction from diagnostic percentiles.
+Request and SQL completions append only to an independent in-memory minute buffer. The
+checkpoint swaps that buffer under its short recorder lock, releases it, then merges and
+persists receipts under a separate ledger lock. Checkpoint, report and gauge SQLite work
+never hold the recorder lock; a blocked disk operation cannot delay completion recording.
+Failed checkpoint snapshots remain available for retry while new completions collect separately.
+Reporting first takes an owned snapshot of request, client and CPU diagnostics under the Meter
+lock. After releasing that guard, it reads native budgets and renders store diagnostics. Store
+series and newest database-size guards likewise end before native ledger I/O; reporting cannot
+indirectly park a completion by retaining one of its diagnostic locks.
+
+Database capacity uses hourly readings with a two-hour maximum age. A violation of either
+capacity bound is known bad; known good requires both bounds to be readable and within limits.
+Missing evidence for either bound therefore cannot turn a partial reading into healthy time.
+
+A `gauge` uses the same event, value, labels and filters, but measures **covered duration**
+instead of event count. Each subject is one series. A valid reading holds forward from its
+timestamp until the next reading or `max-age`, whichever comes first; it never fills time before
+the first reading or bridges a stale gap. Its bad covered milliseconds divided by covered
+milliseconds is the observed bad fraction; uncovered time is unknown, not good.
+
+```kdl
+indicator "gauge" {
+  subject-prefix "custom/acme/capacity/"
+  event "custom.acme.capacity" at="observed_at"
+  value "free_bytes" bad-below=1000000000
+  max-age "2h"
+  cadence "1h"
+}
+```
+
+Gauge thresholds take exactly one of `bad-above` or `bad-below`; equality is good. `cadence` is
+the source's measurement interval, not an interpolation permission. `max-age` must be at least
+one cadence. Effective burn windows expand to `short=max(configured short,cadence)` and
+`long=max(configured long,2*cadence)`: hourly gauges use fast 2h+1h and slow 6h+1h, not fabricated
+five-minute evidence. Both actual windows still require coverage and sample gates. Gauge and
+ratio declarations require `budget` and take neither `window` nor diagnostic `target` children.
+The evaluator retains the longest effective burn or accounting window plus the held-value
+predecessor; cadence expansion never truncates the evidence needed to establish coverage.
+Thresholds must be finite and nonnegative; allowance is in (0,1), coverage in (0,1], and minimum samples positive.
+Each pair requires `short < long <= horizon`, and fast has shorter windows and a higher rate
+than slow. Unknown, repeated and missing fields are errors.
+
+The TypeScript equivalents are `Fractal.indicator.ratio({ subjectPrefix, event: { kind, at },
+field, badAbove })` and `Fractal.indicator.gauge({ subjectPrefix, event: { kind, at }, field,
+badBelow, maxAge, cadence })`. `Fractal.objective` takes `budget: { allowance, horizon,
+minCoverage, minSamples, fast: { burnRate, long, short }, slow: { burnRate, long, short } }`.
+Gauge inputs allow exactly one of `badAbove` and `badBelow`. Targets may be omitted for these
+indicators. The DSL checks these same rules and lowers to the KDL above.
+
+Fleet ownership of a built-in row is a separate, namespaced declaration, not a redefinition of
+native measurement or an embedded private owner in public defaults:
+
+```kdl
+objective "acme/person-read" {
+  about "Fleet ownership of native latency"
+  indicator "native" {
+    objective "person-read/remote"
+  }
+  on-breach "fault" owner="agent/acme/ops" condition="person-read-budget"
+}
+```
+
+Use `Fractal.indicator.native({ objective: 'person-read/remote' })` in TypeScript. The reference
+may identify a built-in subrow such as `transaction/read`. A native binding inherits the source
+row's measurements and budget and forbids `target`, `window` and `budget` overrides. The parser
+checks reference syntax; evaluation resolves it against actual built-in rows, so an unknown
+reference is explicit no-data, never a healthy fallback. Responses use the declaration's owner
+and condition and retain a separate episode on each observing member. Delivery can route to a
+live declared owner agent hosted on another member; ownership is not restricted to a local
+process and public built-in definitions contain no private fleet IDs. Existing interval and
+count declarations keep their original syntax and semantics.
+Native episode failures persist the exact declaring objective name. Cleanup reads that ownership
+from the claims, so changing the bound native family or restarting the member still recovers
+obsolete children without prefix-matching an independent nested declaration. A wholly unavailable
+source keeps its previously open owned rows unknown, including after restart.
 
 ### Interval over claims
 
