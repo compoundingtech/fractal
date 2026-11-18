@@ -103,7 +103,7 @@ use fractal_api_core::api::launches::{
     revise_planning_session, start_planning_session,
 };
 use fractal_api_core::api::messages::post_message_claim;
-use fractal_api_core::api::operations::{get_slo, get_slo_history};
+use fractal_api_core::api::operations::{get_slo, get_slo_history, get_series};
 use fractal_api_core::api::records::post_review;
 use fractal_api_core::api::sessions::clear_context;
 use fractal_api_core::api::work::retry_work;

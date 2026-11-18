@@ -514,7 +514,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -777,6 +777,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
+        .route("/v1/agents/rename-id/plan", post(agents::plan_agent_rename_id))
+        .route("/v1/missions/rename-id/plan", post(agents::plan_mission_rename_id))
+        .route("/v1/agents/rename-proof", get(agents::agent_rename_proof))
+        .route("/v1/missions/rename-proof", get(agents::mission_rename_proof))
         .route("/v1/agents/rename-id/proof/export", post(agents::export_agent_rename_proof))
         .route("/v1/missions/rename-id/proof/export", post(agents::export_mission_rename_proof))
         .route("/v1/fleet/anchor", get(fleet::fleet_anchor))
@@ -847,6 +851,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/usage", get(operations::get_usage))
         .route("/v1/slo", get(operations::get_slo))
         .route("/v1/slo/history", get(operations::get_slo_history))
+        .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(records::get_claim))
         .route("/v1/reviews", get(records::list_reviews))
@@ -2107,6 +2112,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
+        | "unknown-objective"
+        | "invalid-series"
+        | "unsupported-objective-series"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
@@ -12009,6 +12017,13 @@ fn accept_message_receipt_authorized(
         }
         _ => None,
     };
+    #[cfg(feature = "test-support")]
+    if let Some((record, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &record.operation_id, "after-intent").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after durable intent")));
+    }
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
     let subject = format!("message/{id}");
     let previous = state
@@ -12257,6 +12272,13 @@ fn accept_message_receipt_authorized(
                 "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
             ))
         })?;
+    }
+    #[cfg(feature = "test-support")]
+    if let Some((effect, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &effect.operation_id, "after-accept").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after provider acceptance")));
     }
     if let Some((effect, _, caller)) = effect.as_ref() {
         state.store.confirm_message_effect(effect, &record, caller).map_err(ApiError::bad)?;
@@ -12952,7 +12974,13 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
-    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, WorkResponseOptions::default()).await
+}
+
+#[derive(Default)]
+struct WorkResponseOptions {
+    lease_view: bool,
+    starting_claim: bool,
 }
 
 /// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
@@ -12964,8 +12992,9 @@ async fn work_action_response_viewing(
     request: WorkRequest,
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
-    lease_view: bool,
+    options: WorkResponseOptions,
 ) -> Result<Json<StepRunView>, ApiError> {
+    let WorkResponseOptions { lease_view, starting_claim } = options;
     let actor = request
         .actor
         .as_deref()
@@ -13013,7 +13042,7 @@ async fn work_action_response_viewing(
     }
     // The claim's own incarnation is judged, not the seat's newest runtime record: another
     // host can record the end of its own old runtime for a seat that has moved (#4743).
-    if !state
+    if !starting_claim && !state
         .store
         .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
@@ -13025,11 +13054,28 @@ async fn work_action_response_viewing(
     }
     let quiet_renewal = action == "renew";
     let store = state.store.clone();
+    let starting_host = starting_claim.then(|| state.node.clone());
     let response = blocking_action(move || {
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
+            store.work_action_admitting(&subject, &action, &request,
+                crate::store::missions::WorkActionOptions {
+                    extend_ms, handoff: None, enrich_renewal: !lease_view,
+                }, |tx| {
+                if let Some(host) = starting_host.as_deref() {
+                    let incarnation = request.incarnation.as_deref().expect("explicit claim fence");
+                    let admitted = crate::store::runtime_starts::admit_starting_work_claim_tx(
+                        &store, tx, &actor, incarnation, host,
+                        fractal_runtime::process_generation_alive,
+                    ).map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
+                    if !admitted {
+                        return Err(FractalError::new("inactive-work-incarnation",
+                            format!("`{incarnation}` is not the current live incarnation of `{actor}`")));
+                    }
+                }
+                Ok(())
+            })?
         };
         if !lease_view {
             work_response::enrich_under(&store, &mut response)?;

@@ -140,6 +140,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
+        .route("/v1/client/series", get(series_read))
         .route("/v1/client/clients", get(clients_list))
         .route(
             "/v1/client/subject-definition",
@@ -2909,6 +2910,16 @@ pub async fn slo_history(
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     super::get_slo_history(State(state), Query(query)).await
+}
+
+/// Bucketed counts for an objective or explicit claim selection.
+pub async fn series_read(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    Query(params): Query<Vec<(String, String)>>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    super::get_series(State(state), Query(params)).await
 }
 
 #[derive(Deserialize)]

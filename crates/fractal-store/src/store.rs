@@ -22,6 +22,7 @@ pub mod deploy;
 pub mod host_holds;
 pub mod resource_membership;
 pub mod shell_resources;
+pub mod resource_exec_receipts;
 mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
@@ -254,6 +255,7 @@ use smallclaims::windows::holds;
 
 pub mod accounts;
 pub mod declared_objectives;
+pub mod objective_series;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
