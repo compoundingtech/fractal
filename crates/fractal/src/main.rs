@@ -8853,6 +8853,7 @@ async fn start_mission_run(
         &run_id,
         mission_id,
         &mission.revision,
+        args.revision.is_none(),
         &workspace,
         &requester,
         &inputs,
@@ -9175,6 +9176,7 @@ fn mission_run_intent(
     run_id: &str,
     mission_id: &str,
     revision: &str,
+    follow_head: bool,
     workspace: &Path,
     requester: &str,
     inputs: &BTreeMap<String, String>,
@@ -9189,6 +9191,9 @@ fn mission_run_intent(
     let exact_mission = format!("mission/{mission_id}@{revision}");
     body.nodes_mut()
         .push(kdl_node("mission", [exact_mission.as_str()]));
+    if follow_head {
+        body.nodes_mut().push(kdl_node("follow-head", ["true"]));
+    }
     body.nodes_mut().push(kdl_node(
         "workspace",
         [workspace.to_string_lossy().as_ref()],

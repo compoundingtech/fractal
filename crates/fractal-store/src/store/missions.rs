@@ -7,16 +7,7 @@ pub(super) fn mission_run_revision_pinned(
     connection: &Connection,
     source: &MissionRunView,
 ) -> Result<bool, FractalError> {
-    let pinned: Option<bool> = connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-hebd6bd79955a owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */
-        &canonical_sql(
-            "SELECT json_extract(body,'$.revision_pinned') FROM claims
-             WHERE subject=?1 AND kind='mission-run.created'
-             ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-        ),
-        [&source.subject], |row| row.get(0),
-    ).optional().map_err(internal)?.flatten();
-    if let Some(pinned) = pinned {
+    if let Some(pinned) = mission_run_recorded_revision_pin(connection, &source.subject)? {
         return Ok(pinned);
     }
     // Older creation receipts did not retain standalone request pin intent.
@@ -38,6 +29,21 @@ pub(super) fn mission_run_revision_pinned(
     let mission: MissionSpec = serde_json::from_str(&body).map_err(internal)?;
     Ok(flatten_mission_step_specs(&mission).iter()
         .any(|step| step.path == path && step.uses_mission.is_some()))
+}
+
+fn mission_run_recorded_revision_pin(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<bool>, FractalError> {
+    connection.query_row(
+        /* sqlite-large-value: allow-for-now lv-h9a87c0860583 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */
+        &canonical_sql(
+            "SELECT json_extract(body,'$.revision_pinned') FROM claims
+             WHERE subject=?1 AND kind='mission-run.created'
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+        ),
+        [subject], |row| row.get(0),
+    ).optional().map_err(internal).map(Option::flatten)
 }
 
 enum RunCreationSource<'a> {
@@ -1943,6 +1949,8 @@ fn prepare_mission_run_declaration(
                 .collect::<BTreeMap<_, _>>();
             if mission != &creation.mission
                 || revision != &creation.revision
+                || mission_run_recorded_revision_pin(connection, &declaration.subject)?
+                    .is_some_and(|pinned| pinned == creation.follow_head)
                 || workspace != &creation.workspace
                 || requester != &creation.requester
                 || stored_values != creation.inputs
