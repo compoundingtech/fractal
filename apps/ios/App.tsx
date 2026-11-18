@@ -32,6 +32,7 @@ import { quality } from './qualityNative';
 import { qualityVisibility } from './qualityView';
 import { parseFabricProofLink, type FabricProofInput } from './fabricProof';
 import { DiagnosticsBoundary } from './DiagnosticsBoundary';
+import { ClientControlNative } from './ClientControlNative';
 
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
 // @react-navigation/bottom-tabs' native navigator) holding a UINavigationController per tab
@@ -244,7 +245,7 @@ function AppContent() {
         <NavigationContainer ref={navigationRef} theme={navigationTheme}><Main proofSession /></NavigationContainer>
       </StoreProvider>
     } /> : <StoreProvider>
-      <NavigationContainer ref={navigationRef} theme={navigationTheme}><Main /></NavigationContainer>
+      <NavigationContainer ref={navigationRef} theme={navigationTheme}><ClientControlNative /><Main /></NavigationContainer>
     </StoreProvider>}
   </SafeAreaProvider>;
 }

@@ -4,6 +4,8 @@ import { AppState, unstable_batchedUpdates, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
+import Constants from 'expo-constants';
+import type { PersonPairedSession } from '../../clients/typescript/fractal-client';
 import { submitAnswer } from './answer';
 import { overrideRefusal, overrideRequest, overrideRetryable, singleOverride, type OverrideAnswer } from './autoResolved';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
@@ -67,7 +69,7 @@ const SIGNING_KEY = 'st3.device.signing';
 // signing key together. Old separate credential/signing entries remain readable until re-pair.
 const PROFILE_KEY = 'st3.device.profile';
 type PhoneSigning = DeviceKey & { handle?: string };
-type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string; routing?: PairingRouting };
+type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string; routing?: PairingRouting; controlIdentity?: Pick<PersonPairedSession, 'device_id' | 'session_actor'> };
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
 // Notifications: off by default, stored only on this phone. APNs tokens are never persisted here.
@@ -225,6 +227,7 @@ function useAppStore(proof?: FabricProfile) {
   const [fabricMemberList, setFabricMemberList] = useState<FabricMember[]>([]);
   // The members paired on their own, by Keychain key: each one's bearer goes only to that member.
   const [ownProfiles, setOwnProfiles] = useState<ReadonlyMap<string, PhoneProfile>>(new Map());
+  const [controlDeviceProfile, setControlDeviceProfile] = useState<PhoneProfile>();
   // The member the person is pairing this phone with, while the pairing form is open.
   const [pairingMember, setPairingMember] = useState<FabricMember | null>(null);
   const fabricTarget = fabricMemberList.find(member => member.device) ?? fabricMemberList[0] ?? null;
@@ -268,6 +271,14 @@ function useAppStore(proof?: FabricProfile) {
   const clientCredential = credentialFor(selected.route.kind === 'fabric', fabricMember, memberProfile?.credential, credential);
   const signingKeyRef = useRef(PROFILE_KEY);
   signingKeyRef.current = selected.route.kind === 'fabric' && memberProfile && fabricMember ? memberProfileKey(fabricMember) : PROFILE_KEY;
+  const controlProfileKey = signingKeyRef.current;
+  const testClientMode = Constants.expoConfig?.extra?.testClientMode === true;
+  const controlProfile = useMemo(() => {
+    const profile = controlProfileKey === PROFILE_KEY ? controlDeviceProfile : ownProfiles.get(controlProfileKey);
+    if (!testClientMode || proof || profile?.credential !== clientCredential || !profile?.signing
+      || !profile.controlIdentity || profile.controlIdentity.session_actor !== caps?.session_actor) return;
+    return { identity: { device: profile.controlIdentity.device_id, session: profile.controlIdentity.session_actor }, signing: profile.signing };
+  }, [testClientMode, proof, controlProfileKey, controlDeviceProfile, ownProfiles, clientCredential, caps?.session_actor]);
   const routeRef = useRef<Route>(selected.route); routeRef.current = selected.route;
   const feedMisses = useRef(0);
   // What the phone measures of its own service (see observations.ts): timed where the app already
@@ -494,6 +505,7 @@ function useAppStore(proof?: FabricProfile) {
       try { paired = JSON.parse(saved.value); } catch { setError('The saved device profile could not be read.'); return; }
     }
     if (saved.status === 'rejected') { setError('Secure credential storage is unavailable on this build.'); return; }
+    if (Constants.expoConfig?.extra?.testClientMode === true) setControlDeviceProfile(paired);
     const gateway = paired?.url ?? (u.status === 'fulfilled' ? u.value : null);
     const bearer = paired?.credential ?? (c.status === 'fulfilled' ? c.value : null);
     if (paired?.routing) {
@@ -905,12 +917,14 @@ function useAppStore(proof?: FabricProfile) {
         hash: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))),
         verify: verifyGrantSignature,
       });
-      const signs = result.value.scopes.includes('control.messages');
+      const testControl = Constants.expoConfig?.extra?.testClientMode === true;
+      const signs = result.value.scopes.includes('control.messages') || testControl;
       const routing = member ? undefined : pairingCommitRouting({ carrier: carrierChoice, members: fabricMemberList }, !!pairDraft?.scanned);
       const next: PhoneProfile = { url: gateway, credential: result.value.credential,
         ...(!member && (pairDraft?.scanned || old?.routing) ? { routing } : {}),
         ...(pin ? { personRootFingerprint: pin } : {}),
-        ...(signs ? { signing: { key: made.key, storage: made.storage, handle: made.handle, person: result.value.person_id, chain: result.value.device_key_chain! } } : {}),
+        ...(testControl ? { controlIdentity: { device_id: result.value.device_id, session_actor: result.value.session_actor } } : {}),
+        ...(signs ? { signing: { key: made.key, storage: made.storage, handle: made.handle, person: result.value.person_id, chain: result.value.device_key_chain ?? [] } } : {}),
       };
       // This single secure write is the commit. Before it, the old bearer, key and pin survive.
       await SecureStore.setItemAsync(profileKey, JSON.stringify(next), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
@@ -927,6 +941,7 @@ function useAppStore(proof?: FabricProfile) {
       await SecureStore.deleteItemAsync(SIGNING_KEY).catch(() => {});
       await clearCachedProjection().catch(() => {});
       unstable_batchedUpdates(() => {
+        if (testControl) setControlDeviceProfile(next);
         if (next.routing) {
           setFabricMemberList(next.routing.members);
           setCarrierChoice(next.routing.carrier);
@@ -1421,6 +1436,7 @@ function useAppStore(proof?: FabricProfile) {
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    controlProfile,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
