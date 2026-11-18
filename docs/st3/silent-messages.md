@@ -24,6 +24,9 @@ These always wake even if marked silent:
 - ready steps, faults, GitHub watch events and work handoffs;
 - daemon run reports, provider-capacity retry nudges, product-wait and planning notices.
 
+The same classification decides which messages resume a seat the daemon suspended for idleness;
+see [idle residency](idle-residency.md#wake-demand-idle-r05-idle-r06-idle-r08) (specified, not implemented).
+
 The accepted silent kind is recorded as `st3-silent` in message tags. Signed silent requests
 carry that tag in the device's signed tags; signed claims are never rewritten. Message views
 retain the accepted tag; person and system exceptions still always wake. The raw tag-based

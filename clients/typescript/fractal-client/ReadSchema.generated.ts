@@ -371,12 +371,16 @@ export const AgentSuspension = /*#__PURE__*/ (() => Schema.Struct({
   "action": Schema.Literals(["suspend","resume"]),
   /** Why a refused suspend did not find the seat quiet, such as turn-in-flight, pending-ask, unsent-input, claimed-work or subagent-running. */
   "blocking": Schema.Array(Schema.String).annotate({ description: "Why a refused suspend did not find the seat quiet, such as turn-in-flight, pending-ask, unsent-input, claimed-work or subagent-running." }),
+  /** manual or idle. Absent or null means manual; unknown values are retained. */
+  "cause": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "manual or idle. Absent or null means manual; unknown values are retained." }),
   /** Stable reason the last suspend or resume failed, such as not-quiescent, native-session-mismatch or native-resume-unavailable. */
   "code": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Stable reason the last suspend or resume failed, such as not-quiescent, native-session-mismatch or native-resume-unavailable." }),
   "harness": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "host": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   /** The suspended incarnation, or the one a completed resume launched. */
   "incarnation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The suspended incarnation, or the one a completed resume launched." }),
+  /** git or in-place. Absent or null means git; unknown values are retained. */
+  "mode": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "git or in-place. Absent or null means git; unknown values are retained." }),
   /** The harness's own session the seat suspended on and resumes. */
   "native_session_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The harness's own session the seat suspended on and resumes." }),
   /** The request claim; each phase change is a change of this agent. */

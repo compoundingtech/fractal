@@ -36,6 +36,9 @@ pub fn suspend_snapshot_key(request: &str) -> String {
 pub fn suspend_completed_key(request: &str) -> String {
     format!("agent-suspend-completed:{request}")
 }
+pub fn suspend_manual_key(request: &str) -> String {
+    format!("agent-suspend-manual:{request}")
+}
 pub fn resume_failed_key(request: &str) -> String {
     format!("agent-resume-failed:{request}")
 }
@@ -51,6 +54,12 @@ pub fn resume_completed_key(request: &str) -> String {
 pub struct Suspension {
     /// `suspend` or `resume`: the request this phase belongs to.
     pub action: String,
+    /// Why the seat was suspended. Missing means manual; unknown values are retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// Snapshot capture mode. Missing means Git; unknown values are retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +99,14 @@ pub struct Suspension {
 }
 
 impl Suspension {
+    pub fn cause(&self) -> &str {
+        self.cause.as_deref().unwrap_or("manual")
+    }
+
+    pub fn mode(&self) -> &str {
+        self.mode.as_deref().unwrap_or("git")
+    }
+
     /// The seat has no process of its own and the reconciler does not start one.
     pub fn holds_seat(&self) -> bool {
         matches!(
@@ -226,6 +243,7 @@ fn apply_failure(state: &mut Suspension, claim: &ClaimRecord) {
 pub fn suspend_state(store: &Store, request: &ClaimRecord, at: Option<u64>) -> Result<Suspension> {
     let mut state = Suspension {
         action: "suspend".into(),
+        cause: field(request, "cause").map(str::to_owned),
         phase: "quiescing".into(),
         operation_id: request.id.clone(),
         requested_by: request.actor.clone(),
@@ -235,6 +253,10 @@ pub fn suspend_state(store: &Store, request: &ClaimRecord, at: Option<u64>) -> R
         requested_at_unix_ms: request.accepted_at_unix_ms,
         ..Suspension::default()
     };
+    let manual = operation_at(store, &suspend_manual_key(&request.id), at)?;
+    if manual.is_some() {
+        state.cause = Some("manual".into());
+    }
     if let Some(failed) = operation_at(store, &suspend_failed_key(&request.id), at)? {
         state.phase = "failed".into();
         apply_failure(&mut state, &failed);
@@ -243,6 +265,7 @@ pub fn suspend_state(store: &Store, request: &ClaimRecord, at: Option<u64>) -> R
     let snapshot = operation_at(store, &suspend_snapshot_key(&request.id), at)?;
     if let Some(snapshot) = &snapshot {
         state.phase = "snapshotting".into();
+        state.mode = field(snapshot, "mode").map(str::to_owned);
         state.harness = field(snapshot, "harness").map(str::to_owned);
         state.native_session_id = field(snapshot, "native_session_id").map(str::to_owned);
         state.source_host = field(snapshot, "source_host").map(str::to_owned);
@@ -252,6 +275,9 @@ pub fn suspend_state(store: &Store, request: &ClaimRecord, at: Option<u64>) -> R
         state.phase = "suspended".into();
         state.suspended_at_unix_ms = Some(completed.accepted_at_unix_ms);
         state.updated_at_unix_ms = completed.accepted_at_unix_ms;
+    }
+    if let Some(manual) = manual {
+        state.updated_at_unix_ms = state.updated_at_unix_ms.max(manual.accepted_at_unix_ms);
     }
     Ok(state)
 }
