@@ -278,6 +278,15 @@ background QoS or low-priority I/O: `taskpolicy -c utility` is a clamp, not an
 elevation from background. Missing admission tooling refuses the build; it
 never silently bypasses host limits.
 An advisory lock makes scheduled and manual invocations single-flight.
+The private checkout fetches an exact commit from the configured local source
+repository, not a network object transfer. For `origin/<branch>`, it snapshots
+the source's `refs/remotes/origin/<branch>` after checking the configured origin
+URL. Whoever updates that source remote-tracking ref owns freshness; delivery
+does not refresh it from the network. Each `source_snapshot` outcome records
+the SHA, ref and commit time. The trusted-ancestry check still refuses backward
+or divergent snapshots. Under the delivery lock, abandoned Git transfer packs
+are removed before fetching; failed transfers are killed and reaped before
+their temporary pack/index files are removed. Newer files are preserved.
 One root `pnpm install --frozen-lockfile` installs the workspace. Delivery follows
 the app's recursive `workspace:` and `file:` runtime dependencies (currently
 `clients/typescript/fractal-views` and `clients/typescript/fractal-client`). Changes under

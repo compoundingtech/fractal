@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fetch release-delivery snapshots from the verified local source and clean abandoned Git transfer packs under the delivery lock.",
+  "replay": {"status": "none", "detail": "No graph replay change."},
+  "schema": {"status": "none", "detail": "No persistent delivery-state or database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes; trusted commit ancestry and monotonic build protections remain enforced."},
+  "compatibility": {"status": "changed", "detail": "For origin branches, delivery now reads the configured source repository's remote-tracking ref and transfers its exact snapshot locally instead of downloading objects from the network. Snapshot outcomes include commit SHA, ref and commit time."},
+  "downtime": {"status": "none", "detail": "No live scheduler activation or app installation is performed by this source change."},
+  "manual": {"status": "changed", "detail": "Deployment owners must adopt the reviewed worker source and ensure the configured local source repository's origin remote-tracking ref is refreshed. Delivery no longer refreshes that ref over the network."},
+  "recovery": {"status": "changed", "detail": "Failed fetches kill and reap their transfer group before temporary pack/index cleanup under the existing delivery lock. Subsequent fetches reclaim older abandoned transfer files. Trusted observations remain available for existing offline retry behavior."}
+}

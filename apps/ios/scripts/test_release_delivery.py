@@ -447,8 +447,77 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def commit(self, message):
         self.git("add", "--all")
         self.git("commit", "-m", message)
-        self.git("push", "origin", "main")
+        self.publish()
         return self.git("rev-parse", "HEAD")
+
+    def publish(self):
+        # Populate the disposable origin by pulling, never canonical pushes.
+        self.git("fetch", str(self.source), "+refs/heads/main:refs/heads/main", cwd=self.origin)
+        self.git("fetch", "origin")
+
+    def lose_source_snapshot(self):
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+
+    def test_killed_local_fetch_cleans_transfer_and_stale_pack_files(self):
+        target = self.root / "interrupted.git"
+        self.git("init", "--bare", str(target), cwd=self.root)
+        pack = target / "objects/pack"
+        for name in ("tmp_pack_old", "tmp_idx_old"):
+            (pack / name).write_text("abandoned")
+        hook = self.root / "pack-hook"
+        hook.write_text("#!/bin/sh\n"
+                        'echo partial > "$FETCH_PACK/tmp_pack_interrupted"\n'
+                        'echo partial > "$FETCH_PACK/tmp_idx_interrupted"\n'
+                        'echo started > "$FETCH_STARTED"\n'
+                        "exec /bin/sleep 30\n")
+        hook.chmod(0o755)
+        started = self.root / "fetch-started"
+        config = self.root / "fetch.gitconfig"
+        config.write_text(f"[uploadpack]\n\tpackObjectsHook = {hook}\n")
+        result = subprocess.run([
+            sys.executable, "-c",
+            "import fcntl, pathlib, subprocess, sys; "
+            "from release_delivery import fetch_local; "
+            "lock = open(sys.argv[1] + '/delivery.lock', 'a'); "
+            "fcntl.flock(lock, fcntl.LOCK_EX); "
+            "fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), "
+            "sys.argv[3], timeout=2)",
+            str(target), str(self.origin), self.initial_commit],
+            cwd=SCRIPT.parent, env={**self.env,
+                "GIT_CONFIG_GLOBAL": str(config),
+                "FETCH_PACK": str(pack), "FETCH_STARTED": str(started)},
+            capture_output=True, text=True, timeout=10)
+        self.assertTrue(started.exists(), result.stdout + result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TimeoutExpired", result.stderr)
+        self.assertEqual(list(pack.glob("tmp_pack_*")), [])
+        self.assertEqual(list(pack.glob("tmp_idx_*")), [])
+
+    def test_local_snapshot_delivers_without_network_origin_and_logs_identity(self):
+        self.origin.rename(self.root / "offline-origin.git")
+        result = self.reconcile()
+        snapshot = next(json.loads(line) for line in result.stdout.splitlines()
+                        if line.startswith("{") and json.loads(line).get("outcome") == "source_snapshot")
+        self.assertEqual(snapshot["commit"], self.initial_commit)
+        self.assertEqual(snapshot["ref"], "refs/remotes/origin/main")
+        self.assertEqual(snapshot["commit_time"],
+                         self.git("show", "-s", "--format=%cI", self.initial_commit))
+        self.assert_installed(self.initial_commit)
+
+    def test_unpublished_head_is_not_delivered_and_stale_snapshot_cannot_rollback(self):
+        self.reconcile()
+        self.write_source("apps/ios/index.ts", "unpublished\n")
+        self.git("add", "--all")
+        self.git("commit", "-m", "Unpublished")
+        self.reconcile()
+        self.assertEqual(self.saved_state()["trusted_head"], self.initial_commit)
+        self.publish()
+        newer = self.git("rev-parse", "HEAD")
+        self.reconcile()
+        self.git("update-ref", "refs/remotes/origin/main", self.initial_commit)
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.saved_state()["trusted_head"], newer)
 
     def configure(self, **values):
         control = json.loads(self.control_path.read_text())
@@ -1145,7 +1214,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         pending = self.saved_state()["pending"]
         artifact = pending["app"]
         self.assertEqual(pending["commit"], self.initial_commit)
-        self.origin.rename(self.root / "offline-origin.git")
+        self.lose_source_snapshot()
         self.configure(install_exit=0)
         self.reconcile()
         self.assertIn("fetch_failed", self.outcomes())
@@ -1167,7 +1236,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.outcomes()[-1], "build_failed")
         self.assertEqual(self.saved_state()["observed"]["commit"], newer)
         self.assertIn("pending_discarded", self.outcomes())
-        self.origin.rename(self.root / "offline-origin.git")
+        self.lose_source_snapshot()
         # Offline, the last observed revision is retried from the local
         # checkout; while it keeps failing the superseded artifact is never installed.
         self.configure(install_exit=0)
@@ -1192,7 +1261,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.configure(build_exit=65)
         self.invoke()
         self.assertEqual(self.saved_state()["observed"]["commit"], newer)
-        self.origin.rename(self.root / "offline-origin.git")
+        self.lose_source_snapshot()
         self.env["EXPO_PUBLIC_FIXTURE_ENDPOINT"] = "changed-offline"
         self.configure(install_exit=0, build_exit=0)
         self.reconcile()
@@ -1216,7 +1285,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.outcomes()[-1], "unchanged")
         # Offline ticks keep the revert as the observed head: the failed
         # revision is never rebuilt or installed.
-        self.origin.rename(self.root / "offline-origin.git")
+        self.lose_source_snapshot()
         self.configure(build_exit=0)
         self.reconcile()
         self.assertEqual(self.outcomes()[-2:], ["fetch_failed", "unchanged"])
@@ -1312,7 +1381,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
 
     def revert_head(self):
         self.git("revert", "--no-edit", "HEAD")
-        self.git("push", "origin", "main")
+        self.publish()
         return self.git("rev-parse", "HEAD")
 
     def app_trees(self, commit):
@@ -1355,11 +1424,11 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                               "launch_exit": 0 if rng.random() < 0.8 else 1}
                     self.configure(**faults)
                     if not fetch_ok:
-                        self.origin.rename(self.root / "offline-origin.git")
+                        self.lose_source_snapshot()
                     installs = len(self.device_commands("install"))
                     self.invoke()
                     if not fetch_ok:
-                        (self.root / "offline-origin.git").rename(self.origin)
+                        self.git("fetch", "origin")
                     if fetch_ok:
                         observed = self.git("rev-parse", "HEAD")
                     expected = (self.app_trees(observed),

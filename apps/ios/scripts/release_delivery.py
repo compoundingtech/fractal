@@ -10,9 +10,53 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import signal
 import time
 
 BUNDLE_ID = "com.compoundingtech.fractal"
+
+
+def fetch_local(repo, source, commit, *, timeout=60):
+    """Called only under delivery.lock, which owns the private checkout."""
+    pack = Path(git(repo, "rev-parse", "--git-path", "objects/pack"))
+    if not pack.is_absolute():
+        pack = repo / pack
+    started = time.time_ns()
+
+    def clean_before(cutoff):
+        for pattern in ("tmp_pack_*", "tmp_idx_*"):
+            for path in pack.glob(pattern):
+                if path.is_file() and path.stat().st_mtime_ns < cutoff:
+                    path.unlink()
+
+    clean_before(started)
+    # Kill and reap the transfer group before removing files it could still use.
+    # Capture diagnostics: a configured Git URL may contain credentials.
+    process = subprocess.Popen(
+        ["git", "-C", str(repo), "fetch", "--no-tags", "--no-auto-maintenance",
+         str(source), commit], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True)
+    previous_term = signal.getsignal(signal.SIGTERM)
+
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, process.args, stdout, stderr)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        # Include the just-failed transfer, not just earlier abandoned packs.
+        clean_before(time.time_ns())
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
 
 
 def policy_digest(policy):
@@ -587,19 +631,21 @@ class Delivery:
         repo = self.state / "checkout"
         if not repo.exists():
             run(["git", "clone", "--no-checkout", str(self.args.repo), str(repo)])
-        if self.args.ref.startswith("origin/"):
-            remote = self.args.expected_origin
-            ref = "refs/heads/" + self.args.ref[len("origin/"):]
-        else:
-            remote, ref = str(self.args.repo), self.args.ref
+        # Freshness belongs to the source repository's remote-ref updater.
+        # Snapshot its remote-tracking ref, never its potentially unpushed HEAD.
+        ref = ("refs/remotes/" + self.args.ref if self.args.ref.startswith("origin/")
+               else self.args.ref)
         observed = self.data.get("observed")
         trusted_head = self.data.get("trusted_head", self.args.trusted_commit)
         try:
-            # Capture stderr: Git fetch diagnostics can contain credential-bearing URLs.
-            subprocess.run(["git", "-C", str(repo), "fetch", "--no-tags", remote, ref],
-                           check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=60)
+            snapshot = git(self.args.repo, "rev-parse", "--verify", ref + "^{commit}")
+            snapshot_time = git(self.args.repo, "show", "-s", "--format=%cI", snapshot)
+            self.record("source_snapshot", commit=snapshot, ref=ref,
+                        commit_time=snapshot_time)
+            fetch_local(repo, self.args.repo, snapshot)
             head = git(repo, "rev-parse", "FETCH_HEAD^{commit}")
+            if head != snapshot:
+                raise ValueError("Fetched revision does not match the source snapshot")
         except subprocess.SubprocessError:
             if not observed or observed["commit"] != trusted_head:
                 raise ValueError("Fetch failed; no previously trusted observation is available") from None
