@@ -9,6 +9,8 @@ pub(super) const RETRY_RETIREMENT_FAULT_SCOPE: &str = "program/retry-resource-re
 struct Acquire {
     name: String,
     host: String,
+    profile: Option<String>,
+    disk_path: Option<String>,
     #[serde(default = "one")]
     max_members: u32,
     capacity: Option<fractal_runtime::Capacity>,
@@ -218,15 +220,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 let options: Acquire = serde_json::from_value(payload.clone())?;
                 anyhow::ensure!(options.host == self.host, "the resource execution host must be this daemon's host");
-                let lane = LaneRequest {
+                let mut lane = LaneRequest {
                     id: request.idempotency_key(), name: options.name, host: options.host,
                     max_members: options.max_members, capacity: options.capacity, coverage: options.coverage,
                     class: options.class, disk: options.disk, io: options.io,
+                    profile: options.profile, profile_estimate: None, disk_path: options.disk_path,
                     admission_timeout_ms: options.admission_timeout.as_deref()
                         .map(|duration| crate::declaration_syntax::parse_duration(duration, true)).transpose()?,
                     owner: Owner { run: run.subject.clone(), step: request.step.clone(), attempt: request.attempt,
                         invocation: Some(format!("program:{}", request.key)) },
                 };
+                self.resolve_resource_profile(&mut lane)?;
                 let fit = self.resource_lane_fit(&lane)?;
                 let admission = self.store.request_resource_membership(&lane, fit, now)?;
                 if !matches!(&admission, Admission::Queued { .. }) {
@@ -422,6 +426,22 @@ mod tests {
     use super::*;
     use crate::store::resource_membership::Fit;
 
+    #[test]
+    fn keyed_acquisition_decodes_declaration_but_never_caller_estimates() {
+        let payload = serde_json::json!({
+            "name": "checks", "host": "node", "profile": "check.unit",
+            "diskPath": "/workspace", "maxMembers": 3, "coverage": "enforced", "class": "check"
+        });
+        let options: Acquire = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(options.profile.as_deref(), Some("check.unit"));
+        assert_eq!(options.disk_path.as_deref(), Some("/workspace"));
+        assert_eq!(options.max_members, 3);
+        assert!(options.capacity.is_none());
+        let mut injected = payload;
+        injected["profileEstimate"] = serde_json::json!({"seedRevision":"caller"});
+        assert!(serde_json::from_value::<Acquire>(injected).is_err());
+    }
+
     fn fit() -> Fit {
         Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() }
     }
@@ -448,6 +468,7 @@ mission "retry-lane" state="ready" {{
                 let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
                 reconciler.ensure_resource_authority().unwrap();
                 let old = LaneRequest {
+                    profile: None, profile_estimate: None, disk_path: None,
                     id: "failed-attempt".into(), name: "heavy-gate".into(), host: "node".into(),
                     max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
                     coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -526,6 +547,7 @@ mission "retry-child" state="ready" {{
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
         reconciler.ensure_resource_authority().unwrap();
         let old = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "parent-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -607,6 +629,7 @@ mission "window-child" state="ready" {{
             let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
             reconciler.ensure_resource_authority().unwrap();
             let old = LaneRequest {
+                profile: None, profile_estimate: None, disk_path: None,
                 id: "uncertain-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
                 capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
                 coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -750,6 +773,7 @@ mission "resource-child" state="ready" {
         let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
         reconciler.ensure_resource_authority().unwrap();
         let lane = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "scope-holder".into(), name: "child-scope".into(), host: "node".into(),
             max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
@@ -795,6 +819,7 @@ mission "resource-child" state="ready" {
         let store = Arc::new(Store::open_memory("node").unwrap());
         store.start_resource_authority("node", "epoch").unwrap();
         let lane = LaneRequest {
+            profile: None, profile_estimate: None, disk_path: None,
             id: "unknown-scope".into(), name: "child-scope".into(), host: "node".into(),
             max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,

@@ -1506,6 +1506,7 @@ mission "shell-owner" state="ready" {{
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
             coverage: Coverage::Logical, admission_timeout_ms: None,
             class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
+            profile: None, profile_estimate: None, disk_path: None,
         };
         let now = u64::try_from(now_ms()).unwrap();
         let mut execution = store.submit_shell_resource(Command {
@@ -1559,6 +1560,7 @@ mission "shell-owner" state="ready" {{
     fn shell_recovery_reads_synced_helper_result_before_predecessor_retirement() {
         let (_root, store, runtime, reconciler) = released_shell_fixture(false);
         assert!(store.shell_resource("outcome").unwrap().result.is_none());
+        store.take_shell_environment("outcome");
         drop(reconciler);
         let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
         recovered.driver_state_dir = _root.path().join("drivers");
@@ -1583,6 +1585,25 @@ mission "shell-owner" state="ready" {{
         reconciler.reconcile_shell_resources().unwrap();
         assert_one_shell_outcome(&store, "refused");
         assert!(store.shell_resource("outcome").unwrap().reason.contains("owner"));
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn never_launched_shell_without_transient_environment_is_refused_without_spawn() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        let original = store.shell_resource("outcome").unwrap();
+        let grant = store.resource_membership_record(&original.command.lane.id, &original.command.lane.owner)
+            .unwrap().grant.unwrap();
+        let mut command = original.command;
+        command.id = "lost-environment".into();
+        command.parent = Some(grant);
+        store.submit_shell_resource(command, u64::try_from(now_ms()).unwrap()).unwrap();
+        store.take_shell_environment("lost-environment");
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("lost-environment").unwrap();
+        assert_eq!(execution.state, "refused");
+        assert!(execution.reason.contains("environment-unavailable"));
+        assert!(execution.started_at.is_none());
         assert!(runtime.started_members.lock().unwrap().is_empty());
     }
 

@@ -15,6 +15,7 @@ pub(super) fn allows_bound_request(method: &axum::http::Method, path: &str) -> b
             match (segments.next(), segments.next(), segments.next()) {
                 (Some(id), None, None) if !id.is_empty() => *method == Method::GET,
                 (Some(id), Some("wait" | "cancel"), None) if !id.is_empty() => *method == Method::POST,
+                (Some(id), Some("member-scope"), None) if !id.is_empty() => *method == Method::GET,
                 _ => false,
             }
         },
@@ -81,11 +82,13 @@ pub(super) struct WaitQuery { after: u64 }
 pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Json(mut command): Json<Command>) -> Result<Json<Execution>, ApiError> {
     require_exec_platform(cfg!(target_os = "macos"))?;
     (|| -> anyhow::Result<()> {
+        anyhow::ensure!(command.lane.profile_estimate.is_none(), "resource profile estimates are host-owned");
+        anyhow::ensure!(command.argv.iter().all(|arg| !arg.contains('\0')), "resource execution argv cannot contain NUL");
         anyhow::ensure!(command.lane.host.is_empty() || command.lane.host == state.node, "shell execution must use the connected host");
         let id = format!("shell:{}", command.id);
         anyhow::ensure!(command.lane.id == id && command.lane.owner.run == id && command.lane.owner.step == id
             && command.lane.owner.attempt == 1 && command.lane.owner.invocation.as_deref() == Some(id.as_str())
-            && command.lane.max_members == 1, "invalid shell execution owner");
+            && command.lane.max_members > 0, "invalid shell execution owner");
         anyhow::ensure!(uuid::Uuid::parse_str(&command.id).is_ok(), "shell execution identity must be a UUID");
         Ok(())
     })().map_err(|error| ApiError::bad(FractalError::new("resource-exec-refused", error.to_string())))?;
@@ -128,8 +131,9 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
 }
 fn validate_parent(command: &Command, parent: &crate::store::resource_membership::LaneRequest, state: &str) -> anyhow::Result<()> {
     anyhow::ensure!(matches!(state, "admitted" | "launched"), "nested parent membership is not active");
-    anyhow::ensure!(parent.host == command.lane.host && parent.name == command.lane.name && parent.class == command.lane.class,
-        "nested execution must inherit the parent host, lane and class");
+    anyhow::ensure!(parent.host == command.lane.host && parent.name == command.lane.name && parent.class == command.lane.class
+        && parent.profile == command.lane.profile,
+        "nested execution must inherit the parent host, lane, profile and class");
     anyhow::ensure!(command.lane.coverage != Coverage::Enforced || parent.coverage == Coverage::Enforced,
         "nested execution cannot upgrade logical parent coverage");
     if let Some(capacity) = command.lane.capacity {
@@ -142,6 +146,9 @@ fn validate_parent(command: &Command, parent: &crate::store::resource_membership
         anyhow::ensure!(disk.path == inherited.path && disk.bytes <= inherited.bytes, "nested execution exceeds the parent disk reservation");
     }
     anyhow::ensure!(command.lane.io.is_none() || command.lane.io == parent.io, "nested execution cannot add heavy I/O custody");
+    anyhow::ensure!(command.lane.disk_path.as_ref().is_none_or(|path|
+        parent.disk_path.as_ref() == Some(path) || parent.disk.as_ref().is_some_and(|disk| disk.path == *path)),
+        "nested execution cannot change the parent disk path");
     Ok(())
 }
 
@@ -193,6 +200,37 @@ pub(super) async fn wait(State(state): State<AppState>, bound: Option<BoundActor
     }
 }
 
+/// Report only a live runtime generation whose binding agrees with authenticated host custody.
+pub(super) async fn member_scope(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
+    let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
+    authorize_execution(caller.as_ref(), &execution)?;
+    require_exec_platform(cfg!(target_os = "macos"))?;
+    let scope = (|| -> anyhow::Result<_> {
+        anyhow::ensure!(execution.command.lane.host == state.node, "execution does not belong to this host");
+        anyhow::ensure!(execution.started_at.is_some() && execution.ended_at.is_none() && !execution.cancel,
+            "execution has no live released payload");
+        let member = state.store.resource_membership_record(&execution.command.lane.id, &execution.command.lane.owner)?;
+        anyhow::ensure!(matches!(member.state.as_str(), "admitted" | "launched") && member.retirement_requested_at.is_none(),
+            "execution membership is not live");
+        let root = member.roots.iter().find(|root| root.runtime_id == id).context("execution root is not bound to membership")?;
+        anyhow::ensure!(root.payload_released_at.is_some() && root.execution_ended_at.is_none(),
+            "execution root has no live released payload");
+        let generation = &root.execution.as_ref().context("execution root has no generation")?.generation_id;
+        let grant = member.grant.as_ref().context("execution membership has no live grant")?;
+        anyhow::ensure!(grant.coverage == Coverage::Enforced, "member-scope requires enforced coverage");
+        state.store.resource_membership_for_grant(grant)?;
+        let binding = fractal_runtime::ResourceExecutionBinding {
+            membership_id: grant.membership_id.clone(), authority_epoch: grant.authority_epoch.clone(), generation: grant.generation.clone(),
+        };
+        let runtime = fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+        let scope = runtime.member_scope(&id, &binding)?;
+        anyhow::ensure!(&scope.generation == generation, "runtime generation differs from host custody");
+        Ok(scope)
+    })().map_err(|error| ApiError::bad(FractalError::new("resource-member-scope-refused", error.to_string())))?;
+    Ok(Json(serde_json::to_value(scope).map_err(ApiError::internal)?))
+}
+
 pub(super) async fn cancel(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     let caller = CallerOwner::resolve(&state, bound, run)?;
     let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
@@ -208,6 +246,7 @@ mod tests {
     use crate::store::resource_membership::{LaneRequest, Owner};
     fn request() -> LaneRequest {
         LaneRequest { id: "shell:parent".into(), name: "checks".into(), host: "host-a".into(), max_members: 1,
+            profile: None, profile_estimate: None, disk_path: None,
             class: RequestClass::Check, capacity: Some(fractal_runtime::Capacity { cores: 4, memory: 24 << 30 }),
             disk: None, io: None, coverage: Coverage::Logical, admission_timeout_ms: None,
             owner: Owner { run:"shell:parent".into(), step:"shell:parent".into(), attempt:1, invocation:None } }
@@ -223,6 +262,53 @@ mod tests {
         command.lane.class = RequestClass::Check;
         command.lane.capacity.as_mut().unwrap().memory += 1;
         assert!(validate_parent(&command,&parent,"launched").is_err());
+    }
+
+    #[test]
+    fn nested_keyed_request_requires_the_same_key_and_uses_parent_snapshot() {
+        let mut parent = request();
+        parent.profile = Some("check.unit".into());
+        parent.profile_estimate = Some(fractal_runtime::ResourceProfileEstimate {
+            seed_revision: Some("seed-revision".into()), learned_revision: None,
+            samples: fractal_runtime::ResourceProfileSamples { memory: 0, disk: 0 }, memory_high_bytes: None,
+            source: None, reason: None,
+            learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly,
+        });
+        let mut lane = parent.clone();
+        lane.capacity = None;
+        lane.profile_estimate = None;
+        let mut command = Command { id: "child".into(), lane, argv: vec!["true".into()],
+            cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None };
+        assert!(validate_parent(&command, &parent, "launched").is_ok());
+        command.lane.profile = Some("check.other".into());
+        assert!(validate_parent(&command, &parent, "launched").is_err());
+        command.lane.profile = None;
+        assert!(validate_parent(&command, &parent, "launched").is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn shell_submission_rejects_caller_estimates_and_nul_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let mut lane = request();
+        lane.profile_estimate = Some(fractal_runtime::ResourceProfileEstimate {
+            seed_revision: None, learned_revision: None,
+            samples: fractal_runtime::ResourceProfileSamples { memory: 0, disk: 0 }, memory_high_bytes: None,
+            source: None, reason: None,
+            learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly,
+        });
+        let command = Command { id: uuid::Uuid::now_v7().to_string(), lane, argv: vec!["true".into()],
+            cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None };
+        let error = submit(State(state.clone()), None, None, Json(command.clone())).await.unwrap_err();
+        assert_eq!(error.code, "resource-exec-refused");
+        assert_eq!(error.message, "resource profile estimates are host-owned");
+        let mut command = command;
+        command.lane.profile_estimate = None;
+        command.argv = vec!["bad\0argument".into()];
+        let error = submit(State(state), None, None, Json(command)).await.unwrap_err();
+        assert_eq!(error.code, "resource-exec-refused");
+        assert_eq!(error.message, "resource execution argv cannot contain NUL");
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -303,7 +389,7 @@ mod tests {
         let Json(result) = waiting.await.unwrap();
         assert_eq!(result.exit_code,Some(37));
         assert!(result.command.environment.is_empty());
-        assert_eq!(state.store.shell_resource("waiter").unwrap().command.environment.len(),1);
+        assert!(state.store.shell_resource("waiter").unwrap().command.environment.is_empty());
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -346,9 +432,11 @@ mod tests {
             ("/v1/internal/resources/owned", Some(Method::GET)),
             ("/v1/internal/resources/owned/wait", Some(Method::POST)),
             ("/v1/internal/resources/owned/cancel", Some(Method::POST)),
+            ("/v1/internal/resources/owned/member-scope", Some(Method::GET)),
             ("/v1/internal/resources/", None),
             ("/v1/internal/resources/owned/", None),
             ("/v1/internal/resources/owned/cancel/extra", None),
+            ("/v1/internal/resources/owned/member-scope/extra", None),
             ("/v1/internal/resources/owned/other", None),
             ("/v1/internal/resources-extra", None),
             ("/v1/internal/unrelated", None),
@@ -456,6 +544,14 @@ mod tests {
                 let (status, body) = bound_request(&state,bound_agent,run_credential,method,&format!("/v1/internal/resources/{own}{suffix}"),Value::Null).await;
                 assert_eq!(status,StatusCode::OK,"{body}");
                 assert!(!body.to_string().contains("must-not-export"));
+            }
+            let (status, body) = bound_request(&state,bound_agent,run_credential,"GET",&format!("/v1/internal/resources/{other}/member-scope"),Value::Null).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["code"], "resource-exec-owner");
+            if !cfg!(target_os = "macos") {
+                let (status, body) = bound_request(&state,bound_agent,run_credential,"GET",&format!("/v1/internal/resources/{own}/member-scope"),Value::Null).await;
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+                assert_eq!(body["code"], "resource-member-scope-refused");
             }
             for (method,path) in [("GET","/v1/internal/unrelated"),("POST","/v1/internal/resources"),
                 ("GET","/v1/internal/resources/exec"),("DELETE","/v1/internal/resources/owned-0"),
