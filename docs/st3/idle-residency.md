@@ -121,9 +121,12 @@ Missing or indeterminate observations, including channel readiness, are not elig
 The **eligible epoch** is the time the seat last became eligible. It is derived from the claims
 that change eligibility (`harness.observed`, work claims and leases, subagent claims, runtime
 observations) and is never `last_activity_at`: received mail counts as activity there, so silent
-mail would hold a seat awake. The seat is due at `eligible epoch + idle_suspend_after`. The check
-runs inside the seat's existing wake evaluation, which records the exact due time as its next
-deadline.
+mail would hold a seat awake. The epoch is never earlier than the time this daemon loaded a policy
+that enables idle suspension, so turning the policy on, and every daemon restart, gives every seat
+a full `idle_suspend_after` before its first idle suspend; no seat is suspended because it was
+quiet before the policy applied. The seat is due at `eligible epoch + idle_suspend_after`. The
+check runs inside the seat's existing wake evaluation, which records the exact due time as its
+next deadline.
 
 ## Suspend admission (IDLE-R01, IDLE-R03, IDLE-R06)
 
@@ -228,7 +231,7 @@ in metric labels.
 
 | Subject suffix | Kind | Fields | Written |
 | --- | --- | --- | --- |
-| `wake/<demand id>` | `residency.wake-demand` | `host`, `demand_at`, source message, suspended incarnation | when the first wake-class message is accepted for the suspension, before admission |
+| `wake/<demand id>` | `residency.wake-demand` | `host`, `demand_at`, `origin_accepted_at`, source message, suspended incarnation | when the first wake-class message for the suspension reaches the owner, before admission; `demand_at` is the owner's receipt, `origin_accepted_at` the sender member's acceptance |
 | same | `residency.resumed` | `host`, `resumed_at`, native session, incarnation | when the exact session is bound and its channel is ready |
 | same | `residency.first-turn` | `host`, `first_turn_at`, turn identity | at the resumed incarnation's first native turn |
 | `outcome/<operation id>` | `residency.outcome` | `host`, `observed_at`, `resume_failed` 0/1, `useless` 0/1, bounded `reason` | on failure or deadline, or 10 minutes after a verified resume |
@@ -267,6 +270,10 @@ objective "example/residency-first-turn" {
   on-breach "fault" owner="agent/example/ops" condition="residency-first-turn"
 }
 ```
+
+The wake objectives start at the owner's receipt, so they measure residency and not cross-member
+propagation; propagation from the sender to the owner adds to what the sender sees and is judged
+by its own objective. `origin_accepted_at` keeps it visible per wake.
 
 Benefit is not an objective: memory released and asleep seat-hours are measurements on the host
 sample and dashboards. A fault goes to the declared owner, who changes the member's
