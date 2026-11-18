@@ -411,6 +411,7 @@
       ],
       "definition_paths": [
         "apps/ios/package.json",
+        "apps/macos/Fractal/design/package.json",
         "clients/typescript/fractal-client/package.json",
         "clients/typescript/fractal-declarations/package.json",
         "clients/typescript/fractal-views/package.json",
