@@ -1697,12 +1697,14 @@ pub fn request_latency_snapshot() -> Vec<Value> {
 
 /// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
-    request_latency().lock().unwrap().targets_only(Instant::now())
+    let snapshot = request_latency().lock().unwrap().targets_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
-    request_latency().lock().unwrap().windows(Instant::now())
+    let snapshot = request_latency().lock().unwrap().windows_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Note what keeps this minute of the member's CPU from being idle.

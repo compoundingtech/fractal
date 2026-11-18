@@ -142,6 +142,15 @@ fn checkpoint_with(recorder: &Recorder, ledger: &Mutex<Option<Ledger>>) -> Resul
     ledger.checkpoint_at(now, instant)
 }
 
+/// Configure the actual SQLite wait boundary for isolated cross-crate I/O regressions.
+#[cfg(feature = "test-support")]
+pub fn set_busy_handler_for_tests(handler: Option<fn(i32) -> bool>) -> Result<()> {
+    let guard = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(ledger) = guard.as_ref() else { anyhow::bail!("native SLO ledger is not installed"); };
+    ledger.db.busy_handler(handler)?;
+    Ok(())
+}
+
 impl Ledger {
     fn checkpoint_at(&mut self, now: u64, instant: Instant) -> Result<()> {
         let end = now / MINUTE * MINUTE;

@@ -120,6 +120,10 @@ checkpoint swaps that buffer under its short recorder lock, releases it, then me
 persists receipts under a separate ledger lock. Checkpoint, report and gauge SQLite work
 never hold the recorder lock; a blocked disk operation cannot delay completion recording.
 Failed checkpoint snapshots remain available for retry while new completions collect separately.
+Reporting first takes an owned snapshot of request, client and CPU diagnostics under the Meter
+lock. After releasing that guard, it reads native budgets and renders store diagnostics. Store
+series and newest database-size guards likewise end before native ledger I/O; reporting cannot
+indirectly park a completion by retaining one of its diagnostic locks.
 
 Database capacity uses hourly readings with a two-hour maximum age. A violation of either
 capacity bound is known bad; known good requires both bounds to be readable and within limits.
