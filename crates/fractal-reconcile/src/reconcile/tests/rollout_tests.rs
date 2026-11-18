@@ -427,6 +427,19 @@ fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
         );
         reconciler.driver_state_dir = state.join("drivers");
         let observation = seat.runtime.observation.lock().unwrap().clone();
+        if suspension.phase == "snapshotting" {
+            let bytes = std::fs::read(&transcript).unwrap();
+            std::fs::remove_file(&transcript).unwrap();
+            let error = reconciler.reconcile_suspension(
+                &desired, member, observation.as_ref(), None, &suspension,
+            ).unwrap_err();
+            assert_eq!(crate::seat_snapshot::code(&error), "transcript-missing");
+            let retained = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+            assert!(retained.holds_seat());
+            assert_eq!(retained.phase, "snapshotting");
+            assert!(seat.runtime.starts.lock().unwrap().is_empty());
+            std::fs::write(&transcript, bytes).unwrap();
+        }
         reconciler.reconcile_suspension(
             &desired, member, observation.as_ref(), None, &suspension,
         ).unwrap();

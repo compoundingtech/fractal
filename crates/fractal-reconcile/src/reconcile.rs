@@ -8984,8 +8984,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if suspension.mode() == "in-place" {
                     match sealed {
                         Ok(Some(_)) => {}
-                        Ok(None) => return self.fail_suspension(agent, suspension, "driver-unsupported", "in-place suspension requires a portable native transcript".into(), Vec::new()),
-                        Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),
+                        // A stopped seat must retain its hold if sealing cannot finish.
+                        // A failed suspend receipt would release it to ordinary fresh launch.
+                        Ok(None) => return Err(crate::model::FractalError::new("driver-unsupported", "in-place suspension requires a portable native transcript").into()),
+                        Err(error) => return Err(error),
                     }
                 }
                 // The stop is now verified, so a fault from an earlier attempt that timed out
