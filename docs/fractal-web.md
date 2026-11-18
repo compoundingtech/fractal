@@ -660,12 +660,13 @@ manufactured into a corrupt entry. Storage failures are typed, without a memory 
 and persistent-storage permission is reported as granted, denied or unsupported. Browser
 eviction, site-data deletion and device loss are not covered by this durability guarantee.
 
-Startup opens and recovers the authenticated outbox before the live page is ready and
-before chat or thread send grants become available. Each scoped connection shares one
-initialization barrier: later capability refreshes and recovery inspection do not demote
+Read-only page readiness does not wait for the channel capabilities probe or browser
+storage: the shell and roster can render while identity or storage is pending. Chat
+and thread send grants still await authenticated outbox initialization. Each scoped
+connection shares one initialization barrier: later capability refreshes and recovery inspection do not demote
 that connection's own in-flight sends. A new tab independently restores unresolved
 dispatch markers as unknown; the original dispatcher can still retain a correlated receipt.
-Live-source startup recovery reuses the SDK channel's initial capabilities probe for readiness,
+Live-source startup recovery reuses the SDK channel's initial capabilities probe asynchronously,
 so startup without a composer needs only one identity read. Send grants always read capabilities
 fresh, including the first composer mount, and initialize the outbox from that response.
 Recovery discovery or reconnect cannot make a late composer restore an old startup scope.

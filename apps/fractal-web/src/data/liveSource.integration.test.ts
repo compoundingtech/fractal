@@ -450,7 +450,7 @@ const withGateway = <E,>(
 
 describe('outbox startup admission', () => {
   const issuerPair = { issuer: 'person/example', issuer_key: 'issuer-key/startup' }
-  it.live('restores dispatched storage before readiness and only then publishes send-capable grants', () => Effect.gen(function* () {
+  it.live('restores dispatched storage before publishing send-capable grants without gating read-only readiness', () => Effect.gen(function* () {
     const factory = new IDBFactory()
     vi.stubGlobal('indexedDB', factory)
     const scope = { principalId: 'person/operator', deploymentId: outboxDeploymentId(issuerPair.issuer, issuerPair.issuer_key), memberId: snapshot.host_id }
@@ -467,20 +467,38 @@ describe('outbox startup admission', () => {
     saved.close()
     yield* withGateway((live, gateway) => Effect.gen(function* () {
       yield* Effect.promise(() => live.ready)
+      yield* settle
       expect(gateway.capabilityReads).toBe(1)
       const inspected = yield* openIndexedDbOutbox({ indexedDB: factory, scope, recoverOnOpen: false })
       try {
-        expect(yield* Effect.promise(() => inspected.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
         expect(gateway.messageActions).toEqual([])
         expect(live.registry.get(live.source.grants)).toMatchObject({ unread: true, messageSend: 'ungranted' })
         live.registry.mount(live.source.grants)
         yield* settle
         expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
+        expect(yield* Effect.promise(() => inspected.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
         expect(gateway.capabilityReads).toBe(2)
         expect(gateway.messageActions).toEqual([])
       } finally { inspected.close() }
     }), { issuerPair })
   }))
+
+  for (const blocked of ['probe', 'storage'] as const) {
+    it.live(`resolves read-only readiness while ${blocked} readiness is still pending`, () => {
+      const probe = Promise.withResolvers<void>()
+      const storage = Promise.withResolvers<boolean>()
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      vi.stubGlobal('navigator', { onLine: true, storage: { persist: () => storage.promise } })
+      return withGateway((live, gateway) => Effect.gen(function* () {
+        if (blocked === 'probe') gateway.capabilityGate = probe.promise
+        try {
+          yield* Effect.promise(() => live.ready)
+          expect(live.registry.get(live.source.grants)).toMatchObject({ unread: true, messageSend: 'ungranted' })
+          expect(gateway.messageActions).toEqual([])
+        } finally { probe.resolve(); storage.resolve(false) }
+      }), { issuerPair })
+    })
+  }
 
   it.live('reads fresh capabilities for mounted grants independently of the in-flight startup probe', () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
@@ -572,6 +590,7 @@ describe('outbox startup admission', () => {
         expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'unprotected' })
         releaseProbe.resolve()
         yield* Effect.promise(() => live.ready)
+        yield* settle
         expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'unprotected' })
         // A cached protected repository here would refuse B's unprotected send.
         yield* Effect.promise(() => live.source.attachments!.send({
@@ -602,6 +621,7 @@ describe('outbox startup admission', () => {
     try {
       yield* withGateway((live, gateway) => Effect.gen(function* () {
         yield* Effect.promise(() => live.ready)
+        yield* settle
         expect(gateway.capabilityReads).toBe(1)
         expect(yield* Effect.promise(() => saved.read(intent.id))).toEqual(dispatched)
         gateway.issuerPair = nextIssuer

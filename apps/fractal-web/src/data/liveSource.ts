@@ -231,6 +231,9 @@ export const liveSource = ({
   const followInterests = new Map<string, () => boolean>()
   const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const startupIdentity = Promise.withResolvers<EnvelopeOf<Capabilities>>()
+  // Read-only rendering must not wait for the channel probe or browser storage.
+  // Send and recovery paths join this scoped barrier and surface its failures themselves.
+  void startupIdentity.promise.then(response => outbox.initialize(response, startupSequence)).catch(() => undefined)
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
@@ -1259,8 +1262,6 @@ export const liveSource = ({
     ready: runtime.runPromise(Effect.gen(function* () {
       sdk = yield* Fractal
       if (!online) yield* sdk.setNetworkOnline(false)
-      // Rendering may proceed read-only when identity/storage is unavailable; send grants await the same barrier.
-      yield* Effect.tryPromise({ try: async () => outbox.initialize(await startupIdentity.promise, startupSequence), catch: (cause) => cause }).pipe(Effect.catch(() => Effect.void))
     })).catch(cause => { if (!disposed) throw cause }),
     suspendSockets: () => sdk?.suspendSockets(),
     resumeSockets: () => {
