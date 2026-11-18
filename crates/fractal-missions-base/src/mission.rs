@@ -1454,10 +1454,11 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
         _ => return Err(FractalError::new("invalid-step-lane", "coverage must be logical or enforced")),
     };
     let class = match property_string(node, "class")?.as_deref().unwrap_or("agent") {
+        "recovery" => fractal_runtime::RequestClass::Recovery,
         "landing" => fractal_runtime::RequestClass::Landing,
         "check" => fractal_runtime::RequestClass::Check,
         "agent" => fractal_runtime::RequestClass::Agent,
-        _ => return Err(FractalError::new("invalid-step-lane", "class must be landing, check or agent")),
+        _ => return Err(FractalError::new("invalid-step-lane", "class must be recovery, landing, check or agent")),
     };
     let disk = match (property_string(node, "disk")?, property_string(node, "disk-path")?) {
         (None, None) => None,
@@ -3456,6 +3457,18 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recovery_lane_class_parses_as_a_host_profile_request() {
+        let document: kdl::KdlDocument =
+            r#"lane "reclaim" host="node" class="recovery" profile="disk.reclaim""#.parse().unwrap();
+        let lane = super::parse_resource_lane(&document.nodes()[0]).unwrap();
+        assert_eq!(lane.class, fractal_runtime::RequestClass::Recovery);
+        assert_eq!(lane.profile.as_deref(), Some("disk.reclaim"));
+        let invalid: kdl::KdlDocument =
+            r#"lane "reclaim" host="node" class="unknown" profile="disk.reclaim""#.parse().unwrap();
+        assert!(super::parse_resource_lane(&invalid.nodes()[0]).is_err());
+    }
+
     #[test]
     fn whole_input_subjects_use_the_input_id_grammar() {
         for name in [
