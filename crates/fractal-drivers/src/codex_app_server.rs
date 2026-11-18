@@ -596,6 +596,7 @@ enum CodexDeliveryMethod {
 struct PendingCodexDelivery {
     request_id: u64,
     filename: String,
+    attempt_sequence: u64,
     method: CodexDeliveryMethod,
     requested_at: Instant,
 }
@@ -1457,7 +1458,7 @@ impl CodexInboxDelivery {
         let request =
             codex_delivery_request(request_id, state.thread_id(), &client_id, &text, &method);
         // Durable ownership lands before transport.
-        self.ledger.begin(delivery_ledger::Begin {
+        let entry = self.ledger.begin(delivery_ledger::Begin {
             filename: filename.clone(),
             binding: state.thread_id().to_string(),
             correlation: delivery_ledger::Correlation::native(client_id.clone()),
@@ -1468,6 +1469,7 @@ impl CodexInboxDelivery {
         self.pending = Some(PendingCodexDelivery {
             request_id,
             filename,
+            attempt_sequence: entry.attempt_sequence.context("new Codex RPC has no durable attempt sequence")?,
             method,
             requested_at: Instant::now(),
         });
@@ -1688,10 +1690,7 @@ impl CodexInboxDelivery {
             // The request itself was refused: an authoritative negative acknowledgement about
             // this attempt, and the only thing that re-authorizes the same client ID here. A
             // delivery that already reached its ceiling cannot be un-settled by a late error.
-            self.ledger.negative(
-                &pending.filename,
-                delivery_ledger::NegativeReceipt::Rejected,
-            )?;
+            self.ledger.reject_attempt(&pending.filename, pending.attempt_sequence)?;
             self.rejected = Some(RejectedCodexDelivery {
                 filename: pending.filename,
                 observed: observed.clone(),

@@ -324,7 +324,7 @@ fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
                 (_, Some(failed)) => LifecycleTerminal::Failed(failed),
                 _ => LifecycleTerminal::Open,
             };
-            if onset.saturating_add(DEADLINE).saturating_add(HORIZON) >= now
+            if onset.saturating_add(DEADLINE).saturating_add(HORIZON) >= now.min(source_through_ms)
                 || matches!(terminal, LifecycleTerminal::Open) {
                 samples.push(LifecycleSample { onset_ms: onset, terminal });
             }

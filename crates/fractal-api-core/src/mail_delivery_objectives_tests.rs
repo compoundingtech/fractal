@@ -235,6 +235,31 @@ fn missing_driver_frontier_cannot_manufacture_an_overdue_failure() {
 }
 
 #[test]
+fn lagging_fresh_frontier_keeps_the_accounting_horizon_failure() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-horizon-edge", json!([]));
+    let accepted = sent + DEADLINE + 1;
+    crate::store::mail_input_acceptance::record(&store.connection.write(),
+        "message/example-horizon-edge", "agent/example/worker", "incarnation-one",
+        accepted, accepted).unwrap();
+    let at = sent + DEADLINE + HORIZON + 30_000;
+    let cut = at - 60_000;
+    frontier(&store, cut);
+    let snapshot = capture(&store, at).unwrap();
+    assert_eq!(snapshot.source_through_ms, cut);
+    assert_eq!(snapshot.samples.len(), 1);
+    let publication = store.extension::<Publication>();
+    let (_sender, receiver) = tokio::sync::watch::channel(0);
+    *publication.changed.lock().unwrap() = Some(receiver);
+    *publication.snapshot.lock().unwrap() = Some(snapshot);
+    let row = rows(&store, at).unwrap().remove(0);
+    assert_eq!(row["evidence"]["bad"], 1.0);
+    assert_eq!(row["evidence"]["total"], 1.0);
+    assert_eq!(row["status"], "exhausted");
+}
+
+#[test]
 fn accounting_clock_stops_at_the_native_frontier_not_the_daemon_heartbeat() {
     let store = Store::open_memory("example-host").unwrap();
     declared(&store);

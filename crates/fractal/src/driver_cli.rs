@@ -3160,6 +3160,41 @@ async fn run_channel_renewals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_family_acceptance_storage_is_independent_of_optional_todo_observation() {
+        for mode in ["pi", "omp-observed", "omp-todo"] {
+            let root = tempfile::tempdir().unwrap();
+            let subject = format!("agent/{mode}");
+            let mut state = PiChannelResume {
+                incarnation: "runtime-a".into(),
+                ..Default::default()
+            };
+            activate_channel_input_acceptance(root.path(), &subject, &mut state).unwrap();
+            let source = state.pending.input_source_dir.clone().unwrap();
+            if mode == "omp-todo" {
+                state.todo_outbox = Some(prepare_channel_todo_outbox(root.path(), &subject, "runtime-a").unwrap());
+            }
+            // Both Pi and observed OMP run without the optional todo observer; stopping it must
+            // also leave the mandatory pre-frame and acceptance ingress paths fully functional.
+            state.todo_outbox = None;
+            state.record_input_attempt("message/first").unwrap();
+            let mut observer = None;
+            accept_managed_channel_frame(&mut state, &mut observer, &json!({
+                "type":"delivered", "meta":{"messageId":"message/first","inputIncarnation":"runtime-a"},
+                "acceptedAtUnixMs":123,
+            }).to_string(), &subject).unwrap();
+            assert_eq!(state.pending.input_acceptances["message/first"], 123, "{mode}");
+            assert_eq!(fractal_drivers::native_channel::input_acceptances(&source).unwrap()["message/first"], 123);
+            prepare_channel_todo_outbox(root.path(), &subject, "runtime-b").unwrap();
+            assert!(source.join("input-attempts.json").is_file(), "todo cleanup removed {mode} acceptance evidence");
+            let mut replacement = PiChannelResume { incarnation:"runtime-b".into(), ..Default::default() };
+            activate_channel_input_acceptance(root.path(), &subject, &mut replacement).unwrap();
+            assert_ne!(replacement.pending.input_source_dir.as_ref(), Some(&source));
+            assert!(source.join("input-acceptances.json").is_file(), "restart removed old source evidence");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn binding_longer_than_a_lease_keeps_renewing() {
         binding_renewal_case(false).await;
