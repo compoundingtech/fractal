@@ -674,6 +674,21 @@ The client currently exposes no correlated outcome-read capability for the origi
 operation reads are not action receipt lookup. Startup therefore performs no outcome
 reconciliation, no speculative status requests, and no replay of unknown attempts.
 
+Recovery on this device is keyed by the original attempt identity, not its position in
+the transcript. Unknown attempts warn that Fractal has not confirmed the message or
+thread and that it must not be sent again. They offer Copy into a separate composer,
+with an explicit warning that the original may have arrived, and confirmed Discard;
+they never offer Retry or Check status. Copy does not replace an existing draft or
+change the original attempt's delivery state. A deliberate send from that separate
+composer creates an independent attempt.
+
+Explicitly not-applied attempts offer Retry through fresh-child preparation. Saved
+never-dispatched attempts offer Revalidate and send: the original recipient and current
+authorization must be revalidated before acquiring the durable dispatch permit.
+Readable damaged entries and foreign-identity entries remain discard-only. Unavailable
+storage displays a notice without actions. Cross-tab notifications only wake a persisted
+re-read; they never authorize sending or supply authoritative delivery state.
+
 Cleanup never expires unresolved attempts. Terminal content/spool lasts seven days (delivered
 content additionally waits for exact timeline observation), then minimal identity/evidence
 tombstones last another thirty days. Explicit dismissal preserves uncertainty in a tombstone;
@@ -764,10 +779,10 @@ network work. Preparation uses the core packet builders and a real snapshot exac
 once; only the winning durable permit submits those bytes. Missing issuer identity is
 visibly unprotected; storage errors in protected mode never select that fallback.
 Restored never-dispatched Starts cannot dispatch without revalidating the original
-recipient through the exact canonical preview. Startup recovery remains discard-only:
-it does not automatically continue saved sends. Thread entries share chat's recovery
-list, including foreign-identity and damaged entries. Discard during an in-flight
-request settles unconfirmed without an outcome-retention loop.
+recipient through the exact canonical preview. Recovery continues a saved send only
+after an explicit Revalidate and send action; startup never submits it automatically.
+Thread entries share chat's recovery list, including foreign-identity and damaged entries.
+Discard during an in-flight request settles unconfirmed without an outcome-retention loop.
 
 Replies use the existing thread's stored participants, regardless of later routing
 policy. Storybook's `Fractal/App/Threads/Start recipient` covers the recipient states.

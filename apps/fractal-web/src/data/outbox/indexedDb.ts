@@ -52,6 +52,8 @@ export interface IndexedDbOutbox extends OutboxRepository<PreparedPacket> {
   readonly readSpool: (id: string, hash: string) => Promise<Uint8Array | undefined>
   readonly readPacketBytes: (id: string) => Promise<Uint8Array | undefined>
   readonly readIntentBytes: (id: string) => Promise<Uint8Array | undefined>
+  /** Includes dismissed rows and retained tombstones; content expiry never grants a new attempt. */
+  readonly hasAttempt: (id: string) => Promise<boolean>
   readonly listQuarantined: () => Promise<readonly QuarantinedAttempt[]>
   readonly cleanupTerminal: () => Promise<void>
   readonly recover: () => Promise<void>
@@ -323,6 +325,14 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
       return result.record
     },
     read: (id) => run('readonly', 'read', (tx, done, fail) => get(tx, id, (envelope) => done(envelope?.record), fail)),
+    hasAttempt: (id) => run('readonly', 'hasAttempt', (tx, done) => {
+      const request = tx.objectStore(attemptsStore).get(id)
+      request.onsuccess = () => {
+        const raw: unknown = request.result
+        const owner = rawScope(raw)
+        done(raw !== undefined && (owner === undefined || sameScope(owner, scope)))
+      }
+    }),
     list: () => run('readonly', 'list', (tx, done, fail) => {
       const entries: OutboxEntry<PreparedPacket>[] = []
       const request = tx.objectStore(attemptsStore).openCursor()

@@ -183,7 +183,7 @@ export const gatewayMessageSend = (
   const scopes = new Map<string, IndexedDbOutbox['scope'] | 'unprotected'>()
   const observed = new Map<string, Pick<OutboxRecord<PreparedPacket>, 'id' | 'revision'>>()
   const principals = new Map<string, string>()
-  return async (input: AttachmentSendRequest, chosenKey?: string, onPrepared?: (messageIds: readonly string[]) => void): Promise<ConversationPortResult<ActionResult>> => {
+  return async (input: AttachmentSendRequest, chosenKey?: string, onPrepared?: (messageIds: readonly string[]) => void, recovery?: { readonly expectedRevision: number }): Promise<ConversationPortResult<ActionResult>> => {
   const rootKey = input._tag === 'Resend' ? input.idempotencyKey : chosenKey ?? crypto.randomUUID()
   // This invocation owns only the generation visible at the synchronous user action.
   const predecessor = input._tag === 'Resend' ? observed.get(rootKey) : undefined
@@ -210,6 +210,7 @@ export const gatewayMessageSend = (
     () => { dispatched = true })
   let record: OutboxRecord<PreparedPacket> | undefined
   try { record = await repo.read(key) } catch { return storageRefusal() }
+  if (recovery !== undefined && record?.revision !== recovery.expectedRevision) return unconfirmed()
   const pinnedPredecessor = predecessor ?? (input._tag === 'Resend' && record?.state === 'not-applied'
     ? { id: record.id, revision: record.revision } : undefined)
   if (record !== undefined) {
@@ -222,8 +223,10 @@ export const gatewayMessageSend = (
   }
   if (input._tag === 'Resend' && record?.state === 'not-applied') {
     try {
+      if (recovery !== undefined && await repo.hasAttempt(`${key}/retry`)) return unconfirmed()
       const child = await repo.read(`${key}/retry`)
       if (child !== undefined) {
+        if (recovery !== undefined) return unconfirmed()
         key = child.id
         record = child
         if (child.state === 'not-applied') {
@@ -309,6 +312,7 @@ export const gatewayMessageSend = (
             record = child
             original = childOriginal
           } else {
+            if (recovery !== undefined) return unconfirmed()
             record = await repo.read(childKey)
             const acceptedBytes = await repo.readIntentBytes(childKey)
             if (record === undefined || acceptedBytes === undefined) return unconfirmed()

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Offer explicit, identity-bound recovery actions for browser-local messages and threads",
+  "replay": {"status": "none", "detail": "Unknown attempts are never retried or checked through speculative status requests. Never-dispatched sends require explicit recipient and authorization revalidation; only explicit applied:none permits Retry as a freshly prepared child attempt."},
+  "schema": {"status": "none", "detail": "Reuses the existing browser-local IndexedDB database and saved intent envelopes; no browser or server schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "changed", "detail": "Recovery actions follow each persisted attempt's delivery state and original identity. Copy opens a separate composer without replacing an existing draft; a deliberate send creates an independent attempt and warns that the original may have arrived. Foreign-identity and damaged records remain discard-only."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator action, configuration change or re-pairing is required."},
+  "recovery": {"status": "changed", "detail": "Unknown attempts offer Copy and confirmed Discard, explicitly not-applied attempts offer Retry and Discard, and pending attempts offer Revalidate and send and Discard. Unavailable storage shows a notice without actions. Cross-tab notifications trigger persisted re-reads only, never authority or automatic dispatch. No original-member correlated outcome-read API is available, so unknown delivery remains unknown."}
+}

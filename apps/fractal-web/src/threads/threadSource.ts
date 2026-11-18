@@ -9,7 +9,7 @@ import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
 import { createScopedChatOutbox, type ScopedChatOutbox } from '../data/outbox/scoped.ts'
-import { createThreadOutboxSender, type ThreadOutboxInput } from '../data/outbox/threadSender.ts'
+import { createThreadOutboxSender, revalidateThreadOutboxTarget, type ThreadOutboxInput } from '../data/outbox/threadSender.ts'
 import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
 import { readRequestHistoryPages, RequestHistoryPagingError } from './requestHistoryPages.ts'
 
@@ -556,28 +556,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         const outcome = await sendThread(input, {
           expectedActor: attempt.actor,
           retry: previous?.deliveryState === 'not-applied',
-          revalidate: async () => {
-            if (input.type === 'thread.start') {
-              await reloadStartContext(input.parameters.origin.source_id, input.parameters.origin.episode)
-              const preview = registry.get(readStartContext(input.parameters.origin.source_id)(input.parameters.origin.episode))
-              if (preview._tag !== 'Observed' || preview.value.start_recipient.agent_id !== input.parameters.agent_id) {
-                throw new Error('Review the current recipient before sending this saved thread. Nothing was sent.')
-              }
-            } else {
-              try {
-                const { value } = await client.threadGet(input.parameters.target_id)
-                const current = Native.decodeUnknownSync(Native.ThreadSummary)(value)
-                if (current.id !== input.parameters.target_id) throw new Error('The original thread could not be verified. Nothing was sent.')
-                if (current.state === 'closed') throw new Error('This thread is closed. Nothing was sent.')
-              } catch (error) {
-                if (error instanceof ClientError) {
-                  throw new Error(error.response.code === 'not-found' ? 'Fractal no longer has this thread. Nothing was sent.'
-                    : 'The original thread could not be verified. Nothing was sent.')
-                }
-                throw error
-              }
-            }
-          },
+          revalidate: () => revalidateThreadOutboxTarget(client, input),
         })
         if (outcome.how === 'sent') {
           attempts.delete(destination)

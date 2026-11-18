@@ -121,6 +121,21 @@ it.each(['/', '/w/inbox', '/w/thread/example'])('offers ordinary pairing from %s
   expect(start).toHaveBeenCalledOnce()
 })
 
+it.each(['/', '/w/agent/example', '/w/thread/example'])('shows the one outbox recovery list from %s, including thread attempts', async path => {
+  const list = vi.fn(async () => [
+    { id: 'outbox/thread-start', kind: 'unknown' as const, subject: 'thread' as const, status: 'delivery unconfirmed', actions: ['copy', 'discard'] as const },
+    { id: 'outbox/reply', kind: 'pending' as const, subject: 'message' as const, status: 'waiting to send', actions: ['send', 'discard'] as const },
+  ])
+  source = { ...source, outboxRecovery: { list, discard: vi.fn(async () => {}), send: vi.fn(async () => {}), copy: vi.fn(async () => ({ copyKey: 'outbox/copy/1', text: '', images: [] })), sendCopy: vi.fn(async () => ({ _tag: 'Recorded' as const })) } }
+  window.history.replaceState(null, '', path)
+  await mount()
+  await act(async () => vi.dynamicImportSettled())
+  // Retained conversation panes do not mount their own copy.
+  expect(host.querySelectorAll('[data-outbox-recovery]')).toHaveLength(1)
+  expect(host.querySelector('[data-outbox-item="outbox/thread-start"] [data-outbox-headline]')?.textContent).toBe('Fractal has not confirmed this thread. Do not send it again.')
+  expect([...host.querySelectorAll('[data-outbox-item="outbox/reply"] button')].map(button => button.textContent)).toEqual(['Revalidate and send', 'Discard'])
+})
+
 it('keeps the shared code mounted but hidden while Settings manages pairing, including a drawer breakpoint change', async () => {
   const status = vi.fn(async () => ({ status: 'pending' as const, displayCode: 'PAIR-123' }))
   source = { ...source, pairing: { status, start: vi.fn(async () => ({ requestId: 'request/shared', displayCode: 'PAIR-123' })), forget: vi.fn(async () => {}) } }

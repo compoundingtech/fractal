@@ -1,4 +1,3 @@
-import * as React from 'react'
 import type { ReactNode } from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
@@ -8,9 +7,8 @@ import { accentVars as accent, borderVars as border, geometryVars, radiusVars as
 import { readingColumnStyles } from '../../../../packages/fractal-ui/src/assistant-ui/reading-column.stylex.ts'
 import { ObservedAge, useConversationLastObservedAt } from './lastObserved.tsx'
 import type { LastSeenActivity } from './conversationTranscript.ts'
-import type { OutboxRecoveryItem as RecoveryItem, OutboxRecoveryPort } from '../data/source.ts'
 
-export { ThreadUnavailable, LastSeen, SeatAtRest, SendUnprotected, OutboxRecovery }
+export { ThreadUnavailable, LastSeen, SeatAtRest, SendUnprotected }
 /**
  * The conversation read failed or was refused. Fixed copy only, inline in the reading lane: the reason (danger tone
  * only for a failure), its consequence on its own line, and Retry only where the source can re-acquire the follow.
@@ -73,75 +71,6 @@ function SendUnprotected() {
   </div>
 }
 
-/** One list answer, held against the port that gave it: a changed port reads as not yet listed. */
-type RecoveryRead =
-  | { readonly port: OutboxRecoveryPort; readonly _tag: 'Listed'; readonly items: readonly RecoveryItem[] }
-  | { readonly port: OutboxRecoveryPort; readonly _tag: 'Unavailable' }
-
-const RECOVERY_TITLE = 'Outbox on this device'
-const RECOVERY_UNAVAILABLE = 'Outbox on this device is unavailable; retry later.'
-
-/**
- * Messages this browser's outbox can no longer send. Each row says the outbox's own status verbatim and offers only
- * Discard; nothing here sends, copies or retries a message. A list that cannot be read says storage is unavailable
- * (never that it is damaged) with a Retry that lists again. Lists once per port and after each Discard; no polling.
- */
-function OutboxRecovery({ port }: { readonly port: OutboxRecoveryPort }) {
-  const [read, setRead] = React.useState<RecoveryRead>()
-  const [attempt, setAttempt] = React.useState(0)
-  const [discarding, setDiscarding] = React.useState<string>()
-  const [discardFailed, setDiscardFailed] = React.useState<string>()
-  // The port a Discard answer must still belong to; a later port or an unmount drops it.
-  const current = React.useRef<OutboxRecoveryPort | undefined>(port)
-  React.useEffect(() => {
-    current.current = port
-    let live = true
-    port.list().then(
-      (items) => { if (live) setRead({ port, _tag: 'Listed', items }) },
-      () => { if (live) setRead({ port, _tag: 'Unavailable' }) },
-    )
-    return () => { live = false; current.current = undefined }
-  }, [port, attempt])
-  const relist = () => setAttempt((n) => n + 1)
-  const discard = (id: string) => {
-    setDiscarding(id)
-    setDiscardFailed(undefined)
-    port.discard(id).then(
-      () => { if (current.current === port) { setDiscarding(undefined); relist() } },
-      () => { if (current.current === port) { setDiscarding(undefined); setDiscardFailed(id); relist() } },
-    )
-  }
-  const shown = read?.port === port ? read : undefined
-  if (shown === undefined) return null
-  if (shown._tag === 'Unavailable') return <div {...stylex.props(styles.lane)}>
-    <section aria-label={RECOVERY_TITLE} data-outbox-recovery="unavailable" {...stylex.props(styles.recovery, styles.recoveryRow)}>
-      <p role="status" {...stylex.props(styles.recoveryText)}>{RECOVERY_UNAVAILABLE}</p>
-      <Button aria-label={`Retry: ${RECOVERY_UNAVAILABLE}`} onPress={relist} {...stylex.props(styles.actionButton)}>Retry</Button>
-    </section>
-  </div>
-  if (shown.items.length === 0) return null
-  return <div {...stylex.props(styles.lane)}>
-    <section aria-label={RECOVERY_TITLE} data-outbox-recovery="list" {...stylex.props(styles.recovery)}>
-      <p aria-hidden="true" {...stylex.props(styles.recoveryTitle)}>{RECOVERY_TITLE}</p>
-      <ul {...stylex.props(styles.recoveryList)}>
-        {shown.items.map((item) => <OutboxRecoveryRow key={item.id} item={item} discarding={discarding === item.id} failed={discardFailed === item.id} onDiscard={discard} />)}
-      </ul>
-    </section>
-  </div>
-}
-
-function OutboxRecoveryRow({ item, discarding, failed, onDiscard }: { readonly item: RecoveryItem; readonly discarding: boolean; readonly failed: boolean; readonly onDiscard: (id: string) => void }) {
-  const id = React.useId()
-  return <li data-outbox-item={item.id} {...stylex.props(styles.recoveryRow)}>
-    <span {...stylex.props(styles.recoveryText, styles.recoveryStatus)}>
-      <span id={`${id}-status`} data-outbox-status>{item.status}</span>
-      {failed ? <span role="status" {...stylex.props(styles.recoveryFailure)}>Discard did not finish: outbox unavailable; retry later.</span> : null}
-    </span>
-    {/* The outbox grants Discard alone; no other action is drawn for a recovery item. */}
-    <Button id={`${id}-discard`} aria-labelledby={`${id}-discard ${id}-status`} isDisabled={discarding} onPress={() => onDiscard(item.id)} {...stylex.props(styles.actionButton)}>{discarding ? 'Discarding…' : 'Discard'}</Button>
-  </li>
-}
-
 const focusRing = { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
 const styles = stylex.create({
   lane: { width: '100%', maxWidth: geometryVars.lane, boxSizing: 'border-box', paddingInline: spaceVars.lg, marginInline: 'auto', flexShrink: 0 },
@@ -157,11 +86,4 @@ const styles = stylex.create({
   protection: { margin: 0, paddingBlock: spaceVars.xs2, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   protectionLabel: { color: tone.attention, fontWeight: t.weightMedium },
   code: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: t.fontMono, fontSize: t.denseSize },
-  recovery: { display: 'flex', flexDirection: 'column', gap: spaceVars.xs2, minWidth: 0, margin: 0, paddingBlock: spaceVars.xs2, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  recoveryTitle: { margin: 0, color: ink.fgMuted, fontWeight: t.weightMedium },
-  recoveryList: { display: 'flex', flexDirection: 'column', gap: spaceVars.xs2, margin: 0, padding: 0, listStyle: 'none' },
-  recoveryRow: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: spaceVars.md, minWidth: 0 },
-  recoveryText: { flex: '1 1 0', minWidth: 0, margin: 0, color: ink.fgMuted, overflowWrap: 'anywhere' },
-  recoveryStatus: { display: 'flex', flexDirection: 'column', gap: spaceVars.xs2, color: ink.fgSoft },
-  recoveryFailure: { color: tone.attention },
 })
