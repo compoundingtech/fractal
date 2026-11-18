@@ -2142,11 +2142,10 @@ pub fn commit_tx(
         } else { None };
         let hold = crate::suspension::current_at_tx(transaction, subject, cut).map_err(internal)?;
         if let Some(hold) = hold.filter(|hold| hold.cause() == "idle") {
-            let origin = transaction.query_row(
-                "SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1",
-                [subject], |row| row.get::<_, String>(0)).optional()
-                .map_err(internal)?.unwrap_or_else(|| origin.to_string());
-            super::idle_residency::end_sleep_tx(transaction, &origin, subject, &hold, now, "retire")?;
+            let owner = hold.source_host.as_deref().unwrap_or(origin);
+            if owner == origin {
+                super::idle_residency::end_sleep_tx(transaction, owner, subject, &hold, now, "retire")?;
+            }
         }
     }
     let revision = Revision {

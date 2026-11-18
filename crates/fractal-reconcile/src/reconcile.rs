@@ -7107,9 +7107,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                             Some(declaration.store_index.saturating_sub(1)))?
                             .filter(|hold| hold.cause() == "idle")
                     {
+                        let end_class = if declaration.body.get("owned_set").is_some() { "retire" } else { "stop" };
                         self.idle_residency_evidence.lock()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .end_sleep(&self.store, &subject.subject, &hold, now_ms(), "stop")?;
+                            .end_sleep(&self.store, &subject.subject, &hold, now_ms(), end_class)?;
                     }
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
