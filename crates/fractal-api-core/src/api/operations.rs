@@ -522,7 +522,8 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
 
 /// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
 pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
-    let mut rows = slo_rows(store)?;
+    let domain = crate::declared_objectives::github_rows(store, state_dir, client_now_ms() as u64)?;
+    let mut rows = slo_rows(store, domain)?;
     rows.extend(crate::readiness_slo::current(store));
     add_budget_forecasts(&mut rows, &crate::slo_history::dir(state_dir), client_now_ms() as u64);
     add_tones(&mut rows);
