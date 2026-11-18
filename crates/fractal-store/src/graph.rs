@@ -448,6 +448,7 @@ fn parse_mission_run_declaration(
         body,
         &[
             "mission",
+            "follow-head",
             "workspace",
             "requester",
             "mode",
@@ -466,6 +467,7 @@ fn parse_mission_run_declaration(
         matches!(
             child.name().value(),
             "mission"
+                | "follow-head"
                 | "workspace"
                 | "requester"
                 | "mode"
@@ -478,6 +480,14 @@ fn parse_mission_run_declaration(
     let creation = if has_creation {
         let mission_ref = required_child_string(body, "mission", &subject)?;
         let (mission, revision) = exact_mission_revision(&mission_ref)?;
+        let follow_head = match child_string(body, "follow-head")?.as_deref() {
+            None => false,
+            Some("true") => true,
+            Some(other) => return Err(FractalError::new(
+                "invalid-follow-head",
+                format!("`follow-head` is `true` when present, not `{other}`"),
+            )),
+        };
         let workspace = required_child_string(body, "workspace", &subject)?;
         if !workspace.starts_with('/') {
             return Err(FractalError::new(
@@ -557,6 +567,7 @@ fn parse_mission_run_declaration(
         Some(MissionRunCreation {
             mission,
             revision,
+            follow_head,
             workspace,
             requester,
             inputs,
