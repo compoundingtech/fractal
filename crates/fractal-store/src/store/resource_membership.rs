@@ -119,6 +119,7 @@ impl RefusalCode {
             Self::Retiring => "retiring",
             Self::Uncertain => "uncertain",
             Self::InvalidState => "invalid-state",
+            Self::RecoveryNotAllowed => "recovery-not-allowed",
         }
     }
 }
