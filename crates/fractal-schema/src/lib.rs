@@ -1589,6 +1589,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
         (
+            "resource.exec-receipt",
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
             "person.delegation-set",
             &["person"],
             WritePolicy::SameSubjectActor,
@@ -3347,6 +3356,26 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "resource.exec-receipt" => &[
+            ("exec_id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["landing", "check", "agent"])),
+            ("owner", required_object()),
+            ("coverage", required_enum(&["logical", "enforced"])),
+            ("state", required_enum(&["completed", "refused", "cancelled"])),
+            ("memory_bytes", integer()),
+            ("disk_reserved_bytes", required_integer()),
+            ("io", enumeration(&["heavy"])),
+            ("head_start", string()),
+            ("head_end", string()),
+            ("clean_start", boolean()),
+            ("clean_end", boolean()),
+            ("exit_code", integer()),
+            ("exit_signal", integer()),
+            ("wall_duration_ms", required_integer()),
+            ("queue_wait_ms", required_integer()),
+            ("memory_peak_bytes", integer()),
+        ],
         "deploy.go" => &[
             ("version", required_integer()),
             ("host", required_string()),
@@ -5368,6 +5397,7 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();

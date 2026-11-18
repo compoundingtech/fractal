@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Let an exact live custom-shell launch establish running authority with its first bound work claim",
+  "replay": { "status": "none", "detail": "No replay or projection rebuild. Launch completion still publishes starting for driver-less members." },
+  "schema": { "status": "none", "detail": "No database, claim vocabulary, or client-v0 schema change." },
+  "rules": { "status": "none", "detail": "No replicated rule or rules-version change. Bootstrap admission is owner-local and checked in the work writer savepoint." },
+  "compatibility": { "status": "changed", "detail": "A bound work claim with an exact launch incarnation can promote a custom shell to running and claim work atomically before reconciliation applies completion. Without --incarnation, the CLI resolves its own native PTY using PTY_SESSION, PTY_ROOT and the launch-exported operation, before reading status; a missing exact match does not borrow a predecessor fence. The worker records the verified operation, incarnation and kernel process identity durably at spawn completion. Admission requires that current operation for the same subject/runtime, unchanged retained start/control requests before application, an unchanged pre-spawn runtime observation or the exact starting incarnation, and a fresh PID/start-identity liveness check. Existing applied completions can use retained exact launch-receipt identity evidence. Dead, reused, stale, repaired/retracted, foreign, unbound, and unfenced callers retain refusal. Native-driver readiness remains unchanged." },
+  "downtime": { "status": "none", "detail": "No startup work or required downtime." },
+  "manual": { "status": "none", "detail": "No operator action. Existing starting shells can use the path if their retained completion includes exact process-birth evidence; no retry or restart is issued by this change. Unsupported process-generation platforms retain their refusal." },
+  "recovery": { "status": "none", "detail": "Rollback needs no migration. Earlier builds read ordinary running observations and work claims, but restore the requirement to wait for reconciliation before a custom shell's first claim." }
+}

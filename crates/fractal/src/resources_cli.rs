@@ -150,7 +150,8 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
             "completed" => {
                 cli_output::stdout().write_all(execution.stdout.as_bytes())?;
                 std::io::stderr().write_all(execution.stderr.as_bytes())?;
-                let code = execution.exit_signal.map_or_else(|| execution.exit_code.unwrap_or(1), |signal| 128 + signal);
+                let code = if execution.timed_out { 124 }
+                    else { execution.exit_signal.map_or_else(|| execution.exit_code.unwrap_or(1), |signal| 128 + signal) };
                 return if code == 0 { Ok(()) } else { Err(CommandExit(code.clamp(1,255) as u8).into()) };
             }
             "refused" | "cancelled" => anyhow::bail!("refused: {} blockedBy={}", execution.reason,
@@ -169,9 +170,11 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
     }
 }
 
-/// Runs inside the admitted transient scope so kernel memory.peak is captured before it ends.
-pub(super) fn payload(result_path: &Path, argv: Vec<String>) -> Result<()> {
+/// Runs inside the admitted scope; SIGTERM stops the payload while this observer remains
+/// alive to reap it and publish final observations before whole-tree retirement.
+pub(super) async fn payload(result_path: &Path, argv: Vec<String>) -> Result<()> {
     use std::os::unix::process::ExitStatusExt as _;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     anyhow::ensure!(!argv.is_empty(), "resource payload requires argv");
     let git = || -> Result<(Option<String>,Option<bool>)> {
         let head = match std::process::Command::new("git").args(["rev-parse", "HEAD"]).output() {
@@ -183,19 +186,37 @@ pub(super) fn payload(result_path: &Path, argv: Vec<String>) -> Result<()> {
         Ok((head, clean))
     };
     let (head_start, clean_start) = git()?;
+    let start_path = result_path.with_extension("started");
+    let pending = result_path.with_extension("starting");
+    fs::write(&pending, serde_json::to_vec(&(&head_start, clean_start))?)?;
+    fs::rename(pending, start_path)?;
     let started = Instant::now();
-    let status = std::process::Command::new(&argv[0]).args(&argv[1..]).status()?;
+    let mut child = tokio::process::Command::new(&argv[0]).args(&argv[1..]).spawn()?;
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        _ = terminate.recv() => {
+            // Descendants retain charged custody until the authority retires the tree.
+            child.start_kill()?;
+            child.wait().await?
+        }
+    };
     let wall_duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let (head_end, clean_end) = git()?;
-    let memory_peak_bytes = if cfg!(target_os = "linux") {
+    let enforced = std::env::var(shell_resources::PARENT_ENV).ok()
+        .map(|value| serde_json::from_str::<shell_resources::ParentContext>(&value)).transpose()?
+        .is_some_and(|parent| parent.request.coverage == Coverage::Enforced);
+    let memory_peak_bytes = if cfg!(target_os = "linux") && enforced {
         fs::read_to_string("/proc/self/cgroup").ok().and_then(|groups| groups.lines().find_map(|line| line.strip_prefix("0::")).map(str::to_owned))
             .and_then(|group| fs::read_to_string(Path::new("/sys/fs/cgroup").join(group.trim_start_matches('/')).join("memory.peak")).ok())
             .and_then(|peak| peak.trim().parse().ok())
     } else { None };
     let result = PayloadResult { head_start, head_end, clean_start, clean_end, exit_code: status.code(), exit_signal: status.signal(), wall_duration_ms, memory_peak_bytes };
     let temporary = result_path.with_extension("pending");
-    fs::write(&temporary, serde_json::to_vec(&result)?)?;
+    let mut file = fs::File::create(&temporary)?;
+    std::io::Write::write_all(&mut file, &serde_json::to_vec(&result)?)?;
+    file.sync_all()?;
     fs::rename(temporary, result_path)?;
+    fs::File::open(result_path.parent().context("payload result has no parent")?)?.sync_all()?;
     let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
     if code == 0 { Ok(()) } else { Err(CommandExit(code.clamp(1,255) as u8).into()) }
 }
@@ -222,11 +243,11 @@ mod tests {
             result.unwrap();
         }
     }
-    #[test]
-    fn payload_exit_code_is_passed_through_and_result_is_durable() {
+    #[tokio::test]
+    async fn payload_exit_code_is_passed_through_and_result_is_durable() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("outcome.json");
-        let error = payload(&path, vec!["/bin/sh".into(), "-c".into(), "exit 37".into()]).unwrap_err();
+        let error = payload(&path, vec!["/bin/sh".into(), "-c".into(), "exit 37".into()]).await.unwrap_err();
         assert_eq!(error.downcast_ref::<CommandExit>().unwrap().0, 37);
         let result: PayloadResult = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(result.exit_code, Some(37));
