@@ -98,16 +98,26 @@ It includes root `exec_id`, host/state, nullable exit code/signal, `launched`, q
 actual root `argv` and `argv_sha256`. The digest is lowercase SHA-256 of UTF-8 arguments joined
 by NUL without a trailing NUL; NUL-containing arguments are refused. Nested proof joins the
 eventual outer root receipt instead of fabricating a terminal root outcome from a child's exit.
-`FRACTAL_RESOURCE_EXEC_ID` is a host-set convenience join key, not authorization.
+`FRACTAL_RESOURCE_EXEC_ID` joins the outer root receipt; `FRACTAL_RESOURCE_MEMBER_EXEC_ID`
+identifies the current execution generation. Neither value is authorization.
 Receipts contain actual root argv, so never put credentials in argv. Environment values are sent
 only in the live launch request and are neither receipt fields nor persisted command data.
 After restart, a command whose live environment is unavailable fails closed rather than replaying
 lost secrets.
-Use optional `--exec-id UUID` to recover a transport-uncertain submission with a stable identity;
-otherwise the CLI generates a UUIDv7. UUID syntax is validated before submission. The first
-accepted intent owns that ID: identical semantic retries return the existing execution without
-relaunching or replacing its live environment; changed intent is refused. Environment values
-never enter the persisted submission-intent digest.
+Use optional `--request-id UUID` to recover a transport-uncertain submission with an owner-scoped
+identity. UUID syntax is validated before submission. The first accepted intent owns that ID:
+identical semantic retries return the existing execution without relaunching or replacing its
+live environment; changed intent is refused. Environment values never enter the persisted
+submission-intent digest. Request IDs also work for inherited child executions.
+
+`show --request-id UUID` returns `{"execution":null}` when absent.
+`cancel --request-id UUID --wait` returns `{requestId,cancelled:true,tombstone,execution}` after
+confirmed retirement or a durable cancellation tombstone. Tombstones fence late submissions
+for seven days; never reuse expired identities. Use `--json` for machine-readable responses.
+
+`exec`, `show`, `cancel` and `member-scope` accept `--as ACTOR` after the subcommand. Agent
+selectors use the authenticated Unix agent transport; local operator selectors such as
+`person/operator` use `unix_as`, not an agent identity.
 
 
 `fractal resources cancel EXECUTION_ID` uses the same authenticated execution-owner boundary and
@@ -134,14 +144,14 @@ check below. No custody layout or configurable cgroup root is exposed.
 ### Exact member verification for privileged helpers
 
 `fractal --json resources member-scope --exec-id EXECUTION_ID` reports the runtime-owned DTO:
-`{execId, generation, state: "running", cgroupPath}`. The authenticated API
+`{execId, rootExecId, requestId, lane, class, profile, generation, state: "running", cgroupPath}`. The authenticated API
 `GET /v1/internal/resources/{id}/member-scope` checks the exact shell owner, host membership,
 released root, live grant, enforced coverage and execution generation, then verifies the running
 runtime binding and exact kernel cgroup path. Parent slices, sibling generations, ended roots,
 retiring memberships and logical-only execution are not proof of a live enforced member.
 
 A root helper must independently read its own unified `/proc/self/cgroup` entry and require
-**exact equality** with the reported `cgroupPath` for `FRACTAL_RESOURCE_EXEC_ID`; prefix matching
+**exact equality** with the reported `cgroupPath` for `FRACTAL_RESOURCE_MEMBER_EXEC_ID`; prefix matching
 or a parent/sibling match is insufficient. The environment ID is only a lookup key, never
 authority. Reject absent, stale, retired or mismatched execution evidence before any mutation.
 

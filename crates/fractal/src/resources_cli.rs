@@ -394,6 +394,22 @@ pub(super) async fn payload(result_path: &Path, argv: Vec<String>) -> Result<()>
 mod tests {
     use super::*;
     #[test]
+    fn local_operator_selector_is_preserved_for_supervisor_commands() {
+        for arguments in [
+            vec!["exec", "--lane", "checks", "--as", "person/schickling", "--", "true"],
+            vec!["show", "execution-id", "--as", "person/schickling"],
+            vec!["cancel", "--request-id", "0192c8d8-97e7-7000-8000-000000000001", "--wait", "--as", "person/schickling"],
+            vec!["member-scope", "--exec-id", "execution-id", "--as", "person/schickling"],
+        ] {
+            let cli = Cli::try_parse_from(["fractal", "resources"].into_iter().chain(arguments)).unwrap();
+            let Command::Resources { command } = cli.command else { panic!("wrong command") };
+            assert_eq!(command.actor(), Some("person/schickling"));
+            let endpoint = Endpoint::Unix(PathBuf::from("/nonexistent/fractal.sock"));
+            assert!(execution_client(&endpoint, command.actor().unwrap().to_owned()).is_ok());
+        }
+    }
+
+    #[test]
     fn offline_membership_requires_explicit_owner_uid() {
         let cli = Cli::try_parse_from(["fractal", "--json", "resources", "in-member", "--owner-uid", "1000"]).unwrap();
         let Command::Resources { command: ResourcesCommand::InMember { owner_uid } } = cli.command else { panic!("wrong command") };
