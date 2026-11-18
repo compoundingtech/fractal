@@ -330,7 +330,7 @@ export const AllStates: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     for (const scenario of scenarios) {
-      await userEvent.click(canvas.getByRole('tab', { name: scenario, exact: true }))
+      await userEvent.click(canvas.getByRole('tab', { name: scenario }))
       await expect(canvas.getAllByRole('main')).toHaveLength(1)
       await expect(canvasElement.querySelectorAll('[data-start-recipient-scene]')).toHaveLength(1)
       await expect(canvasElement.querySelector(`[data-start-recipient-scene="${scenario}"]`)).toBeVisible()
