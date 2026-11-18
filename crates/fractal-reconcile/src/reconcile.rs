@@ -11134,7 +11134,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let record = if kind == "runtime.observed" {
             let Some(record) = self.store.append_reconciled_runtime_observation(&input)? else {
                 // The worker's durable result superseded this physical capture.
-                // Wake a fresh pass instead of publishing the prior incarnation.
+                // Wake a fresh pass instead of publishing an old incarnation or status.
                 self.record_runtime_observation_admission(subject, true)?;
                 return Ok(());
             };

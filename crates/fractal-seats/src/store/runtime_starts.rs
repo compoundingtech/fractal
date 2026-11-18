@@ -351,6 +351,8 @@ pub trait RuntimeStartsStore {
     /// A late physical snapshot cannot turn the prior target into a replacement
     /// for a newly verified launch. Admission order comes from the exact local
     /// request position, never UUID creation time or claim publication time.
+    /// A captured status also cannot overwrite a later completion observation
+    /// of the same incarnation, including its terminal status and exit evidence.
     fn append_reconciled_runtime_observation(
             &self,
             input: &ClaimInput,
@@ -461,14 +463,19 @@ impl RuntimeStartsStore for Store {
                     )
                     .map_err(internal)?;
                 // The capture serial predates physical reads. Only this subject's
-                // later mutation invalidates it; other subjects cannot starve exits.
-                let stale_capture = capture_epoch.is_none_or(|captured| current > captured);
-                if observed != Some(actual)
-                    && (stale_capture || (observed.is_some() && observed == prior))
+                // later ledger mutation invalidates it; heartbeat, work, usage
+                // claims and other subjects cannot starve physical observations.
+                // Exact incarnation equality does not make an old status fresh:
+                // completion may have published that same incarnation's exit.
+                let superseded_capture = capture_epoch.is_some_and(|captured| current > captured);
+                let stale_capture = capture_epoch.is_none() || superseded_capture;
+                if superseded_capture
+                    || (observed != Some(actual)
+                        && (stale_capture || (observed.is_some() && observed == prior)))
                 {
                     return Err(FractalError::new(
                         "stale-runtime-observation",
-                        "physical snapshot precedes the verified start incarnation",
+                        "physical snapshot precedes a mutation of the verified start ledger",
                     ));
                 }
             }
@@ -1780,6 +1787,61 @@ mission "launch-publication" state="ready" {
             "writer-cost profile={}",
             output.join("slow.jsonl").display()
         );
+    }
+
+    #[test]
+    fn completion_exit_refuses_a_previously_captured_running_status_for_the_same_incarnation() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/completion-exit";
+        let incarnation = "actual-incarnation";
+        let mut start = operation("completion-exit", subject, None);
+        store.admit_runtime_start(&mut start, 2).unwrap();
+        store.finish_runtime_start(&start.id, &json!({
+            "incarnation": incarnation, "verification": "operation-incarnation"
+        })).unwrap();
+        let capture = store.capture_runtime_observations().unwrap();
+        // The broad pass has physically observed running, but has not appended it.
+        let running = ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), Value::from("running")),
+                ("runtime_id".into(), Value::from(subject)),
+                ("terminal".into(), Value::from(true)),
+                ("incarnation_id".into(), Value::from(incarnation)),
+                ("adopted".into(), Value::from(true)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let exit_evidence = json!({"incarnation": incarnation, "exit_code": 23});
+        let mut exited = running.clone();
+        exited.fields.insert("status".into(), Value::from("exited"));
+        exited.fields.insert("exit_code".into(), Value::from(23));
+        exited.fields.insert("exit_evidence".into(), exit_evidence.clone());
+        exited.idempotency_key = Some(format!("start-observed:{}", start.id));
+        // Completion publishes a newer observation under the same writer transaction
+        // that advances this subject's runtime-start ledger generation.
+        assert!(store.apply_runtime_start_result(&start.id, &[receipt(subject), exited]).unwrap());
+        let completed = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+        assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
+        assert!(store.append_reconciled_runtime_observation(&running).unwrap().is_none());
+        let retained = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+        assert_eq!(retained.id, completed.id);
+        assert_eq!(retained.body["fields"]["status"], "exited");
+        assert_eq!(retained.body["fields"]["incarnation_id"], incarnation);
+        assert_eq!(retained.body["fields"]["exit_code"], 23);
+        assert_eq!(retained.body["fields"]["exit_evidence"], exit_evidence);
+        assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
+        drop(capture);
+        // A later physical capture can still publish legitimate observations.
+        let _fresh_capture = store.capture_runtime_observations().unwrap();
+        let mut stopped = running;
+        stopped.fields.insert("status".into(), Value::from("stopped"));
+        assert!(store.append_reconciled_runtime_observation(&stopped).unwrap().is_some());
+        assert!(!store.work_incarnation_live(subject, incarnation).unwrap());
     }
 
     #[test]
