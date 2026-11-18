@@ -202,7 +202,7 @@ pub struct Membership {
     pub admission_decision: Option<AdmissionDecision>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AdmissionDecision {
     pub class: RequestClass,

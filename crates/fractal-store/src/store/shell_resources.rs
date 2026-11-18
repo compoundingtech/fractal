@@ -75,6 +75,9 @@ pub struct Execution {
     pub refusal_code: Option<resource_membership::RefusalCode>,
     #[serde(default)]
     pub learning_decision: Option<resource_profile_learner::RecordOutcome>,
+    /// Frozen host admission evidence, retained after membership retirement and in receipts.
+    #[serde(default)]
+    pub admission_decision: Option<resource_membership::AdmissionDecision>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -206,7 +209,8 @@ impl Store {
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
-            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None, learning_decision: None };
+            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None,
+            learning_decision: None, admission_decision: None };
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         expire_request_cancellations(&transaction, now)?;
@@ -302,6 +306,16 @@ impl Store {
         next.command.environment.clear();
         next.cancel |= previous.cancel;
         next.revision = previous.revision;
+        // Admission evidence comes from the host membership, never mutable execution input.
+        // Once copied, it remains frozen even after retirement or later host observations.
+        next.admission_decision.clone_from(&previous.admission_decision);
+        if next.admission_decision.is_none() {
+            let decision: Option<String> = transaction.query_row(
+                "SELECT json_extract(body,'$.admissionDecision') FROM resource_memberships_v1 WHERE id=?1 AND host=?2",
+                rusqlite::params![next.command.lane.id, next.command.lane.host], |row| row.get(0),
+            ).optional()?.flatten();
+            next.admission_decision = decision.map(|body| serde_json::from_str(&body)).transpose()?;
+        }
         if next.root_exec_id.is_empty() { next.root_exec_id.clone_from(&next.command.id); }
         if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") && next.command.parent.is_none() {
             next.receipt_subject = Some(resource_exec_receipts::subject(&self.origin, &next));
@@ -485,7 +499,7 @@ mod tests {
             execution.result = Some(PayloadResult {
                 head_start: None, head_end: None, clean_start: None, clean_end: None,
                 exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None,
-                evidence: None,
+                evidence: Default::default(),
             });
             store.update_shell_resource(&execution).unwrap();
         }
@@ -623,6 +637,7 @@ mod tests {
         terminal.result = Some(PayloadResult {
             head_start: None, head_end: None, clean_start: None, clean_end: None,
             exit_code: Some(0), exit_signal: None, wall_duration_ms: 10, memory_peak_bytes: None,
+            evidence: Default::default(),
         });
         store.update_shell_resource(&terminal).unwrap();
         let terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();

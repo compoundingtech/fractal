@@ -78,17 +78,17 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
-        if let Some(host) = admission.lanes {
-            // The PSI brake only governs finite lane admission, and only on Linux where
-            // /proc/pressure exists; sampling shares this refresh deadline at a 5s cadence.
-            if cfg!(target_os = "linux") {
-                if let Err(error) = admission.pressure_decision() {
-                    tracing::error!(%error, "invalid native admission PSI policy");
-                }
-                self.incremental.touch("host-lane-pressure");
-                self.arm_deadline_at("resource-pressure", u128::from(now.saturating_add(5)) * 1000,
-                    crate::reconcile_telemetry::WakeCause::Other);
+        // Both logical finite admission and enforced lanes consult the Linux PSI brake.
+        // Recovery must therefore wake even without configured native seat lanes.
+        if cfg!(target_os = "linux") {
+            if let Err(error) = admission.pressure_decision() {
+                tracing::error!(%error, "invalid native admission PSI policy");
             }
+            self.incremental.touch("host-lane-pressure");
+            self.arm_deadline_at("resource-pressure", u128::from(now.saturating_add(5)) * 1000,
+                crate::reconcile_telemetry::WakeCause::Other);
+        }
+        if let Some(host) = admission.lanes {
             let observation = (host.outside)();
             let mut previous = admission.outside_observation.lock().unwrap_or_else(PoisonError::into_inner);
             if *previous != Some(observation) {

@@ -63,6 +63,7 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
     // turns an unavailable cgroup peak into a measured zero.
     for (name, value) in [
         ("memory_bytes", request.capacity.as_ref().map(|capacity| json!(capacity.memory))),
+        ("admissionDecision", execution.admission_decision.as_ref().map(|decision| json!(decision))),
         ("request_id", execution.command.request_id.as_ref().map(|request_id| json!(request_id))),
         ("profile_key", request.profile.as_ref().map(|key| json!(key))),
         ("profile_estimate", request.profile_estimate.as_ref().map(|estimate| json!(estimate))),
@@ -170,6 +171,47 @@ mod tests {
         assert!(fields.get("memory_peak_bytes").is_none());
         assert!(claims(&store, Some(&head_prefix("other"))).is_empty());
         assert_eq!(fractal_schema::retention::policy().kind(KIND).class, fractal_schema::retention::Class::Durable);
+    }
+
+    #[test]
+    fn recovery_receipt_preserves_frozen_admission_decision_across_restart() {
+        use super::super::resource_membership::{Admission, DiskFit, Fit};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.db");
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.start_resource_authority("host-a", "epoch").unwrap();
+            let mut request = command("recovery");
+            request.lane.class = RequestClass::Recovery;
+            request.lane.disk = Some(fractal_runtime::DiskRequest { bytes: 1, path: "/workspace".into() });
+            let mut execution = store.submit_shell_resource(request, 10).unwrap();
+            assert!(matches!(store.request_resource_membership(&execution.command.lane, Fit {
+                room: execution.command.lane.capacity,
+                disk: Some(DiskFit { filesystem: 1, available: 7, floor: 20 }),
+                recovery_capable: true, ..Fit::default()
+            }, 20).unwrap(), Admission::Admitted(_)));
+            execution.state = "admitted".into();
+            store.update_shell_resource(&execution).unwrap();
+            let frozen = store.shell_resource("recovery").unwrap().admission_decision.unwrap();
+            assert_eq!(frozen.exemption.as_deref(), Some("disk-floor"));
+            assert_eq!(frozen.free_bytes_at_admission, Some(7));
+            assert_eq!(frozen.at_ms, 20);
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        let mut execution = store.shell_resource("recovery").unwrap();
+        execution.admission_decision.as_mut().unwrap().free_bytes_at_admission = Some(999);
+        execution.state = "completed".into();
+        execution.result = Some(PayloadResult::default());
+        store.update_shell_resource(&execution).unwrap();
+        let stored = store.shell_resource("recovery").unwrap();
+        let fields = receipt_fields(&stored);
+        assert_eq!(fields["admissionDecision"]["exemption"], "disk-floor");
+        assert_eq!(fields["admissionDecision"]["freeBytesAtAdmission"], 7);
+        assert_eq!(fields["admissionDecision"]["atMs"], 20);
+        let page = claims(&store, None);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].body["fields"]["class"], "recovery");
+        assert_eq!(page[0].body["fields"]["admissionDecision"], fields["admissionDecision"]);
     }
 
     #[test]
