@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Count exhausted native SLO objectives in Mac signal tiles",
+  "replay": { "status": "none", "detail": "Presentation only." },
+  "schema": { "status": "none", "detail": "Consumes existing SLO rows without changing wire schemas or generated clients." },
+  "rules": { "status": "none", "detail": "Server objective policies remain authoritative." },
+  "compatibility": { "status": "changed", "detail": "Mac aggregate signal counts include exhausted objectives. When server tone is absent, exhausted is red and burning is yellow, matching server classification. Ratio and gauge readings and paired-burn explanations retain their server text." },
+  "downtime": { "status": "none", "detail": "Normal app rollout." },
+  "manual": { "status": "none", "detail": "No configuration changes." },
+  "recovery": { "status": "none", "detail": "Ordinary app rollback; no persisted state changes." }
+}
