@@ -9242,8 +9242,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         Err(error) => return self.fail_suspension(agent, suspension, crate::seat_snapshot::code(&error), format!("{error:#}"), Vec::new()),
                     }
-                } else
-                if moved {
+                } else if moved {
                     crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 } else if let (Some(incarnation), Some(harness)) =
                     (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
