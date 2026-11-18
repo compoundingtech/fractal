@@ -177,6 +177,10 @@ const expectHeadingActions = async (canvasElement: HTMLElement) => {
   const reminderActions = canvasElement.querySelectorAll<HTMLButtonElement>('[data-thread-unread-reminder-controls] button')
   for (const button of [...naturalRead, ...reminderActions]) {
     await userEvent.unhover(button)
+    const heading = button.closest<HTMLElement>('[data-thread-read-heading]')!.getBoundingClientRect()
+    const bounds = button.getBoundingClientRect()
+    await expect(bounds.left).toBeGreaterThanOrEqual(heading.left)
+    await expect(bounds.right).toBeLessThanOrEqual(heading.right)
     await expect(getComputedStyle(button).backgroundColor).toBe('rgba(0, 0, 0, 0)')
     await expect(getComputedStyle(button).borderTopWidth).toBe('0px')
   }
@@ -193,6 +197,7 @@ const jumpStops = (detail: string): NonNullable<Story['play']> => async ({ canva
   await expectHeadingActions(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: jump }))
   await expect(await canvas.findByRole('status')).toHaveTextContent(detail)
+  await expectHeadingActions(canvasElement)
   await expect(canvas.queryByRole('alert')).toBeNull()
   await expect(indicators(canvasElement)).toHaveLength(1)
   await expect(canvasElement.querySelectorAll(threadAnchorSelector)).toHaveLength(replies.length)
