@@ -206,8 +206,14 @@ fn build(objectives: &[Objective]) -> Result<Targets> {
                 let value = Divergence { about, max_open: whole(max("open")?, "open maximum")? };
                 one(&mut divergence, "divergence", "projection-divergence", name, value)?;
             }
-            Indicator::Interval(_) | Indicator::Count(_) | Indicator::Ratio(_) | Indicator::Gauge(_) | Indicator::Native { .. } => {
-                bail!("objective {name} is a fleet declaration: Fractal ships native measurement definitions, not claim indicators or owner bindings")
+            Indicator::Interval(_)
+            | Indicator::Count(_)
+            | Indicator::GithubMergedCount(_)
+            | Indicator::GithubReadyToMerged(_)
+            | Indicator::Ratio(_)
+            | Indicator::Gauge(_)
+            | Indicator::Native { .. } => {
+                bail!("objective {name} is a fleet declaration: Fractal ships native measurement definitions, not claim indicators, GitHub indicators or owner bindings")
             }
         }
     }

@@ -293,3 +293,30 @@ fn empty_repository_probes_share_the_page_budget() -> Result<()> {
     assert!(snapshot.advance(&db, "source", 0, 1_000)?);
     Ok(())
 }
+
+#[test]
+fn indicator_horizons_ignore_unrequired_families_and_do_not_pin_to_retired_members() {
+    let roster = Roster { revision: "scope".into(), members: vec![
+        RosterMember { repository_id: "active".into(), effective_from_ms: 100, effective_until_ms: None },
+        RosterMember { repository_id: "retired".into(), effective_from_ms: 0, effective_until_ms: Some(100) },
+    ] };
+    let record = |repository: &str, family, through_ms| Coverage {
+        repository_id: repository.into(), family, complete: true, authoritative: true,
+        history_from_ms: 0, through_ms, error: None,
+    };
+    let records = vec![
+        record("active", FactFamily::PullRequest, 1_000),
+        record("active", FactFamily::Merge, 900),
+        record("active", FactFamily::Lifecycle, 500),
+        record("retired", FactFamily::Merge, 50),
+    ];
+    let merged = [FactFamily::PullRequest, FactFamily::Merge];
+    assert_eq!(measurement_horizon(&records, &roster, &merged), Some(1_000));
+    assert_eq!(measurement_horizon(&records[2..3], &roster, &merged), None);
+    let without_lifecycle = &records[..2];
+    assert_eq!(measurement_horizon(without_lifecycle, &roster, &merged), Some(1_000));
+    let ready = [FactFamily::PullRequest, FactFamily::Merge, FactFamily::Lifecycle];
+    assert_eq!(measurement_horizon(without_lifecycle, &roster, &ready), Some(1_000));
+    // A retired member's newer upstream scan cannot move the horizon past its membership.
+    assert_eq!(measurement_horizon(&[record("retired", FactFamily::Merge, 2_000)], &roster, &merged), Some(100));
+}
