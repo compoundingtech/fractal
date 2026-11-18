@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make native operational SLO allowances and independent diagnostic aspirations explicit",
+  "replay": { "status": "none", "detail": "Uses existing retained native evidence; diagnostic windows cannot backfill accounting history." },
+  "schema": { "status": "none", "detail": "No new persisted schema or wire fields." },
+  "rules": { "status": "none", "detail": "Retains the native platform's 5% latency, 1% transaction and 5% capacity-time allowances over 30d with cadence-aware paired burns." },
+  "compatibility": { "status": "changed", "detail": "Built-in objective descriptions explicitly distinguish operational slow-event and capacity-time allowances from p99/max aspirations. Row IDs, targets and evaluation remain unchanged." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "Fleet owners bind native rows through their own declarations; public defaults carry no fleet identity." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback restores prior descriptions without changing evidence." }
+}
