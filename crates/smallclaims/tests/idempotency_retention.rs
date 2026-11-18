@@ -348,7 +348,7 @@ fn retention_unique_key_flood_stabilizes_at_the_published_window() {
         loop {
             let cleanup = store.cleanup_idempotency(now).unwrap();
             assert!(cleanup.examined <= CLEANUP_CHUNK);
-            if cleanup.examined < CLEANUP_CHUNK {
+            if cleanup.examined == 0 {
                 break;
             }
         }
