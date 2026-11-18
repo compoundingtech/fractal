@@ -315,7 +315,7 @@ fn check_store(store: &Path, uid: u32) -> Result<()> {
 /// The calling process and its Unix user, as the kernel reports them. Linux only: the gateway's
 /// caller checks rest on Linux credentials and cgroups.
 #[cfg(target_os = "linux")]
-fn peer_credentials(stream: &UnixStream) -> io::Result<(i32, u32)> {
+pub(crate) fn peer_credentials(stream: &UnixStream) -> io::Result<(i32, u32)> {
     let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let result = unsafe {
@@ -334,7 +334,7 @@ fn peer_credentials(stream: &UnixStream) -> io::Result<(i32, u32)> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn peer_credentials(_stream: &UnixStream) -> io::Result<(i32, u32)> {
+pub(crate) fn peer_credentials(_stream: &UnixStream) -> io::Result<(i32, u32)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "the sekrets gateway runs only on Linux",

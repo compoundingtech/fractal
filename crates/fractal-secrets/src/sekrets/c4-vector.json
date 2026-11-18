@@ -1,0 +1,24 @@
+{
+  "version": "c4-experimental-v1",
+  "provenance": "Disposable deterministic test seeds 00..1f and 20..3f; never enrollment credentials.",
+  "issuerKey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "certificate": {
+    "statement": "[\"org.fractal.session.v1\",\"fixture-c4-root\",\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"fixture-machine\",\"fixture-service\",\"session/fixture/root\",\"fixture-incarnation-root\",\"\",\"\",\"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc\",1800000000000,1800000060000]",
+    "signature": "hNEGKDNaku-1ddiYsN8mPYezeSgIMhLN4XnQWyqq4nE39jk8eookd4hErihHf3a8HjRr_mtf2JTvDdoCWgYkBg"
+  },
+  "ancestors": [],
+  "proof": {
+    "statement": "[\"org.fractal.session-proof.v1\",\"fixture-c4-root\",\"fixture-service\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8\",1800000001000]",
+    "signature": "ReuoYETkDm6zzLolTD71Jia7DeOYpKGwoDLwJISJXRXhIUtuDvUyOg0jg3DftVnTHTn0yIxLqcUxkgkrJvYCCA"
+  },
+  "expected": {
+    "machine": "fixture-machine",
+    "audience": "fixture-service",
+    "leaf": "session/fixture/root",
+    "incarnation": "fixture-incarnation-root",
+    "workAttempt": "",
+    "parentCertificateId": ""
+  },
+  "requestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "nowMs": 1800000001000
+}

@@ -82,6 +82,40 @@ configured socket, and only over a Unix socket. `fractal sekrets enable` registe
 daemon found that way, so a person enables from a login environment whose `ST3_ENDPOINT`, if set,
 names their own daemon.
 
+### Experimental C4 session provenance
+
+`fractal_secrets::sekrets::c4::Broker` is a disposable Linux library experiment, **not**
+an enabled issuer, HTTP route, enrollment mechanism, or permission grant. Existing attestations
+and production gateway behavior are unchanged. `Broker::open` requires a pre-created root-owned
+0700 directory beneath root-controlled ancestors (for example a disposable directory under
+`/run`). It creates a separate protected issuer key with the existing `MemberKey` crypto.
+
+Only a trusted privileged launcher may invoke `bind_launch` with independently resolved native
+session identity, incarnation, optional work attempt, UID, and cgroup from its launch plan.
+A root must be an actual child of the broker. A nested launch requires a parent socket whose
+kernel PID/UID, start time, and cgroup match the registered parent, a parent session proof
+binding the exact observed child and launch plan, and an actual child PPID matching that parent.
+Each independent leaf requires its own non-root UID and root-controlled cgroup. Environment
+names, claimant parent IDs, shared-UID leaves, and multiplexed same-PID subagents do not qualify.
+This seam deliberately does not expose arbitrary caller-driven registration or minting.
+
+Certificates bind issuer, machine, audience, full leaf identity, incarnation, work attempt,
+parent certificate, and broker-held session key for at most 60 seconds; child expiry cannot
+exceed its parent's. `prove` rechecks the process boundary and signs an audience-bound request
+digest and fresh nonce without exporting a session key. `admit` requires exact expected
+identity and request binding, checks signatures/lifetimes and current ancestry revocation,
+and atomically consumes the nonce in SQLite. Missing/replaced state is not trusted.
+`revoke` cascades to descendants. Restart revokes every old certificate while retaining
+certificate IDs, incarnation uniqueness, and consumed nonces; it never restores old session keys.
+
+The deterministic, explicitly disposable cross-language crypto vector lives at
+`crates/fractal-secrets/src/sekrets/c4-vector.json`. Focused nonprivileged coverage is
+`nix develop -c cargo test --locked -p fractal-secrets --lib sekrets::c4`.
+The ignored `sekrets::c4::tests::linux_protected_launch_and_verified_spawn` test additionally
+requires a disposable Linux VM running as root with writable cgroup v2 and unused fixture
+UIDs 60001/60002. It is not a host deployment procedure; no daemon activation is part of the spike.
+
+
 ### Tiles
 
 A [tile](tiles.md) is an agent with its own Unix user, and the kernel names it without any
