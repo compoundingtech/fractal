@@ -2987,6 +2987,8 @@
       "required": ["action", "phase", "operation_id", "updated_at", "blocking"],
       "properties": {
         "action": { "enum": ["suspend", "resume"] },
+        "cause": { "type": ["string", "null"], "description": "manual or idle. Absent or null means manual; unknown values are retained." },
+        "mode": { "type": ["string", "null"], "description": "git or in-place. Absent or null means git; unknown values are retained." },
         "phase": { "enum": [
           "quiescing",
           "snapshotting",

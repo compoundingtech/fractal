@@ -1736,12 +1736,15 @@ async fn request_suspension(
         )
         .await?;
     let resume = route.ends_with("/resume");
+    // A manual conversion completes in place; follow the operation whose hold it preserves.
+    let operation = claim.body.pointer("/fields/operation_id")
+        .and_then(Value::as_str).unwrap_or(&claim.id);
     let gateway = generated_client(endpoint, None)?;
     let wait = async {
         loop {
             if let ClientResource::Agent(agent) = gateway.agents_get(subject).await?.value
                 && let Some(suspension) = agent.suspension.clone()
-                && suspension.operation_id == claim.id
+                && suspension.operation_id == operation
             {
                 let failure = || {
                     let blocking = if suspension.blocking.is_empty() {

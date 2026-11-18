@@ -2800,6 +2800,29 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+#[test]
+fn agent_card_suspension_shows_cause_and_mode_with_legacy_defaults() {
+    for (metadata, expected) in [
+        (serde_json::json!({}), "manual · git"),
+        (serde_json::json!({"cause":"idle", "mode":"in-place"}), "idle · in-place"),
+        (serde_json::json!({"cause":"future", "mode":"future-mode"}), "future · future-mode"),
+    ] {
+        let mut suspension = serde_json::json!({
+            "action":"suspend", "phase":"suspended", "operation_id":"operation",
+            "updated_at":"2026-11-18T00:00:00Z", "blocking":[]
+        });
+        suspension.as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
+            "kind":"agent", "id":"agent/sample", "revision":"one", "name":"Sample",
+            "updated_at":"2026-11-18T00:00:00Z", "state":"suspended",
+            "reachability":"local", "runtime_ids":[], "suspension":suspension
+        })).unwrap();
+        assert!(render_client_agent(&agent, &[], 0).contains(
+            &format!("SUSPENSION   suspend suspended · {expected}\n")
+        ));
+    }
+}
+
 fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
     serde_json::from_value(serde_json::json!({
         "kind": "agent", "id": "agent/garden/worker", "revision": "one",

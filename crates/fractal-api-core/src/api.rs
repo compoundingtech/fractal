@@ -3738,6 +3738,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     json!({
         "action": suspension.action,
         "phase": suspension.phase,
+        "cause": suspension.cause(),
+        "mode": suspension.mode(),
         "operation_id": suspension.operation_id,
         "harness": suspension.harness,
         "native_session_id": suspension.native_session_id,
@@ -11243,6 +11245,11 @@ pub fn request_suspend(
     {
         return Ok(prior);
     }
+    if let Some(prior) = state.store.suspension_manual_request(&subject, &key)
+        .map_err(ApiError::internal)?
+    {
+        return Ok(prior);
+    }
     if crate::rollout::status(&state.store, &subject)
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
@@ -11262,6 +11269,36 @@ pub fn request_suspend(
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
         && suspension.holds_seat()
     {
+        let manual_key = crate::suspension::suspend_manual_key(
+            suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id),
+        );
+        if suspension.cause() == "idle" && suspension.phase == "suspended" {
+            check_suspension_fence(
+                fence.as_ref(), suspension.incarnation_id.as_deref(), &token,
+            )?;
+            let (claim, _) = state.store.append_source_gated(
+                &subject,
+                &ClaimInput {
+                    subject: subject.clone(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: Some(actor),
+                    fields: BTreeMap::from([
+                        ("action".into(), json!("suspend")),
+                        ("operation_status".into(), json!("manual")),
+                        ("cause".into(), json!("manual")),
+                        ("request_key".into(), json!(key)),
+                        ("operation_id".into(), json!(suspension.operation_id)),
+                    ]),
+                    evidence: vec![token, suspension.suspend_operation_id.clone().unwrap_or_else(|| suspension.operation_id.clone())],
+                    expected_subject: None,
+                    idempotency_key: Some(manual_key),
+                },
+                crate::store::owned_sets::Verb::Suspend,
+                force_reason,
+            ).map_err(ApiError::bad)?;
+            signal_changed(state);
+            return Ok(claim);
+        }
         return Err(ApiError::bad(
             FractalError::new(
                 "already-suspended",
@@ -11374,6 +11411,14 @@ pub fn request_resume(
         return Err(ApiError::bad(FractalError::new(
             "invalid-host",
             "resume needs a host name",
+        )));
+    }
+    if suspension.mode() == "in-place"
+        && suspension.source_host.as_deref() != Some(host.as_str())
+    {
+        return Err(ApiError::bad(FractalError::new(
+            "snapshot-in-place",
+            "an in-place suspension can only resume on its source host",
         )));
     }
     let launch_token = if let Some((incumbent, old)) =
