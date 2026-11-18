@@ -90,7 +90,7 @@ fn retirement_filter_rejects_unknown_counters_coverage_and_all_truncations() {
     rejected.retirement_confirmed = false;
     assert_eq!(record(&mut connection, &rejected),
         RecordOutcome::Rejected(Rejection::UnconfirmedRetirement));
-    for end_reason in [EndReason::Cancelled, EndReason::TimedOut, EndReason::MaxHold, EndReason::Signalled] {
+    for end_reason in [EndReason::Cancelled, EndReason::TimedOut, EndReason::MaxHold, EndReason::Signalled, EndReason::Unknown] {
         rejected = sample(1, 100);
         rejected.end_reason = end_reason;
         assert_eq!(record(&mut connection, &rejected), RecordOutcome::Rejected(Rejection::Truncated));
@@ -284,4 +284,15 @@ fn absent_cgroup_population_counter_cannot_certify_untruncated_retirement() {
     let mut observed = sample(1, 100);
     observed.pre_retirement_populated = None;
     assert_eq!(observed.rejection(), Some(Rejection::MissingRetirementEvidence));
+}
+
+#[test]
+fn partial_readiness_configuration_never_implies_unobserved_capabilities() {
+    let readiness: HostReadiness = serde_json::from_str(
+        "{\"nixPerBuildCgroups\":true}").unwrap();
+    assert!(readiness.nix_per_build_cgroups);
+    assert!(!readiness.io_accounting && !readiness.disk_measurement);
+    assert!(!readiness.permits_below_seed());
+    assert!(serde_json::from_str::<HostReadiness>(
+        "{\"pretendReady\":true}").is_err());
 }

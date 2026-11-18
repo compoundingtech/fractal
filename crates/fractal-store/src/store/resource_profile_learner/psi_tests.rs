@@ -132,3 +132,12 @@ fn host_reader_parses_real_files_without_substituting_missing_or_stale_data() {
     std::fs::write(&io, "some avg60=1.00\nsome avg60=2.00\n").unwrap();
     assert!(reader.read_paths(&policy, 126, &memory, &io).is_err());
 }
+
+#[test]
+fn omitted_policy_durations_use_declared_defaults_without_ignoring_unknown_fields() {
+    let policy: Policy = serde_json::from_str("{\"sustainedMs\":15000}").unwrap();
+    assert_eq!(policy.sustained_ms, 15000);
+    assert_eq!(policy.resume_ms, 120000);
+    assert_eq!(policy.rules, Policy::default().rules);
+    assert!(serde_json::from_str::<Policy>("{\"tripWhenever\":true}").is_err());
+}

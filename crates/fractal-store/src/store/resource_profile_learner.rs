@@ -14,7 +14,7 @@ pub const MIN_SAMPLES: usize = 20;
 pub const WINDOW_SAMPLES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostReadiness {
     pub nix_per_build_cgroups: bool,
     pub io_accounting: bool,
@@ -53,6 +53,7 @@ pub enum EndReason {
     TimedOut,
     MaxHold,
     Signalled,
+    Unknown,
 }
 
 /// Produced by the executing host only after generation-fenced whole-tree retirement.

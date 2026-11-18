@@ -39,15 +39,28 @@ fn optional_file(path: &Path) -> Result<Option<String>> {
 }
 
 pub fn read(cgroup: &Path) -> Result<Observation> {
+    let populated_before = optional_file(&cgroup.join("cgroup.events"))?
+        .map(|value| parse_populated(&value)).transpose()?;
     let memory_peak_bytes = optional_file(&cgroup.join("memory.peak"))?
         .map(|value| value.trim().parse()).transpose()?;
     let memory_events = optional_file(&cgroup.join("memory.events"))?
         .map(|value| parse_memory_events(&value)).transpose()?;
     let io_stat = optional_file(&cgroup.join("io.stat"))?
         .map(|value| parse_io_stat(&value)).transpose()?;
-    let populated = optional_file(&cgroup.join("cgroup.events"))?
+    let populated_after = optional_file(&cgroup.join("cgroup.events"))?
         .map(|value| parse_populated(&value)).transpose()?;
+    let populated = stable_population(populated_before, populated_after);
     Ok(Observation { memory_peak_bytes, memory_events, io_stat, populated })
+}
+
+// Reading "empty" only after the counters could miss a final peak written during the snapshot.
+// Unknown on either side cannot certify that every counter was observed after natural quiescence.
+fn stable_population(before: Option<bool>, after: Option<bool>) -> Option<bool> {
+    match (before, after) {
+        (Some(false), Some(false)) => Some(false),
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        _ => None,
+    }
 }
 
 pub fn parse_populated(value: &str) -> Result<bool> {
@@ -169,6 +182,20 @@ mod tests {
         assert!(parse_populated("populated 1\nfrozen 0\n").unwrap());
         for value in ["frozen 0\n", "populated 2\n", "populated 0\npopulated 1\n"] {
             assert!(parse_populated(value).is_err());
+        }
+    }
+
+    #[test]
+    fn quiescence_must_bracket_every_counter_read() {
+        assert_eq!(stable_population(Some(false), Some(false)), Some(false));
+        for (before, after) in [
+            (Some(true), Some(false)), (Some(false), Some(true)),
+            (Some(true), Some(true)), (Some(true), None), (None, Some(true)),
+        ] {
+            assert_eq!(stable_population(before, after), Some(true));
+        }
+        for (before, after) in [(None, None), (None, Some(false)), (Some(false), None)] {
+            assert_eq!(stable_population(before, after), None);
         }
     }
 }

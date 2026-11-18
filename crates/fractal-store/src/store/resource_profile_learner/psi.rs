@@ -31,7 +31,7 @@ pub struct Rule {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Policy {
     pub rules: Vec<Rule>,
     pub sustained_ms: u64,
