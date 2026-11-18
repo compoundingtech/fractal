@@ -363,14 +363,14 @@ fn wake_demand_receipt_before_send_and_mirror_replay_are_monotone() {
     append(&graph, &sent("message/early-receipt", "agent/cedar", &[]));
     step(&graph, "message/early-receipt", "message.staged");
     graph.connection.write().execute(
-        "INSERT INTO local_stream_lifecycle(subject,kind) VALUES(?1,'message.staged')",
+        /* sqlite-large-value: allow-for-now lv-hd041c8f2ef6a owner=fractal_store::store::stream_mirror_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_stream_lifecycle(subject,kind) VALUES(?1,'message.staged')",
         ["message/early-receipt"],
     ).unwrap();
     assert!(!graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
     stream_mirror::mirror(&graph).unwrap();
     assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_none());
     graph.connection.write().execute(
-        "DELETE FROM meta WHERE key IN ('stream_mirror_sent_through','stream_mirror_lifecycle_through')", [],
+        /* sqlite-large-value: allow-for-now lv-h402a55290888 owner=fractal_store::store::stream_mirror_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN ('stream_mirror_sent_through','stream_mirror_lifecycle_through')", [],
     ).unwrap();
     assert!(!graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
     stream_mirror::mirror(&graph).unwrap();
@@ -391,7 +391,7 @@ fn wake_demand_prefers_person_then_canonical_time_and_subject() {
         ("message/later-person", "person/example", 30),
     ] {
         graph.connection.write().execute(
-            "INSERT INTO local_stream_sent(subject,sent_ms,fields,stream_index) VALUES(?1,?2,?3,?4)",
+            /* sqlite-large-value: allow-for-now lv-ha59aa8322ff3 owner=fractal_store::store::stream_mirror_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_stream_sent(subject,sent_ms,fields,stream_index) VALUES(?1,?2,?3,?4)",
             params![subject, sent_ms, json!({"from":from,"to":"agent/cedar","tags":[]}).to_string(), sent_ms],
         ).unwrap();
     }
@@ -430,7 +430,7 @@ fn wake_demand_restarts_a_partially_committed_backfill_and_preserves_late_sends(
         }
         stream_mirror::mirror(&graph).unwrap();
         graph.connection.write().execute_batch(
-            "DELETE FROM local_wake_demand_v1 WHERE subject>'message/history-063';
+            /* sqlite-large-value: allow-for-now lv-hbf49a9a9002d owner=fractal_store::store::stream_mirror_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_wake_demand_v1 WHERE subject>'message/history-063';
              DELETE FROM meta WHERE key='local_wake_demand_v1_complete';
              INSERT OR REPLACE INTO meta(key,value) VALUES('local_wake_demand_v1_after','message/history-063');",
         ).unwrap();
