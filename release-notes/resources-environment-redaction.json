@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep captured shell resource environment values out of durable records and execution responses",
+  "replay": {"status": "changed", "detail": "Every store startup idempotently removes captured environment maps from historical shell resource bodies. Only the number of changed rows is returned; no environment values are logged. This owner-local custody table is not replicated, so an older peer cannot re-import its records."},
+  "schema": {"status": "changed", "detail": "Shell command environment values move through an input-only submission envelope and a process-local launch handoff. They are omitted from stored command bodies and execution responses. No table or replicated claim schema changes."},
+  "rules": {"status": "none", "detail": "Resource ownership, admission, and execution fencing are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Queued commands whose launch environment is lost on daemon restart fail closed rather than executing with an incomplete environment. Clients should resubmit them. Program resource command environments and program-host start messages remain transient process-launch inputs, not durable environment snapshots."},
+  "downtime": {"status": "none", "detail": "The scrub runs when an updated store opens; no coordinated fleet outage is required."},
+  "manual": {"status": "changed", "detail": "Rotate potentially exposed credentials independently of this scrub. Logical removal does not securely erase free database pages, WAL files, backups, or copies on hosts that have not opened an updated binary. Ordinary seat launch snapshots are a separate pre-existing storage boundary and are not changed here."},
+  "recovery": {"status": "changed", "detail": "Scrubbed environment values cannot be recovered from live rows. A rollback may capture values again; retain the fix and resubmit interrupted queued commands instead."}
+}

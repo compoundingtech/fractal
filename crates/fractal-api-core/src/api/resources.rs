@@ -1,7 +1,7 @@
 //! Shell transport: bound callers access only their native owner; admission stays with the host reconciler.
 use super::*;
 use anyhow::Context;
-use crate::store::shell_resources::{Command, Execution};
+use crate::store::shell_resources::{Command, Execution, Submission};
 use crate::store::resource_membership::{Coverage, RequestClass};
 
 pub(super) fn allows_bound_request(method: &axum::http::Method, path: &str) -> bool {
@@ -78,8 +78,9 @@ pub(super) struct ListQuery {
 #[derive(Deserialize)]
 pub(super) struct WaitQuery { after: u64 }
 
-pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Json(mut command): Json<Command>) -> Result<Json<Execution>, ApiError> {
+pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Json(submission): Json<Submission>) -> Result<Json<Execution>, ApiError> {
     require_exec_platform(cfg!(target_os = "macos"))?;
+    let Submission { mut command, environment } = submission;
     (|| -> anyhow::Result<()> {
         anyhow::ensure!(command.lane.host.is_empty() || command.lane.host == state.node, "shell execution must use the connected host");
         let id = format!("shell:{}", command.id);
@@ -121,6 +122,7 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
     } else {
         command.lane.owner = owner;
     }
+    command.environment = environment;
     let execution = state.store.submit_shell_resource(command, u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(ApiError::internal)?;
     state.notify.notify_one();
     state.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
@@ -146,8 +148,7 @@ fn validate_parent(command: &Command, parent: &crate::store::resource_membership
 }
 
 fn present(mut execution: Execution) -> Execution {
-    // The durable launch envelope can contain credentials. Inspection never exports it.
-    execution.command.environment.clear();
+    // Parent grants are process capabilities, not inspection metadata.
     execution.command.parent = None;
     execution
 }
@@ -244,8 +245,8 @@ mod tests {
             timeout_ms:None, parent:Some(grant.clone()) };
         let mut other_owner = state.clone();
         other_owner.owning_person = Some("person/other".into());
-        assert!(submit(State(other_owner), None, None, Json(command.clone())).await.is_err());
-        let Json(child) = submit(State(state.clone()), None, None, Json(command.clone())).await.unwrap();
+        assert!(submit(State(other_owner), None, None, Json(command.clone().into())).await.is_err());
+        let Json(child) = submit(State(state.clone()), None, None, Json(command.clone().into())).await.unwrap();
         assert_eq!(child.command.lane, parent);
         assert!(child.command.parent.is_none(), "inspection must not export replayable parent grants");
         let Json(details) = show(State(state.clone()), None, None, AxumPath(child.command.id.clone())).await.unwrap();
@@ -254,7 +255,7 @@ mod tests {
         assert_eq!(state.store.resource_memberships_for_host(&state.node).unwrap().len(), 1);
         assert_eq!(state.store.held_resource_membership_bytes(&state.node, "").unwrap(), 24 << 30);
         state.store.cancel_resource_membership(&grant, &parent.owner, 11).unwrap();
-        assert!(submit(State(state), None, None, Json(command)).await.is_err());
+        assert!(submit(State(state), None, None, Json(command.into())).await.is_err());
     }
 
     #[tokio::test]
@@ -303,7 +304,8 @@ mod tests {
         let Json(result) = waiting.await.unwrap();
         assert_eq!(result.exit_code,Some(37));
         assert!(result.command.environment.is_empty());
-        assert_eq!(state.store.shell_resource("waiter").unwrap().command.environment.len(),1);
+        assert!(state.store.shell_resource("waiter").unwrap().command.environment.is_empty());
+        assert!(!serde_json::to_string(&result).unwrap().contains("private-test-value"));
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -318,9 +320,13 @@ mod tests {
         lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport.clone()) };
         let command = Command { id:id.clone(), lane, argv:vec!["true".into()], cwd:"/work".into(),
             environment:BTreeMap::from([("ST_MISSION_RUN".into(),"mission-run/spoofed".into())]), timeout_ms:None, parent:None };
-        assert!(submit(State(state.clone()),Some(BoundActor::Agent("agent/missing".into())),None,Json(command.clone())).await.is_err());
-        let Json(execution) = submit(State(state.clone()),None,None,Json(command)).await.unwrap();
+        assert!(submit(State(state.clone()),Some(BoundActor::Agent("agent/missing".into())),None,Json(command.clone().into())).await.is_err());
+        let Json(execution) = submit(State(state.clone()),None,None,Json(command.into())).await.unwrap();
         assert_eq!(execution.command.lane.owner.run,"person/operator");
+        assert_eq!(state.store.take_shell_resource_environment(&id).unwrap()["ST_MISSION_RUN"], "mission-run/spoofed");
+        let Json(details) = show(State(state.clone()), None, None, AxumPath(id.clone())).await.unwrap();
+        assert!(details["execution"]["command"].get("environment").is_none());
+        assert!(!details.to_string().contains("mission-run/spoofed"));
         assert_eq!(execution.command.lane.owner.step,transport);
         let mut persisted = state.store.shell_resource(&id).unwrap();
         persisted.command.environment.clear();
@@ -470,7 +476,7 @@ mod tests {
             lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport) };
             let command = Command { id:id.clone(), lane, argv:vec!["true".into()], cwd:"/work".into(),
                 environment:BTreeMap::from([("ST_MISSION_RUN".into(),"spoofed".into())]), timeout_ms:None,parent:None };
-            let (status, body) = bound_request(&state,bound_agent,run_credential,"POST","/v1/internal/resources/exec",serde_json::to_value(command).unwrap()).await;
+            let (status, body) = bound_request(&state,bound_agent,run_credential,"POST","/v1/internal/resources/exec",serde_json::to_value(Submission::from(command)).unwrap()).await;
             if cfg!(target_os = "macos") {
                 assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{body}");
                 assert_eq!(body["code"],"unsupported-platform");

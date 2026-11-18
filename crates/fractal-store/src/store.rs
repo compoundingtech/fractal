@@ -23,6 +23,7 @@ pub mod host_holds;
 pub mod launch_freeze;
 pub mod resource_membership;
 pub mod shell_resources;
+mod environment_scrub;
 pub mod resource_exec_receipts;
 mod device_renewal;
 pub mod evidence;
@@ -2433,6 +2434,7 @@ pub struct Store {
     _resource_backfill: Option<resource_references::BackfillWorker>,
     resource_observations: std::sync::OnceLock<std::sync::Mutex<resource_membership::Observations>>,
     resource_clocks: std::sync::OnceLock<std::sync::Mutex<resource_membership::Clocks>>,
+    shell_resource_environments: std::sync::OnceLock<std::sync::Mutex<shell_resources::Environments>>,
     usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
@@ -2953,6 +2955,7 @@ impl Store {
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
+            shell_resource_environments: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2987,6 +2990,7 @@ impl Store {
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
+            shell_resource_environments: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -3022,6 +3026,7 @@ impl Store {
             resource_observations: Default::default(),
             launch_admission: Default::default(),
             resource_clocks: Default::default(),
+            shell_resource_environments: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })

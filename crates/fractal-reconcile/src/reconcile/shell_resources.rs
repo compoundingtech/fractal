@@ -34,7 +34,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != execution.command.lane.id);
                 self.shell_exec_watches.lock().unwrap_or_else(PoisonError::into_inner).remove(&execution.command.id);
-                execution.command.environment.clear();
             }
             if self.store.update_shell_resource(&execution)? { self.signal_changed(); }
         }
@@ -274,7 +273,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let newly_started = !record.roots.iter().any(|root| root.runtime_id == execution.command.id);
         if newly_started {
             execution.queue_wait_ms = self.store.shell_resource_queue_wait_ms(execution, now);
-            let mut environment = execution.command.environment.clone();
+            let mut environment = self.store.take_shell_resource_environment(&execution.command.id)?;
             environment.insert(PARENT_ENV.into(), serde_json::to_string(&crate::store::shell_resources::ParentContext { grant: grant.clone(), request: request.clone() })?);
             // Nested CLIs must reconnect to the exact authority which owns the inherited grant.
             environment.insert("ST3_ENDPOINT".into(), self.endpoint.clone());
@@ -304,7 +303,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         let root = record.roots.iter().find(|root| root.runtime_id == execution.command.id).context("shell execution root missing")?;
         let generation = root.execution.as_ref().context("shell preparation is uncertain; custody retained")?;
         execution.started_at = Some(root.payload_released_at.context("shell payload release has no durable timestamp")?);
-        execution.command.environment.clear();
         match fs::read(result_path.with_extension("started")) {
             Ok(bytes) => {
                 let (head, clean): (Option<String>, Option<bool>) = serde_json::from_slice(&bytes)?;

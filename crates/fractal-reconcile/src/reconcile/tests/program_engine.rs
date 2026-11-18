@@ -229,6 +229,30 @@ fn entries(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[test]
+fn program_start_environment_stays_live_without_a_durable_launch_snapshot() {
+    use crate::RuntimeStartsStore;
+
+    let fixture = fixture(Liveness::default());
+    let started = fixture.start("private-environment", "idle");
+    fixture.until("the host receives the attempt environment", || {
+        fixture.journal(&started.step).contains(&("first".into(), "completed".into()))
+    });
+    let environment = fixture.engine.attempt_environment(&started.step, 1).unwrap();
+    let credential = &environment[crate::store::run_credentials::RUN_CREDENTIAL_ENV];
+    assert!(!credential.is_empty());
+    assert_eq!(fixture.store.run_binding(credential).unwrap().step_run, started.step);
+    assert!(fixture.store.pending_runtime_starts().unwrap().is_empty(),
+        "program-host IPC must not create ordinary durable seat launch snapshots");
+    for subject in [&started.run, &started.step] {
+        let claims = fixture.store.claims_for(subject, None).unwrap();
+        for claim in claims {
+            assert!(!claim.body.to_string().contains(credential),
+                "program start environment leaked into a durable claim");
+        }
+    }
+}
+
+#[test]
 fn trace_context_crosses_host_worker_and_exec_and_is_retained_with_result() {
     let fixture = fixture(Liveness::default());
     let first = fixture.start("trace-first", "trace");

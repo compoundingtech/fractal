@@ -137,7 +137,7 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
         owner: Owner { run: format!("shell:{id}"), step: format!("shell:{id}"), attempt: 1, invocation: Some(format!("shell:{id}")) } };
     let command = shell_resources::Command { id: id.clone(), lane, argv: args.argv, cwd: cwd.to_string_lossy().into_owned(),
         environment: std::env::vars().collect(), timeout_ms: args.timeout, parent: parent.map(|parent| parent.grant) };
-    let mut execution: Execution = client.post("/v1/internal/resources/exec", &command).await?;
+    let mut execution: Execution = client.post("/v1/internal/resources/exec", &shell_resources::Submission::from(command)).await?;
     let mut announced_admission = false;
     loop {
         if execution.started_at.is_some() && !announced_admission {

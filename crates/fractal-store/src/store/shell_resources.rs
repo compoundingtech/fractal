@@ -1,4 +1,4 @@
-//! Durable local commands handed to the existing host resource writer.
+//! Durable shell metadata with a process-local, one-use launch environment handoff.
 use super::*;
 use super::resource_membership::{Grant, LaneRequest};
 
@@ -18,9 +18,34 @@ pub struct Command {
     pub lane: LaneRequest,
     pub argv: Vec<String>,
     pub cwd: String,
+    /// Only populated by the submission transport; never serialized or read from storage.
+    #[serde(default, skip_serializing, deserialize_with = "discard_environment")]
     pub environment: BTreeMap<String, String>,
     pub timeout_ms: Option<u64>,
     pub parent: Option<Grant>,
+}
+
+/// Input-only transport. Environment values never belong to an execution response.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Submission {
+    #[serde(flatten)]
+    pub command: Command,
+    pub environment: BTreeMap<String, String>,
+}
+
+impl From<Command> for Submission {
+    fn from(mut command: Command) -> Self {
+        let environment = std::mem::take(&mut command.environment);
+        Self { command, environment }
+    }
+}
+
+pub(super) type Environments = BTreeMap<String, BTreeMap<String, String>>;
+
+fn discard_environment<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<BTreeMap<String, String>, D::Error> {
+    let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(BTreeMap::new())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -51,21 +76,42 @@ pub struct Execution {
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // Transitional debt: command/result bodies and indexed text keys have no byte-size proof.
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9574bb92e055 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
+    super::environment_scrub::scrub(connection)?;
     Ok(())
 }
 
 impl Store {
-    pub fn submit_shell_resource(&self, command: Command, now: u64) -> Result<Execution> {
+    pub fn submit_shell_resource(&self, mut command: Command, now: u64) -> Result<Execution> {
         anyhow::ensure!(!command.id.is_empty() && !command.argv.is_empty(), "shell execution requires identity and argv");
         anyhow::ensure!(command.cwd.starts_with('/'), "shell execution cwd must be absolute");
+        let environment = std::mem::take(&mut command.environment);
+        // Hold the handoff lock across publication so the host writer cannot observe
+        // a queued command before its environment is available. Failed duplicate
+        // submissions must not replace the original command's environment.
+        let mut environments = self.shell_resource_environments.get_or_init(Default::default)
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None };
-        // One row per command does not bound its serialized argv/environment/result bytes.
+        // One row per command does not bound its serialized argv/result bytes.
         self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
+        environments.insert(execution.command.id.clone(), environment);
         self.resource_admission_elapsed(&format!("shell-wait:{}", execution.command.id), now, now);
         Ok(execution)
+    }
+
+    /// Consume only when preparing a new native root; recovery must never substitute
+    /// the daemon's own environment for a lost caller handoff.
+    pub fn take_shell_resource_environment(&self, id: &str) -> Result<BTreeMap<String, String>> {
+        self.shell_resource_environments.get_or_init(Default::default)
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id).context("shell launch environment unavailable after daemon restart; submit a new execution")
+    }
+
+    pub fn forget_shell_resource_environment(&self, id: &str) {
+        self.shell_resource_environments.get_or_init(Default::default)
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
     }
 
     pub fn shell_resource(&self, id: &str) -> Result<Execution> {
@@ -108,8 +154,10 @@ impl Store {
             resource_exec_receipts::append_tx(&transaction, &self.origin, &next)?;
         }
         transaction.commit()?;
+        drop(connection);
         if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") {
             self.finish_resource_admission_clock(&format!("shell-wait:{}", next.command.id));
+            self.forget_shell_resource_environment(&next.command.id);
         }
         Ok(true)
     }
@@ -195,6 +243,48 @@ mod tests {
             admission_timeout_ms: None,
             owner: Owner { run: format!("shell:{id}"), step: format!("shell:{id}"), attempt: 1, invocation: Some(format!("shell:{id}")) },
         }, argv: vec!["true".into()], cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None }
+    }
+
+    #[test]
+    fn environment_handoff_is_ephemeral_and_submission_only() {
+        let store = Store::open_memory("host-a").unwrap();
+        let mut input = command("secret");
+        input.environment.insert("EXAMPLE_TOKEN".into(), "private-test-value".into());
+        let wire = serde_json::to_value(Submission::from(input)).unwrap();
+        assert_eq!(wire["environment"]["EXAMPLE_TOKEN"], "private-test-value");
+        let Submission { mut command, environment } = serde_json::from_value(wire).unwrap();
+        command.environment = environment;
+        let execution = store.submit_shell_resource(command.clone(), 10).unwrap();
+        assert!(execution.command.environment.is_empty());
+        assert!(serde_json::to_value(&execution).unwrap()["command"].get("environment").is_none());
+        let body: String = store.readers.get().query_row(
+            "SELECT body FROM shell_resources_v1 WHERE id='secret'", [], |row| row.get(0)).unwrap();
+        assert!(!body.contains("private-test-value"));
+        command.environment.insert("EXAMPLE_TOKEN".into(), "replacement".into());
+        assert!(store.submit_shell_resource(command, 11).is_err());
+        assert_eq!(store.take_shell_resource_environment("secret").unwrap()["EXAMPLE_TOKEN"], "private-test-value");
+        assert!(store.take_shell_resource_environment("secret").is_err());
+        let mut legacy = serde_json::to_value(&execution).unwrap();
+        legacy["command"]["environment"] = serde_json::json!({"EXAMPLE_TOKEN":"legacy-secret"});
+        let legacy: Execution = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.command.environment.is_empty());
+    }
+
+    #[test]
+    fn restart_discards_queued_environment_and_terminal_rows_release_handoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.submit_shell_resource(command("queued"), 10).unwrap();
+            let mut done = store.submit_shell_resource(command("done"), 10).unwrap();
+            done.state = "cancelled".into();
+            store.update_shell_resource(&done).unwrap();
+            assert!(store.take_shell_resource_environment("done").is_err());
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        assert_eq!(store.shell_resource("queued").unwrap().state, "waiting");
+        assert!(store.take_shell_resource_environment("queued").is_err());
     }
 
     #[test]
