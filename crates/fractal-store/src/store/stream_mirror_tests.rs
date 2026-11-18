@@ -255,3 +255,201 @@ fn a_long_body_stays_in_the_shard_and_the_mirror_row_stays_small() {
     assert_eq!(coordination(&graph, "message/mirror-long"), Some((false, true)));
     assert_eq!(idle(&graph, "message/mirror-long"), Some(("agent/cedar".into(), true, false)));
 }
+
+#[test]
+fn wake_demand_is_shard_aware_and_does_not_hide_mirror_lag() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    assert!(graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
+    append(&graph, &sent("message/wake-index", "agent/cedar", &[]));
+    let lagging = graph.wake_demand("agent/cedar").unwrap();
+    assert!(lagging.oldest.is_none());
+    assert!(!lagging.frontier.caught_up);
+    stream_mirror::mirror(&graph).unwrap();
+    let current = graph.wake_demand("agent/cedar").unwrap();
+    assert!(current.frontier.caught_up);
+    assert_eq!(current.oldest.unwrap().subject, "message/wake-index");
+    step(&graph, "message/wake-index", "message.staged");
+    assert!(!graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
+    stream_mirror::mirror(&graph).unwrap();
+    let offered = graph.wake_demand("agent/cedar").unwrap();
+    assert!(offered.frontier.caught_up);
+    assert!(offered.oldest.is_none());
+}
+
+#[test]
+fn wake_demand_reuses_silent_person_and_reserved_family_classification() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    for (index, (from, tags, wakes, person)) in [
+        ("agent/birch", vec![], true, false),
+        ("agent/birch", vec!["st3-silent"], false, false),
+        ("agent/birch", vec!["st3-fyi"], false, false),
+        ("agent/birch", vec!["st3-silent", "launch"], false, false),
+        ("person/example", vec!["st3-silent"], true, true),
+        ("external/example", vec!["st3-silent"], true, true),
+        ("daemon/alder", vec!["st3-silent", "launch"], true, false),
+        ("agent/birch", vec!["st3-silent", "st3-work:step/example"], true, false),
+        ("agent/birch", vec!["st3-silent", "fractal-work-handoff:step/example"], true, false),
+        ("agent/birch", vec!["st3-silent", "st3-fault:example"], true, false),
+        ("agent/birch", vec!["st3-silent", "github-watch"], true, false),
+        ("agent/birch", vec!["st3-silent", "fractal-run-report:example"], true, false),
+        ("agent/birch", vec!["st3-silent", "st3-provider-capacity-retry"], true, false),
+        ("agent/birch", vec!["st3-silent", "st3-product-wait:example"], true, false),
+        ("agent/birch", vec!["st3-silent", "st3-session-start:example"], true, false),
+        ("agent/birch", vec!["st3-silent", "st3-restart-prepare:example"], true, false),
+    ].into_iter().enumerate() {
+        let recipient = format!("agent/recipient-{index}");
+        let mut input = sent(&format!("message/class-{index}"), &recipient, &tags);
+        input.actor = Some(from.into());
+        input.fields.insert("from".into(), json!(from));
+        graph.append_claim(&input).unwrap();
+        let demand = graph.wake_demand(&recipient).unwrap();
+        assert!(demand.frontier.caught_up);
+        assert_eq!(demand.oldest.is_some(), wakes, "{from} {tags:?}");
+        if wakes { assert_eq!(demand.oldest.unwrap().person, person); }
+    }
+}
+
+#[test]
+fn wake_demand_receipts_clear_graph_marks_and_shard_sends() {
+    for kind in ["message.staged", "message.delivered", "message.read", "message.closed"] {
+        for storage in ["claims", "marks", "shard"] {
+            let root = tempfile::tempdir().unwrap();
+            let graph = graph_with_shard(root.path());
+            let subject = "message/receipt";
+            let send = sent(subject, "agent/cedar", &[]);
+            if storage == "shard" {
+                append(&graph, &send);
+                stream_mirror::mirror(&graph).unwrap();
+            } else {
+                graph.append_claim(&send).unwrap();
+            }
+            assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_some());
+            let statuses: &[&str] = match kind {
+                "message.read" => &["delivered", "read"],
+                "message.closed" => &["delivered", "read", "closed"],
+                "message.staged" => &["staged"],
+                _ => &["delivered"],
+            };
+            for status in statuses {
+                let receipt_kind = format!("message.{status}");
+                if storage == "shard" {
+                    step(&graph, subject, &receipt_kind);
+                    stream_mirror::mirror(&graph).unwrap();
+                } else if storage == "marks" {
+                    message_marks::record(&graph, subject, &receipt_kind, "agent/cedar").unwrap();
+                } else {
+                    let receipt = ClaimInput {
+                        kind: receipt_kind, actor: Some("agent/cedar".into()),
+                        fields: serde_json::from_value(json!({"status": status})).unwrap(),
+                        ..send.clone()
+                    };
+                    graph.append_claim(&receipt).unwrap();
+                }
+                assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_none());
+            }
+            let demand = graph.wake_demand("agent/cedar").unwrap();
+            assert!(demand.frontier.caught_up, "{storage} {kind}");
+            assert!(demand.oldest.is_none(), "{storage} {kind}");
+        }
+    }
+}
+
+#[test]
+fn wake_demand_receipt_before_send_and_mirror_replay_are_monotone() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    append(&graph, &sent("message/early-receipt", "agent/cedar", &[]));
+    step(&graph, "message/early-receipt", "message.staged");
+    graph.connection.write().execute(
+        "INSERT INTO local_stream_lifecycle(subject,kind) VALUES(?1,'message.staged')",
+        ["message/early-receipt"],
+    ).unwrap();
+    assert!(!graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
+    stream_mirror::mirror(&graph).unwrap();
+    assert!(graph.wake_demand("agent/cedar").unwrap().oldest.is_none());
+    graph.connection.write().execute(
+        "DELETE FROM meta WHERE key IN ('stream_mirror_sent_through','stream_mirror_lifecycle_through')", [],
+    ).unwrap();
+    assert!(!graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
+    stream_mirror::mirror(&graph).unwrap();
+    let replayed = graph.wake_demand("agent/cedar").unwrap();
+    assert!(replayed.frontier.caught_up);
+    assert!(replayed.oldest.is_none());
+    assert_eq!(stream_mirror::mirror(&graph).unwrap(), 0);
+}
+
+#[test]
+fn wake_demand_prefers_person_then_canonical_time_and_subject() {
+    let root = tempfile::tempdir().unwrap();
+    let graph = graph_with_shard(root.path());
+    for (subject, from, sent_ms) in [
+        ("message/older-wake", "agent/birch", 1),
+        ("message/person-z", "person/example", 20),
+        ("message/person-a", "external/example", 20),
+        ("message/later-person", "person/example", 30),
+    ] {
+        graph.connection.write().execute(
+            "INSERT INTO local_stream_sent(subject,sent_ms,fields,stream_index) VALUES(?1,?2,?3,?4)",
+            params![subject, sent_ms, json!({"from":from,"to":"agent/cedar","tags":[]}).to_string(), sent_ms],
+        ).unwrap();
+    }
+    graph.connection.batched(wake_demand::flush).unwrap().unwrap();
+    assert_eq!(graph.wake_demand("agent/cedar").unwrap().oldest.unwrap().subject, "message/person-a");
+    // Independent writers replicate the same send subject at different accepted times.
+    // The later duplicate must not move person-a behind person-z or change its onset.
+    for (origin, at) in [("early-writer", 20), ("later-writer", 200)] {
+        let source = Store::open_memory(origin).unwrap();
+        source.set_write_clock_at(at).unwrap();
+        let mut input = sent("message/person-a", "agent/cedar", &[]);
+        input.actor = Some("external/example".into());
+        input.fields.insert("from".into(), json!("external/example"));
+        source.append_claim(&input).unwrap();
+        glasses_tests_shared_delivery::sync(&source, &graph);
+        let oldest = graph.wake_demand("agent/cedar").unwrap().oldest.unwrap();
+        assert_eq!(oldest.subject, "message/person-a");
+        assert_eq!(oldest.sent_ms, 20);
+    }
+    let plan: Vec<String> = graph.readers.get().prepare(
+        "EXPLAIN QUERY PLAN SELECT subject,sent_ms,class FROM local_wake_demand_v1
+         WHERE recipient=?1 AND pending=1 AND class>0 ORDER BY class DESC,sent_ms,subject LIMIT 1",
+    ).unwrap().query_map(["agent/cedar"], |row| row.get(3)).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap();
+    assert!(plan.iter().any(|line| line.contains("local_wake_demand_seat_v1")), "{plan:?}");
+    assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE") || line.starts_with("SCAN ")), "{plan:?}");
+}
+
+#[test]
+fn wake_demand_restarts_a_partially_committed_backfill_and_preserves_late_sends() {
+    let root = tempfile::tempdir().unwrap();
+    {
+        let graph = graph_with_shard(root.path());
+        for index in 0..130 {
+            append(&graph, &sent(&format!("message/history-{index:03}"), "agent/cedar", &[]));
+        }
+        stream_mirror::mirror(&graph).unwrap();
+        graph.connection.write().execute_batch(
+            "DELETE FROM local_wake_demand_v1 WHERE subject>'message/history-063';
+             DELETE FROM meta WHERE key='local_wake_demand_v1_complete';
+             INSERT OR REPLACE INTO meta(key,value) VALUES('local_wake_demand_v1_after','message/history-063');",
+        ).unwrap();
+        // A late subject sorts before the saved cursor. Its durable trigger work must survive.
+        graph.append_claim(&sent("message/a-late", "agent/cedar", &[])).unwrap();
+    }
+    let graph = graph_with_shard(root.path());
+    let count: u64 = graph.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_wake_demand_v1 WHERE recipient='agent/cedar' AND pending=1", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 131);
+    assert!(graph.wake_demand("agent/cedar").unwrap().frontier.caught_up);
+}
+
+#[test]
+fn wake_demand_never_proves_absence_without_the_native_source() {
+    let graph = Store::open_memory("alder").unwrap();
+    let demand = graph.wake_demand("agent/cedar").unwrap();
+    assert!(demand.oldest.is_none());
+    assert_eq!(demand.frontier.source, None);
+    assert!(!demand.frontier.caught_up);
+}
