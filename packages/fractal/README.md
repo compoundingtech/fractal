@@ -76,6 +76,39 @@ An interval or count keeps a sample or event only when its start (or event) clai
 
 The namespace also holds `step`, `gate`, `person`, `input`, `product`, `t`, `doc`, `pr`, `childMission`, `runId`, `completed`/`failed`/`terminal`, `Timing`, `Launch`, `Review`, `Fragment`, `Mission`, `Round`, `omp` and `pinMission`. `Fractal.defineAgent`, `Fractal.defineMission`, `Fractal.defineSchedule` and `Fractal.defineObjective` are the low-level forms: `{ meta, intent }`, where `intent` may be a function of the loader's `context`.
 
+### Declared admission budgets (breaking change)
+
+Agents and missions, including `fractal/effect` program missions, author admission
+metadata only through `budget`:
+
+```ts
+budget: {
+  scheduling: { priority: 'background', lane: 'check' },
+  resources: { memoryMax: '8G', diskMax: '20G' },
+}
+```
+
+Mission resources additionally accept positive safe-integer `cpuSeconds` and
+`tokenBudget`: per mission run, cumulative across attempts, with token pricing
+pinned at admission. Sizes are positive integer strings with an optional K/M/G/T
+suffix (case-insensitive). These are declared metadata, not enforced limits.
+Unknown keys are refused at every budget level. Steps, loops and rounds have no
+budget. Keep mission and step `timeout` at the top level, never in `budget`.
+
+This ports effect-utils #2480. The retired authoring keys are refused, including
+when a decoder ignores excess properties:
+
+| Removed            | Replacement                  |
+| ------------------ | ---------------------------- |
+| `declaredPriority` | `budget.scheduling.priority` |
+| `declaredLane`     | `budget.scheduling.lane`     |
+| `declaredBudgets`  | `budget.resources`           |
+
+Native KDL is unchanged: `declared-priority`, `declared-lane` and
+`declared-budgets` retain their order and spelling. Omission emits nothing;
+`resources: {}` emits an empty `declared-budgets` block. Agents must move
+`cpuSeconds` and `tokenBudget` to the mission budget.
+
 ### Harness startup messages
 
 OMP, Codex and Claude harnesses accept an optional `message: { text, id }`:
