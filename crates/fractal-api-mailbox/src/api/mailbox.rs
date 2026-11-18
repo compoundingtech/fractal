@@ -2636,7 +2636,7 @@ mod tests {
             store.apply(&intent, &BTreeMap::new(), "fixture").unwrap();
             crate::store::mailbox_tests::ready(&store, "current");
             let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "current", "delivery")).unwrap();
-            let declaration = store.suspension_lineage_at(&fence.subject).unwrap().pop().unwrap();
+            let declaration = store.suspension_lineage_at(&fence.subject, None).unwrap().pop().unwrap();
             let append = |subject: &str, kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
                 store.append_claim(&ClaimInput {
                     subject: subject.into(), kind: kind.into(), actor: Some(fence.subject.clone()),
