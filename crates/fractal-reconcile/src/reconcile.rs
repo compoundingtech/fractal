@@ -59,6 +59,7 @@ use crate::store::model_drift::{
 
 pub mod channel_recovery;
 pub mod github_events;
+pub mod github_capture;
 pub mod github_plugin_store;
 pub mod plugin_store;
 pub mod idle_nudge;
@@ -18902,6 +18903,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .entry(observer.subject.clone()).or_default().clone();
         let look_limit = self.look_limit;
         let github_plugin = self.github_plugin.clone();
+        let capture_state_dir = self.driver_state_dir.parent()
+            .context("observer drivers have no state directory")?.to_path_buf();
         let refill_mirrors = self.refill_mirrors;
         let poller_host = self.host.clone();
         let agent_workspaces = agent_workspaces.clone();
@@ -19008,6 +19011,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     workflow_runs: (spec.provider == "github.repository").then(|| {
                         Arc::new(GraphWorkflowRuns { store: store.clone(), observer: observer_subject.clone() })
                             as Arc<dyn WorkflowRunLedger>
+                    }),
+                    github_capture: (spec.provider == "github.repository").then(|| {
+                        Arc::new(github_capture::GraphGitHubCaptureLedger {
+                            store:store.clone(),state_dir:capture_state_dir.clone(),
+                        }) as Arc<dyn crate::github_capture::GitHubCaptureLedger>
                     }),
                 };
                 // Reload under the look lock: a retired arm may have completed while we waited.
@@ -21041,8 +21049,27 @@ fn mirror_observation(
             return;
         }
     };
+    // Capture owns durable merge facts for migrated repositories. Keep the mirror's live
+    // transitions (and watches) intact, but never publish a second durable merge history.
+    // In particular, capture replay/backfill must not be turned into live github.event rows.
+    let canonical_merges = if events.iter().any(|event| event["event"] == "merged") {
+        match store.github_source_definitions() {
+            Ok(definitions) => definitions.iter().any(|definition| {
+                definition.enabled
+                    && definition.source.host == "github.com"
+                    && definition.repositories.iter().any(|locator| locator.eq_ignore_ascii_case(&spec.locator))
+            }),
+            Err(error) => {
+                tracing::warn!(observer, "GitHub event ownership could not be read; the mirror keeps the events: {error:#}");
+                return;
+            }
+        }
+    } else { false };
     // Each event is one keyed claim, written once, within the plugin's graph allowlist.
     for event in events {
+        if canonical_merges && event["event"] == "merged" {
+            continue;
+        }
         let Some(subject) = event["subject"].as_str() else { continue };
         let mut fields = BTreeMap::from([
             ("version".to_owned(), Value::from(fractal_schema::github_plugin::VERSION)),
@@ -21196,6 +21223,7 @@ async fn refill_mirror(
         refresh: false,
         webhook_covered: false,
         workflow_runs: None,
+        github_capture: None,
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;

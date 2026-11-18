@@ -48,6 +48,11 @@
 //! mission. Each attempt uses its own stable key, so every measured request writes a new run
 //! rather than measuring idempotent replay; source preparation is outside the counted region.
 //!
+//! GitHub capture probes admit fresh root/successor grants and stop fresh writers on every
+//! sample. Source declarations, capture history and predecessor fences are prepared outside
+//! the counted request; replay measures one populated continuation at fixed page size while
+//! its retained capture sequence grows with the generated scale.
+//!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
@@ -739,6 +744,36 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get(
+        "GET /v1/plugins/github/capture/v1/replay",
+        "/v1/plugins/github/capture/v1/replay?source={capture_source}&cursor={capture_cursor}&limit=1",
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/authority/root",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/authority/root",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "member": NODE,
+        }),
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/authority/successor",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/authority/successor",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "member": NODE, "epoch": 2, "predecessor_grant": fixture.items["capture_grant"],
+            "fencing_receipt": fixture.items["capture_fence"],
+            "final_predecessor_commit": fixture.items["capture_frontier"],
+        }),
+    ),
+    post(
+        "POST /v1/plugins/github/capture/v1/sources/{source}/fence",
+        "/v1/plugins/github/capture/v1/sources/{capture_source}/fence",
+        |fixture, _| json!({
+            "actor": "person/bench-operator", "source": capture_source(fixture),
+            "authority_grant": fixture.items["capture_grant"],
+        }),
+    ),
     get(
         "GET /v1/mission-runs/continuity/startup-preview",
         "/v1/mission-runs/continuity/startup-preview",
@@ -3202,6 +3237,106 @@ async fn missing_service_probe_is_fatal_before_cost_aggregation() {
     required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
 }
 
+fn capture_source(fixture: &Fixture) -> Value {
+    json!({"host": "github.com", "id": fixture.items["capture_source"], "generation": 1})
+}
+
+/// Trusted-local operator requests must not carry a client session or bound agent.
+async fn capture_request(app: &Router, method: &str, path: &str, body: Option<&Value>) -> Value {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let bytes = body.map(|body| serde_json::to_vec(body).unwrap()).unwrap_or_default();
+    let response = app.clone().oneshot(Request::builder().method(method).uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(bytes)).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+    assert!(status.is_success(), "capture probe {method} {path}: {status}: {}", String::from_utf8_lossy(&bytes));
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    envelope.get("value").expect("capture response must use the daemon envelope").clone()
+}
+
+async fn prepare_capture_probe(
+    app: &Router, store: &Store, fixture: &mut Fixture, route: &str, attempt: usize, scale: f64,
+) {
+    use fractal_schema::github_capture::{
+        self as capture, CaptureCommit, FactImage, FactReference, MergeFact, ObservedFact, Source,
+    };
+
+    let operation = if route.starts_with("GET ") { "replay" } else { route.rsplit('/').next().unwrap() };
+    let id = format!("cost-{operation}-{attempt}");
+    let subject = format!("github-source/{id}");
+    fixture.items.insert("capture_source", id.clone());
+    let source: Source = serde_json::from_value(capture_source(fixture)).unwrap();
+    let declare = |grant: Option<&str>| {
+        let authority = grant.map(|grant| format!("authority-grant \"{grant}\";")).unwrap_or_default();
+        let kdl = format!("version 2\ngithub-source \"{id}\" {{ host \"github.com\"; generation 1; \
+            {authority} repository \"example/public\"; enabled #false; checkpoint-every-ms 60000; replicate-private #false; }}");
+        let intent = fractal_daemon::parse_intent(&kdl, NODE).unwrap();
+        store.apply_internal(&intent, &format!("cost-{id}-{}", grant.unwrap_or("disabled"))).unwrap();
+    };
+    declare(None);
+    if operation == "root" { return; }
+
+    let base = format!("/v1/plugins/github/capture/v1/sources/{id}");
+    let root = capture_request(app, "POST", &format!("{base}/authority/root"), Some(&json!({
+        "actor": "person/bench-operator", "source": source, "member": NODE,
+    }))).await;
+    let grant = root["id"].as_str().unwrap().to_owned();
+    declare(Some(&grant));
+    fixture.items.insert("capture_grant", grant.clone());
+    let append = |subject: String, kind: &str, record: Value| {
+        store.append_claim(&ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("record".into(), record)]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    // Grow retained replay history, not the measured page. Authority samples need only one
+    // real capture to exercise the stopped-frontier dependency rather than an empty source.
+    let count = if operation == "replay" { ((1000.0 * scale) as u64).max(3) } else { 1 };
+    let mut frontier = None;
+    for sequence in 1..=count {
+        let fact = ObservedFact {
+            version: capture::VERSION, source: source.clone(), observed_at_ms: sequence,
+            supersedes: None,
+            fact: FactImage::Merge(MergeFact {
+                pull_request_id: format!("pr-{sequence}"), repository_id: "example/public".into(),
+                merged_at_ms: sequence,
+            }),
+        };
+        let fact_claim = append(fact.subject().unwrap(), capture::FACT_KIND, serde_json::to_value(&fact).unwrap());
+        let commit = CaptureCommit {
+            version: capture::VERSION, source: source.clone(), epoch: 1,
+            authority_grant: grant.clone(), sequence, predecessor: frontier,
+            facts: vec![FactReference { claim_id: fact_claim.id, digest: fact.digest().unwrap() }],
+            checkpoint: None, coverage: Vec::new(), observed_at_ms: sequence,
+        };
+        frontier = Some(append(commit.subject().unwrap(), capture::COMMIT_KIND, serde_json::to_value(&commit).unwrap()).id);
+    }
+    fixture.items.insert("capture_frontier", frontier.unwrap());
+    // Finish bounded projection catch-up outside the sample, then retain a finite
+    // continuation after sequence one so measured replay also checks its pinned frontier.
+    let path = format!("/v1/plugins/github/capture/v1/replay?source={id}&limit=1");
+    loop {
+        let first = capture_request(app, "GET", &path, None).await;
+        if first["state"] == "projection-pending" { continue; }
+        assert_eq!(first["state"], "ready");
+        assert_eq!(first["page"]["through_sequence"], count);
+        assert_eq!(first["page"]["records"][0]["commit"]["sequence"], 1);
+        fixture.items.insert("capture_cursor", first["page"]["cursor"].as_str().unwrap().into());
+        break;
+    }
+    if operation == "successor" {
+        let receipt = capture_request(app, "POST", &format!("{base}/fence"), Some(&json!({
+            "actor": "person/bench-operator", "source": source, "authority_grant": grant,
+        }))).await;
+        assert_eq!(receipt["subject"], subject);
+        fixture.items.insert("capture_fence", receipt["id"].as_str().unwrap().into());
+    }
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -3432,6 +3567,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let service_claim = seed_service_probe(&store);
     let mut service_state = state.clone();
     service_state.owning_person = Some("person/bench-operator".into());
+    let capture_router = fractal_daemon::api::router(service_state.clone());
     let service_router = fractal_daemon::api::fabric_router(service_state);
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
@@ -3768,6 +3904,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            if probe.route.contains("/plugins/github/capture/v1/") {
+                prepare_capture_probe(&capture_router, &store, &mut fixture, probe.route, attempt, scale).await;
+            }
             if probe.route == "POST /v1/mission-runs/continuity/recover" {
                 let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
                 fixture.items.insert("continuity_hash", preview["preview_hash"].as_str().unwrap().into());
@@ -3824,6 +3963,40 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.route.contains("/plugins/github/capture/v1/") {
+                let path = fixture.fill(probe.path, attempt);
+                let body = probe.body.map(|body| body(&fixture, attempt));
+                let method = probe.route.split_once(' ').unwrap().0;
+                counted(|| async {
+                    let value = capture_request(&capture_router, method, &path, body.as_ref()).await;
+                    if probe.body.is_none() {
+                        assert_eq!(value["state"], "ready");
+                        assert_eq!(value["page"]["frontier"], fixture.items["capture_frontier"]);
+                        assert_eq!(value["page"]["records"].as_array().unwrap().len(), 1);
+                        assert_eq!(value["page"]["records"][0]["commit"]["sequence"], 2);
+                        assert_eq!(value["page"]["records"][0]["facts"].as_array().unwrap().len(), 1);
+                        assert_eq!(value["page"]["coverage"], Value::Null);
+                        assert_eq!(value["page"]["snapshot_complete"], false);
+                    } else {
+                        let record = &value["body"]["fields"]["record"];
+                        assert_eq!(record["source"], capture_source(&fixture));
+                        if probe.route.ends_with("/fence") {
+                            assert_eq!(record["authority_grant"], fixture.items["capture_grant"]);
+                            assert_eq!(record["final_commit"], fixture.items["capture_frontier"]);
+                            assert_eq!(value["kind"], fractal_schema::github_capture::FENCED_KIND);
+                        } else {
+                            assert_eq!(record["epoch"], if probe.route.ends_with("/root") { 1 } else { 2 });
+                            assert_eq!(record["member"], NODE);
+                            if probe.route.ends_with("/successor") {
+                                assert_eq!(record["predecessor_grant"], fixture.items["capture_grant"]);
+                                assert_eq!(record["fencing_receipt"], fixture.items["capture_fence"]);
+                                assert_eq!(record["final_predecessor_commit"], fixture.items["capture_frontier"]);
+                            }
+                            assert_eq!(value["kind"], fractal_schema::github_capture::AUTHORITY_KIND);
+                        }
+                    }
+                    Ok(value)
+                }).await
             } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
                 let path = fixture.fill(probe.path,attempt);
                 counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await
