@@ -14,8 +14,9 @@ const bindings = { id: 'example/change', host: 'local', workers: { 'example/work
 const base = { state: 'ready' as const, reportTo: owner, goal: 'Deliver the bounded change.' }
 const completed = (key: string): ProgramExit => ({ _tag: 'Success', value: { run: `mission-run/${key}`, status: 'completed' } })
 
-// Synthetic, small counterparts of maintenance fan-out, renewal approval, review products,
-// and worker-plus-command verification. No external mission sources or fixtures are loaded.
+// Runtime fixtures use public synthetic values. The three authoring excerpts below retain
+// real step ids/edges while replacing goals, actors, hosts and command bodies with test data.
+// No test loads or imports an external mission repository.
 const diamond = () => {
   const inspect = Fractal.step({ id: 'inspect', assignedTo: worker, goal: 'Inspect the change.' })
   const code = Fractal.step({ id: 'code', assignedTo: worker, dependsOn: inspect, goal: 'Implement.' })
@@ -43,7 +44,28 @@ const verify = () => {
   return Fractal.mission({ meta, ...base, inputs: [head], steps: [check] })
 }
 
+const maintenanceExcerpt = () => Fractal.mission({ meta, ...base, steps: [
+  { id: 'inventory-upstream', assignedTo: worker, goal: 'Inventory releases.' },
+  { id: 'update-and-land', assignedTo: worker, dependsOn: [{ step: 'inventory-upstream', state: 'completed' }], goal: 'Update reviewed inputs.' },
+  { id: 'verify-and-report', assignedTo: worker, dependsOn: [{ step: 'update-and-land', state: 'completed' }], goal: 'Verify and report.' },
+] })
+const renewalExcerpt = () => Fractal.defineMission({ meta, intent: { ...base, steps: [
+  { id: 'precheck', assignedTo: worker, goal: 'Inspect required renewals.' },
+  { id: 'restart-provisioning', assignedTo: worker, dependsOn: ['precheck'], goal: 'Provision the approved renewal.' },
+  { id: 'observe-approvals-and-verify', assignedTo: worker, dependsOn: ['restart-provisioning'], goal: 'Verify external approval evidence.' },
+] } })
+const acceptanceExcerpt = () => Fractal.mission({ meta, ...base, assignedTo: worker, steps: [
+  { id: 'implement', goal: 'Implement the selected change.' },
+  { id: 'deterministic-interaction-proof', dependsOn: ['implement'], goal: 'Prove deterministic interactions.' },
+  { id: 'independent-exact-head-review', dependsOn: ['deterministic-interaction-proof'], goal: 'Obtain independent exact-head review.' },
+  { id: 'land-and-packaged-observation', dependsOn: ['independent-exact-head-review'], goal: 'Observe the reviewed artifact.' },
+  { id: 'acceptance', dependsOn: ['land-and-packaged-observation'], goal: 'Check acceptance evidence.', gates: [Fractal.gate.exec({ name: 'evidence-check', command: 'test -f evidence.json', host: 'local', workspace: '/work' })] },
+] })
+
 const fixtures = [
+  { name: 'real maintenance excerpt', make: maintenanceExcerpt, ids: ['inventory-upstream', 'update-and-land', 'verify-and-report'], edges: [[], ['inventory-upstream'], ['update-and-land']] },
+  { name: 'real renewal excerpt', make: renewalExcerpt, ids: ['precheck', 'restart-provisioning', 'observe-approvals-and-verify'], edges: [[], ['precheck'], ['restart-provisioning']] },
+  { name: 'real acceptance excerpt', make: acceptanceExcerpt, ids: ['implement', 'deterministic-interaction-proof', 'independent-exact-head-review', 'land-and-packaged-observation', 'acceptance'], edges: [[], ['implement'], ['deterministic-interaction-proof'], ['independent-exact-head-review'], ['land-and-packaged-observation']] },
   { name: 'maintenance diamond', make: diamond, ids: ['inspect', 'code', 'docs', 'finish'], edges: [[], ['inspect'], ['inspect'], ['code', 'docs']] },
   { name: 'approval renewal', make: renewal, ids: ['approve', 'renew'], edges: [[], ['approve']] },
   { name: 'review products', make: review, ids: ['review', 'check'], edges: [[], ['review']] },
