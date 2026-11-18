@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fingerprint the TypeScript dependency installation's semantic inputs instead of the entire effect-utils revision, allowing unrelated upstream changes without weakening fixed-output integrity.",
+  "replay": {"status": "none", "detail": "No replay behavior change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No coordination policy change."},
+  "compatibility": {"status": "changed", "detail": "The dependency pin records installationInputHash instead of effectUtilsNarHash. Its fingerprint covers workspace manifests and lockfile, the declared staged packages, staging code and its bootstrap resolver, pnpm authority, resolved nixpkgs toolchain identity, and installation/identity recipes. The builder uses the same filtered upstream tree. Unrelated effect-utils files no longer invalidate the pin; a stale semantic fingerprint still refuses evaluation."},
+  "downtime": {"status": "none", "detail": "No restart required."},
+  "manual": {"status": "changed", "detail": "After semantic installation inputs change, run scripts/nix-typescript-client-deps-hash to measure both the actual fixed-output digest and semantic fingerprint. It needs network and a builder for --system. Unrelated source changes require no refresh. The installation name changes with the fingerprint; output hashes are measured, not copied from a previous name."},
+  "recovery": {"status": "none", "detail": "Revert the installation recipe and generated dependency pin together."}
+}
