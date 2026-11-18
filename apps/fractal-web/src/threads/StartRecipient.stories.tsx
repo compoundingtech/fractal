@@ -7,6 +7,7 @@ import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
+import * as Aria from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import startRefusalWire from '../../../../docs/st3/client-v0/fixtures/thread-start-refusals.json'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -316,14 +317,25 @@ export const ExistingReply: Story = {
   },
 }
 
-/** Compare every first-send contract and the unchanged existing reply in one gallery. */
+/** Compare first-send contracts while mounting only the selected Inbox detail. */
 export const AllStates: Story = {
-  render: args => <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
-    {scenarios.map(scenario => <section key={scenario} aria-label={scenario}>
-      <h2>{scenario}</h2>
+  render: args => <Aria.Tabs aria-label="Start recipient scenarios" defaultSelectedKey="original">
+    <Aria.TabList aria-label="Scenarios">
+      {scenarios.map(scenario => <Aria.Tab key={scenario} id={scenario}>{scenario}</Aria.Tab>)}
+    </Aria.TabList>
+    {scenarios.map(scenario => <Aria.TabPanel key={scenario} id={scenario}>
       <StartRecipientStory {...args} scenario={scenario} viewport={390} />
-    </section>)}
-  </div>,
+    </Aria.TabPanel>)}
+  </Aria.Tabs>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    for (const scenario of scenarios) {
+      await userEvent.click(canvas.getByRole('tab', { name: scenario, exact: true }))
+      await expect(canvas.getAllByRole('main')).toHaveLength(1)
+      await expect(canvasElement.querySelectorAll('[data-start-recipient-scene]')).toHaveLength(1)
+      await expect(canvasElement.querySelector(`[data-start-recipient-scene="${scenario}"]`)).toBeVisible()
+    }
+  },
 }
 
 const styles = stylex.create({
