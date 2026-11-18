@@ -15,7 +15,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/d85c8f7f78007fb56dac5cc23be5cbe3443a7e6b";
+      "github:overengineeringstudio/effect-utils/3df1c2b1ef0edb97fff288878e5d15daa92aaa57";
     mergemaster.url = "github:compoundingtech/mergemaster/v0.6.0";
     mergemaster.inputs.nixpkgs.follows = "nixpkgs";
     mergemaster.inputs.effect-utils.follows = "effect-utils";
@@ -919,6 +919,10 @@
         };
         checks.fractal-web-publisher = fractalWebPublisher;
         packages.fractal = fractal;
+        packages.${if system == "aarch64-darwin" then "fractal-mac" else null} =
+          (import ./nix/fractal-mac.nix { inherit pkgs; source = self; }).app;
+        packages.${if system == "aarch64-darwin" then "fractal-mac-gallery" else null} =
+          (import ./nix/fractal-mac.nix { inherit pkgs; source = self; }).gallery;
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
         packages.fractal-chatgpt = fractalChatgpt;

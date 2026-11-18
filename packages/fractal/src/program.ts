@@ -78,6 +78,9 @@ export interface ProgramIntent<
   I extends InputSchema,
   O extends Codec,
   ES extends Codec | undefined,
+> extends Pick<
+  MissionIntent,
+  'budget' | 'declaredPriority' | 'declaredLane' | 'declaredBudgets'
 > {
   readonly id: string
   readonly goal: string

@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from unittest.mock import patch
+import urllib.error
 import urllib.request
 
 spec = importlib.util.spec_from_file_location("preseed", Path(__file__).with_name("release-zig-preseed.py"))
@@ -25,9 +26,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     primary_ok = False
     fallback_ok = True
     truncated = False
+    require_client = False
 
     def do_GET(self):
         self.paths.append(self.path)
+        if self.require_client and self.headers.get("User-Agent") != "fractal-release-preseed/1":
+            self.send_response(403)
+            self.end_headers()
+            return
         ok = self.primary_ok if self.path.startswith("/primary/") else self.fallback_ok
         self.send_response(200 if ok else 503)
         truncated = self.truncated if self.path.startswith("/primary/") else False
@@ -54,15 +60,33 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack
     thread.start()
     stack.callback(thread.join)
     stack.callback(server.shutdown)
+    # The archive host refuses Python's default client identification. Exercise
+    # both sides with real HTTP; no dependency hash or retry policy changes.
+    Handler.require_client = True
+    direct = f"http://127.0.0.1:{server.server_port}/fallback/archive.tar.gz"
+    try:
+        urllib.request.urlopen(direct)
+    except urllib.error.HTTPError as error:
+        assert error.code == 403
+    else:
+        raise AssertionError("default Python client unexpectedly accepted")
+    destination = source / "client-archive.tar.gz"
+    preseed.download(direct, destination)
+    assert destination.read_bytes() == b"archive bytes"
+    Handler.require_client = False
+    Handler.paths.clear()
+    print("PASS archive requests identify the real release client instead of the refused default")
     delays = []
 
-    def open_url(candidate, **kwargs):
+    def open_url(request, **kwargs):
+        assert request.get_header("User-agent") == "fractal-release-preseed/1"
+        candidate = request.full_url
         if candidate == url:
             path = "/primary/archive.tar.gz"
         else:
             assert candidate == "https://codeload.github.com/example/package/tar.gz/refs/tags/v1"
             path = "/fallback/archive.tar.gz"
-        return urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}{path}", **kwargs)
+        return urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{server.server_port}{path}", headers=dict(request.header_items())), **kwargs)
 
     def fetch(archive):
         assert archive.read_bytes() == b"archive bytes"

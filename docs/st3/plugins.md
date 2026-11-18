@@ -5,6 +5,11 @@ graph holds declarations and the claims about them. A plugin holds what it learn
 in a local database, and writes into the graph only a few small, keyed facts that other members
 need. GitHub is the first plugin.
 
+The proposed [durable GitHub fact contract](github-facts.md) extends this boundary for bounded,
+normalized lifecycle evidence, not full source mirrors. It is a design proposal, not
+an enabled acquisition mode. Until its reader, writer and rollout gates pass, the implementation
+described below remains the current contract.
+
 ## The plugin store contract
 
 - **One local database per plugin.** A plugin owns `<state>/plugins/<name>/` and one SQLite file
@@ -23,6 +28,21 @@ need. GitHub is the first plugin.
   (the same relay timeline reads use), once that member advertises the plugin.
 - **Shared data gets a shard.** If a plugin ever needs data every member holds, it gets a shard
   under its name, not tables in the graph.
+
+### Proposed durable-fact exception
+
+A plugin admitted under the [durable GitHub fact contract](github-facts.md) writes normalized
+source revisions, capture commits and coverage into claims. Claims and their normal backups
+are the only retained authority; the local plugin SQLite file contains rebuildable projections
+and optional content caches. Such projections rebuild from committed claims, not a fresh source
+scan that would lose observed history. Full bodies, review prose, logs and artifact bytes do not
+become graph facts by this exception.
+
+This exception requires an explicit schema/manifest allowlist, bounded fields and capture pages,
+source authorization, a fenced acquisition authority, and a measured incremental capacity gate.
+It does not permit an authoritative side database, a second historical crawler, or arbitrary
+plugin tables in the graph. The mirror/fill behavior below is not evidence of historical coverage
+and is replaced only for a fact family whose complete cutover has passed its acceptance gates.
 
 ## The GitHub plugin
 

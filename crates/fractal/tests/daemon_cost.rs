@@ -192,6 +192,26 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
     ),
     (
+        "GET /v1/internal/resources",
+        "host-local operator inventory combines shell command history, native memberships, holds and the in-memory accountant, absent from generated claim-history cost stores; shell_resources::tests::durable_commands_are_queryable_without_becoming_second_admission_authority and api::resources ownership tests cover the transport/store boundary; populated host-local inventory and retained command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/exec",
+        "requires a real native invocation/attempt or local operator and connected-host resource authority, absent from generated cost stores; queues one host-local command without granting membership or releasing a payload; api::resources submission and nested-custody tests cover ownership and admission boundaries; command bytes, native owner validation and queue-write cost are not measured here",
+    ),
+    (
+        "GET /v1/internal/resources/{id}",
+        "requires a durable host-local shell execution, absent from generated cost stores; reads the execution by primary key, then scans its host's memberships and operator holds for inspection; api::resources ownership tests cover disclosure, but host-local membership/hold history and command-body growth are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/wait",
+        "event-driven long-poll over one host-local shell execution, not a finite JSON cost sample; each wake rereads the command by primary key and rechecks native ownership; api::resources::tests::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials covers wakeup ordering and disclosure; command-body and wakeup cost are not measured here",
+    ),
+    (
+        "POST /v1/internal/resources/{id}/cancel",
+        "requires a durable host-local shell execution and its authenticated owner or local operator, absent from generated cost stores; reads by primary key and sets only the queue row's cancel flag, leaving whole-tree retirement to the existing host authority; shell_resources::tests::cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot covers durable cancellation; command-body rewrite cost is not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
     ),
@@ -397,6 +417,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
     ("POST /v1/hosts/holds/release", "owner/revision-fenced host-local resolution; covered by host_holds::tests::owner_and_revision_fence_release_without_occupying_capacity"),
     ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
+    ("POST /v1/hosts/launch-freeze", "rare host-local daemon-replacement barrier; bounded spawn drain and typed failures covered by launch_freeze tests"),
+    ("POST /v1/hosts/launch-freeze/clear", "authenticated owner/id-fenced host-local release; covered by host_holds::tests::launch_freeze_api_authenticates_owner_reports_state_and_clears"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -717,6 +739,23 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get(
+        "GET /v1/mission-runs/continuity/startup-preview",
+        "/v1/mission-runs/continuity/startup-preview",
+    ),
+    post(
+        "POST /v1/mission-runs/continuity/preview",
+        "/v1/mission-runs/continuity/preview",
+        |fixture, _| json!({"run": fixture.items["continuity_source"]}),
+    ),
+    post(
+        "POST /v1/mission-runs/continuity/recover",
+        "/v1/mission-runs/continuity/recover",
+        |fixture, _| json!({
+            "run": fixture.items["continuity_source"],
+            "preview_hash": fixture.items["continuity_hash"],
+        }),
+    ),
     get("GET /v1/effects/by-key", "/v1/effects/by-key?key={effect_key}"),
     post("POST /v1/effects/{*subject}", "/v1/effects/{effect_subject}/resolve", |_, attempt| json!({
         "actor": "person/bench-operator",
@@ -745,6 +784,10 @@ const PROBES: &[Probe] = &[
         "text":format!("Invented current person context {attempt}"),
     })),
     get("GET /v1/client/availability", "/v1/client/availability"),
+    get(
+        "GET /v1/client/availability/history",
+        "/v1/client/availability/history?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket_seconds=3600",
+    ),
     put("PUT /v1/client/availability", "/v1/client/availability", |_, attempt| json!({
         "interruptions": {"value": if attempt % 2 == 0 { "urgent" } else { "all" }},
     })),
@@ -992,6 +1035,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
     get("GET /v1/client/slo", "/v1/client/slo"),
     get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
+    get(
+        "GET /v1/client/series",
+        "/v1/client/series?objective=cost%2Fseries&from=1000&to=4000&bucket_seconds=1",
+    ),
     post("POST /v1/messages/cleanup", "/v1/messages/cleanup", |_, _| {
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
@@ -1133,6 +1180,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
     get("GET /v1/slo/history", "/v1/slo/history?id=cpu"),
+    get(
+        "GET /v1/series",
+        "/v1/series?kind=custom.cost.series-event&kind=custom.cost.series-other&subject_prefix=custom%2Fcost%2Fseries%2F&group_by=category&from=1000&to=4000&bucket_seconds=1",
+    ),
     get("GET /v1/reviews", "/v1/reviews"),
     get("GET /v1/attention", "/v1/attention"),
     get(
@@ -1264,6 +1315,7 @@ const PROBES: &[Probe] = &[
         "/v1/hosts/bench-host/agent-workspace?identity=bench/seat-0",
     ),
     get("GET /v1/hosts/holds", "/v1/hosts/holds"),
+    get("GET /v1/hosts/launch-freeze", "/v1/hosts/launch-freeze"),
     // Writes, each with a new idempotency key.
     post("POST /v1/claims", "/v1/claims", |fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
@@ -1520,6 +1572,18 @@ const PROBES: &[Probe] = &[
     ),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
+    post("POST /v1/agents/rename-id/plan", "/v1/agents/rename-id/plan", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id/plan", "/v1/missions/rename-id/plan", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
     post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
         "from": format!("agent/bench/cost/rename-{attempt}"),
         "to": format!("agent/bench/cost/renamed-{attempt}"),
@@ -1532,6 +1596,10 @@ const PROBES: &[Probe] = &[
         "actor": "person/bench-operator", "reason": "Invented rename",
         "idempotency_key": format!("cost-mission-rename-{attempt}"),
     })),
+    get("GET /v1/agents/rename-proof",
+        "/v1/agents/rename-proof?from=agent%2Fbench%2Fcost%2Frename-0&to=agent%2Fbench%2Fcost%2Frenamed-0"),
+    get("GET /v1/missions/rename-proof",
+        "/v1/missions/rename-proof?from=mission%2Fcost-rename-0&to=mission%2Fcost-renamed-0"),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -3179,6 +3247,40 @@ async fn paired_push(
     Ok(response)
 }
 
+/// Keep both series answers fixed while same-kind timestamp history outside the window grows.
+fn seed_series_reads(store: &Store, scale: f64) {
+    let intent = fractal_daemon::parse_intent(r#"version 2
+objective "cost/series" {
+  about "Cost fixture events"
+  indicator "count" {
+    subject-prefix "custom/cost/series/"
+    event "custom.cost.series-event" at="at"
+  }
+  window "1h"
+  target "per-hour" min=1
+}
+"#, NODE).unwrap();
+    store.apply_internal(&intent, "cost-series-objective").unwrap();
+    let history = ((scale * 10_000.0).round() as usize).max(1);
+    for (name, kind, at) in [
+        ("first".to_owned(), "custom.cost.series-event", 1000),
+        ("second".to_owned(), "custom.cost.series-other", 2000),
+        ("boundary".to_owned(), "custom.cost.series-event", 4000),
+    ].into_iter().chain((0..history).map(|n| {
+        (format!("history-{n}"), "custom.cost.series-event", 10_000)
+    })) {
+        store.append_claim(&ClaimInput {
+            subject: format!("custom/cost/series/{name}"),
+            kind: kind.into(),
+            actor: None,
+            fields: BTreeMap::from([("at".into(), json!(at)), ("category".into(), json!("event"))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+}
+
 async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u64, u64)) -> Measured {
     let work_directory = tempfile::tempdir().unwrap();
     let root = work_directory.path();
@@ -3263,6 +3365,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     {
         let store = store.clone();
         tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_series_reads(&store, scale))
             .await
             .unwrap();
     }
@@ -3563,6 +3671,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     assert_eq!(page["page"]["has_more"], false);
 
     prepare_custom_fixture(&store, &mut fixture, scale);
+    prepare_continuity(&store, &mut fixture, root);
     let event_page: Value = client
         .get(&fixture.fill("/v1/events/page?after={event_after}&limit=100", 0))
         .await
@@ -3597,7 +3706,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/work/start" {
             prepare_handoffs(&store, &mut fixture);
         }
-        if probe.route == "POST /v1/agents/rename-id" {
+        if probe.route == "POST /v1/agents/rename-id/plan" {
             prepare_renames(&store);
         }
         if probe.route == "POST /v1/mission-runs/{run}/retry" {
@@ -3659,6 +3768,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
+                fixture.items.insert("continuity_hash", preview["preview_hash"].as_str().unwrap().into());
+            }
             // Seed a fresh durable uncertainty outside the measured region. In particular,
             // resolution must write a new receipt on every sample, never an idempotent replay.
             if probe.route.contains("/v1/effects/") {
@@ -3729,7 +3842,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
+                } else if path.starts_with("/v1/mission-runs/continuity/")
+                    || path.starts_with("/v1/client/")
+                    || path.starts_with("/v1/effects/")
+                {
                     person.clone()
                 } else {
                     client.clone()
@@ -3753,6 +3869,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route == "GET /v1/mission-runs/continuity/startup-preview" {
+                                anyhow::ensure!(value["runs"].is_array(), "startup preview must return its candidate inventory");
+                            }
+                            if probe.route == "POST /v1/mission-runs/continuity/preview" {
+                                anyhow::ensure!(
+                                    value["preview_hash"].as_str().is_some_and(|hash| hash.len() == 64)
+                                        && value["original_work"][0]["eligibility"] == "eligible",
+                                    "continuity cost probe must inspect eligible original completion evidence",
+                                );
+                            }
+                            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                                anyhow::ensure!(
+                                    value["recovered_run"].as_str().is_some()
+                                        && value["preview_hash"] == body.as_ref().unwrap()["preview_hash"],
+                                    "continuity cost probe must accept its current preview and create a successor",
+                                );
+                            }
                             if probe.route.contains("/v1/effects/") {
                                 anyhow::ensure!(
                                     value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
@@ -3794,6 +3927,32 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                     "the usage cost probe must answer its exact empty fixture period",
                                 );
                             }
+                            if matches!(probe.route, "GET /v1/series" | "GET /v1/client/series") {
+                                let series = value.get("value").unwrap_or(&value);
+                                let grouped = probe.route == "GET /v1/series";
+                                let mut expected = json!({
+                                    "from": 1000, "to": 4000, "bucket_seconds": 1,
+                                    "buckets": [
+                                        {"start": 1000, "end": 2000, "count": 1},
+                                        {"start": 2000, "end": 3000, "count": if grouped { 1 } else { 0 }},
+                                        {"start": 3000, "end": 4000, "count": 0},
+                                    ],
+                                });
+                                if grouped {
+                                    expected["group_by"] = json!("category");
+                                    for bucket in expected["buckets"].as_array_mut().unwrap() {
+                                        bucket["groups"] = if bucket["count"] == 0 {
+                                            json!([])
+                                        } else {
+                                            json!([{"value": "event", "count": 1}])
+                                        };
+                                    }
+                                }
+                                anyhow::ensure!(
+                                    *series == expected,
+                                    "series cost probes must return their exact fixed, populated histogram",
+                                );
+                            }
                             if probe.route == "POST /v1/internal/client-read/forward"
                                 && (serde_json::from_value::<fractal_daemon::model::ClientResourcePage>(
                                     value.clone(),
@@ -3822,6 +3981,23 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 assert_eq!(source.status, "failed", "retry must leave its source terminal");
                 assert!(source.steps.iter().all(|step| step.status == "failed"));
                 assert_eq!(source.retried_by.len(), attempt + 1, "each sample must write a new retry");
+            }
+            if probe.route == "POST /v1/mission-runs/continuity/recover" {
+                let preview = store.mission_continuity_preview(&fixture.items["continuity_source"]).unwrap();
+                let target = store.mission_run(preview["target_run"].as_str().unwrap()).unwrap().unwrap();
+                assert_eq!(target.steps[0].status, "completed");
+                let references = store.claims_for(&target.steps[0].subject, Some("step-run.carried")).unwrap();
+                assert_eq!(references.len(), 1, "every sample must adopt original evidence into a fresh successor");
+                let mut source = references[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                let mut seen = std::collections::BTreeSet::from([target.steps[0].subject.clone()]);
+                while source != fixture.items["continuity_step"] {
+                    assert!(seen.insert(source.clone()), "carried evidence must have an acyclic original reference");
+                    assert!(store.claims_for(&source, Some("work.submitted")).unwrap().is_empty());
+                    let previous = store.claims_for(&source, Some("step-run.carried")).unwrap();
+                    assert_eq!(previous.len(), 1, "every intermediate must reference its authentic source");
+                    source = previous[0].body["fields"]["source_step_run"].as_str().unwrap().to_owned();
+                }
+                assert!(store.claims_for(&target.steps[0].subject, Some("work.submitted")).unwrap().is_empty());
             }
             if attempt > 0 {
                 samples.push(cost);
@@ -4231,6 +4407,29 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         peer_inventory: Value::Null,
         peer_exchange: Value::Null,
     }
+}
+
+/// A superseded run with late original evidence, independent of generated history size.
+fn prepare_continuity(store: &Store, fixture: &mut Fixture, workspace: &Path) {
+    let definition = "version 2\nmission \"cost-continuity\" state=\"ready\" {\n\
+        goal \"Original goal.\"\nstep \"prepare\" { agentless; }\n}\n";
+    let intent = fractal_daemon::parse_intent(definition, NODE).unwrap();
+    store.apply_internal(&intent, "cost-continuity-original").unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "cost-continuity".into(), revision: None,
+        workspace: workspace.display().to_string(),
+        requester: Some("person/bench-operator".into()), mode: None,
+        inputs: BTreeMap::new(), idempotency_key: "cost-continuity-source".into(),
+    }).unwrap();
+    let updated = definition.replace("Original goal.", "Updated goal.");
+    let intent = fractal_daemon::parse_intent(&updated, NODE).unwrap();
+    store.apply_internal(&intent, "cost-continuity-updated").unwrap();
+    store.supersede_mission_publications().unwrap();
+    let current = store.mission_run(&source.subject).unwrap().unwrap();
+    assert!(current.superseded_by.is_some());
+    store.set_step_state(&source.steps[0].subject, "completed", None).unwrap();
+    fixture.items.insert("continuity_step", source.steps[0].subject.clone());
+    fixture.items.insert("continuity_source", source.subject);
 }
 
 /// Keep the source terminal and permit all four independent retries without bypassing admission.

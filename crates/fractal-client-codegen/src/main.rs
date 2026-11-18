@@ -329,6 +329,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {{ self.get(\"/v1/client/auto-resolved\").await }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    pub async fn availability_history(&self, person: Option<&str>, from: &str, to: &str, bucket_seconds: u64) -> Result<Envelope<AvailabilityHistory>, ClientError> {{ let person = person.map(|person| format!(\"&person={{}}\", percent_encode(person))).unwrap_or_default(); self.get(&format!(\"/v1/client/availability/history?from={{}}&to={{}}&bucket_seconds={{bucket_seconds}}{{person}}\", percent_encode(from), percent_encode(to))).await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -341,6 +343,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn slo_history(&self, id: &str, since_ms: Option<u64>, until_ms: Option<u64>, steps: Option<usize>) -> Result<Envelope<SloHistory>, ClientError> {{ let mut path = format!(\"/v1/client/slo/history?id={{}}\", percent_encode(id)); if let Some(since_ms) = since_ms {{ path.push_str(&format!(\"&since_ms={{since_ms}}\")); }} if let Some(until_ms) = until_ms {{ path.push_str(&format!(\"&until_ms={{until_ms}}\")); }} if let Some(steps) = steps {{ path.push_str(&format!(\"&steps={{steps}}\")); }} self.get(&path).await }}"
             )?;
+        } else if id == "series.read" {
+            writeln!(out, "    pub async fn series(&self, options: &SeriesQuery) -> Result<Envelope<Series>, ClientError> {{ let mut query = vec![format!(\"from={{}}\", options.from), format!(\"to={{}}\", options.to), format!(\"bucket_seconds={{}}\", options.bucket_seconds)]; for (name, value) in [(\"objective\", options.objective.as_deref()), (\"subject_prefix\", options.subject_prefix.as_deref()), (\"group_by\", options.group_by.as_deref())] {{ if let Some(value) = value {{ query.push(format!(\"{{name}}={{}}\", percent_encode(value))); }} }} for kind in &options.kinds {{ query.push(format!(\"kind={{}}\", percent_encode(kind))); }} self.get(&format!(\"/v1/client/series?{{}}\", query.join(\"&\"))).await }}")?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
         } else if id == "usage-hub.quota" {
@@ -477,7 +481,7 @@ fn rust_operation_methods(
         if action == "message.send" {
             writeln!(
                 out,
-                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, mut parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let idempotency_key = idempotency_key.into(); if parameters.signature.is_none() && let Some(device) = &self.signing_device {{ parameters.signature = Some(device.sign_message(&idempotency_key, &parameters).map_err(|error| ClientError::Protocol(error.to_string()))?); }} let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
+                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let request = self.prepare_message_send(id,idempotency_key,fence,parameters)?; self.action_internal(&request).await }}"
             )?;
         } else {
             writeln!(
@@ -569,6 +573,8 @@ fn swift_operation_methods(
             writeln!(out, "    public func autoResolvedList() async throws -> Envelope<AutoResolvedAsks> {{ try await get(\"v1/client/auto-resolved\") }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    public func availabilityHistory(person: String? = nil, from: String, to: String, bucketSeconds: Int) async throws -> Envelope<AvailabilityHistory> {{ var query = [URLQueryItem(name: \"from\", value: from), URLQueryItem(name: \"to\", value: to), URLQueryItem(name: \"bucket_seconds\", value: String(bucketSeconds))]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; return try await get(\"v1/client/availability/history\", query: query) }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -581,6 +587,8 @@ fn swift_operation_methods(
                 out,
                 "    public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> {{ var query: [URLQueryItem] = [.init(name: \"id\", value: id)]; if let sinceMS {{ query.append(.init(name: \"since_ms\", value: String(sinceMS))) }}; if let untilMS {{ query.append(.init(name: \"until_ms\", value: String(untilMS))) }}; if let steps {{ query.append(.init(name: \"steps\", value: String(steps))) }}; return try await get(\"v1/client/slo/history\", query: query) }}"
             )?;
+        } else if id == "series.read" {
+            writeln!(out, "    public func series(objective: String? = nil, kinds: [String] = [], subjectPrefix: String? = nil, groupBy: String? = nil, from: UInt64, to: UInt64, bucketSeconds: UInt64) async throws -> Envelope<Series> {{ var query: [URLQueryItem] = [.init(name: \"from\", value: String(from)), .init(name: \"to\", value: String(to)), .init(name: \"bucket_seconds\", value: String(bucketSeconds))]; if let objective {{ query.append(.init(name: \"objective\", value: objective)) }}; for kind in kinds {{ query.append(.init(name: \"kind\", value: kind)) }}; if let subjectPrefix {{ query.append(.init(name: \"subject_prefix\", value: subjectPrefix)) }}; if let groupBy {{ query.append(.init(name: \"group_by\", value: groupBy)) }}; return try await get(\"v1/client/series\", query: query) }}")?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
         } else if id == "usage-hub.quota" {
@@ -731,7 +739,9 @@ fn rust_field(name: &str) -> String {
         "loop" => "loop_spec".into(),
         "ref" => "reference".into(),
         "kdlLines" => "kdl_lines".into(),
-        other => other.into(),
+        "override" => "r#override".into(),
+        // A wire word used as a key, such as `hold-routine`.
+        other => other.replace('-', "_"),
     }
 }
 
@@ -900,6 +910,13 @@ fn validate_surfaces(
         "AvailabilitySet",
         "PresenceReport",
         "PresenceReportResult",
+        "AvailabilityHistory",
+        "AvailabilityHistoryBucket",
+        "AvailabilityStatusDurations",
+        "AvailabilityStatusSourceDurations",
+        "AvailabilityPresenceDurations",
+        "AvailabilityInterruptionsDurations",
+        "AvailabilityDeadlineClockDurations",
         "DirectiveNoteSet",
         "DirectiveNoteSetResult",
         "ResourceObservation",
@@ -952,6 +969,9 @@ fn validate_surfaces(
         "SloList",
         "SloRow",
         "SloHistory",
+        "Series",
+        "SeriesBucket",
+        "SeriesGroup",
         "UsageRow",
         "UsagePricing",
         "UsagePricingRates",
@@ -1192,6 +1212,7 @@ fn validate_surfaces(
         }
         let rust_method = match read["id"].as_str().context("read id")? {
             "capabilities.get" => "capabilities".into(),
+            "series.read" => "series".into(),
             "timeline.list" => "timeline".into(),
             "conversation.changes" => "conversation_changes".into(),
             "events.list" => "events".into(),
@@ -1204,6 +1225,7 @@ fn validate_surfaces(
         let swift_method = lower_camel(&pascal(read["id"].as_str().unwrap()));
         let swift_method = match read["id"].as_str().unwrap() {
             "capabilities.get" => "capabilities".into(),
+            "series.read" => "series".into(),
             "timeline.list" => "timeline".into(),
             "conversation.changes" => "conversationChanges".into(),
             "events.list" => "events".into(),
@@ -1549,6 +1571,7 @@ fn ts_object(value: &Value) -> Result<String> {
             } else {
                 "?"
             };
+            // A wire word used as a key, such as `hold-routine`, is no identifier: quote it.
             let identifier = name.chars().enumerate().all(|(index, character)| {
                 character.is_ascii_alphabetic() || matches!(character, '_' | '$')
                     || (index > 0 && character.is_ascii_digit())
@@ -1821,6 +1844,8 @@ fn typescript_operation_methods(
             writeln!(out, "    async autoResolvedList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AutoResolvedAsks>> {{ return this.get('/v1/client/auto-resolved', undefined, requestOptions); }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    async availabilityHistory(options: {{ from: string; to: string; bucket_seconds: number; person?: string }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AvailabilityHistory>> {{ return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -1833,6 +1858,8 @@ fn typescript_operation_methods(
                 out,
                 "    async sloHistory(id: string, options: {{ since_ms?: number; until_ms?: number; steps?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloHistory>> {{ return this.get('/v1/client/slo/history' + query({{ id, ...options }}), undefined, requestOptions); }}"
             )?;
+        } else if id == "series.read" {
+            writeln!(out, "    async series(options: {{ objective?: string; kind?: string[]; subject_prefix?: string; group_by?: string; from: number; to: number; bucket_seconds: number }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Series>> {{ const {{ kind, ...single }} = options; const suffix = query(single) + (kind ?? []).map(value => '&kind=' + encodeURIComponent(value)).join(''); return this.get('/v1/client/series' + suffix, undefined, requestOptions); }}")?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
         } else if id == "usage-hub.quota" {

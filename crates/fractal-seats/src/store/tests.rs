@@ -626,6 +626,13 @@ agent "worker" { workspace "/eval/child"; command "true"; restart "never" }
             .any(|desired| desired.owner_run.as_deref() == Some(child.subject.as_str()))
     );
 
+    store.settle_runtime_cleanup("agent/eval/root/seat", "eval.root.seat", "root-old").unwrap();
+    store.settle_runtime_cleanup("agent/eval/root/seat", "eval.root.seat", "root-current").unwrap();
+    let child_seat = declaration.subjects.keys().next().unwrap();
+    let child_runtime = format!("{}.worker", child.id);
+    store.settle_runtime_cleanup(child_seat, &child_runtime, "child").unwrap();
+    // Unrelated historical cleanup remains settled when this eval tree is forgotten.
+    store.settle_runtime_cleanup("exec/retained", "retained", "historical").unwrap();
     assert!(
         store
             .retire_eval_owned_desired(&root.subject)
@@ -636,6 +643,12 @@ agent "worker" { workspace "/eval/child"; command "true"; restart "never" }
         desired.owner_run.as_deref() != Some(root.subject.as_str())
             && desired.owner_run.as_deref() != Some(child.subject.as_str())
     }));
+    let connection = store.readers.get();
+    let remaining: Vec<String> = connection.prepare(
+        "SELECT runtime_id FROM local_runtime_cleanup_settled ORDER BY runtime_id",
+    ).unwrap().query_map([], |row| row.get(0)).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(remaining, ["retained"]);
 }
 
 #[test]

@@ -40,6 +40,25 @@ static ENFORCED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, Eq, PartialEq, Ord, PartialOrd)]
+#[serde(rename_all = "camelCase")]
+pub enum RequestClass { Landing, Check, #[default] Agent }
+
+impl RequestClass {
+    pub const fn is_agent(&self) -> bool { matches!(self, Self::Agent) }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiskRequest {
+    pub bytes: u64,
+    pub path: String,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum IoClass { Heavy }
+
 /// A seat lane's size: how many cores of CPU time and how many bytes of memory it may use.
 #[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct Capacity {
@@ -182,9 +201,28 @@ pub fn show_memory(bytes: u64) -> String {
         .map_or_else(|| bytes.to_string(), |(shift, unit)| format!("{}{unit}", bytes >> shift))
 }
 
-/// `4G`, `512M`, `1T` or a byte count: binary units, as systemd reads them.
+/// A memory byte count has invalid syntax or cannot fit in a `u64`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParseMemoryError {
+    InvalidFormat,
+    Overflow,
+}
+
+impl std::fmt::Display for ParseMemoryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidFormat => "capacity memory must be unsigned integer bytes, optionally with an unsigned e/E exponent, or a whole number with K, M, G or T",
+            Self::Overflow => "capacity memory is too large",
+        })
+    }
+}
+
+impl std::error::Error for ParseMemoryError {}
+
+/// Integer bytes, decimal `2e9`/`2E9`, or binary `4G`/`512M`/`1T` (units ignore case).
+/// Signs, decimal points, whitespace, and combining exponents with units are not accepted.
 pub fn parse_memory(value: &str) -> Result<u64> {
-    let (digits, unit) = match value.char_indices().last() {
+    let (number, unit) = match value.char_indices().last() {
         Some((index, suffix)) if suffix.is_ascii_alphabetic() => (&value[..index], Some(suffix)),
         _ => (value, None),
     };
@@ -194,14 +232,32 @@ pub fn parse_memory(value: &str) -> Result<u64> {
         Some('M') => 20,
         Some('G') => 30,
         Some('T') => 40,
-        Some(_) => bail!("capacity memory `{value}` must end in K, M, G or T"),
+        Some(_) => return Err(ParseMemoryError::InvalidFormat.into()),
     };
-    let amount: u64 = digits
-        .parse()
-        .with_context(|| format!("capacity memory `{value}` must be a whole number with K, M, G or T"))?;
-    amount
-        .checked_mul(1 << shift)
-        .with_context(|| format!("capacity memory `{value}` is too large"))
+    let (digits, exponent) = match number.split_once(['e', 'E']) {
+        Some((digits, exponent)) if unit.is_none() => (digits, Some(exponent)),
+        Some(_) => return Err(ParseMemoryError::InvalidFormat.into()),
+        None => (number, None),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || exponent.is_some_and(|exponent| {
+            exponent.is_empty() || !exponent.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return Err(ParseMemoryError::InvalidFormat.into());
+    }
+    let amount: u64 = digits.parse().map_err(|_| ParseMemoryError::Overflow)?;
+    let multiplier = match exponent {
+        Some(exponent) => {
+            let exponent: u32 = exponent.parse().map_err(|_| ParseMemoryError::Overflow)?;
+            if amount == 0 {
+                return Ok(0);
+            }
+            10_u64.checked_pow(exponent).ok_or(ParseMemoryError::Overflow)?
+        }
+        None => 1 << shift,
+    };
+    Ok(amount.checked_mul(multiplier).ok_or(ParseMemoryError::Overflow)?)
 }
 
 /// Turns lanes on or off for this host (`lanes` in the install config). Applies to launches after
@@ -525,7 +581,7 @@ fn end_requested(slice: &str) -> Result<()> {
 }
 
 fn stop_slice(slice: &str) -> Result<()> {
-    let snapshot = crate::systemd::snapshot()?;
+    let snapshot = crate::systemd::snapshot_after_admission()?;
     // A complete loaded-only snapshot proves an absent slice has nothing left to end.
     if !snapshot.units.contains_key(slice) {
         return Ok(());
@@ -670,13 +726,53 @@ mod tests {
 
     #[test]
     fn memory_reads_binary_units() {
+        for (unit, multiplier) in [('K', 1 << 10), ('M', MIB), ('G', GIB), ('T', 1 << 40)] {
+            for spelling in [unit, unit.to_ascii_lowercase()] {
+                assert_eq!(parse_memory(&format!("2{spelling}")).unwrap(), 2 * multiplier);
+            }
+        }
         assert_eq!(parse_memory("512M").unwrap(), 512 * MIB);
-        assert_eq!(parse_memory("4g").unwrap(), 4 * GIB);
-        assert_eq!(parse_memory("1T").unwrap(), 1024 * GIB);
         assert_eq!(parse_memory("1048576").unwrap(), MIB);
-        assert!(parse_memory("").is_err());
-        assert!(parse_memory("G").is_err());
-        assert!(parse_memory("99999999999T").is_err());
+    }
+
+    #[test]
+    fn memory_reads_decimal_exponents_as_exact_integer_bytes() {
+        for spelling in ["2000000000", "2e9", "2E9", "02e09"] {
+            assert_eq!(parse_memory(spelling).unwrap(), 2_000_000_000, "{spelling}");
+        }
+        for spelling in ["9007199254740993", "9007199254740993e0", "9007199254740993E0"] {
+            assert_eq!(parse_memory(spelling).unwrap(), 9_007_199_254_740_993, "{spelling}");
+        }
+        for spelling in ["18446744073709551615", "18446744073709551615e0"] {
+            assert_eq!(parse_memory(spelling).unwrap(), u64::MAX, "{spelling}");
+        }
+        assert_eq!(parse_memory("1e19").unwrap(), 10_000_000_000_000_000_000);
+        assert_eq!(parse_memory("0").unwrap(), 0);
+        assert_eq!(parse_memory("0e20").unwrap(), 0);
+    }
+
+    #[test]
+    fn memory_refuses_other_numeric_forms_with_a_typed_error() {
+        for spelling in [
+            "", "G", "1B", "1KiB", "1X", "+1", "-1", "+2e9", "-2e9",
+            "1.0", "1.5", "2.0e9", ".2e10", "4.5G", "+4G", "-4G",
+            "2e", "e9", "2e+9", "2e-9", "2e1.5", "2ee9", "2e9e0", "2e9G",
+            " 1", "1 ", "2 e9", "2e 9", "0x10", "1_000", "NaN", "inf", "١",
+        ] {
+            let error = parse_memory(spelling).unwrap_err();
+            assert_eq!(error.downcast_ref::<ParseMemoryError>(), Some(&ParseMemoryError::InvalidFormat), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn memory_refuses_overflow_without_rounding_or_wrapping() {
+        for spelling in [
+            "18446744073709551616", "18446744073709551616e0", "18446744073709551615e1",
+            "2e19", "1e20", "2E20", "1e4294967296", "99999999999T",
+        ] {
+            let error = parse_memory(spelling).unwrap_err();
+            assert_eq!(error.downcast_ref::<ParseMemoryError>(), Some(&ParseMemoryError::Overflow), "{spelling}");
+        }
     }
 
     #[test]

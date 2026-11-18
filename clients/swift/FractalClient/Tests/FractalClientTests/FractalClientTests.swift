@@ -6,6 +6,34 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testSeriesFixturePreservesZeroAndClippedBuckets() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/series.json"))
+        let series = try JSONDecoder().decode(Envelope<Series>.self, from: data).value
+        XCTAssertNil(series.groupBy)
+        XCTAssertEqual(series.from, 1767225600000)
+        XCTAssertEqual(series.to, 1767225725000)
+        XCTAssertEqual(series.bucketSeconds, 60)
+        XCTAssertEqual(series.buckets.map(\.count), [2, 0, 1])
+        XCTAssertEqual(series.buckets.last?.start, 1767225720000)
+        XCTAssertEqual(series.buckets.last?.end, series.to)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(series)) as? NSDictionary, wire["value"] as? NSDictionary)
+    }
+
+    func testSeriesGroupedFixturePreservesJSONValues() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/series-grouped.json"))
+        let series = try JSONDecoder().decode(Envelope<Series>.self, from: data).value
+        XCTAssertEqual(series.groupBy, "category")
+        XCTAssertEqual(series.buckets.first?.groups?.count, 6)
+        XCTAssertEqual(series.buckets[1].groups?.count, 0)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(series)) as? NSDictionary, wire["value"] as? NSDictionary)
+    }
+
     func testMissionRunSupersessionLineageAndLegacyOmission() throws {
         let legacy = Data(#"{"id":"mission-run/example/current","requester":"person/operator","status":"running","phase":"normal","must_act":"system","state_since":"2026-11-12T12:00:00Z","progress":{"done":0,"total":1},"current_steps":[]}"#.utf8)
         let decoded = try JSONDecoder().decode(MissionRunSummary.self, from: legacy)
@@ -360,6 +388,51 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(String(decoding: try JSONEncoder().encode(future.deadlineClock), as: UTF8.self), #""hold-weekend""#)
         XCTAssertEqual(AvailabilityDeadlineClock(word: "hold-all"), .holdAll)
         XCTAssertEqual(AvailabilityPresence.unreported.word, "unreported")
+    }
+
+    func testAvailabilityHistoryFixtureDecodesMillisecondsPerAxis() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixture = root.appendingPathComponent("docs/st3/client-v0/fixtures/availability-history.json")
+        let history = try JSONDecoder().decode(Envelope<AvailabilityHistory>.self, from: Data(contentsOf: fixture)).value
+        XCTAssertEqual(history.person, "person/ada")
+        XCTAssertEqual([history.bucketSeconds, history.buckets.count], [3600, 2])
+        let last = try XCTUnwrap(history.buckets.last)
+        XCTAssertEqual(last.start, "2026-11-12T10:00:00.000Z")
+        XCTAssertEqual([last.coveredMS, last.statusSource.override, last.deadlineClock.holdRoutine, last.interruptions.urgent], [1_800_000, 1_200_000, 1_200_000, 1_800_000])
+        XCTAssertEqual(last.presence?.present, 1_800_000)
+        for bucket in history.buckets {
+            XCTAssertEqual(bucket.status.available + bucket.status.away, bucket.coveredMS)
+            XCTAssertEqual(bucket.deadlineClock.run + bucket.deadlineClock.holdRoutine + bucket.deadlineClock.holdAll, bucket.coveredMS)
+        }
+        let wire = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any]
+        let reencoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(history)) as? NSDictionary
+        XCTAssertEqual(reencoded, wire?["value"] as? NSDictionary)
+    }
+
+    func testAvailabilityHistorySendsItsRangeAndAnOlderDaemonIsUnsupported() async throws {
+        let url = URL(string: "https://history-\(UUID().uuidString.lowercased()).example/")!
+        let capture = TraceRequestCapture()
+        TraceHTTPRegistry.shared.register(capture, host: url.host!)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraceHTTPProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            TraceHTTPRegistry.shared.remove(host: url.host!)
+        }
+        let client = FractalClient(fabricLoopbackURL: url, session: session)
+        do {
+            _ = try await client.availabilityHistory(person: "person/ada", from: "2026-11-12T09:00:00Z", to: "2026-11-12T11:00:00Z", bucketSeconds: 3600)
+            XCTFail("an older daemon has no availability history")
+        } catch let error as ErrorEnvelope {
+            XCTAssertEqual(error.code, .unsupportedCapability)
+        }
+        let request = try XCTUnwrap(capture.requests.first { $0.url?.path == "/v1/client/availability/history" })
+        XCTAssertEqual(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "from", value: "2026-11-12T09:00:00Z"), URLQueryItem(name: "to", value: "2026-11-12T11:00:00Z"),
+            URLQueryItem(name: "bucket_seconds", value: "3600"), URLQueryItem(name: "person", value: "person/ada"),
+        ])
     }
 
     func testCreationActionFixtures() throws {
@@ -1028,16 +1101,18 @@ private final class TraceHTTPProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        // An older daemon: no availability history route, so Axum's empty 404.
+        let missing = request.url?.path == "/v1/client/availability/history"
         guard let capture = TraceHTTPRegistry.shared.capture(for: request),
               let url = request.url,
-              let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+              let response = HTTPURLResponse(url: url, statusCode: missing ? 404 : 200, httpVersion: nil,
                   headerFields: ["Content-Type": "application/json"]) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
         capture.append(request)
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: TraceTestFixtures.capabilities)
+        client?.urlProtocol(self, didLoad: missing ? Data() : TraceTestFixtures.capabilities)
         client?.urlProtocolDidFinishLoading(self)
     }
 

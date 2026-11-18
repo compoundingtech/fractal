@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v33.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v35.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -101,6 +101,60 @@ fn the_corpus_includes_every_registry_kind() {
             corpus().contains_key(kind),
             "add {kind} to a versioned corpus"
         );
+    }
+}
+
+#[test]
+fn the_corpus_generates_valid_native_continuity_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["mission-run.gate-carried", "step-run.carried", "gate.requested", "work.person-asked"] {
+        let spec = &corpus()[kind];
+        assert_eq!(
+            serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current continuity fields, not just retain its kind name"
+        );
+        let input = world.claim_of(spec, 0).expect("generate continuity input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        for (name, field) in &spec.fields {
+            if field.required {
+                assert!(input.fields.contains_key(name), "{kind} requires {name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_corpus_generates_coherent_review_heads_and_request_tuples() {
+    let mut world = World::new(1, Sabotage::None);
+    for index in 0..2 {
+        for kind in fractal_schema::review::KINDS.into_iter().chain(["gate.requested"]) {
+            let mut saw_head = false;
+            for _ in 0..16 {
+                let input = world.claim_of(&corpus()[kind], index).unwrap();
+                fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+                if kind == "gate.requested"
+                    && fractal_schema::review::REQUEST_FIELDS.iter().any(|name| input.fields.contains_key(*name))
+                {
+                    for name in fractal_schema::review::REQUEST_FIELDS {
+                        assert!(input.fields.get(name).is_some_and(|value| !value.is_null()), "missing review request {name}");
+                    }
+                }
+                if let Some(value) = input.fields.get("head").or_else(|| input.fields.get("reviewed_head")) {
+                    let head: fractal_schema::review::Head = serde_json::from_value(value.clone()).unwrap();
+                    head.validate().unwrap();
+                    assert_eq!(matches!(head, fractal_schema::review::Head::GitCommit { .. }), index == 0);
+                    if let Some(change) = input.fields.get("change") {
+                        let change: fractal_schema::review::Change = serde_json::from_value(change.clone()).unwrap();
+                        change.validate(fractal_schema::registry(), &head).unwrap();
+                    }
+                    saw_head = true;
+                }
+            }
+            if kind != "gate.review-withdrawn" {
+                assert!(saw_head, "{kind} must exercise its tagged head");
+            }
+        }
     }
 }
 
@@ -1194,6 +1248,41 @@ impl World {
             };
             (fields, actor)
         };
+        let mut fields = fields;
+        // Object field specs cannot express tagged review heads or the all-or-none
+        // request tuple. Generate those together, retaining ordinary legacy requests
+        // when no review field was drawn.
+        let review_request = spec.kind == "gate.requested"
+            && fractal_schema::review::REQUEST_FIELDS.iter().any(|name| fields.contains_key(*name));
+        if review_request || fractal_schema::review::KINDS.contains(&spec.kind.as_str()) {
+            if review_request {
+                for name in fractal_schema::review::REQUEST_FIELDS {
+                    if !fields.contains_key(name) {
+                        fields.insert(name.into(), self.value_of(&spec.fields[name], index));
+                    }
+                }
+            }
+            let head_name = if matches!(spec.kind.as_str(), "gate.review-verdict" | "gate.remediation-attached") {
+                "reviewed_head"
+            } else {
+                "head"
+            };
+            if spec.fields.contains_key(head_name) {
+                let (change, head) = if index.is_multiple_of(2) {
+                    (fractal_schema::review::Change {
+                        kind: "git.branch".into(), subject: "resource/convergence-review".into(),
+                    }, fractal_schema::review::Head::GitCommit { sha: "a".repeat(40) })
+                } else {
+                    (fractal_schema::review::Change {
+                        kind: "patch".into(), subject: "doc/convergence-review".into(),
+                    }, fractal_schema::review::Head::PatchManifest { digest: "b".repeat(64) })
+                };
+                fields.insert(head_name.into(), serde_json::to_value(head).unwrap());
+                if spec.fields.contains_key("change") {
+                    fields.insert("change".into(), serde_json::to_value(change).unwrap());
+                }
+            }
+        }
         Some(ClaimInput {
             subject,
             kind: spec.kind.clone(),
@@ -2104,7 +2193,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v32 adds durable native effect receipts to v31's explicit person overrides.
+/// Corpus v35 resource execution receipts shift the seeded schedule (see the
+/// fixed-seed characterization in fixtures/convergence/README.md).
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
 const NEVER_TRIMS: &[u64] = &[179];
@@ -2117,7 +2207,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v33 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v35 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2126,7 +2216,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v33 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v35 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2134,7 +2224,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v33 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v35 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2347,7 +2437,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v33.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v35.json"
         }))
         .unwrap(),
     )

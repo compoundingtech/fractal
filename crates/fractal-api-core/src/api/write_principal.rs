@@ -7,6 +7,10 @@ pub(super) struct WritePrincipal {
 }
 
 impl WritePrincipal {
+    pub(super) fn actor(&self) -> &str {
+        &self.actor
+    }
+
     fn derive(state: &AppState, request: &Request<Body>) -> Result<Option<Self>, ApiError> {
         if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
             return Err(ApiError::bad(FractalError::new(
@@ -102,6 +106,9 @@ impl WritePrincipal {
 
 fn native_scope(path: &str, value: Option<&Value>) -> Option<&'static str> {
     if path.starts_with("/v1/client/") { return None; }
+    if path == "/v1/mission-runs/continuity/preview" {
+        return Some("read.projections");
+    }
     if path == "/v1/work/override" {
         return Some("control.attention");
     }
@@ -147,7 +154,14 @@ pub(super) async fn bind_request(
     {
         return Ok(request);
     }
-    if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX)
+    // Native resource handlers bind every command and control request to the verified owner.
+    // Keep normal principal derivation, pairing checks and scopes below; only their exact
+    // methods may pass the otherwise blanket internal-write refusal.
+    let native_resource_request = (
+        request.extensions().get::<BoundAgent>().is_some()
+            || request.extensions().get::<BoundRun>().is_some()
+    ) && resources::allows_bound_request(request.method(), request.uri().path());
+    if (request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) && !native_resource_request)
         || request.uri().path() == "/v1/repair/apply"
         || request.uri().path() == "/v1/replication/replay"
     {

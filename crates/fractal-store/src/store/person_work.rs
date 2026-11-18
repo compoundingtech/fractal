@@ -1,7 +1,7 @@
 //! Person asks are runtime steps. The immutable asking claim supplies their ownership fence;
 //! step_runs supplies their state. No separate attention record is created.
 use super::*;
-use crate::model::PersonRenameRequest;
+use crate::model::{PersonAskRequest, PersonRenameRequest};
 
 use crate::person_request::StructuredRequest;
 
@@ -9,6 +9,8 @@ use crate::person_request::StructuredRequest;
 mod reconcile_candidates_tests;
 #[cfg(test)]
 mod revision_provenance_tests;
+pub mod continuity;
+pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
 /// The structured request an ask claim carries. An ask from a newer build whose request this
 /// build cannot read is refused rather than answered as free text.
@@ -599,6 +601,21 @@ fn run_liveness_uncached(
     }
 }
 
+pub fn episode_owner(connection: &Connection, ask: &ClaimRecord) -> Result<Option<(String, Option<String>)>> {
+    let fields = &ask.body["fields"];
+    if fields.get("owner_run").is_some() {
+        return Ok(fields["owner_run"].as_str().map(|run| (
+            run.to_owned(), fields["owner_generation"].as_str().map(str::to_owned),
+        )));
+    }
+    let requester = ask.actor.as_deref().unwrap_or_default();
+    if !requester.starts_with("agent/") {
+        return Ok(None);
+    }
+    Ok(canonical_desired_row_at_claim(connection, requester, &ask.id)?.and_then(|desired|
+        desired.owner_run.map(|run| (run, desired.owner_generation))))
+}
+
 pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Result<bool> {
     if ask.accepted_at_unix_ms > as_of {
         return Ok(false);
@@ -623,11 +640,27 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         return Ok(false);
     }
     let requester = ask.actor.as_deref().unwrap_or_default();
-    // Independent asks belong to the agent, not its current work or runtime turn.
-    // This also preserves asks written before owner-run fencing was removed.
+    // Unowned asks survive runtime turns; an episode-owned ask keeps its original fence.
+    if let Some((owner, generation)) = episode_owner(connection, ask)?
+        && !run_live(connection, &owner, generation.as_deref(), false)?
+    {
+        return Ok(false);
+    }
+    if is_update(ask) {
+        let about = fields["request"]["about"].as_str().unwrap_or_default();
+        if about.starts_with("mission-run/") && !run_live(connection, about, None, false)? {
+            return Ok(false);
+        }
+        if about.starts_with("step-run/")
+            && let Some(origin) = step(connection, about)?
+            && (matches!(origin.status.as_str(), "completed" | "cancelled" | "failed")
+                || !run_live(connection, &origin.run, Some(&origin.generation), false)?)
+        {
+            return Ok(false);
+        }
+    }
     let independent = view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null();
-    // A daemon asks for its own policy, not for a seat, so no declaration fences it. An update
-    // waits for nobody, so it stays until the person reads it, even after its poster stops.
+    // Updates need no live poster, but their owning episode still fences them.
     let unfenced = requester.starts_with("daemon/") || is_update(ask);
     if !matches!(view.status.as_str(), "pending" | "ready")
         || (!independent && !run_live(connection, &view.run, Some(&view.generation), false)?)
@@ -710,10 +743,18 @@ pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h96e1535e2ac0 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
-          json_extract(request.body,'$.fields.origin_step')=?1, resolution.kind,
-          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution JOIN claims request
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h58b7fa26fa6e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "WITH RECURSIVE sources(subject,attempt) AS (
+          SELECT ?1,?2 UNION
+          SELECT json_extract(carried.body,'$.fields.source_step_run'),
+            coalesce(json_extract(carried.body,'$.fields.source_attempt'),sources.attempt)
+          FROM sources JOIN claims carried ON carried.subject=sources.subject
+            AND carried.kind='step-run.carried'
+            AND json_extract(carried.body,'$.fields.attempt')=sources.attempt
+        )
+        SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
+          EXISTS(SELECT 1 FROM sources WHERE sources.subject=json_extract(request.body,'$.fields.origin_step')), resolution.kind,
+          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution LEFT JOIN claims request
         ON request.subject=resolution.subject AND request.kind='work.person-asked'
         WHERE resolution.kind IN ('work.person-done','work.person-cancelled','work.person-override')
           AND (resolution.kind!='work.person-override' OR (
@@ -725,15 +766,13 @@ pub fn enrich_responses(
                 AND deadline.subject=request.subject AND deadline.kind='work.person-done'
                 AND json_extract(deadline.body,'$.fields.resolved_by')='deadline'
                 AND json_extract(deadline.body,'$.fields.episode')=request.id)))
-          -- Only asks this step made, or the step's own ask: an index walk, not every answer.
-          AND resolution.subject IN (
-            SELECT subject FROM claims WHERE kind='work.person-asked'
-              AND json_extract(body,'$.fields.origin_step')=?1
-            UNION SELECT ?1)
-          AND ((json_extract(request.body,'$.fields.origin_step')=?1
-                AND json_extract(request.body,'$.fields.origin_attempt')=?2)
-            OR (resolution.subject=?1 AND (json_extract(resolution.body,'$.fields.attempt')=?2
-                OR (resolution.kind='work.person-override' AND json_extract(request.body,'$.fields.attempt')=?2))))
+          AND EXISTS(SELECT 1 FROM sources WHERE
+            (json_extract(request.body,'$.fields.origin_step')=sources.subject
+              AND json_extract(request.body,'$.fields.origin_attempt')=sources.attempt)
+            OR (resolution.subject=sources.subject AND
+              (json_extract(resolution.body,'$.fields.attempt')=sources.attempt
+               OR (resolution.kind='work.person-override'
+                 AND json_extract(request.body,'$.fields.attempt')=sources.attempt))))
         ORDER BY CANONICAL_ASC(resolution)",
     ))?;
     let responses = query

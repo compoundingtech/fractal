@@ -72,6 +72,7 @@ pub mod seat_admission;
 mod seat_admission_queue;
 mod resource_lanes;
 mod program_resources;
+mod shell_resources;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -599,6 +600,12 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
         anyhow::bail!("runtime does not support generation-fenced execution status")
     }
+    fn cancel_resource_exec(&self, _id: &str, _generation: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support generation-fenced payload cancellation")
+    }
+    fn resource_exec_memory_peak(&self, _id: &str, _generation: &str) -> Result<Option<u64>> {
+        anyhow::bail!("runtime does not support generation-fenced memory observations")
+    }
     fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
         anyhow::bail!("runtime does not support exact resource execution cancellation")
     }
@@ -671,6 +678,11 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
     fn end_leftovers(&self, _runtime_id: &str, _terminal: bool) {}
+    /// True only after the exact exec generation has exited and its entire work scope is
+    /// proven closed. Missing records, logical containment and delivered signals are not proof.
+    fn leftovers_settled(&self, _runtime_id: &str, _incarnation: &str) -> Result<bool> {
+        Ok(false)
+    }
     /// Ends, without waiting, the lane of a seat that stopped for good: the jobs it started in
     /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
     /// without one has nothing to end.
@@ -1033,6 +1045,25 @@ impl RuntimeControl for NativeRuntime {
             _ => anyhow::bail!("resource execution exit status is missing or belongs to another generation"),
         }
     }
+    fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+        self.exec.signal_if(id, Some(generation), libc::SIGTERM)
+    }
+    fn resource_exec_memory_peak(&self, id: &str, generation: &str) -> Result<Option<u64>> {
+        let current = match self.exec.observe(id)? {
+            Some(fractal_runtime::ExecObservation::Running(current) | fractal_runtime::ExecObservation::Exited(current))
+                if current.generation_id == generation => current,
+            _ => anyhow::bail!("resource execution memory belongs to an unknown generation"),
+        };
+        let Some(unit) = current.scope_unit else { return Ok(None); };
+        let snapshot = fractal_runtime::systemd::snapshot()?;
+        let Some(group) = snapshot.units.get(&unit).and_then(|unit| unit.control_group.as_ref()) else { return Ok(None); };
+        anyhow::ensure!(group.file_name() == Some(std::ffi::OsStr::new(&unit)), "execution cgroup differs from recorded scope");
+        match fs::read_to_string(group.join("memory.peak")) {
+            Ok(value) => Ok(Some(value.trim().parse()?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
     fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
         let record = store.resource_membership_record(&request.id, &request.owner)?;
         let root = record.roots.iter().find(|root| root.runtime_id == id).context("resource execution root missing")?;
@@ -1139,6 +1170,9 @@ impl RuntimeControl for NativeRuntime {
         } else {
             self.exec.end_leftovers_later(runtime_id);
         }
+    }
+    fn leftovers_settled(&self, runtime_id: &str, incarnation: &str) -> Result<bool> {
+        self.exec.retired_if(runtime_id, incarnation)
     }
 
     fn end_lane(&self, runtime_id: &str) {
@@ -1478,6 +1512,7 @@ pub struct Reconciler<R = NativeRuntime> {
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
+    shell_exec_watches: Mutex<BTreeSet<String>>,
     seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
     pub wait_for_test_starts: AtomicBool,
@@ -1626,6 +1661,7 @@ pub struct Reconciler<R = NativeRuntime> {
     disk_paths: Vec<PathBuf>,
     /// When the disk stage last read free space, and whether its episode raised an item.
     disk_check: Mutex<(Option<u128>, bool)>,
+    disk_observations: Mutex<BTreeMap<u64, crate::disk::DiskSpace>>,
     disk_check_every_ms: u128,
     /// When the fault stage last sent faults to their owning agents.
     fault_delivery: Mutex<Option<u128>>,
@@ -1756,6 +1792,7 @@ impl Reconciler<NativeRuntime> {
             event_notify,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
@@ -1838,6 +1875,7 @@ impl Reconciler<NativeRuntime> {
             disk_probe: Some(Arc::new(crate::disk::disk_space)),
             disk_paths: vec![state_dir.to_path_buf()],
             disk_check: Mutex::new((None, false)),
+            disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: DISK_CHECK_EVERY_MS,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: FAULT_DELIVERY_EVERY_MS,
@@ -1947,9 +1985,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .flatten()
             .map(|size| seat_admission::LaneHost {
                 room: fractal_runtime::host::for_lanes(size),
-                outside: fractal_runtime::host::unlaned_seat_memory,
+                outside: fractal_runtime::host::outside_lane_memory,
                 burst_lane: Some(seat_admission::BURST_LANE),
             });
+        self
+    }
+
+    /// Install the host's finite disk/IO policy without creating another accountant.
+    pub fn with_finite_resources(mut self, policy: Option<fractal_runtime::host::FinitePolicy>) -> Self {
+        self.seat_admission.finite_policy = policy.unwrap_or_default();
         self
     }
 
@@ -1980,6 +2024,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
             start_jobs: Default::default(),
+            shell_exec_watches: Default::default(),
             seat_admission: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
@@ -2062,6 +2107,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             disk_probe: None,
             disk_paths: Vec::new(),
             disk_check: Mutex::new((None, false)),
+            disk_observations: Mutex::new(BTreeMap::new()),
             disk_check_every_ms: 0,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: 0,
@@ -2739,11 +2785,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         // One reading per filesystem, named by the first path on it. A workspace that does not
         // exist yet has no filesystem to read.
         let mut filesystems = BTreeMap::<u64, (PathBuf, crate::disk::DiskSpace)>::new();
-        for path in self.disk_paths.iter().cloned().chain(workspaces) {
+        let finite = self.store.resource_memberships_for_host(&self.host)?;
+        let finite_paths = finite.iter()
+            .filter(|member| matches!(member.state.as_str(), "queued" | "admitted" | "launched" | "retiring" | "uncertain"))
+            .filter_map(|member| member.request.disk.as_ref().map(|disk| PathBuf::from(&disk.path)));
+        for path in self.disk_paths.iter().cloned().chain(workspaces).chain(finite_paths)
+            .chain(self.seat_admission.finite_policy.disk_floors.keys().cloned()) {
             if let Ok(space) = probe(&path) {
                 filesystems.entry(space.filesystem).or_insert((path, space));
             }
         }
+        let mut observations = self.disk_observations.lock().unwrap_or_else(PoisonError::into_inner);
+        if observations.len() != filesystems.len()
+            || filesystems.iter().any(|(mount, (_, space))| observations.get(mount) != Some(space))
+        {
+            observations.clear();
+            observations.extend(filesystems.iter().map(|(mount, (_, space))| (*mount, *space)));
+            self.incremental.touch("host-lane-disk");
+            self.signal_changed();
+        }
+        drop(observations);
         if filesystems.is_empty() {
             return Ok(());
         }
@@ -3233,6 +3294,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _observation_capture = self.store.capture_runtime_observations()?;
         let pty_snapshot = PassPtySnapshot::new();
         self.reconcile_start_jobs_with_snapshot(&pty_snapshot)?;
+        self.reconcile_shell_resources()?;
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -7786,10 +7848,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 evidence.record("end_leftovers", "skip_running_root_tasks", false);
                 return Ok(false);
             }
-            // A harness that ended before the stop, or a stop that could not finish, can leave
-            // processes in the runtime's work scope. They end with it.
-            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
-            self.runtime.end_leftovers(runtime_id, terminal);
+            // A stopped leader can leave descendants. Retry until native whole-scope proof
+            // is finalized durably; never infer settlement from a stopped observation alone.
+            let settled = if let Some(incarnation) = incarnation.filter(|_| !terminal) {
+                self.store.runtime_cleanup_settled(runtime_id, incarnation)?
+            } else {
+                false
+            };
+            if !settled {
+                evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
+                self.runtime.end_leftovers(runtime_id, terminal);
+                if let Some(incarnation) = incarnation.filter(|_| !terminal)
+                    && self.runtime.leftovers_settled(runtime_id, incarnation).unwrap_or(false)
+                {
+                    self.store.settle_runtime_cleanup(subject, runtime_id, incarnation)?;
+                }
+            }
             let desired = self.store.selected_desired_token(subject)?;
             let stop = match &desired {
                 Some(token) if self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop") => {
@@ -16644,6 +16718,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("attempt".into(), Value::from(attempt)),
         ]);
+        let (binding, original_request) = self.store.human_gate_continuity(run, subject, &fields)?;
+        fields.insert("continuity".into(), binding);
         let request_hash = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&fields)?));
         let operation = format!(
             "gate-operation/{}/{}",
@@ -16651,7 +16727,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &request_hash[..24]
         );
         fields.insert("operation".into(), Value::String(operation.clone()));
-        let request = self.store.append_claim(&ClaimInput {
+        let request = if let Some(original) = original_request { original } else { self.store.append_claim(&ClaimInput {
             subject: operation.clone(),
             kind: "gate.requested".into(),
             actor: None,
@@ -16663,7 +16739,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject,
                 &request_hash[..24]
             )),
-        })?;
+        })? };
         // The reviewer's answer, read by the rule that takes an answered review off the
         // reviewers' list: a later result on the operation (another actor's, an unbound one)
         // cannot hide it and leave a gate nobody can answer.

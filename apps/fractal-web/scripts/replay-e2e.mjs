@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import { once } from 'node:events'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import { loadWorld } from '@fractal/scenarios'
 import { collectResponse } from './response-wait.mjs'
+import { waitForDevtoolsEndpoint } from './devtools-endpoint.mjs'
 
 // Run in the web Nix shell: its Playwright driver and Chromium are also used by the kit gate.
 const started = performance.now()
@@ -72,9 +72,9 @@ try {
   const { arguments: arguments_ } = await browserSession.send('Browser.getBrowserCommandLine')
   const profile = arguments_.find(argument => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length)
   assert(profile, 'Chromium must report its temporary profile for the loopback CDP endpoint')
-  const [port, socketPath] = (await readFile(`${profile}/DevToolsActivePort`, 'utf8')).trim().split('\n')
+  const endpoint = await waitForDevtoolsEndpoint(profile, browser)
   await browserSession.detach()
-  devtools = new WebSocket(`ws://127.0.0.1:${port}${socketPath}`)
+  devtools = new WebSocket(endpoint)
   await once(devtools, 'open')
   let nextCommand = 0
   const commands = new Map()

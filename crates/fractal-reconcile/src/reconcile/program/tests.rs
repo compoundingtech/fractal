@@ -573,3 +573,94 @@ fn a_replayed_grant_still_visits_native_authority_and_cancellation_wins_the_repl
     assert!(engine.requests(&run.subject).is_empty());
     assert_eq!(journal_claims(&engine, step), before, "neither acquisition nor withdrawal overwrites the journal");
 }
+
+#[test]
+fn launch_freeze_defers_resource_exec_and_clear_invalidates_the_pending_effect() {
+    frozen_resource_exec(false);
+}
+
+#[test]
+fn launch_freeze_drain_timeout_wakes_resource_exec_without_a_timer() {
+    frozen_resource_exec(true);
+}
+
+fn frozen_resource_exec(timed_out_drain: bool) {
+    use crate::reconcile::{NativeRuntime, Reconciler};
+    use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+    use fractal_runtime::Capacity;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let run = scoped_run(&engine, "frozen-resource-exec");
+    running_attempt(&engine, &run, 1, 1);
+    let child = Command::new("sleep").arg("1000").spawn().unwrap();
+    let (lines, _receiver) = mpsc::channel();
+    engine.lock().host = Some(Host { child, lines, generation: 1, ping: None });
+    let runtime = Arc::new(NativeRuntime::new(dir.path(), None, Path::new("unused-pty")));
+    let reconciler = Reconciler::new(engine.store.clone(), runtime, "node".into(), Arc::new(tokio::sync::Notify::new()));
+    reconciler.ensure_resource_authority().unwrap();
+    let lane = LaneRequest {
+        id: "freeze-resource-lane".into(), name: "checks".into(), host: "node".into(),
+        max_members: 1, capacity: Some(Capacity { cores: 1, memory: 256 << 20 }),
+        coverage: Coverage::Logical, admission_timeout_ms: None,
+        class: Default::default(), disk: None, io: None,
+        owner: Owner { run: run.subject.clone(), step: run.steps[0].subject.clone(),
+            attempt: 1, invocation: Some("program:checks".into()) },
+    };
+    let fit = Fit { room: Some(Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() };
+    let Admission::Admitted(grant) = engine.store.request_resource_membership(&lane, fit, 1).unwrap() else {
+        panic!("logical membership must be admitted");
+    };
+    let marker = dir.path().join("executions");
+    let payload = json!({"membership":grant, "argv":["/bin/sh","-c","printf x >> \"$1\"","sh",marker],
+        "options":{"cwd":dir.path()}});
+    engine.handle(&json!({"t":"resource","step":run.steps[0].subject,"attempt":1,"seq":1,
+        "key":"resource.exec/check","operation":"resource.lane.exec","payload":payload}), 1).unwrap();
+    let request = engine.requests(&run.subject)[0].clone();
+    let prior_permit = timed_out_drain.then(|| engine.store.admit_launch().unwrap().unwrap());
+    let setter = if timed_out_drain {
+        let store = engine.store.clone();
+        let setter = std::thread::spawn(move ||
+            store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 2_000));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while engine.store.admit_launch().unwrap().is_some() {
+            assert!(Instant::now() < deadline, "set must enter its drain");
+            std::thread::yield_now();
+        }
+        Some(setter)
+    } else {
+        engine.store.set_launch_freeze("person/operator", "activation", "replace daemon", 60_000, 5_000).unwrap();
+        None
+    };
+    let expiry = engine.store.launch_freeze().unwrap().map(|freeze| u128::from(freeze.expires_at_unix_ms));
+    reconciler.incremental.observe(&engine.store).unwrap();
+    let ((changed, due), reads) = smallclaims::touched::record(|| smallclaims::touched::record_due(||
+        reconciler.settle_program_resource(&engine, &run, &request, "resource.lane.exec", &payload, false).unwrap()));
+    assert!(!changed);
+    assert_eq!(due, expiry);
+    assert!(!marker.exists());
+    assert!(engine.store.resource_membership_record(&lane.id, &lane.owner).unwrap().roots.is_empty());
+    assert_eq!(engine.requests(&run.subject).len(), 1, "the effect must remain pending");
+    reconciler.incremental.evaluated("pending-resource-effect", reads, due);
+    assert!(!reconciler.incremental.needs("pending-resource-effect", 0));
+    if let Some(setter) = setter {
+        assert_eq!(setter.join().unwrap().unwrap_err().code, "launch-freeze-timeout");
+        assert!(engine.store.launch_freeze().unwrap().is_none());
+        drop(prior_permit);
+    } else {
+        engine.store.clear_launch_freeze("person/operator", "activation").unwrap();
+    }
+    reconciler.incremental.observe(&engine.store).unwrap();
+    assert!(reconciler.incremental.needs("pending-resource-effect", 0), "clear must wake the cached run, not just the daemon");
+    assert!(reconciler.settle_program_resource(&engine, &run, &request, "resource.lane.exec", &payload, false).unwrap());
+    let roots = engine.store.resource_membership_record(&lane.id, &lane.owner).unwrap().roots;
+    assert_eq!(roots.len(), 1, "the deferred effect must allocate exactly one root");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(10)); }
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+    reconciler.settle_program_resource(&engine, &run, &request, "resource.lane.exec", &payload, false).unwrap();
+    assert_eq!(engine.store.resource_membership_record(&lane.id, &lane.owner).unwrap().roots.len(), 1);
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x", "replay must not spawn a duplicate");
+    let mut host = engine.lock().host.take().unwrap();
+    let _ = host.child.kill();
+    host.child.wait().unwrap();
+}

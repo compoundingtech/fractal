@@ -188,13 +188,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.signal_changed();
     }
 
+    pub(super) fn admit_incarnation_launch(&self) -> Result<Option<crate::store::launch_freeze::LaunchPermit>> {
+        let permit = self.store.admit_launch()?;
+        if permit.is_none() && let Some(freeze) = self.store.launch_freeze()? {
+            self.arm_deadline_at("launch-freeze", u128::from(freeze.expires_at_unix_ms),
+                crate::reconcile_telemetry::WakeCause::Deadline);
+        }
+        Ok(permit)
+    }
+
     pub fn start_queued_job(&self, operation: &RuntimeStartOperation) -> Result<()> {
         if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
+        let Some(launch_permit) = self.admit_incarnation_launch()? else {
+            return Ok(());
+        };
         let Some(lock) = self.store.try_runtime_start_lock(&operation.subject)? else {
             return Ok(());
         };
+        if operation.owner != self.start_jobs.owner
+            && !self.store.adopt_queued_runtime_start(&operation.id, &self.start_jobs.owner)?
+        {
+            return Ok(());
+        }
         if !self
             .store
             .dispatch_runtime_start(&operation.id, MAX_START_JOBS)?
@@ -210,13 +227,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let live = self.start_jobs.live.clone();
         let id = operation.id.clone();
         let subject = operation.subject.clone();
-        let owner = operation.owner.clone();
+        let owner = self.start_jobs.owner.clone();
         live.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id.clone());
         let spawned = std::thread::Builder::new().name("st3-runtime-start".into()).spawn(move || crate::task_cpu::blocking("runtime.start", || {
             let _lock = lock;
+            let _launch_permit = launch_permit;
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
                 anyhow::ensure!(store.runtime_start_intent_current(&id)?,
@@ -236,12 +254,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let mut backend_entered = false;
             let mut contract = None;
+            let mut runtime_before_start = None;
             let result = caught(|| {
                 guard()?;
                 if prepared.subject.kind == "agent" {
                     let measured = runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?;
                     store.record_invocation_launch_inputs(&id, &measured)?;
                     contract = Some(measured);
+                }
+                if prepared.subject.kind == "agent" && prepared.member.driver.is_none() {
+                    runtime_before_start = store.latest_claim(&subject, Some("runtime.observed"))?
+                        .map(|claim| claim.id);
                 }
                 backend_entered = true;
                 if resource_lanes::request(&prepared.launch_member)?.is_some() {
@@ -279,6 +302,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                         "verification_error": verification_error})
                 },
             };
+            if result["verification"] == "operation-incarnation"
+                && prepared.subject.kind == "agent" && prepared.member.driver.is_none()
+                && let Some(incarnation) = result["incarnation"].as_str()
+                && let Ok(Some((pid, token))) =
+                    runtime.start_process_identity(&prepared.launch_member, incarnation)
+            {
+                let fields = member_fields(&prepared.member, "starting", Some(incarnation), false);
+                result["runtime_pid"] = Value::from(pid);
+                result["runtime_pid_start_token"] = Value::from(token.to_string());
+                result["runtime_start_fields"] = serde_json::json!(fields);
+                result["runtime_before_start"] = serde_json::json!(runtime_before_start);
+            }
             result["launch_contract"] = serde_json::json!(contract);
             result["operation_id"] = Value::from(id.clone());
             result["subject"] = Value::from(subject.clone());
@@ -416,7 +451,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&operation.id);
         if !operation.finished
-            && (operation.owner != self.start_jobs.owner || (operation.dispatched && !live))
+            && operation.dispatched && (operation.owner != self.start_jobs.owner || !live)
         {
             // The kernel lock, not a PID guess, establishes that no old launch worker holds
             // admission. Late producer ownership still needs exact operation provenance.

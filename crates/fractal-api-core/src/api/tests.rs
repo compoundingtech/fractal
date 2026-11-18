@@ -4694,9 +4694,9 @@ fn internal_routes() -> Vec<String> {
         .collect()
 }
 
-/// Internal routes now refuse seat callers: a bound harness is refused on every one of them, by
-/// any method, while this node's replication worker and its operator's CLI, which run in no
-/// harness, pass.
+/// Internal routes refuse seat callers except the exact resource methods whose handlers enforce
+/// native ownership. This node's replication worker and operator CLI, which run in no harness,
+/// still pass the transport guard for every internal route.
 #[tokio::test]
 async fn internal_routes_refuse_seat_callers() {
     let root = tempfile::tempdir().unwrap();
@@ -4704,7 +4704,11 @@ async fn internal_routes_refuse_seat_callers() {
     let routes = internal_routes();
     assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
     for route in &routes {
-        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+        for method in [
+            axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT,
+            axum::http::Method::PATCH, axum::http::Method::DELETE, axum::http::Method::HEAD,
+            axum::http::Method::OPTIONS, axum::http::Method::TRACE, axum::http::Method::CONNECT,
+        ] {
             let request = || {
                 Request::builder()
                     .method(method.clone())
@@ -4713,8 +4717,17 @@ async fn internal_routes_refuse_seat_callers() {
                     .body(Body::from("{}"))
                     .unwrap()
             };
-            let refused = guard_bound_request(request(), Some("agent/own"), &state.store).await.unwrap_err();
-            assert_eq!(refused.code, "foreign-agent-actor", "{method} {route}");
+            let bound = guard_bound_request(request(), Some("agent/own"), &state.store).await;
+            let resource_owner_route = matches!((route.as_str(), method.as_str()),
+                ("/v1/internal/resources" | "/v1/internal/resources/example", "GET")
+                | ("/v1/internal/resources/exec"
+                    | "/v1/internal/resources/example/wait"
+                    | "/v1/internal/resources/example/cancel", "POST"));
+            if resource_owner_route {
+                assert!(bound.is_ok(), "{method} {route} reaches native resource ownership enforcement");
+            } else {
+                assert_eq!(bound.unwrap_err().code, "foreign-agent-actor", "{method} {route}");
+            }
             assert!(
                 guard_bound_request(request(), None, &state.store).await.is_ok(),
                 "{method} {route} serves a caller in no harness"
@@ -17105,5 +17118,54 @@ async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
         }
         connection.abort();
         server.abort();
+    }
+}
+
+#[tokio::test]
+async fn native_rename_plan_and_proof_routes_are_read_only_and_symmetric() {
+    for (family, from, to, source) in [
+        ("agents", "agent/example-plan/worker", "agent/example-plan-renamed/worker",
+            "version 2\nagent \"example-plan/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n"),
+        ("missions", "mission/example-plan", "mission/example-plan-renamed",
+            "version 2\nmission \"example-plan\" state=\"ready\" { goal \"Review candidate\"; step \"review\" { assigned-to \"person/robin\"; }; }\n"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+        let expected = intent.subjects.keys().chain(intent.missions.values().map(|mission| &mission.subject)).map(|subject| {
+            (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+        }).collect();
+        state.store.apply(&intent, &expected, "example-plan-declare").unwrap();
+        let before = state.store.selected_desired_token(from).unwrap();
+        let app = router(state.clone());
+        let request = json!({
+            "from": from, "to": to, "actor": "person/robin",
+            "reason": "Clarify responsibility", "idempotency_key": "example-plan",
+            "expected_naming_revision": null, "expected_declaration": null,
+        });
+        let (status, plan) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id/plan"), request.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["request"], request);
+        let digest = plan["request_digest"].as_str().unwrap();
+        assert_eq!(state.store.selected_desired_token(from).unwrap(), before);
+        let (status, receipt) = json_request(
+            app.clone(), &format!("/v1/{family}/rename-id"), request,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        let applied = state.store.selected_desired_token(from).unwrap();
+        for suffix in [String::new(), format!("&request_digest={digest}")] {
+            let path = format!("/v1/{family}/rename-proof?from={from}&to={to}{suffix}");
+            let (status, proof) = get_request(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{proof}");
+            assert_eq!(proof["availability"], "selected", "{proof}");
+            assert_eq!(proof["request_digest"], digest);
+            assert_eq!(state.store.selected_desired_token(from).unwrap(), applied);
+        }
+        let response = app.oneshot(Request::builder()
+            .uri(format!("/v1/{family}/rename-proof?from={from}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

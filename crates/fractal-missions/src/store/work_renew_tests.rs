@@ -255,15 +255,16 @@ fn a_renewal_holds_the_writer_for_a_fixed_number_of_statements_whatever_the_clai
     let (short, long) = (costs[0], costs[1]);
     // Every statement the job runs, counted once: the step, its owner, the lease updates, the
     // idempotency receipt; a published renewal adds its claim append, including the two
-    // transactional batch-rowid high-water statements.
+    // transactional batch-rowid high-water statements and eight timestamp-index statements
+    // (pending seek, claim fetch, old rows removal, three timestamps, pending removal, final seek).
     assert!(
         short.0.statements <= 13,
         "a quiet renewal grew past its 13-statement writer budget: {}",
         short.0.statements
     );
     assert!(
-        short.1.statements <= 28,
-        "a published renewal grew past its 28-statement writer budget: {}",
+        short.1.statements <= 36,
+        "a published renewal grew past its 36-statement writer budget: {}",
         short.1.statements
     );
     assert_eq!(
