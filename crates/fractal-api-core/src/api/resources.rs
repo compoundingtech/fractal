@@ -158,8 +158,8 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
             run: id.clone(), step: id.clone(), attempt: 1, invocation: Some(id),
         };
     }
-    let owner = if let Some(caller) = caller {
-        let mut owner = caller.owner;
+    let owner = if let Some(caller) = &caller {
+        let mut owner = caller.owner.clone();
         if !caller.agent { owner.invocation = Some(format!("shell:{}", command.id)); }
         owner
     } else {
@@ -168,6 +168,14 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
             step: format!("shell:{}", command.id), attempt: 1, invocation: Some(format!("shell:{}", command.id)),
         }
     };
+    if let Some(existing) = state.store.shell_resource_if_exists(&command.id).map_err(ApiError::internal)? {
+        authorize_execution(caller.as_ref(), &existing)?;
+        if existing.command.lane.owner.run != owner.run {
+            return Err(ApiError::bad(FractalError::new("resource-exec-owner",
+                "shell execution belongs to another execution owner")));
+        }
+        return replay_submission(command, existing).map(|execution| Json(present(execution)));
+    }
     state.store.shell_resource_owner_live(&owner).map_err(|error|
         ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?;
     if let Some(parent) = &command.parent {
@@ -188,8 +196,30 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
     state.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
     Ok(Json(present(execution)))
 }
+
+fn replay_submission(mut command: Command, existing: Execution) -> Result<Execution, ApiError> {
+    let conflict = || ApiError::bad(FractalError::new("resource-request-conflict",
+        "resource request identity is already bound to different execution intent"));
+    if command.parent.is_some() {
+        // Compare inherited intent against the frozen snapshot, not current live custody.
+        // This validation does not authorize a launch: only the existing execution is returned.
+        validate_parent_intent(&command, &existing.command.lane).map_err(|_| conflict())?;
+        command.lane = existing.command.lane.clone();
+    } else {
+        command.lane.owner = existing.command.lane.owner.clone();
+    }
+    let digest = crate::store::shell_resources::submission_digest(&command).map_err(ApiError::internal)?;
+    if existing.submission_digest.as_deref() != Some(digest.as_str()) {
+        return Err(conflict());
+    }
+    Ok(existing)
+}
 fn validate_parent(command: &Command, parent: &crate::store::resource_membership::LaneRequest, state: &str) -> anyhow::Result<()> {
     anyhow::ensure!(matches!(state, "admitted" | "launched"), "nested parent membership is not active");
+    validate_parent_intent(command, parent)
+}
+
+fn validate_parent_intent(command: &Command, parent: &crate::store::resource_membership::LaneRequest) -> anyhow::Result<()> {
     anyhow::ensure!(parent.host == command.lane.host && parent.name == command.lane.name && parent.class == command.lane.class
         && parent.profile == command.lane.profile,
         "nested execution must inherit the parent host, lane, profile and class");
@@ -449,9 +479,35 @@ mod tests {
         assert_eq!(error.message, "resource execution argv cannot contain NUL");
     }
 
+    #[test]
+    fn inherited_replay_uses_frozen_intent_without_live_parent_custody() {
+        use crate::store::resource_membership::{Admission, Fit};
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open_memory("host-a").unwrap();
+        store.start_resource_authority("host-a", "epoch").unwrap();
+        let parent = request();
+        let Admission::Admitted(grant) = store.request_resource_membership(&parent,
+            Fit { room: parent.capacity, ..Fit::default() }, 10).unwrap() else { panic!("parent not admitted") };
+        let command = Command { id: "child".into(), request_id: Some(uuid::Uuid::now_v7().to_string()),
+            lane: parent.clone(), argv: vec!["true".into()], cwd: "/work".into(),
+            environment: BTreeMap::new(), timeout_ms: None, parent: Some(grant.clone()) };
+        let mut accepted = store.submit_shell_resource(command.clone(), 10).unwrap();
+        accepted.state = "cancelled".into();
+        accepted.ended_at = Some(11);
+        store.update_shell_resource(&accepted).unwrap();
+        store.cancel_resource_membership(&grant, &parent.owner, 11).unwrap();
+        let runtime = fractal_runtime::ExecRuntime::new(directory.path().join("runtime"), directory.path().join("logs"));
+        assert!(store.retire_resource_membership(&grant, &parent.owner, &runtime, 12).unwrap());
+        let existing = store.shell_resource_if_exists("child").unwrap().unwrap();
+        assert_eq!(replay_submission(command.clone(), existing.clone()).unwrap(), existing);
+        let mut changed = command;
+        changed.argv = vec!["false".into()];
+        assert_eq!(replay_submission(changed, existing).unwrap_err().code, "resource-request-conflict");
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
-    async fn nested_submission_keeps_one_membership_and_rejects_a_stale_marker() {
+    async fn nested_submission_keeps_one_membership_and_adopts_retry_after_parent_retirement() {
         use crate::store::resource_membership::{Admission, Fit};
         let directory = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(directory.path());
@@ -479,7 +535,18 @@ mod tests {
         assert_eq!(state.store.resource_memberships_for_host(&state.node).unwrap().len(), 1);
         assert_eq!(state.store.held_resource_membership_bytes(&state.node, "").unwrap(), 24 << 30);
         state.store.cancel_resource_membership(&grant, &parent.owner, 11).unwrap();
-        assert!(submit(State(state), None, None, Json(command)).await.is_err());
+        let runtime = fractal_runtime::ExecRuntime::new(directory.path().join("runtime"), directory.path().join("logs"));
+        assert!(state.store.retire_resource_membership(&grant, &parent.owner, &runtime, 12).unwrap());
+        let mut terminal = state.store.shell_resource(&child.command.id).unwrap();
+        terminal.state = "cancelled".into();
+        terminal.ended_at = Some(12);
+        state.store.update_shell_resource(&terminal).unwrap();
+        let Json(adopted) = submit(State(state.clone()), None, None, Json(command.clone())).await.unwrap();
+        assert_eq!(adopted.state, "cancelled");
+        let mut changed = command;
+        changed.argv = vec!["false".into()];
+        let error = submit(State(state), None, None, Json(changed)).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-conflict");
     }
 
     #[tokio::test]
