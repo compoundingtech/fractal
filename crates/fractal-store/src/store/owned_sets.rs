@@ -2128,6 +2128,20 @@ pub fn commit_tx(
             members.insert(s.clone(), member);
         }
     }
+    // The desired row this hold depends on is about to disappear; record the sleep's
+    // end now, while the suspension is still readable. Receipts are idempotent.
+    let now = smallclaims::store::now_ms();
+    for (subject, change) in &plan.preview.changes {
+        if *change != "retiring" && *change != "retired" { continue; }
+        let Ok(hold) = crate::suspension::current_at_tx(transaction, subject, None) else { continue };
+        if let Some(hold) = hold.filter(|hold| hold.cause() == "idle") {
+            let origin = transaction.query_row(
+                "SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1",
+                [subject], |row| row.get::<_, String>(0)).optional()
+                .map_err(internal)?.unwrap_or_else(|| origin.to_string());
+            super::idle_residency::end_sleep_tx(transaction, &origin, subject, &hold, now, "retire")?;
+        }
+    }
     let revision = Revision {
         rollout: plan.preview.rollout.clone(),
         previous: plan.preview.previous.clone(),

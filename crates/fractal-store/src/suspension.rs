@@ -244,6 +244,23 @@ fn requests(store: &Store, subject: &str, at: Option<u64>) -> Result<Vec<ClaimRe
     Ok(requests)
 }
 
+fn requests_tx(connection: &Connection, subject: &str, at: Option<u64>) -> Result<Vec<ClaimRecord>> {
+    let mut requests = claims_for_subject_kind_at_tx(connection, subject, "runtime.action.requested", at.map(|at| at + 1), false, u32::MAX as usize)?
+        .claims;
+    requests.retain(|claim| claim.actor.is_some() && matches!(action(claim), Some("suspend" | "resume")));
+    Ok(requests)
+}
+
+fn operation_at_tx(connection: &Connection, key: &str, at: Option<u64>) -> Result<Option<ClaimRecord>> {
+    Ok(connection.query_row(
+        "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
+                claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
+         FROM operations JOIN claims ON claims.id=operations.canonical_claim_id
+         WHERE operations.id=?1 AND operations.state='active'",
+        [operation_id_for_key(key)], claim_from_row,
+    ).optional()?.filter(|claim| at.is_none_or(|index| claim.store_index <= index)))
+}
+
 fn operation_at(store: &Store, key: &str, at: Option<u64>) -> Result<Option<ClaimRecord>> {
     Ok(store.operation_claim(key)?.filter(|claim| at.is_none_or(|index| claim.store_index <= index)))
 }
@@ -399,6 +416,118 @@ pub fn current_at(store: &Store, subject: &str, at: Option<u64>) -> Result<Optio
         state.updated_at_unix_ms = completed.accepted_at_unix_ms;
     }
     Ok(Some(state))
+}
+
+/// `current_at` on a writer transaction: the reader folds see this transaction's own writes,
+/// so a retire hook records the end of a suspension in the same commit it retires the seat.
+pub fn current_at_tx(connection: &Connection, subject: &str, at: Option<u64>) -> Result<Option<Suspension>> {
+    let requests = requests_tx(connection, subject, at)?;
+    let Some(request) = requests.last() else {
+        return Ok(None);
+    };
+    let row = desired_row_at(connection, subject, at)?;
+    if row.as_ref().is_none_or(|row| row.kind != "agent") {
+        return Ok(None);
+    }
+    let lineage = desired_lineage_from_at_tx(connection, row.expect("agent row checked").claim_id, same_declared_launch, at)?;
+    let visible = |index: u64| at.is_none_or(|at| index <= at);
+    let mut moved = false;
+    if action(request) == Some("resume") && field(request, "host").is_some() {
+        for token in &lineage {
+            if claim_by_id_tx(connection, token)?.filter(|claim| visible(claim.store_index)).is_some_and(|selected| {
+                selected.body.get("evidence").and_then(Value::as_array)
+                    .is_some_and(|items| items.iter().any(|id| id.as_str() == Some(&request.id)))
+            }) { moved = true; break; }
+        }
+    }
+    let mut applies = evidence(request, 0)
+        .is_some_and(|token| lineage.iter().any(|item| item == token));
+    if !moved && !applies {
+        return Ok(None);
+    }
+    if action(request) == Some("suspend") {
+        return suspend_state_tx(connection, request, at).map(Some);
+    }
+    let Some(suspend) = evidence(request, 1).and_then(|id| requests.iter().find(|claim| claim.id == id)) else {
+        return Ok(None);
+    };
+    let mut state = suspend_state_tx(connection, suspend, at)?;
+    if state.phase != "suspended" {
+        return Ok(None);
+    }
+    state.action = "resume".into();
+    state.operation_id = request.id.clone();
+    state.requested_by = request.actor.clone();
+    state.updated_at_unix_ms = request.accepted_at_unix_ms;
+    state.requested_at_unix_ms = request.accepted_at_unix_ms;
+    state.host = field(request, "host").map(str::to_owned);
+    state.source_host = field(request, "source_host").map(str::to_owned).or(state.source_host);
+    state.phase = if state.host.is_some() { "fencing-source" } else { "restoring" }.into();
+    for (suffix, phase) in [("transfer", "transferring"), ("restored", "restoring")] {
+        if let Some(claim) = operation_at_tx(connection, &format!("agent-resume-{suffix}:{}", request.id), at)? {
+            state.phase = phase.into();
+            state.updated_at_unix_ms = claim.accepted_at_unix_ms;
+        }
+    }
+    if moved && matches!(state.phase.as_str(), "fencing-source" | "transferring") {
+        state.phase = "restoring".into();
+    }
+    if let Some(failed) = operation_at_tx(connection, &resume_failed_key(&request.id), at)? {
+        state.phase = "suspended".into();
+        apply_failure(&mut state, &failed);
+        return Ok(Some(state));
+    }
+    if let Some(started) = operation_at_tx(connection, &resume_started_key(&request.id), at)? {
+        state.phase = "verifying".into();
+        state.updated_at_unix_ms = started.accepted_at_unix_ms;
+    }
+    if let Some(completed) = operation_at_tx(connection, &resume_completed_key(&request.id), at)? {
+        state.phase = "resumed".into();
+        state.incarnation_id = field(&completed, "incarnation_id").map(str::to_owned);
+        state.updated_at_unix_ms = completed.accepted_at_unix_ms;
+    }
+    Ok(Some(state))
+}
+
+fn suspend_state_tx(connection: &Connection, request: &ClaimRecord, at: Option<u64>) -> Result<Suspension> {
+    let mut state = Suspension {
+        action: "suspend".into(),
+        cause: field(request, "cause").map(str::to_owned),
+        phase: "quiescing".into(),
+        operation_id: request.id.clone(),
+        requested_by: request.actor.clone(),
+        suspend_operation_id: Some(request.id.clone()),
+        incarnation_id: field(request, "incarnation_id").map(str::to_owned),
+        updated_at_unix_ms: request.accepted_at_unix_ms,
+        requested_at_unix_ms: request.accepted_at_unix_ms,
+        ..Suspension::default()
+    };
+    let manual = operation_at_tx(connection, &suspend_manual_key(&request.id), at)?;
+    if manual.is_some() {
+        state.cause = Some("manual".into());
+    }
+    if let Some(failed) = operation_at_tx(connection, &suspend_failed_key(&request.id), at)? {
+        state.phase = "failed".into();
+        apply_failure(&mut state, &failed);
+        return Ok(state);
+    }
+    if let Some(snapshot) = operation_at_tx(connection, &suspend_snapshot_key(&request.id), at)? {
+        state.phase = "snapshotting".into();
+        state.mode = field(&snapshot, "mode").map(str::to_owned);
+        state.harness = field(&snapshot, "harness").map(str::to_owned);
+        state.native_session_id = field(&snapshot, "native_session_id").map(str::to_owned);
+        state.source_host = field(&snapshot, "source_host").map(str::to_owned);
+        state.updated_at_unix_ms = snapshot.accepted_at_unix_ms;
+    }
+    if let Some(completed) = operation_at_tx(connection, &suspend_completed_key(&request.id), at)? {
+        state.phase = "suspended".into();
+        state.suspended_at_unix_ms = Some(completed.accepted_at_unix_ms);
+        state.updated_at_unix_ms = completed.accepted_at_unix_ms;
+    }
+    if let Some(manual) = manual {
+        state.updated_at_unix_ms = state.updated_at_unix_ms.max(manual.accepted_at_unix_ms);
+    }
+    Ok(state)
 }
 
 /// The native session the seat's driver bound for `incarnation`, with its harness.

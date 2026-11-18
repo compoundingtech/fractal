@@ -55,6 +55,33 @@ fn owner_received_at(store: &Store, tx: &Transaction<'_>, message: &str) -> Resu
     Err(anyhow::anyhow!("wake message has no owner receipt timestamp"))
 }
 
+/// Record the end of an idle suspension inside the caller's retire transaction. The receipt
+/// is idempotent per (seat, suspend operation), so a replayed retire cannot reopen a sleep.
+pub fn end_sleep_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    seat: &str,
+    suspension: &crate::suspension::Suspension,
+    ended_at_unix_ms: u128,
+    end_class: &str,
+) -> Result<(), FractalError> {
+    declared_admission::validate_fleet(transaction, origin, &FEATURE)?;
+    let operation = suspension.suspend_operation_id.as_deref()
+        .unwrap_or(&suspension.operation_id);
+    let key = format!("sleep-ended:{seat}:{operation}");
+    let id = operation_id_for_key(&format!("residency-evidence:{key}"));
+    let subject = format!("residency/{origin}/sleep/{}", id.trim_start_matches("op/"));
+    let short_sleep = suspension
+        .suspended_at_unix_ms
+        .is_some_and(|suspended| ended_at_unix_ms.saturating_sub(suspended) < 300_000)
+        as i64;
+    append_receipt_claim_tx(transaction, origin, &subject, "residency.sleep-ended", None,
+        &json!({"fields": {"suspended_at": suspension.suspended_at_unix_ms, "ended_at": ended_at_unix_ms,
+            "short_sleep": short_sleep, "end_class": end_class, "host": origin, "seat": seat}}),
+        &[], None, &key)?;
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IdleWakeAdmission {
     pub operation_id: Option<String>,
@@ -475,6 +502,33 @@ mod tests {
              AND json_extract(body,'$.fields.code')='wake-frontier-lag'", [SEAT], |row| row.get(0)).unwrap();
         assert_eq!(refusals, 1);
         assert!(store.admit_idle_suspend(SEAT, Some(0), Some(0), 9_000_000_000_000).unwrap().is_some());
+    }
+
+    #[test]
+    fn retire_records_idempotent_sleep_end_inside_its_own_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.sqlite");
+        let store = fixture(&path, root.path());
+        let suspend = store.admit_idle_suspend(SEAT, Some(0), Some(0), 9_000_000_000_000).unwrap().unwrap();
+        complete_suspend(&store, SEAT, &suspend);
+        let ended: u128 = 9_000_000_300_000;
+        store.connection.batched(|tx| {
+            let state = crate::suspension::current_at_tx(tx, SEAT, None).unwrap().expect("tx fold sees its own suspension");
+            assert_eq!(state.phase, "suspended");
+            end_sleep_tx(tx, "alder", SEAT, &state, ended, "retire").unwrap();
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+        store.connection.batched(|tx| {
+            let state = crate::suspension::current_at_tx(tx, SEAT, None).unwrap().unwrap();
+            end_sleep_tx(tx, "alder", SEAT, &state, ended, "retire").unwrap();
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+        let receipts: (u64, Value) = store.readers.get().query_row(
+            "SELECT COUNT(*), json_extract(body,'$.fields') FROM claims WHERE kind='residency.sleep-ended'",
+            [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(receipts.0, 1, "a replayed retire reuses the sleep episode");
+        assert_eq!(receipts.1["end_class"], "retire");
+        assert_eq!(receipts.1["short_sleep"], 1);
     }
 
     #[test]
