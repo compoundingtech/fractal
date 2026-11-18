@@ -2069,14 +2069,21 @@ Operations' terms: it is emptied before a run once it passes 80 GB (a limit belo
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
 **Native resources govern heavy phases.** Member preparation and each heavy check run inside one
-`fractal resources exec --lane st-test --class check --profile KEY --receipt-file FILE -- COMMAND`.
+`fractal --json --endpoint SOCKET resources exec --as ACTOR --lane st-test --class check --profile KEY --request-id UUID --receipt-file FILE -- COMMAND`
+(the seat's endpoint and owner, pinned so a later recovery cancels at the daemon that admitted the phase).
 `st-test-build` covers preparation, Rust build/check suites and web; `st-test-run` covers the standalone Rust test phase.
 The profile/receipt flags are provisional until the native profile contract merges. Hosts must provision those keys before adoption;
 missing native admission refuses rather than falling back to gate-slot, cargo slots or builds.slice.
 The host owns resource scheduling and whole-tree custody, including detached test guardians. Pool-tree locks protect mutable caches only:
 load averages, slot probes, caller priority files and lane bursts no longer independently veto work.
 Receipts persist in `~/.cache/st-test/admission/`; `admission_receipts` in the run ledger links each phase to its profile and file.
-The queue log retains separate admission and payload budgets. Receipt `queue_wait_ms` and `wall_duration_ms` are the host's terminal measurements.
+The queue log retains separate admission and payload budgets, passed as native `--admission-timeout` and `--timeout` milliseconds.
+Receipt `queue_wait_ms` and `wall_duration_ms` are the host's terminal measurements. Each submission has a durable `--request-id`.
+Before cleanup, st-test calls `fractal --json --endpoint SOCKET resources cancel --as ACTOR --request-id ID --wait` once: only terminal whole-tree retirement or a
+nonlaunch tombstone authorizes client termination and scratch cleanup. Transport failure, nonzero exit or an unconfirmed response
+quarantines the pool tree, target and scratch instead of releasing them for reuse. The error prints the request ID and exact resume
+command; the adjacent `.native-execs.json` journal survives process exit. A later owner must complete that same cancellation once
+before reusing the tree or shared target; another failure refuses reuse. There is no cancellation retry loop.
 Phase receipt files are root-only: the orchestrator must start outside native custody, and refuses inherited parent grants rather than
 double-admitting or stripping them. The heavy phases are sibling roots; their native `FRACTAL_RESOURCE_PARENT`,
 `FRACTAL_RESOURCE_EXEC_ID`, `ST3_ENDPOINT` and `FRACTAL_ENDPOINT` context survives control-plane and local-runner scrubbing.

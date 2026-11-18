@@ -109,7 +109,9 @@ class CiLocalWeb(unittest.TestCase):
         self.assertEqual(env['KIT_PLAY_WORKERS'], '4')
         self.assertEqual(env['FRACTAL_RESOURCE_EXEC_ID'], 'fixture-root')
         argv = Path(str(self.log) + '.admission').read_text().splitlines()
-        self.assertEqual(argv[:8], ['resources', 'exec', '--lane', 'st-test', '--class', 'check', '--profile', 'st-test-build'])
+        self.assertEqual(argv[:11], ['--json', 'resources', 'exec', '--as', 'agent/x',
+                                     '--lane', 'st-test', '--class', 'check', '--profile', 'st-test-build'])
+        self.assertIn('--request-id', argv)
         self.assertIn('--receipt-file', argv)
         self.assertNotIn('nested-admission-would-wait', done.stderr)
 

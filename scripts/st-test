@@ -110,6 +110,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
 
@@ -456,7 +457,7 @@ def release_impact(base):
            'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
     commit = text(git('commit-tree', merged.stdout.decode().split()[0], '-p', base_commit, '-p', head, '-m',
                       f'merge of {head[:12]} into {base}', env=env))
-    with tempfile.TemporaryDirectory(prefix='st-test-impact-') as scratch:
+    with temporary_directory(prefix='st-test-impact-') as scratch:
         for name in RELEASE_IMPACT:
             shown = git('show', f'{commit}:scripts/{name}', check=False)
             if shown.returncode != 0:
@@ -820,6 +821,7 @@ def shared_target(tree_target=None):
     except BlockingIOError:
         print(f'fractal-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
         fcntl.flock(lock, fcntl.LOCK_EX)
+    recover_native_tree(target)
     prepare_targets(target)  # nobody else is using either target: the moment to keep them small
     return target, lock
 
@@ -987,7 +989,191 @@ def oom_note(caps, before):
                    for cgroup in sorted(inner))
 
 RESOURCE_EXEC = None  # resolved before check PATH normalization; never a candidate tree tool
+
 ADMISSION_RECEIPTS = []
+QUARANTINED = False
+TEMP_DIRS = set()
+NATIVE_JOURNAL_LOCK = threading.Lock()
+
+
+def native_command(executable, environment=None):
+    """The prefix every native resources call uses: JSON output, and an explicit endpoint when the seat names one."""
+    environment = os.environ if environment is None else environment
+    endpoint = environment.get('ST3_ENDPOINT') or environment.get('FRACTAL_ENDPOINT')
+    return [executable, '--json'] + (['--endpoint', endpoint] if endpoint else [])
+
+
+def native_owner(environment=None):
+    environment = os.environ if environment is None else environment
+    return environment.get('ST_AGENT') or environment.get('FRACTAL_AGENT')
+
+
+def is_native_exec(argv):
+    try:
+        options = argv[:argv.index('--')]
+    except ValueError:
+        return False
+    at = options.index('resources') if 'resources' in options else -1
+    return options[at + 1:at + 2] == ['exec']
+
+
+@contextlib.contextmanager
+def temporary_directory(**options):
+    path = Path(tempfile.mkdtemp(**options))
+    TEMP_DIRS.add(path)
+    try:
+        yield str(path)
+    finally:
+        TEMP_DIRS.discard(path)
+        if not QUARANTINED:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def native_journal(directory):
+    path = Path(directory).resolve()
+    return path.with_name(path.name + '.native-execs.json')
+
+
+def write_native_journal(path, entries):
+    if not entries:
+        path.unlink(missing_ok=True)
+        return
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex)
+    with temporary.open('w') as output:
+        os.fchmod(output.fileno(), 0o600)
+        json.dump(entries, output)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(path)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+class NativeRetirementFailure(Failure):
+    pass
+
+
+def cancel_native_request(command, environment):
+    """One owner-scoped cancel; --wait fences even a submit not yet committed."""
+    with tempfile.TemporaryFile() as output:
+        try:
+            process = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
+                                       stdout=output, start_new_session=True)
+        except OSError as error:
+            request = command[command.index('--request-id') + 1]
+            raise NativeRetirementFailure(f'request={request}; exit=transport ({error}); '
+                                          f'resume cleanup: {shlex.join(command)}') from error
+        while True:
+            try:
+                code = process.wait()
+                break
+            except (KeyboardInterrupt, SystemExit):
+                print('fractal-test: cancellation is still waiting for confirmed native retirement', file=sys.stderr, flush=True)
+        output.seek(0)
+        try:
+            result = json.load(output)
+        except (ValueError, UnicodeError):
+            result = {}
+    if not isinstance(result, dict):
+        result = {}
+    request = command[command.index('--request-id') + 1]
+    execution = result.get('execution')
+    confirmed = (result.get('requestId') == request and result.get('cancelled') is True and (
+        (result.get('tombstone') is True and execution is None) or
+        (result.get('tombstone') is False and isinstance(execution, dict) and
+         execution.get('state') in ('completed', 'refused', 'cancelled'))))
+    if code or not confirmed:
+        raise NativeRetirementFailure(f'native retirement unconfirmed for request {request}; exit={code}; '
+                                      f'quarantined: do not clean or release this tree; resume cleanup with: {shlex.join(command)}')
+
+
+class NativePhase:
+    def __init__(self, argv, options):
+        if QUARANTINED:
+            raise NativeRetirementFailure('this run is quarantined; no further native phase may start')
+        self.request = argv[argv.index('--request-id') + 1]
+        self.environment = dict(options.get('env') or os.environ)
+        self.command = native_command(argv[0], self.environment) + ['resources', 'cancel']
+        owner = native_owner(self.environment)
+        if owner:
+            self.command += ['--as', owner]
+        self.command += ['--request-id', self.request, '--wait']
+        self.path = native_journal(options.get('cwd') or Path.cwd())
+        self.paths = {self.path}
+        target = self.environment.get('CARGO_TARGET_DIR')
+        if target:
+            self.paths.add(native_journal(target))
+        self.lock, self.retired, self.failure = threading.Lock(), False, None
+        endpoints = {key: self.environment[key] for key in ('ST3_ENDPOINT', 'FRACTAL_ENDPOINT') if key in self.environment}
+        self.entry = {'command': self.command, 'endpoints': endpoints,
+                      'scratch': [str(path) for path in tuple(TEMP_DIRS)]}
+        with NATIVE_JOURNAL_LOCK:
+            for path in self.paths:
+                entries = json.loads(path.read_text()) if path.exists() else {}
+                entries[self.request] = self.entry
+                write_native_journal(path, entries)
+
+    def retire(self):
+        global QUARANTINED
+        with self.lock:
+            if self.failure:
+                raise self.failure
+            if self.retired:
+                return
+            try:
+                cancel_native_request(self.command, self.environment)
+            except (OSError, NativeRetirementFailure) as error:
+                QUARANTINED = True
+                for path in tuple(TEMP_DIRS):
+                    (path / '.native-quarantine').write_text(str(self.path))
+                self.failure = NativeRetirementFailure(f'{error}; journal={self.path}; '
+                    f'request={self.request}; resume cleanup: {shlex.join(self.command)}')
+                print(f'fractal-test: {self.failure}', file=sys.stderr, flush=True)
+                raise self.failure from error
+            with NATIVE_JOURNAL_LOCK:
+                for path in self.paths:
+                    entries = json.loads(path.read_text())
+                    entries.pop(self.request)
+                    write_native_journal(path, entries)
+            self.retired = True
+
+
+def recover_native_tree(directory):
+    path = native_journal(directory)
+    if not path.exists():
+        return
+    entries = json.loads(path.read_text())
+    for entry in entries.values():
+        cancel_native_request(entry['command'], dict(os.environ, **entry['endpoints']))
+    path.unlink()
+    for scratch in {value for entry in entries.values() for value in entry['scratch']}:
+        retained = Path(scratch)
+        marker = retained / '.native-quarantine'
+        if marker.exists() and marker.read_text() == str(path) and not (retained / 'KEPT').exists():
+            shutil.rmtree(retained)
+
+
+@contextlib.contextmanager
+def managed_process(argv, options):
+    native = NativePhase(argv, options) if is_native_exec(argv) else None
+    process = None
+    try:
+        process = subprocess.Popen(argv, **options)
+        process._st_native_phase = native
+        yield process
+    finally:
+        if native:
+            native.retire()  # Must precede client waiting, pipe closure, and all tree/scratch cleanup.
+        if process is not None:
+            if native and process.poll() is None:
+                process.terminate()  # Only client cleanup, after confirmed daemon retirement.
+            process.wait()
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
 
 
 def governed(argv, name, output=None):
@@ -1004,9 +1190,10 @@ def governed(argv, name, output=None):
         raise Failure('native-admission-unavailable: fractal resources exec is required')
     receipts = Path.home() / '.cache/st-test/admission'
     receipts.mkdir(parents=True, exist_ok=True)
-    receipt = receipts / f'{name}-{os.getpid()}-{time.time_ns()}.json'
+    request = str(uuid.uuid4())
+    receipt = receipts / f'{name}-{request}.json'
     profile = 'st-test-run' if name == RUST_TESTS else 'st-test-build'
-    ADMISSION_RECEIPTS.append({'phase': name, 'profile': profile, 'file': str(receipt)})
+    ADMISSION_RECEIPTS.append({'phase': name, 'profile': profile, 'file': str(receipt), 'request_id': request})
     print(f'fractal-test: {name} admission receipt: {receipt}', file=output or sys.stderr, flush=True)
     # This process starts only after admission. The inherited log is the same
     # protocol ci-local uses, so Limit retains separate queue/payload budgets.
@@ -1014,15 +1201,19 @@ def governed(argv, name, output=None):
         'import os,sys,time; '
         'p=os.environ.get("CI_LOCAL_QUEUE_LOG"); '
         'f=open(p,"a") if p else None; '
-        'f.write("slot %d resources\\n" % time.time()) if f else None; '
+        'f.write("slot %.9f resources\\n" % time.time()) if f else None; '
         'f.close() if f else None; '
         'os.environ["PATH"]=os.pathsep.join(p for p in os.environ.get("PATH",os.defpath).split(os.pathsep) '
         'if os.path.realpath(p)!=os.path.join(os.path.expanduser("~"),".local","bin")); '
         'os.execvpe(sys.argv[1],sys.argv[1:],os.environ)'
     )
-    return [fractal, 'resources', 'exec', '--lane', 'st-test', '--class', 'check',
-            '--profile', profile, '--receipt-file', str(receipt), '--',
-            sys.executable, '-I', '-c', payload, *argv]
+    command = native_command(fractal) + ['resources', 'exec']
+    owner = native_owner()
+    if owner:
+        command += ['--as', owner]
+    return command + ['--lane', 'st-test', '--class', 'check',
+                      '--profile', profile, '--receipt-file', str(receipt), '--request-id', request, '--',
+                      sys.executable, '-I', '-c', payload, *argv]
 
 
 def web_changes(base):
@@ -1035,7 +1226,7 @@ def web_changes(base):
     diff = git('diff', '--name-only', '--no-renames', '-z', text(start), 'HEAD', check=False)
     if diff.returncode:
         return None
-    with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
+    with temporary_directory(prefix='st-test-') as scratch:
         path = Path(scratch) / 'ci_fractal_web_changes.py'
         path.write_bytes(source.stdout)
         try:
@@ -1252,7 +1443,7 @@ def sweep_run_tmp(root):
         try:
             status = entry.lstat()
             if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid() or (entry / KEPT).exists()
-                    or time.time() - status.st_mtime < RUN_TMP_FRESH):
+                    or (entry / '.native-quarantine').exists() or time.time() - status.st_mtime < RUN_TMP_FRESH):
                 continue  # another account's, or kept, or too new to judge
             fd = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError:
@@ -1277,6 +1468,7 @@ def run_tmpdir(keep=False):
     path = Path(tempfile.mkdtemp(prefix=RUN_TMP_PREFIX, dir=root))
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     fcntl.flock(fd, fcntl.LOCK_EX)
+    TEMP_DIRS.add(path)
     saved, saved_tempdir = {name: os.environ.get(name) for name in TMP_NAMES}, tempfile.tempdir
     os.environ.update({name: str(path) for name in TMP_NAMES})
     tempfile.tempdir = None
@@ -1295,9 +1487,10 @@ def run_tmpdir(keep=False):
             kept_web = (path / WEB_KEPT).read_text().split('\n') if (path / WEB_KEPT).exists() else []
             for scratch in filter(None, kept_web):
                 print(f'fractal-test: kept fractal-web\'s scratch {scratch} too (its kit play receipts, browser traces and screenshots)', file=sys.stderr)
-        else:
+        elif not QUARANTINED:
             remove_tree(path)
         os.close(fd)
+        TEMP_DIRS.discard(path)
 
 
 def pool_max_gb():
@@ -1367,6 +1560,9 @@ def evict_to_cap(base, limit_gb, keep=None):
         except BlockingIOError:
             lock.close()
             continue
+        if native_journal(repo / f'tree-{n}').exists():
+            lock.close()
+            continue  # An unretired request owns this tree even after its local runner exits.
         mine = own_line() if mine is None else mine
         live = sorted({pid for path in paths for pid in tree_users(path, execution_only=True) if runner_of(pid, mine=mine) is not None})
         if live:
@@ -1580,6 +1776,7 @@ def acquire_tree(root, size, rank=None, waits=None, follow=None):
                     lock.close()
                     continue
                 try:
+                    recover_native_tree(root / f'tree-{n}')
                     clear = clear_tree_orphans(root / f'tree-{n}', told=live_told)
                 except BaseException:
                     lock.close()
@@ -1882,7 +2079,7 @@ def materialize_members(directory, queue_limit=None):
         command = governed(members_command(directory), 'st-test-members')
     except (OSError, ValueError, KeyError, TypeError) as error:
         return f'cannot read the effect-utils pin from flake.lock: {error}'
-    with tempfile.TemporaryDirectory(prefix='st-test-members-') as scratch, tempfile.TemporaryFile() as output:
+    with temporary_directory(prefix='st-test-members-') as scratch, tempfile.TemporaryFile() as output:
         limit = Limit(members_limit(), Path(scratch) / 'queue', QUEUE_LIMIT if queue_limit is None else queue_limit)
         code = run_limited(command, limit, kill_group=True, cwd=directory, stdin=subprocess.DEVNULL,
                            stdout=output, stderr=subprocess.STDOUT, env=dict(os.environ, PATH=check_path()))
@@ -1906,6 +2103,8 @@ def reap_stale():
         if not match:
             continue
         scratch = Path(match.group(1))
+        if (scratch / '.native-quarantine').exists() or native_journal(scratch / 'tree').exists():
+            continue
         try:
             os.kill(int((scratch / 'pid').read_text()), 0)
             continue  # still running
@@ -2623,6 +2822,7 @@ class Limit:
         self.started = self.heard = time.monotonic()
         self.begins_at, self.tail, self.pre_start, self.silent, self.waited_out = begins_at, b'', 0.0, False, False
         self.silence = SILENCE_LIMIT if silence is None else silence
+        self.native = False
 
     def output(self, chunk):
         """The check printed `chunk`: it is not silent, and when `begins_at` is in it, its running time starts now."""
@@ -2645,12 +2845,14 @@ class Limit:
             self.silent, self.waited_out = quiet <= 0, waiting <= 0 < quiet
             return min(quiet, waiting)
         queued = self.queued()
+        if self.native:
+            self.waited_out = queued >= self.queue_limit
         ran = time.monotonic() - self.started - queued
         return min(self.seconds - ran, self.queue_limit - queued)
 
     def waiting(self):
         """Seconds the check has waited before it started: so far, while it has not."""
-        return time.monotonic() - self.started if self.begins_at else self.pre_start
+        return self.queued() if self.native else (time.monotonic() - self.started if self.begins_at else self.pre_start)
 
 
 GROUP_EXIT_SECONDS = 10.0
@@ -2745,6 +2947,12 @@ def wait_group_exit(pgid, seconds=GROUP_EXIT_SECONDS, proc='/proc', reap=None):
 
 
 def kill_limited(process, group=False):
+    native = getattr(process, '_st_native_phase', None)
+    if native:
+        native.retire()
+        if process.poll() is None:
+            process.terminate()
+        return
     if group:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
@@ -2820,11 +3028,18 @@ def wait_limited(process, limit, group=False):
 
 
 def admission_clock(argv, limit, options):
-    if argv[1:3] != ['resources', 'exec'] or limit.queue_log is None:
+    if not is_native_exec(argv):
         return
+    limit.native = True
+    if limit.queue_log is None:
+        limit.queue_log = Path(argv[argv.index('--receipt-file') + 1]).with_suffix('.queue')
+    separator = argv.index('--')
+    argv[separator:separator] = ['--admission-timeout', str(max(1, int(limit.queue_limit * 1000))),
+                                '--timeout', str(max(1, int(limit.seconds * 1000)))]
+    options['start_new_session'] = True
     limit.queue_log.parent.mkdir(parents=True, exist_ok=True)
     with limit.queue_log.open('a') as events:
-        events.write(f'wait {int(time.time())} resources\n')
+        events.write(f'wait {time.time():.9f} resources\n')
     options['env'] = dict(options.get('env') or os.environ, CI_LOCAL_QUEUE_LOG=str(limit.queue_log))
 
 
@@ -2833,7 +3048,7 @@ def run_limited(argv, limit, kill_group=False, groups=None, **options):
     admission_clock(argv, limit, options)
     if kill_group:
         options['start_new_session'] = True
-    with subprocess.Popen(argv, **options) as process:
+    with managed_process(argv, options) as process:
         process._st_group_kill_started = False
         try:
             if kill_group and groups is not None:
@@ -2912,7 +3127,7 @@ def answer_pre_start(fifo, pipe, take, limit):
             take(chunk)
         os.set_blocking(handle, True)
         if limit.begins_at is None:
-            os.write(handle, f'{round(limit.pre_start)}\n'.encode())
+            os.write(handle, f'{round(limit.queued())}\n'.encode())
     finally:
         os.close(handle)
     return True
@@ -2941,7 +3156,7 @@ def streamed(argv, log, timeout, pre_start=None, **options):
             sys.stdout.write(decode(chunk))
             sys.stdout.flush()
 
-    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options) as process, open(log, 'wb') as kept:
+    with managed_process(argv, dict(options, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)) as process, open(log, 'wb') as kept:
         try:
             pipe, ended, answered = process.stdout.fileno(), None, pre_start is None
             while limit.remaining() > 0 and (ended is None or time.monotonic() - ended < STREAM_GRACE):
@@ -2957,7 +3172,7 @@ def streamed(argv, log, timeout, pre_start=None, **options):
                 take(chunk)
             return wait_limited(process, limit)
         except BaseException:
-            process.kill()
+            kill_limited(process)
             raise
 
 
@@ -3104,7 +3319,7 @@ def run_main(argv, cleanup):
         commit, why_merge = gate_commit(args.base)
         if why_merge:
             print(f'fractal-test: {why_merge}')
-        with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
+        with temporary_directory(prefix='st-test-') as scratch:
             rows = [row[:4] for row in coverage(args, checks, commit, base_commit, args.repository or repository_of(remote), scratch, args.crate)]
             if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
@@ -3129,7 +3344,7 @@ def run_main(argv, cleanup):
     preflight(checks if not (args.push and not args.out and not TARGET) else all_checks, merges=bool(args.push) and not TARGET)  # before any wait
     cleanup.enter_context(run_tmpdir(keep=args.keep))  # what the checks start uses it; a run refused above leaves nothing
     reap_stale()
-    with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
+    with temporary_directory(prefix='st-test-') as scratch:
         os.chmod(scratch, 0o700)
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
         directory = Path(scratch) / 'tree'
@@ -3455,7 +3670,7 @@ def run_main(argv, cleanup):
                     # What the run's tree did for it: how long the run waited for it and held it, and how much of that the build lane spent
                     # blocked in it (before ci-local started: build admission and the dev shell; then every stage waiting for a build slot).
                     pre, slots = (sum(values) for values in zip(*blocked.values())) if blocked else (0, 0)
-                    held = {'tree_wait_s': tree_waits.get('tree_wait_s'), 'tree_slot_wait_s': tree_waits.get('slot_wait_s'),
+                    held = {'tree_wait_s': tree_waits.get('tree_wait_s'), 'tree_slot_wait_s': 0,
                             'tree_held_s': round(time.monotonic() - tree_taken), 'tree_blocked_s': pre + slots, 'tree_pre_start_s': pre,
                             'tree_slot_blocked_s': slots}
                     print(f'  tree-{n}: waited {held["tree_wait_s"]}s for it, held it {held["tree_held_s"]}s, '
@@ -3488,7 +3703,7 @@ def run_main(argv, cleanup):
                 again = merge_base_in(args.base, purpose='to bring the green run up to the base')
                 merged = again or merged
                 commit = gate_commit(args.base)[0]
-                with tempfile.TemporaryDirectory(prefix='st-test-coverage-') as judged:
+                with temporary_directory(prefix='st-test-coverage-') as judged:
                     uncovered = missing = [row for row in coverage(args, all_checks, commit, base_commit, repository, judged) if not row[1]]
                 if not missing:
                     push_branch(args.push, args.base, commit, 'the merge' if merged else 'its head')
@@ -3526,7 +3741,7 @@ def run_main(argv, cleanup):
                     git('worktree', 'remove', '--force', str(directory), check=False)
                     directory, commit = target_worktree(args.base, scratch)
         finally:
-            if not pool_trees and directory.exists():
+            if not QUARANTINED and not pool_trees and directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)
             if tree_lock:
                 os.utime(tree_lock.name)  # last used: now, for the eviction order

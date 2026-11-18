@@ -19,6 +19,8 @@ RECORD = '''#!/usr/bin/env bash
 # a stand-in for the build admission shim, which exports CARGO_SHIM_DEPTH
 python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "umask": u}))' "$@" >> "$CI_LOCAL_TEST_LOG"
 '''
+DEV_RECORD = RECORD.replace('# a stand-in for the build admission shim, which exports CARGO_SHIM_DEPTH',
+                             "# the dev shell's real cargo: it records too, and is not the admission shim")
 
 
 def kill_tree(process):
@@ -103,7 +105,7 @@ class CiLocal(unittest.TestCase):
         # The dev shell's real cargo: a wrapper script outside the account's home (never run here).
         self.devshell = root / 'devshell bin'
         self.devshell.mkdir()
-        (self.devshell / 'cargo').write_text(RECORD)
+        (self.devshell / 'cargo').write_text(DEV_RECORD)
         (self.devshell / 'cargo').chmod(0o755)
         # The recording stand-in first on PATH is the shim, and a cargo in the account's home: neither is the dev shell's.
         (self.home / '.local/bin/cargo').write_text('#!/bin/sh\n')
@@ -139,8 +141,10 @@ class CiLocal(unittest.TestCase):
         done, calls = self.run_local('mail-redelivery-canaries')
         self.assertEqual(done.returncode, 0, done.stderr)
         argv = Path(str(self.log) + '.admission').read_text().splitlines()
-        self.assertEqual(argv[:8], ['resources', 'exec', '--lane', 'st-test', '--class', 'check', '--profile', 'st-test-build'])
-        self.assertIn('--receipt-file', argv)
+        self.assertEqual(argv[:13], ['--json', '--endpoint', 'unix:/x', 'resources', 'exec', '--as', 'agent/x',
+                                     '--lane', 'st-test', '--class', 'check', '--profile', 'st-test-build'])
+        request = argv[argv.index('--request-id') + 1]
+        self.assertTrue(Path(argv[argv.index('--receipt-file') + 1]).name.endswith(f'-{request}.json'))
         for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE',
                      'BUILD_ADMISSION_LOG', 'BUILD_ADMISSION_FALLBACK_LOCK', 'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS'):
             self.assertNotIn(name, calls[-1]['env'])
@@ -278,7 +282,7 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(waits, '2')
         self.assertEqual(int(seconds), 3)  # 1s slot wait + 2s gate wait; compilation is excluded.
         self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] tests: waiting for build admission', done.stdout)), 1)
-        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        lines = [line.split(' ') for line in events.read_text().splitlines() if line.split(' ', 2)[2:] == ['tests']]
         self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
         at = [int(when) for _, when, _ in lines]
         self.assertEqual(at, [100, 101, 101, 103])
@@ -293,7 +297,7 @@ class CiLocal(unittest.TestCase):
                  'echo "cargo: waiting in order for a host build slot (all 6 busy)"\nexit 0\n')
         done, _ = self.run_local('tests', ci_linux=queue, CI_LOCAL_QUEUE_LOG=str(events))
         self.assertEqual(done.returncode, 0, done.stderr)
-        lines = [line.split(' ') for line in events.read_text().splitlines()]
+        lines = [line.split(' ') for line in events.read_text().splitlines() if line.split(' ', 2)[2:] == ['tests']]
         self.assertEqual([(kind, stage) for kind, _, stage in lines],
                          [('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests'), ('wait', 'tests'), ('slot', 'tests')])
         at = [int(seconds) for _, seconds, _ in lines]
@@ -681,17 +685,17 @@ exit 0
         self.assertIn('ci-local: mail-redelivery-canaries exit 3', done.stdout)
         self.assertIn('ci-local: mail-redelivery-canaries exit 5', done.stdout)
 
-    def test_the_test_threads_can_be_named_and_the_stages_run_at_low_priority(self):
+    def test_test_threads_are_named_and_stages_keep_native_custody_without_priority_wrappers(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_TEST_THREADS='2')
         self.assertEqual((done.returncode, calls[-1]['env']['CI_TEST_THREADS']), (0, '2'), done.stderr)
-        # The stage stub reports its own niceness: ten above the caller's (19 at most).
+        self.assertEqual(calls[-1]['env']['FRACTAL_RESOURCE_PARENT'], 'fixture')
+        self.assertEqual(calls[-1]['env']['FRACTAL_RESOURCE_EXEC_ID'], 'fixture-root')
         (self.work / 'scripts/ci-linux').write_text('#!/usr/bin/env bash\npython3 -I -c "import os; print(os.nice(0))" > "$CI_LOCAL_TEST_LOG.nice"\n')
         done = subprocess.run(['bash', 'scripts/ci-local', 'mail-redelivery-canaries'], cwd=self.work, capture_output=True, text=True,
                               env={'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home),
                                    'CI_LOCAL_TEST_LOG': str(self.log), 'TMPDIR': self.tmp.name})
         self.assertEqual(done.returncode, 0, done.stderr)
-        if shutil.which('nice'):
-            self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
+        self.assertEqual(int(Path(f"{self.log}.nice").read_text()), os.nice(0))
 
     def test_ordinary_clippy_and_fleet_compat_stages_stay_unkeyed(self):
         # Neither keyed check has a local entry of its own any more: scripts/st-test runs `ci-local clippy` / `ci-local fleet-compat` unkeyed
@@ -804,29 +808,15 @@ exit 0
         self.assertIn('nix build .#checks.x86_64-linux.provider-components --no-link --print-out-paths', Path(f'{self.log}.prep').read_text())
         self.assertEqual(calls[-1]['env']['ST2_VISTA_COMPONENT'], '/nix/store/components/share/st2/providers/st2_vista_component.component.wasm')
 
-    def test_the_setup_s_build_admission_waits_are_its_queue_and_written_to_the_queue_log(self):
+    def test_the_direct_call_s_native_admission_wait_is_its_queue_and_written_to_the_queue_log(self):
         events = Path(self.tmp.name) / 'queue-events'
-        # The hooks build waits for a slot, then at the admission gate, which prints no end: the build's own output ends it.
-        (self.bin / 'cargo').write_text('#!/usr/bin/env bash\n'
-                                        'if [ "$1" = build ]; then echo "cargo: waiting in order for a host build slot (all 6 busy)" >&2; sleep 1.1\n'
-                                        '  echo "cargo: got build slot 2 and a heavy slot" >&2\n'
-                                        '  echo "build-admission: cargo:build waits to start: 2 build(s) ahead (2 ahead, waited 0 s)" >&2; sleep 1.1\n'
-                                        '  echo "build-admission: cargo:build waits to start: ramp (0 ahead, waited 60 s)" >&2; sleep 1.1\n'
-                                        '  echo "    Finished dev profile" >&2; sleep 1.1; fi\n' + RECORD.split('\n', 1)[1])
         done, _ = self.run_local('mail-redelivery-canaries', CI_LOCAL_QUEUE_LOG=str(events))
         self.assertEqual(done.returncode, 0, done.stderr)
-        row, = [line for line in done.stdout.splitlines() if line.startswith('ci-local:   setup')]
-        waits, seconds = re.search(r'queue: (\d+) waits, (\d+)s$', row).groups()
-        self.assertEqual(waits, '2')
-        # The two waits, not the second after Finished: that ran.
-        self.assertGreaterEqual(int(seconds), 3)
-        self.assertLessEqual(int(seconds), int(re.search(r'(\d+)s +queue', row).group(1)) - 1)
-        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] setup: waiting for build admission', done.stdout)), 1)
-        self.assertEqual(len(re.findall(r'ci-local: \[\S+Z\] setup: admitted', done.stdout)), 1)
         lines = [line.split(' ') for line in events.read_text().splitlines()]
-        self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'setup'), ('slot', 'setup'), ('wait', 'setup'), ('slot', 'setup')])
+        self.assertEqual([(kind, stage) for kind, _, stage in lines], [('wait', 'resources'), ('slot', 'resources')])
         at = [int(when) for _, when, _ in lines]
-        self.assertGreaterEqual(at[3] - at[2], 2)  # the admission wait lasted its two seconds
+        self.assertLessEqual(at[0], at[1])
+        self.assertNotIn('waiting for build admission', done.stdout)
 
     def test_a_failed_hook_install_runs_no_stage(self):
         (self.work / 'scripts/ci-install-built-hooks').write_text('exit 9\n')

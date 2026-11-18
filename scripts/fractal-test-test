@@ -704,13 +704,26 @@ class NativeAdmissionTest(unittest.TestCase):
             commands = [st_test.governed(['/bin/true'], phase, output=io.StringIO())
                         for phase in ('linux-gate', 'rust-tests', 'fractal-web')]
             for command, profile in zip(commands, ('st-test-build', 'st-test-run', 'st-test-build')):
-                self.assertEqual(command[:9], ['/native/fractal', 'resources', 'exec', '--lane', 'st-test',
-                                               '--class', 'check', '--profile', profile])
+                self.assertEqual(command[:10], ['/native/fractal', '--json', 'resources', 'exec', '--lane', 'st-test',
+                                                 '--class', 'check', '--profile', profile])
                 receipt = Path(command[command.index('--receipt-file') + 1])
                 self.assertEqual(receipt.parent, Path(home, '.cache/st-test/admission'))
                 self.assertEqual(command.count('resources'), 1)
                 self.assertNotIn('gate-slot', command)
-            self.assertEqual(len({command[10] for command in commands}), 3)
+            self.assertEqual(len({command[command.index('--request-id') + 1] for command in commands}), 3)
+
+    def test_native_calls_pin_the_seat_endpoint_and_owner_for_durable_recovery(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.dict(os.environ, {'ST3_ENDPOINT': 'unix:/native', 'ST_AGENT': 'agent/x'}), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            command = st_test.governed(['true'], 'linux-gate', output=io.StringIO())
+            self.assertEqual(command[:8], ['/native/fractal', '--json', '--endpoint', 'unix:/native',
+                                            'resources', 'exec', '--as', 'agent/x'])
+            phase = st_test.NativePhase(command, {'cwd': home, 'env': dict(os.environ)})
+            self.assertEqual(phase.command[:8], ['/native/fractal', '--json', '--endpoint', 'unix:/native',
+                                                 'resources', 'cancel', '--as', 'agent/x'])
+            with mock.patch.object(st_test, 'cancel_native_request'):
+                phase.retire()
 
     def test_missing_native_admission_refuses_even_with_old_opt_out(self):
         with mock.patch.object(st_test, 'RESOURCE_EXEC', None), \
@@ -733,6 +746,126 @@ class NativeAdmissionTest(unittest.TestCase):
             self.assertEqual(done.returncode, 0)
             self.assertEqual([line.split()[0] for line in queue.read_text().splitlines()], ['wait', 'slot'])
             self.assertGreater(limit.remaining(), 0)
+            self.assertEqual(command[command.index('--admission-timeout') + 1], '60000')
+            self.assertEqual(command[command.index('--timeout') + 1], '30000')
+            self.assertIn('--request-id', command)
+
+    def test_native_cancel_wait_precedes_client_termination_and_is_only_attempted_once(self):
+        native = mock.Mock()
+        process = mock.Mock(_st_native_phase=native)
+        process.poll.return_value = None
+        order = []
+        native.retire.side_effect = lambda: order.append('retired')
+        process.terminate.side_effect = lambda: order.append('client-terminate')
+        st_test.kill_limited(process, group=True)
+        self.assertEqual(order, ['retired', 'client-terminate'])
+        process.kill.assert_not_called()
+
+    def test_failed_cancel_quarantines_scratch_and_later_reuse_retires_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'), \
+                mock.patch.object(st_test, 'QUARANTINED', False), \
+                mock.patch.object(st_test, 'TEMP_DIRS', set()):
+            tree = Path(home, 'tree')
+            tree.mkdir()
+            with st_test.temporary_directory(dir=home, prefix='run-') as scratch:
+                phase = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()), {'cwd': tree})
+                with mock.patch.object(st_test, 'cancel_native_request', side_effect=st_test.NativeRetirementFailure('exit=7')) as cancel:
+                    for _ in range(2):
+                        with self.assertRaisesRegex(st_test.NativeRetirementFailure, 'request=.*resume cleanup'):
+                            phase.retire()
+                    self.assertEqual(cancel.call_count, 1)
+                    with self.assertRaises(st_test.NativeRetirementFailure):
+                        st_test.recover_native_tree(tree)
+                    self.assertEqual(cancel.call_count, 2, 'reuse makes one new cancellation attempt, not a retry loop')
+                self.assertTrue(st_test.native_journal(tree).exists())
+            self.assertTrue(Path(scratch).exists(), 'unconfirmed custody preserves scratch after unwinding')
+            self.assertTrue((Path(scratch) / '.native-quarantine').exists())
+            with mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                st_test.recover_native_tree(tree)
+                cancel.assert_called_once()
+            self.assertFalse(st_test.native_journal(tree).exists())
+            self.assertFalse(Path(scratch).exists())
+
+    def test_cancel_request_uses_absent_submit_tombstone_as_confirmed_nonlaunch(self):
+        request = '00000000-0000-0000-0000-000000000001'
+        command = ['fractal', '--json', 'resources', 'cancel', '--request-id', request, '--wait']
+        def launch(argv, **options):
+            self.assertEqual(argv, command)
+            options['stdout'].write(json.dumps({'requestId': request, 'cancelled': True,
+                                               'tombstone': True, 'execution': None}).encode())
+            return mock.Mock(wait=mock.Mock(return_value=0))
+        with mock.patch.object(st_test.subprocess, 'Popen', side_effect=launch):
+            st_test.cancel_native_request(command, {})
+
+    def test_absent_lookup_or_nonzero_cancel_never_authorizes_cleanup(self):
+        command = ['fractal', '--json', 'resources', 'cancel', '--request-id', 'request', '--wait']
+        for code, reply in ((0, {'execution': None}), (7, {'requestId': 'request', 'cancelled': True,
+                                                          'tombstone': True, 'execution': None})):
+            def launch(argv, **options):
+                options['stdout'].write(json.dumps(reply).encode())
+                return mock.Mock(wait=mock.Mock(return_value=code))
+            with mock.patch.object(st_test.subprocess, 'Popen', side_effect=launch):
+                with self.assertRaisesRegex(st_test.NativeRetirementFailure, f'exit={code}'):
+                    st_test.cancel_native_request(command, {})
+
+    def test_cancel_accepts_only_plain_terminal_execution_states(self):
+        command = ['fractal', '--json', 'resources', 'cancel', '--request-id', 'request', '--wait']
+        for state in ('completed', 'refused', 'cancelled', 'running', {'type': 'completed'}):
+            reply = {'requestId': 'request', 'cancelled': True, 'tombstone': False, 'execution': {'state': state}}
+            def launch(argv, **options):
+                options['stdout'].write(json.dumps(reply).encode())
+                return mock.Mock(wait=mock.Mock(return_value=0))
+            with self.subTest(state=state), mock.patch.object(st_test.subprocess, 'Popen', side_effect=launch):
+                if isinstance(state, str) and state in ('completed', 'refused', 'cancelled'):
+                    st_test.cancel_native_request(command, {})
+                else:
+                    with self.assertRaises(st_test.NativeRetirementFailure):
+                        st_test.cancel_native_request(command, {})
+
+    def test_malformed_cancel_responses_never_authorize_cleanup(self):
+        command = ['fractal', '--json', 'resources', 'cancel', '--request-id', 'request', '--wait']
+        for reply in (None, [], 'completed', 1):
+            def launch(argv, **options):
+                options['stdout'].write(json.dumps(reply).encode())
+                return mock.Mock(wait=mock.Mock(return_value=0))
+            with self.subTest(reply=reply), mock.patch.object(st_test.subprocess, 'Popen', side_effect=launch):
+                with self.assertRaises(st_test.NativeRetirementFailure):
+                    st_test.cancel_native_request(command, {})
+
+    def test_request_is_journaled_before_the_exec_client_starts(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'):
+            command = st_test.governed(['true'], 'linux-gate', output=io.StringIO())
+            request = command[command.index('--request-id') + 1]
+            process = mock.Mock(stdin=None, stdout=None, stderr=None)
+            process.poll.return_value = 0
+            def launch(argv, **options):
+                journal = json.loads(st_test.native_journal(home).read_text())
+                self.assertIn(request, journal)
+                self.assertEqual(journal[request]['command'][-3:], ['--request-id', request, '--wait'])
+                return process
+            with mock.patch.object(st_test.subprocess, 'Popen', side_effect=launch), \
+                    mock.patch.object(st_test, 'cancel_native_request') as cancel:
+                with st_test.managed_process(command, {'cwd': home}):
+                    pass
+                cancel.assert_called_once()
+            self.assertFalse(st_test.native_journal(home).exists())
+
+    def test_shared_target_has_its_own_durable_retirement_fence(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True), \
+                mock.patch.object(st_test, 'RESOURCE_EXEC', '/native/fractal'), \
+                mock.patch.object(st_test, 'QUARANTINED', False):
+            tree, target = Path(home, 'tree'), Path(home, 'target')
+            tree.mkdir()
+            phase = st_test.NativePhase(st_test.governed(['true'], 'linux-gate', output=io.StringIO()),
+                                        {'cwd': tree, 'env': {'CARGO_TARGET_DIR': str(target)}})
+            self.assertTrue(st_test.native_journal(tree).exists())
+            self.assertTrue(st_test.native_journal(target).exists())
+            with mock.patch.object(st_test, 'cancel_native_request'):
+                phase.retire()
+            self.assertFalse(st_test.native_journal(tree).exists())
+            self.assertFalse(st_test.native_journal(target).exists())
 
     def test_inherited_custody_cannot_create_phase_receipts(self):
         with mock.patch.dict(os.environ, {'FRACTAL_RESOURCE_PARENT': 'host-grant'}, clear=True):
@@ -996,7 +1129,11 @@ class StTest(unittest.TestCase):
         native_bin = Path(self.tmp.name, 'native-bin')
         native_bin.mkdir(exist_ok=True)
         native = native_bin / 'fractal'
-        native.write_text('#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+        native.write_text(f'#!{sys.executable}\nimport json,os,sys\n'
+                          'a=sys.argv[1:]\n'
+                          'if a[1:3]==["resources","cancel"]:\n'
+                          ' print(json.dumps({"requestId":a[a.index("--request-id")+1],"cancelled":True,"tombstone":True,"execution":None})); sys.exit(0)\n'
+                          'a=a[a.index("--")+1:]\nos.execvpe(a[0],a,os.environ)\n')
         native.chmod(0o755)
         env['PATH'] = f'{native_bin}:{env.get("PATH", os.defpath)}'
         cwd = os.getcwd()
@@ -1569,62 +1706,51 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
 
-    def test_a_ci_local_check_s_time_limit_counts_from_when_ci_local_starts(self):
-        self.commit('b.txt', 'two')
-        # 100 s of waiting (its dev shell's admission, say) before ci-local starts, then almost nothing: within a 50 s limit. The wait is
-        # simulated (the Limit hears the start line as if it came 100 s after the check began), so no wall clock decides the outcome. And
-        # this process takes 2 s to handle that line, as a loaded host may: the wrapper, which reads pre_start_s once the check ended, must
-        # still find the wait (2026-10-28: with a plain file it read before this process had written it, and the note said 'none').
-        hear = st_test.Limit.output
+    def test_native_wait_clock_not_ci_local_output_owns_pre_start_time(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            queue = Path(scratch, 'queue')
+            queue.write_text('wait 100 resources\nslot 200 resources\n')
+            with mock.patch.object(st_test.time, 'monotonic', return_value=250), \
+                    mock.patch.object(st_test.time, 'time', return_value=250):
+                limit = st_test.Limit(60, queue, 300)
+                limit.native = True
+                limit.started = 100
+                self.assertEqual(limit.remaining(), 10)
+                self.assertEqual(limit.waiting(), 100)
+                limit.output(b'ci-local: stage logs in /x\n')
+                self.assertEqual(limit.remaining(), 10, 'diagnostic output must not reset the payload clock')
 
-        def late(limit, chunk):
-            if limit.begins_at and limit.begins_at in limit.tail + chunk:
-                time.sleep(2)
-                limit.started -= 100
-            hear(limit, chunk)
+    def test_native_wait_silence_does_not_create_an_independent_veto(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            queue = Path(scratch, 'queue')
+            queue.write_text('wait 100 resources\n')
+            with mock.patch.object(st_test.time, 'monotonic', return_value=150), \
+                    mock.patch.object(st_test.time, 'time', return_value=150):
+                limit = st_test.Limit(30, queue, 60, silence=1)
+                limit.native = True
+                limit.started, limit.heard = 100, 100
+                self.assertEqual(limit.remaining(), 10)
+                self.assertFalse(limit.silent)
 
-        with mock.patch.object(st_test.Limit, 'output', late):
-            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50',
-                                              command=['sh', '-c', 'echo "ci-local: stage logs in /x"', 'scripts/ci-local'])
-        self.assertEqual(code, 0, out + err)
-        waited = re.search(r'waited (\d+)s before ci-local started \(admission, dev shell\) \(not counted against --time-limit\)', out)
-        self.assertIsNotNone(waited, out)
-        self.assertGreaterEqual(int(waited.group(1)), 100)
-        statement, = self.statements()
-        self.assertEqual(statement['predicate']['observed']['inputs']['pre_start_s'], waited.group(1))  # the note records the same wait
-        # Once ci-local has started the limit holds as before: 100 s of running is over it.
-        with self.simulated_limit(100):
-            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50', '--rerun',
-                                              command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 30', 'scripts/ci-local'])
-        self.assertEqual(code, 1, out + err)
-        self.assertRegex(out, r'demo +timed out')
+    def test_native_queue_budget_expires_even_if_admission_is_chatty(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            queue = Path(scratch, 'queue')
+            queue.write_text('wait 100 resources\n')
+            with mock.patch.object(st_test.time, 'monotonic', return_value=161), \
+                    mock.patch.object(st_test.time, 'time', return_value=161):
+                limit = st_test.Limit(30, queue, 60)
+                limit.native = True
+                limit.started = 100
+                limit.output(b'still queued\n')
+                self.assertLessEqual(limit.remaining(), 0)
+                self.assertTrue(limit.waited_out)
+                self.assertFalse(limit.silent)
 
-    def test_a_ci_local_check_silent_before_it_starts_is_stopped(self):
-        self.commit('b.txt', 'two')
-        started = time.monotonic()
-        with mock.patch.object(st_test, 'SILENCE_LIMIT', 1):
-            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', command=['sh', '-c', 'sleep 30', 'scripts/ci-local'])
-        self.assertEqual(code, 1, out + err)
-        self.assertRegex(out, r'demo +timed out .*stopped after 1s without output before ci-local started')
-        self.assertLess(time.monotonic() - started, 25)
-
-    def test_a_ci_local_check_that_waits_past_its_queue_limit_before_it_starts_is_stopped_even_while_it_prints(self):
-        self.commit('b.txt', 'two')
-        chatty = 'while true; do echo still waiting for admission; sleep 0.2; done'  # never silent, never starts
-        started = time.monotonic()
-        with mock.patch.object(st_test, 'SILENCE_LIMIT', 600):
-            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', '--queue-limit', '1',
-                                              command=['sh', '-c', chatty, 'scripts/ci-local'])
-        self.assertEqual(code, 1, out + err)
-        self.assertRegex(out, r'demo +timed out .*stopped after waiting 1s \(--queue-limit\) before ci-local started')
-        self.assertNotIn('without output', out)
-        self.assertLess(time.monotonic() - started, 25)
-
-    def test_ci_local_still_prints_the_line_its_time_limit_starts_at_after_its_load_gate(self):
+    def test_ci_local_reports_native_wait_and_payload_boundaries_without_a_load_gate(self):
         source = (ROOT / 'scripts/ci-local').read_text()
-        marker = 'echo "' + st_test.CI_LOCAL_STARTED.decode()
-        self.assertIn(marker, source)
-        self.assertLess(source.index('waiting: load1'), source.index(marker))  # ci-local's own load wait comes before it: waiting, not running
+        self.assertNotIn('waiting: load1', source)
+        self.assertLess(source.index("printf 'wait "), source.index('exec fractal resources exec'))
+        self.assertLess(source.index('exec fractal resources exec'), source.index("printf 'slot "))
 
     def test_the_waits_for_a_build_slot_have_a_limit_of_their_own(self):
         self.commit('b.txt', 'two')
@@ -3388,13 +3514,12 @@ finally:
         self.assertEqual(len(set(first.split(':'))), len(first.split(':')))
 
 
-    def test_a_whole_run_on_an_overloaded_host_refuses_loudly_before_it_starts_anything(self):
+    def test_legacy_load_settings_are_not_a_veto_on_light_checks(self):
         self.commit('b.txt', 'two')
         code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_MAX_LOAD': '0.0001', 'ST_TEST_LOAD_WAIT_MINUTES': '0.001'})
-        self.assertRegex(str(code), r'host stayed above its load limit: load1 .* > 0.0001 \(host limit\)')
-        self.assertIn('waiting: load1', err)
-        self.assertEqual(self.statements(), [])  # nothing ran, nothing signed
-        self.assertFalse((self.home / '.cache/st-test').exists())  # no pool tree was taken
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('waiting: load1', err)
+        self.assertEqual(len(self.statements()), 1)
 
     def test_the_fixed_path_keeps_cargo_s_bin_because_the_clippy_ratchet_s_toolchain_string_depends_on_it(self):
         (self.home / '.cargo/bin').mkdir(parents=True)
@@ -3717,7 +3842,7 @@ finally:
         record, = self.runs()
         self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
-                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s', 'burst', 'burst_wait_s']))
+                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s', 'admission_receipts']))
         # This private pool has no contention, but acquisition includes ticket work and /proc orphan scans before taking the tree.
         # Rounded elapsed time can be nonzero on a loaded host; no build slot or ci-local stage actually waits in this fixture.
         self.assertIsInstance(record['tree_wait_s'], int)
@@ -3840,28 +3965,20 @@ finally:
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.runs()[-1]['stages'], [])
 
-    def test_a_run_that_builds_takes_its_tree_only_with_a_build_slot_free_and_records_what_it_waited_in_it(self):
+    def test_pool_ownership_has_no_legacy_slot_veto_and_records_native_requests(self):
         self.commit('b.txt', 'two')
         run = Path(self.tmp.name) / 'run'
         (run / 'cargo-slots/queue').mkdir(parents=True)
-        holder = open(run / 'cargo-slots/heavy0', 'w')                         # another build holds the host's one heavy slot
-        fcntl.flock(holder, fcntl.LOCK_EX)
-        self.addCleanup(holder.close)
-        # ci-local's queue log: its tests stage waited 30 s for a slot with nothing else running, and its table.
-        script = ('printf "wait 1792749670 tests\\nslot 1792749700 tests\\n" >> "$CI_LOCAL_QUEUE_LOG"; echo "ci-local: stage logs in x"; '
-                  'echo "ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0   queue: 1 waits, 30s"')
-        command = ['sh', '-c', script, 'scripts/ci-local']
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'TREE_SLOT_WAIT_LIMIT', 1), \
-                mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.05):
-            code, out, err = self.run_st_test(command=command, extra_env={'ST_EVIDENCE_GOVERN': 'off', 'XDG_RUNTIME_DIR': str(run)})
+        with open(run / 'cargo-slots/heavy0', 'w') as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+                code, out, err = self.run_st_test(extra_env={'XDG_RUNTIME_DIR': str(run)})
         self.assertEqual(code, 0, out + err)
-        self.assertIn('tree-0 is free, but a build started now would wait for a slot (1 of 1 heavy slots busy', err)
-        self.assertIn('taking tree-0 after', err)                               # the slot never came free: the limit, then the tree
         record = self.runs()[-1]
-        self.assertGreaterEqual(record['tree_slot_wait_s'], 1)
-        self.assertGreaterEqual(record['tree_wait_s'], record['tree_slot_wait_s'])
-        self.assertEqual((record['tree_slot_blocked_s'], record['tree_blocked_s'] - record['tree_pre_start_s']), (30, 30))
-        self.assertRegex(out, r'tree-0: waited \d+s for it \(\d+s of that free, waiting for a build slot\), held it \d+s, blocked in it \d+s')
+        self.assertEqual(record['tree_slot_wait_s'], 0)
+        self.assertEqual(len(record['admission_receipts']), 1)
+        self.assertIn('request_id', record['admission_receipts'][0])
+        self.assertNotIn('build started now would wait for a slot', err)
 
     def test_a_streamed_check_keeps_the_time_limit_and_is_not_held_by_what_it_left_behind(self):
         self.commit('b.txt', 'two')
