@@ -228,19 +228,15 @@ export const liveSource = ({
   const followInterests = new Map<string, () => boolean>()
   const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const startupIdentity = Promise.withResolvers<EnvelopeOf<Capabilities>>()
-  let startupIdentityCurrent = true
-  let identityObservations = 0
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
       fetch,
       onCapabilities: response => {
-        if (++identityObservations > 1) startupIdentityCurrent = false
         startupIdentity.resolve(response)
         options.onCapabilities?.(response)
       },
       onProbeFailure: () => {
-        startupIdentityCurrent = false
         startupIdentity.reject(new Error('Initial gateway identity unavailable'))
         options.onProbeFailure?.()
       },
@@ -253,7 +249,6 @@ export const liveSource = ({
               registry.set(network, { _tag: 'Online' })
             }
             if (event.state._tag === 'Reconnecting') {
-              startupIdentityCurrent = false
               const status: SyncStatus = {
                 _tag: 'Stale',
                 reason: event.state.nextAt === undefined ? { _tag: 'Unknown' } : {
@@ -1214,19 +1209,6 @@ export const liveSource = ({
   // Before the first capabilities answer every grant is a conservative default, not a refusal.
   const unreadGrants: Grants = { ...noGrants, unread: true }
   let observedGrants: Grants | undefined
-  // Startup recovery and the first grants observation share one identity read.
-  // Later transport refreshes still fetch current capabilities.
-  const startupCapabilities = async () => {
-    if (!startupIdentityCurrent) return client.capabilities()
-    const response = await startupIdentity.promise
-    return startupIdentityCurrent ? response : client.capabilities()
-  }
-  let grantsRequested = false
-  const grantsCapabilities = () => {
-    if (grantsRequested) return client.capabilities()
-    grantsRequested = true
-    return startupCapabilities()
-  }
   const grants = Atom.keepAlive(
     Atom.make((get): Grants => {
       if (readRejection !== undefined) return noGrants
@@ -1238,7 +1220,7 @@ export const liveSource = ({
       const fiber = runtime.runFork(
         Effect.gen(function* () {
           const response = yield* Effect.tryPromise({
-            try: grantsCapabilities,
+            try: () => client.capabilities(),
             catch: (cause) => cause,
           })
           const discovered = outbox.observe(response)
@@ -1279,7 +1261,7 @@ export const liveSource = ({
       sdk = yield* Fractal
       if (!online) yield* sdk.setNetworkOnline(false)
       // Rendering may proceed read-only when identity/storage is unavailable; send grants await the same barrier.
-      yield* Effect.tryPromise({ try: async () => outbox.initialize(await startupCapabilities()), catch: (cause) => cause }).pipe(Effect.catch(() => Effect.void))
+      yield* Effect.tryPromise({ try: async () => outbox.initialize(await startupIdentity.promise), catch: (cause) => cause }).pipe(Effect.catch(() => Effect.void))
     })).catch(cause => { if (!disposed) throw cause }),
     suspendSockets: () => sdk?.suspendSockets(),
     resumeSockets: () => {

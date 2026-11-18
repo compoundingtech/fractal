@@ -476,13 +476,13 @@ describe('outbox startup admission', () => {
         live.registry.mount(live.source.grants)
         yield* settle
         expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
-        expect(gateway.capabilityReads).toBe(1)
+        expect(gateway.capabilityReads).toBe(2)
         expect(gateway.messageActions).toEqual([])
       } finally { inspected.close() }
     }), { issuerPair })
   }))
 
-  it.live('shares the in-flight capabilities read between startup recovery and mounted grants', () => {
+  it.live('reads fresh capabilities for mounted grants independently of the in-flight startup probe', () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
     return withGateway((live, gateway) => Effect.gen(function* () {
       const answer = Promise.withResolvers<void>()
@@ -490,19 +490,20 @@ describe('outbox startup admission', () => {
       const release = live.registry.mount(live.source.grants)
       try {
         yield* settle
-        expect(gateway.capabilityReads).toBe(1)
+        expect(gateway.capabilityReads).toBe(2)
         expect(live.registry.get(live.source.grants)).toHaveProperty('unread', true)
         answer.resolve()
         yield* Effect.promise(() => live.ready)
         yield* settle
         expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'durable' })
-        expect(gateway.capabilityReads).toBe(1)
+        expect(gateway.capabilityReads).toBe(2)
         expect(gateway.messageActions).toEqual([])
       } finally { answer.resolve(); release() }
     }), { issuerPair })
   })
 
-  it.live('uses the new identity when the first composer mounts after a reconnect probe', () => Effect.gen(function* () {
+  for (const observation of ['reconnect probe', 'recovery discovery'] as const) {
+  it.live(`uses the new identity when the first composer mounts after ${observation}`, () => Effect.gen(function* () {
     const factory = new IDBFactory()
     vi.stubGlobal('indexedDB', factory)
     const nextIssuer = { issuer: 'person/other', issuer_key: 'issuer-key/next' }
@@ -524,14 +525,19 @@ describe('outbox startup admission', () => {
         expect(yield* Effect.promise(() => saved.read(intent.id))).toEqual(dispatched)
         gateway.issuerPair = nextIssuer
         gateway.messageGrant = 'ungranted'
-        live.source.reconnect?.()
-        yield* settle
-        expect(gateway.capabilityReads).toBe(2)
+        if (observation === 'reconnect probe') {
+          live.source.reconnect?.()
+          yield* settle
+          expect(gateway.capabilityReads).toBe(2)
+        } else {
+          yield* Effect.promise(() => live.source.outboxRecovery!.list())
+        }
+        const readsBeforeMount = gateway.capabilityReads
         const release = live.registry.mount(live.source.grants)
         try {
           yield* settle
           expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'ungranted', sendProtection: 'durable' })
-          expect(gateway.capabilityReads).toBe(3)
+          expect(gateway.capabilityReads).toBe(readsBeforeMount + 1)
           // Recovering B's dispatch marker proves startup did not reinitialize A's scope.
           expect(yield* Effect.promise(() => saved.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
           expect(gateway.messageActions).toEqual([])
@@ -539,6 +545,7 @@ describe('outbox startup admission', () => {
       }), { issuerPair })
     } finally { saved.close() }
   }))
+  }
 
   it.live('keeps protected startup storage unavailable without granting sends or inventing corrupt entries', () => {
     vi.stubGlobal('indexedDB', { open: () => { throw new DOMException('Storage disabled', 'SecurityError') } })
