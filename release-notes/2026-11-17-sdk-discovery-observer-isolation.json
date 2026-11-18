@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep optional discovery observers from interrupting SDK connections",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No storage or wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Exceptions from optional channel discovery observers are isolated. Socket opening, probe backoff and admission settlement continue normally; omitted observers retain existing behavior."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "A failing observer no longer prevents the SDK from reconnecting or resolving its first-probe admission barrier."}
+}

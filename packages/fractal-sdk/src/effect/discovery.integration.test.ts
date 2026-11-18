@@ -32,5 +32,42 @@ describe('channel discovery observers', () => {
         onProbeFailure: () => { Effect.runFork(Deferred.succeed(observed, undefined)) },
       })))
     }))
+
+    it.live(`isolates a throwing observer from ${fails ? 'backoff and failed admission' : 'socket opening and successful admission'}`, () => Effect.gen(function* () {
+      const progressed = yield* Deferred.make<void>()
+      let reads = 0
+      let sockets = 0
+      yield* Effect.gen(function* () {
+        const sdk = yield* Fractal
+        yield* Deferred.await(progressed)
+        const admission = yield* Effect.result(sdk.readAgents)
+        expect(admission._tag).toBe(fails ? 'Failure' : 'Success')
+        expect(reads).toBe(1)
+        expect(sockets).toBe(fails ? 0 : 1)
+      }).pipe(Effect.provide(FractalLive({
+        baseUrl: 'http://gateway.test', maxFollows: 2, conversationSlots: 'advertised',
+        fetch: async input => {
+          if (String(input).includes('/capabilities')) {
+            reads += 1
+            if (fails) throw new TypeError('Offline')
+            return Response.json(response)
+          }
+          return Response.json({ ...response, value: { items: [], page: { has_more: false } } })
+        },
+        socket: () => {
+          sockets += 1
+          Effect.runFork(Deferred.succeed(progressed, undefined))
+          return { onopen: null, onmessage: null, onerror: null, onclose: null, send: () => {}, close: () => {} }
+        },
+        onCapabilities: () => { throw new Error('Observer failed') },
+        onProbeFailure: () => { throw new Error('Observer failed') },
+        onDiagnostics: event => {
+          if (event._tag === 'Connection' && event.state._tag === 'Reconnecting') {
+            expect(event.state.nextAt).toBeDefined()
+            Effect.runFork(Deferred.succeed(progressed, undefined))
+          }
+        },
+      })))
+    }))
   }
 })

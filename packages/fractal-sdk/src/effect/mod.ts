@@ -604,13 +604,14 @@ const make = (options: FractalOptions) =>
           capability.id === 'collection.attention.thread-hints' && capability.state === 'granted' && capability.version >= 1,
         )
         Effect.runFork(Deferred.succeed(firstProbe, undefined))
-        options.onCapabilities?.(envelope)
+        // Observers must not interrupt connection or admission state handling.
+        try { options.onCapabilities?.(envelope) } catch {}
         if (options.conversationSlots === 'advertised')
           acceptBudget(advertisedSubscriptionLimit(envelope))
       },
       onProbeFailure: () => {
         attentionThreadHintsGranted = false
-        options.onProbeFailure?.()
+        try { options.onProbeFailure?.() } catch {}
         Effect.runFork(Deferred.fail(firstProbe, new AttachFailure({ message: 'Roster discovery is unavailable.' })))
         // A refused or unavailable first probe still releases every admission waiter.
         // Permanent rejection is reported by the channel to each follow, not hidden
