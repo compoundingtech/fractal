@@ -194,6 +194,63 @@ pub fn parse_millipercent(line: &str, window: Window) -> Result<u32> {
     Ok(result)
 }
 
+/// Reuse the small kernel-file and parsed-reading buffers across host observations.
+#[derive(Default, Debug)]
+pub struct Reader {
+    memory: String,
+    io: String,
+    readings: Vec<Reading>,
+}
+
+impl Reader {
+    pub fn read(&mut self, policy: &Policy, now_ms: u64) -> Result<&[Reading]> {
+        self.read_paths(policy, now_ms,
+            std::path::Path::new("/proc/pressure/memory"),
+            std::path::Path::new("/proc/pressure/io"))
+    }
+
+    fn read_paths(
+        &mut self,
+        policy: &Policy,
+        now_ms: u64,
+        memory_path: &std::path::Path,
+        io_path: &std::path::Path,
+    ) -> Result<&[Reading]> {
+        use std::io::Read as _;
+        self.readings.clear();
+        let needs_memory = policy.rules.iter().any(|rule|
+            matches!(rule.signal, Signal::MemorySome | Signal::MemoryFull));
+        let needs_io = policy.rules.iter().any(|rule|
+            matches!(rule.signal, Signal::IoSome | Signal::IoFull));
+        if needs_memory {
+            self.memory.clear();
+            std::fs::File::open(memory_path)?.read_to_string(&mut self.memory)?;
+        }
+        if needs_io {
+            self.io.clear();
+            std::fs::File::open(io_path)?.read_to_string(&mut self.io)?;
+        }
+        for rule in &policy.rules {
+            let (source, name) = match rule.signal {
+                Signal::MemoryFull => (&self.memory, "full"),
+                Signal::MemorySome => (&self.memory, "some"),
+                Signal::IoFull => (&self.io, "full"),
+                Signal::IoSome => (&self.io, "some"),
+            };
+            let mut matching = source.lines().filter(|line|
+                line.split_ascii_whitespace().next() == Some(name));
+            let line = matching.next().ok_or_else(|| anyhow::anyhow!("missing PSI signal"))?;
+            ensure!(matching.next().is_none(), "duplicate PSI signal");
+            self.readings.push(Reading {
+                signal: rule.signal, window: rule.window,
+                millipercent: parse_millipercent(line, rule.window)?,
+                observed_at_ms: now_ms,
+            });
+        }
+        Ok(&self.readings)
+    }
+}
+
 #[cfg(test)]
 #[path = "psi_tests.rs"]
 mod tests;

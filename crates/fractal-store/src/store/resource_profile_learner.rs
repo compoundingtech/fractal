@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod psi;
 pub mod cgroup;
+pub mod disk;
 
 pub const MIN_SAMPLES: usize = 20;
 pub const WINDOW_SAMPLES: usize = 256;

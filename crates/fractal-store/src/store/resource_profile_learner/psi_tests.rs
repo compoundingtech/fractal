@@ -111,3 +111,24 @@ fn kernel_decimal_pressure_parser_preserves_threshold_precision() {
         assert!(parse_millipercent(invalid, Window::Avg60).is_err());
     }
 }
+
+#[test]
+fn host_reader_parses_real_files_without_substituting_missing_or_stale_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory = directory.path().join("memory");
+    let io = directory.path().join("io");
+    std::fs::write(&memory,
+        "some avg10=6.81 avg60=4.90 avg300=1.86 total=4781940413\nfull avg10=4.07 avg60=3.14 avg300=1.28 total=4654995392\n").unwrap();
+    std::fs::write(&io,
+        "some avg10=2.07 avg60=1.42 avg300=3.52 total=36086872246\nfull avg10=0.00 avg60=0.13 avg300=2.89 total=34379897790\n").unwrap();
+    let policy = Policy::default();
+    let mut reader = Reader::default();
+    let observed = reader.read_paths(&policy, 123, &memory, &io).unwrap();
+    assert_eq!(observed, &readings(123, 3140, 1420));
+    std::fs::remove_file(&io).unwrap();
+    assert!(reader.read_paths(&policy, 124, &memory, &io).is_err());
+    std::fs::write(&io, "full avg60=0.00\n").unwrap();
+    assert!(reader.read_paths(&policy, 125, &memory, &io).is_err());
+    std::fs::write(&io, "some avg60=1.00\nsome avg60=2.00\n").unwrap();
+    assert!(reader.read_paths(&policy, 126, &memory, &io).is_err());
+}
