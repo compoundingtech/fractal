@@ -396,9 +396,10 @@ and `cancelled` when the request future is dropped before producing a response.
 An upstream 504 without the read-deadline marker is `server_error`. A drop guard
 records exactly once, including cancellation; the in-process meter and slow logs
 retain their completion-only behavior. The outcome has five values. An SDK cardinality
-limit caps this instrument at 1,500 series; excess combinations go to the
-`otel.metric.overflow=true` series. This runtime cap enforces O11Y-R14's 2,000 active-series
-budget rather than the theoretical label product.
+limit caps this instrument at 1,500 series before idle residency activation; excess combinations
+go to the `otel.metric.overflow=true` series. Activation must lower this cap by residency's full
+footprint as allocated [below](#cardinality-budget). The combined cap enforces O11Y-R14's
+2,000 active-series budget rather than the theoretical label product.
 
 Duration buckets are
 `0.001`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`,
@@ -887,14 +888,19 @@ its overflow series. Such overflow remains an alertable contract violation,
 not an approved loss of labels or a valid substitute for capacity review.
 
 
-This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
-another 2,000. The HTTP request-duration instrument already reserves up to 1,500
-series; mailbox/delivery and other instruments consume the remainder. Capacity
-and label-churn review is an implementation gate, not a claim of current
-compliance. If inventory exceeds the allocation, the decision owner must approve
-a revised budget or a lossless
-dimension policy before rollout: never truncate agents, use SDK overflow to
-silently lose the contract's labels, or discard counts to meet a budget.
+This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add another 2,000.
+Idle residency must take its entire allocation from the HTTP request-duration cap of 1,500.
+The provisional residency estimate is 64 series, leaving an HTTP cap of 1,436: 20 series
+from the seven fixed-vocabulary instruments, plus an estimated 44 refusal/failure-code series
+(including both `other` buckets). This is a planning estimate, not a measured export footprint.
+Before activation, inventory both code vocabularies and measure the combined export and
+backend active-series/churn footprint. If residency's footprint is `R`, the HTTP cap must be
+at most `1,500 - R`; revise the provisional 64-series reservation to that measured allocation.
+Population retains its 267-series allocation; mailbox/delivery and other instruments retain
+the remaining 233 series. Histogram/export expansion and backend retention must be included,
+not hidden by an SDK data-point count. Capacity and label-churn review is an implementation
+gate, not a claim of current compliance. Never truncate agents, use SDK overflow to silently
+lose required labels, discard counts, or increase the 2,000-series budget to fit residency.
 
 ### Signal gaps and implementation boundary
 
