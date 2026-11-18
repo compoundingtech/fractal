@@ -1523,7 +1523,12 @@ fn an_unneeded_evaluation_that_arms_an_earlier_timer_is_a_correction() {
         .unwrap();
 }
 
+static RESIDENCY_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_800_000_000_000);
+
 fn residency_claim(store: &Store, kind: &str, fields: Value) {
+    // Claims in one test must not share a wall-clock millisecond: epochs and deadlines
+    // derive from acceptance times.
+    store.set_write_clock_at(RESIDENCY_CLOCK.fetch_add(1, std::sync::atomic::Ordering::SeqCst).into()).unwrap();
     store.append_claim(&ClaimInput {
         subject: "agent/node.garden".into(), kind: kind.into(), actor: Some("agent/node.garden".into()),
         fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
