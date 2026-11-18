@@ -477,12 +477,14 @@ impl PersonWorkStore for Store {
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
         let program = input.actor == crate::model::PROGRAM_ASKER;
         if !crate::model::person_subject(&input.person)
-            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing" || program)
+            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing"
+                || input.actor == "daemon/escalation" || program)
             || input.title.trim().is_empty()
             || input.reason.trim().is_empty()
             || input.idempotency_key.is_empty()
             // A program asks only on its own step.
             || (program && (input.step.is_none() || input.new_run.is_some()))
+            || (input.actor == "daemon/escalation" && (input.step.is_some() || input.new_run.is_some()))
         {
             return Err(FractalError::new(
                 "invalid-person-ask",
@@ -1236,7 +1238,8 @@ impl PersonWorkStore for Store {
                 stable_input.actor = actor;
                 &stable_input
             };
-            if input.actor != "daemon/browser-pairing" && !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
+            if !matches!(input.actor.as_str(), "daemon/browser-pairing" | "daemon/escalation")
+                && !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
                 return Err(FractalError::new("missing-ask-owner", "the requester must have an existing agent declaration; declare the agent before asking"));
             }
             let key = if input.new_run.is_some() {

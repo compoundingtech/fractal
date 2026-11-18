@@ -64,6 +64,7 @@ pub mod plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
+mod escalation;
 pub mod start_spacing;
 pub mod program;
 mod program_faults;
@@ -11116,7 +11117,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .flatten()
                 .map(|observation| observation.status)
         });
-        let ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        let mut ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
+        for id in self.store.escalation_run_ids(&self.host)? {
+            if !ids.contains(&id) { ids.push(id); }
+        }
         self.evaluate_mission_run_ids_held(ids)
     }
 
@@ -11257,6 +11261,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                     // From the view the evaluation started with: a write it makes changes subjects
                     // it read, so the next pass evaluates it again and takes the new times.
                     due = crate::incremental::run_due(&run, now_ms());
+                    if let Some(definition) = mission.as_ref() {
+                        match self.escalate_run(&run, definition, now_ms()) {
+                            Ok(escalation_due) => {
+                                due = [due, escalation_due].into_iter().flatten().min();
+                                self.close_fault(&run.subject, "escalation", "all due stages delivered")?;
+                            }
+                            Err(error) => self.record_fault(&run.subject, "escalation", Err(error))?,
+                        }
+                    }
                     // Telling a run's reporter never holds the run back or fails it.
                     match self.report_choice(&run.subject).and_then(|choice| match choice {
                         run_report::ReportChoice::Named(report) => {

@@ -402,6 +402,7 @@ pub mod published_views;
 pub mod published_list;
 pub mod mission_list;
 pub mod work_list;
+pub mod escalation;
 pub mod runtime_list;
 #[cfg(test)]
 pub mod tombstones_tests;
@@ -1242,6 +1243,10 @@ BEGIN
     DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
 
+CREATE TABLE IF NOT EXISTS local_escalation_runs_v1 (
+    run_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS capabilities (
     secret_hash TEXT PRIMARY KEY,
     kind TEXT NOT NULL,

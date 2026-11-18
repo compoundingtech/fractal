@@ -10,6 +10,28 @@ A mission is an immutable definition in the claims graph. Initial publication do
 
 A mission run has one stable subject. Each immutable run generation binds that run to one exact mission revision.
 
+## Escalation delivery
+
+Mission and step `escalation` declarations contain uniquely named policies with
+ordered, absolute-delay stages. Each policy matches a runtime state and uses
+`since-entered` or `since-progress`. Progress starts a new silence episode;
+repeated observations or lease renewals do not restart the state-entry clock.
+Step declarations inherit, replace, or disable the mission's policies.
+
+Reconciliation delivers every overdue stage in order, not just the latest one,
+and registers the next stage as a deadline on the run's existing incremental
+evaluation. `notify` uses native message routing; `ask` creates an independent
+native person ask without blocking or changing the source step. The source
+subject, policy ID, stage position, and durable episode identity determine the
+delivery key. Native receipts survive restarts and prevent re-firing even after
+an ask is answered. A local restart index keeps terminal ladders scheduled until
+their remaining deadlines have been delivered.
+
+Publication, including direct `mission.published` claims, requires signed
+`features.mission-escalation-v1=1` advertisements from every active anchored
+member. Missing, unsigned, or older reader advertisements refuse publication;
+upgrade or fence those readers rather than silently dropping policy fields.
+
 ## Retrying a failed run
 
 `fractal missions retry RUN [--same-revision] [--reason REASON] --as ACTOR` creates a new run from a failed, terminal source. A person or the owning agent must have ordinary run-start authority. The trusted API is `POST /v1/mission-runs/{run}/retry`, with `actor`, `same_revision` (default `false`), optional `reason`, and a stable `idempotency_key`. Repeating the same idempotency key must not create another run.

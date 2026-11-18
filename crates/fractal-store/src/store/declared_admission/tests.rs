@@ -422,3 +422,35 @@ fn attention_capability_is_additive_and_anchored() {
     sync(&peer, &store);
     publish(&store, attention, "supported").unwrap();
 }
+
+#[test]
+fn escalation_publication_refuses_an_older_reader_until_signed_upgrade() {
+    let (store, anchor) = enabled();
+    started(&store, json!({"mission-escalation-v1":1}));
+    let (peer, _) = peer(&store, &anchor);
+    started(&peer, json!({"declared_admission":1}));
+    sync(&peer, &store);
+    let source = r#"version 2
+mission "escalated" state="ready" {
+ goal "Escalate overdue work."
+ escalation { policy "waiting" state="waiting" clock="since-entered" {
+   stage "1m" notify="agent/example/reporter"
+ } }
+ step "work" { agentless }
+}"#;
+    let before = store.index().unwrap();
+    let error = publish(&store, source, "older-reader").unwrap_err();
+    assert_eq!(error.code, MISSION_ESCALATION.code);
+    assert!(error.message.contains("mission-escalation-v1"));
+    assert_eq!(store.index().unwrap(), before);
+    let intent = crate::graph::parse_intent(source, "alder").unwrap();
+    let mission = serde_json::to_value(&intent.missions["escalated"]).unwrap();
+    for body in [mission.clone(), json!({"fields":{"body":mission}})] {
+        assert_eq!(validate_claim(&store.readers.get(), "alder", "mission.published", &body)
+            .unwrap_err().code, MISSION_ESCALATION.code);
+    }
+    started(&peer, json!({"mission-escalation-v1":1}));
+    assert_eq!(publish(&store, source, "unsigned-upgrade").unwrap_err().code, MISSION_ESCALATION.code);
+    sync(&peer, &store);
+    publish(&store, source, "upgraded-readers").unwrap();
+}
