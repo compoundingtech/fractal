@@ -3570,6 +3570,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", string()),
             ("state", string()),
             ("body", object()),
+            ("per_run_missions", integer()),
         ],
         "mission.provenance" => &[
             ("mission", required_reference_to(&["mission"])),

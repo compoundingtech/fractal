@@ -4186,7 +4186,7 @@ impl Store {
                     run_authority::admit_tx(transaction, &self.origin, actor, "mission.published", &mission.subject, &BTreeMap::new())?;
                     let predecessors =
                         mission_definition_token_tx(transaction, &mission.id).map_err(internal)?;
-                    let mut body = serde_json::to_value(mission).map_err(internal)?;
+                    let mut body = mission_publication_body(mission).map_err(internal)?;
                     if let Some(plan) = &owned_plan { body["owned_set"] = json!(plan.preview.set); }
                     if let Some(provenance) = intent.mission_provenance.get(&mission.id)
                         && let Some(claim) = mission_provenance::record(transaction, &self.origin, mission, provenance, actor, &batch_id)? {
@@ -12181,6 +12181,10 @@ fn replicated_work_validation_fields<'a>(
     if kind == "mission.published"
         && let Some(mission) = fields.get("body").and_then(|body| serde_json::from_value::<MissionSpec>(body.clone()).ok())
     {
+        let scoped = crate::mission::declares_per_run_missions(&mission);
+        if scoped != (body.pointer("/fields/per_run_missions").and_then(Value::as_u64) == Some(1)) {
+            return Err(anyhow::anyhow!("per-run-missions-marker: mission publication must carry its derived per_run_missions=1 marker"));
+        }
         mission_capacity::validate_mission(transaction, origin, &mission).map_err(anyhow::Error::new)?;
     }
     validate_claim_cardinality(
@@ -12407,6 +12411,17 @@ fn normalize_local_projection_timestamps_tx(
     Ok(())
 }
 
+/// Keep the historical raw mission body for projectors, and persist explicit schema fields
+/// for scoped outputs so older admission code sees (and refuses) the new marker.
+pub fn mission_publication_body(mission: &MissionSpec) -> Result<Value> {
+    let mut body = serde_json::to_value(mission)?;
+    if crate::mission::declares_per_run_missions(mission) {
+        let fields = schema_fields_for_body("mission.published", &body)?;
+        body["fields"] = serde_json::to_value(fields)?;
+    }
+    Ok(body)
+}
+
 pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<String, Value>> {
     if let Some(fields) = body.get("fields").and_then(Value::as_object) {
         return Ok(fields
@@ -12429,11 +12444,17 @@ pub fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<Strin
     }
     if kind == "mission.published" {
         let mission: MissionSpec = serde_json::from_value(body.clone())?;
-        return Ok(BTreeMap::from([
+        let mut fields = BTreeMap::from([
             ("revision".into(), Value::String(mission.revision.clone())),
             ("state".into(), serde_json::to_value(&mission.state)?),
             ("body".into(), body.clone()),
-        ]));
+        ]);
+        // This closed-schema marker prevents old replicas from selecting the revision
+        // and treating its run template as a shared literal mission identity.
+        if crate::mission::declares_per_run_missions(&mission) {
+            fields.insert("per_run_missions".into(), Value::from(1));
+        }
+        return Ok(fields);
     }
     Ok(body
         .as_object()
