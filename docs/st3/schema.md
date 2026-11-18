@@ -341,19 +341,6 @@ only the newest quota snapshot. Older members retain this unknown kind as retrya
 claims continue replicating, and an upgraded member replays the retained observations.
 
 
-## Agent idle-suspend grammar
-
-An agent may declare one optional `idle-suspend "never"` or `idle-suspend "member"`
-child. It takes exactly one string, with no properties, body, or type annotations.
-Duplicate children and all other values are refused. Omitting it and declaring
-`member` both inherit the host's idle-suspend policy; `never` opts the seat out.
-
-The canonical declaration retains this child, and agent declaration reads expose
-it as optional `idle_suspend`. It is policy metadata, not a launch-contract field:
-publishing only this change does not supersede the live seat, restart its process,
-or replace its native session. Residency diagnostics evaluate the current
-declaration and host policy; this grammar alone does not suspend a seat.
-
 ## Agent principal grammar
 
 An agent may declare one optional `principal "person/operator"` child. It takes
