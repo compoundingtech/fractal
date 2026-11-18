@@ -208,10 +208,12 @@ it('offers no Start and names no recipient on a source without the preview reade
   } finally { await view.dispose() }
 })
 
-it.each(['stale-snapshot'] as const)('retains the original signed Start when golden %s has no applied metadata', async code => {
+it.each(['stale-snapshot'] as const)('retains the original signed Start when legacy %s omits applied metadata', async code => {
   const view = await mount(<LiveInboxThreads alert={ask} />, {
     preview: (url, actions) => context(url, actions.length === 0 ? originalRecipient : configuredRecipient),
-    action: (action, actions) => actions.length === 1 ? wireRefusal(code) : receipt(action),
+    action: (action, actions) => actions.length === 1
+      ? Response.json({ ...startRefusalWire[code], applied: undefined, details: {} }, { status: 409 })
+      : receipt(action),
   })
   try {
     await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
