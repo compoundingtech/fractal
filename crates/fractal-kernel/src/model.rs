@@ -904,11 +904,17 @@ pub enum EscalationOverride {
     Replace { policies: Vec<EscalationSpec> },
 }
 
+impl EscalationOverride {
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct StepSpec {
     pub id: String,
     pub path: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "EscalationOverride::is_inherit")]
     pub escalation: EscalationOverride,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
@@ -1092,7 +1098,7 @@ pub struct MissionSpec {
     pub subject: String,
     pub state: MissionState,
     pub revision: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "EscalationOverride::is_inherit")]
     pub escalation: EscalationOverride,
     /// st's own plumbing or a standing observer, which clients fold away until asked. Read it
     /// with `mission::is_system` (fractal-daemon), which covers revisions published before the flag.

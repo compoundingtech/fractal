@@ -822,7 +822,7 @@ export const EscalationSchema = Schema.Struct({
   })),
 }).check(Schema.makeFilter(
   (policy) => policy.stages.every((stage, index) =>
-    index === 0 || EffectDuration.greaterThan(stage.after, policy.stages[index - 1]!.after)),
+    index === 0 || EffectDuration.isGreaterThan(stage.after, policy.stages[index - 1]!.after)),
   { message: 'escalation stages must have strictly increasing absolute delays' },
 )).annotate({ identifier: 'Fractal.Escalation' })
 
@@ -831,7 +831,7 @@ export const MissionEscalationSchema = Schema.Struct({
   when: Schema.Struct({ state: RunEscalationState, clock: EscalationClock }),
 }).check(Schema.makeFilter(
   (policy) => policy.stages.every((stage, index) =>
-    index === 0 || EffectDuration.greaterThan(stage.after, policy.stages[index - 1]!.after)),
+    index === 0 || EffectDuration.isGreaterThan(stage.after, policy.stages[index - 1]!.after)),
   { message: 'escalation stages must have strictly increasing absolute delays' },
 ))
 export const StepEscalationOverrideSchema = Schema.Union([
