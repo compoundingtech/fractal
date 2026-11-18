@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Verified runtime starts are adopted from their completion signal without waiting for a running broad reconcile pass to finish (#6711).",
+  "replay": {"status": "none", "detail": "No graph replay. A narrowly serialized completion lane reuses the existing fenced start-result application; the broad pass still recovers durable pending results."},
+  "schema": {"status": "none", "detail": "No stored schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "No client, wire or code generation change. Exact operation, incarnation, request, desired-state, provenance and observation-generation fences remain in force."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No manual step. Successful completion consumption logs result_to_adoption_ms."},
+  "recovery": {"status": "none", "detail": "Reverting restores adoption at the next broad pass; durable start operations remain compatible."}
+}

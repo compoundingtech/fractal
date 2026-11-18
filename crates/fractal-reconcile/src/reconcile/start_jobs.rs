@@ -11,15 +11,28 @@ pub const MAX_START_JOBS: usize = 2;
 pub const OPERATION_TAG: &str = "st3.start-operation";
 pub const OPERATION_ENV: &str = "ST3_START_OPERATION";
 
+struct StartResult {
+    id: String,
+    subject: String,
+    finished_at: std::time::Instant,
+}
+
 pub struct StartJobs {
     owner: String,
     pub live: Arc<(Mutex<HashSet<String>>, Condvar)>,
+    application: Mutex<()>,
+    results: tokio::sync::mpsc::UnboundedSender<StartResult>,
+    completions: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<StartResult>>,
 }
 impl Default for StartJobs {
     fn default() -> Self {
+        let (results, completions) = tokio::sync::mpsc::unbounded_channel();
         Self {
             owner: uuid::Uuid::now_v7().to_string(),
             live: Arc::default(),
+            application: Mutex::new(()),
+            results,
+            completions: tokio::sync::Mutex::new(completions),
         }
     }
 }
@@ -206,6 +219,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let runtime = self.runtime.clone();
         let notify = self.notify.clone();
         let events = self.event_notify.clone();
+        let results = self.start_jobs.results.clone();
         let incremental = self.incremental.clone();
         let live = self.start_jobs.live.clone();
         let id = operation.id.clone();
@@ -309,12 +323,23 @@ impl<R: RuntimeControl> Reconciler<R> {
             result["terminal"] = Value::from(prepared.member.terminal);
             result["start_request"] = Value::from(prepared.start_request);
             result["control_request"] = serde_json::json!(prepared.control_request);
-            if let Err(error) = store.finish_runtime_start(&id, &result) {
-                eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
-            }
+            let persisted = match store.finish_runtime_start(&id, &result) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
+                    false
+                }
+            };
             // Drop admission before waking the planner: a completion can admit queued work.
             drop(_lock);
             incremental.touch(&format!("local-runtime-start:{subject}"));
+            if persisted {
+                let _ = results.send(StartResult {
+                    id: id.clone(),
+                    subject: subject.clone(),
+                    finished_at: std::time::Instant::now(),
+                });
+            }
             incremental.touch(&subject);
             signal_changed(&notify, &events);
             // Leave `live` only once the completion is marked and its wake sent, so whoever waits
@@ -374,6 +399,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// This lane only consumes durable results for the exact signalled operation.
+    /// It runs alongside the broad pass, never launches a second broad reconciler.
+    pub(super) async fn consume_start_results(self: Arc<Self>) {
+        let mut completions = self.start_jobs.completions.lock().await;
+        while let Some(result) = completions.recv().await {
+            self.blocking(move |this| {
+                match this.apply_start_result(&result.id, &result.subject) {
+                    Err(error) => eprintln!(
+                        "st3: failed to apply runtime start completion {}: {error:#}", result.id
+                    ),
+                    Ok(true) => tracing::info!(
+                        operation = %result.id,
+                        subject = %result.subject,
+                        result_to_adoption_ms = result.finished_at.elapsed().as_secs_f64() * 1_000.0,
+                        "runtime start result adopted"
+                    ),
+                    Ok(false) => {}
+                }
+            }).await;
+        }
+    }
+
+    pub(super) fn apply_start_result(&self, id: &str, subject: &str) -> Result<bool> {
+        let _application = self.start_jobs.application.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(operation) = self.store.runtime_start_for(subject)? else {
+            return Ok(false);
+        };
+        if operation.id != id || !operation.finished || operation.applied {
+            return Ok(false);
+        }
+        let _capture = self.store.capture_runtime_observations()?;
+        self.reconcile_start_operation(operation, &PassPtySnapshot::new())?;
+        Ok(self.store.latest_observation(subject, "runtime.action.succeeded")?
+            .is_some_and(|claim| claim.body["fields"]["operation"] == id))
+    }
+
     pub fn reconcile_start_jobs(&self) -> Result<()> {
         self.reconcile_start_jobs_with_snapshot(&PassPtySnapshot::new())
     }
@@ -389,6 +450,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub(super) fn reconcile_start_jobs_with_snapshot(&self, snapshot: &PassPtySnapshot) -> Result<()> {
+        // Read operations only after serialization: a snapshot from before a
+        // completion consumer ran must never be applied a second time.
+        let _application = self.start_jobs.application.lock().unwrap_or_else(PoisonError::into_inner);
         for operation in self.store.pending_runtime_starts()? {
             let subject = operation.subject.clone();
             if reconcile_decision_admitted(&subject) {

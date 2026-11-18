@@ -1508,6 +1508,8 @@ pub struct Reconciler<R = NativeRuntime> {
     seat_admission: seat_admission::Controller,
     #[cfg(any(test, feature = "test-support"))]
     pub wait_for_test_starts: AtomicBool,
+    #[cfg(test)]
+    start_stage_finished_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
     /// When stalls of runs that name no reporter were last turned on, or `None` while off; see
@@ -1792,6 +1794,8 @@ impl Reconciler<NativeRuntime> {
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
+            #[cfg(test)]
+            start_stage_finished_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             background_entry_hook: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -2024,6 +2028,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
+            #[cfg(test)]
+            start_stage_finished_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             background_entry_hook: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -2309,6 +2315,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub async fn run(self: Arc<Self>) {
+        // Keep the completion lane scoped to this run. A supervised restart
+        // reuses its durable queue; cancellation never leaves an orphan consumer.
+        tokio::select! {
+            () = self.clone().run_passes() => {},
+            () = self.consume_start_results() => {},
+        }
+    }
+
+    async fn run_passes(self: Arc<Self>) {
         #[cfg(any(test, feature = "test-support"))]
         self.wait_for_test_starts.store(false, Ordering::Release);
         self.notify.notify_one();
@@ -3286,6 +3301,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _observation_capture = self.store.capture_runtime_observations()?;
         let pty_snapshot = PassPtySnapshot::new();
         self.reconcile_start_jobs_with_snapshot(&pty_snapshot)?;
+        #[cfg(test)]
+        if let Some(hook) = self.start_stage_finished_hook.lock().unwrap().take() {
+            hook();
+        }
         self.reconcile_shell_resources()?;
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has

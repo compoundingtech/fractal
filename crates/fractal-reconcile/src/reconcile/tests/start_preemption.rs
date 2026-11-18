@@ -407,6 +407,61 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
     assert!(runtime.starts.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn start_results_are_adopted_while_the_broad_pass_is_held() {
+    for stale in [false, true] {
+        let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+        let subject = "agent/example/worker";
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+            "prompt-start-adoption",
+        );
+        assert!(launch(&reconciler, subject));
+        tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+        let operation = store.runtime_start_for(subject).unwrap().unwrap();
+        let (pass_entered, mut pass_entered_rx) = mpsc::unbounded_channel();
+        let (pass_release, pass_held) = std::sync::mpsc::channel();
+        // Release even on an assertion failure: no blocked worker leaks out of the test.
+        let pass_release = ReleaseOnDrop(pass_release);
+        *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(move || {
+            pass_entered.send(()).unwrap();
+            pass_held.recv().unwrap();
+        }));
+        let task = tokio::spawn(reconciler.clone().run());
+        tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
+        if stale {
+            apply_source(&store, "version 2\nstop \"agent/example/worker\"", "stale-start-adoption");
+        }
+        release.0.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if store.runtime_start_for(subject).unwrap().is_none_or(|start| start.applied) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("start-result application waited for the held broad pass");
+        let succeeded = store.observations_for(subject, "runtime.action.succeeded").unwrap();
+        assert_eq!(succeeded.len(), usize::from(!stale));
+        if !stale {
+            assert_eq!(succeeded[0].body["fields"]["operation"], operation.id);
+            let observed = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+            assert_eq!(observed.body["fields"]["incarnation_id"], "blocked-start-incarnation");
+        }
+        // The same signal and the broad pass's start stage are both idempotent.
+        let before = store.observations_for(subject, "runtime.observed").unwrap().len();
+        assert!(!reconciler.apply_start_result(&operation.id, subject).unwrap());
+        reconciler.reconcile_start_jobs().unwrap();
+        assert_eq!(store.observations_for(subject, "runtime.observed").unwrap().len(), before);
+        assert_eq!(store.observations_for(subject, "runtime.action.succeeded").unwrap().len(), succeeded.len());
+        task.abort();
+        let _ = task.await;
+        pass_release.0.send(()).unwrap();
+        workers_done(&reconciler).await;
+    }
+}
+
     #[tokio::test]
 async fn a_pass_that_read_a_start_before_its_worker_finished_keeps_the_launch() {
     let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
