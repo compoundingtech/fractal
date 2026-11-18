@@ -14962,6 +14962,116 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
         assert_eq!(report().status, "cancelled");
     }
 
+    #[test]
+    fn root_cancellation_stops_subscription_descendant_execs_only_under_that_root() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+mission "subscription-root" state="ready" {
+  goal "Own subscription deliveries."
+  concurrent-runs
+  step "wait" {
+    agentless
+    gate "wait" { document "doc/root-release" }
+  }
+}
+mission "subscription-child" state="ready" {
+  goal "Keep a delivered exec live."
+  concurrent-runs
+  step "work" {
+    agentless
+    exec "worker" { command "sleep 60"; restart "never" }
+    gate "wait" { document "doc/child-release" }
+  }
+}
+"#,
+            "subscription-cancellation-missions",
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        for name in ["root", "other", "child", "unrelated"] {
+            std::fs::create_dir(workspace.path().join(name)).unwrap();
+        }
+        let request = |mission: &str, key: &str| MissionRunRequest {
+            mission: mission.into(),
+            revision: None,
+            workspace: workspace.path().join(key).display().to_string(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        };
+        let root = store.create_mission_run(&request("subscription-root", "root")).unwrap();
+        let other = store.create_mission_run(&request("subscription-root", "other")).unwrap();
+        // Both deliveries use the same subscription, but inherit different root identities.
+        // Their synthetic parent is deliberately not a generation's ordinary step.
+        let child = store.create_subscription_mission_run(
+            &request("subscription-child", "child"), Some(&root),
+            "subscription/shared", "resource/item", "discovery-child",
+        ).unwrap();
+        let unrelated = store.create_subscription_mission_run(
+            &request("subscription-child", "unrelated"), Some(&other),
+            "subscription/shared", "resource/item", "discovery-unrelated",
+        ).unwrap();
+        assert_eq!(child.parent_step_run.as_deref(), Some("step-run/subscription/shared"));
+        assert!(store.step_run("step-run/subscription/shared").unwrap().is_none());
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        for _ in 0..8 {
+            reconciler.reconcile_once().unwrap();
+            for member in runtime.started_members.lock().unwrap().iter() {
+                runtime.execs.lock().unwrap().insert(member.runtime_id.clone(), RuntimeObservation {
+                    runtime_id: member.runtime_id.clone(),
+                    terminal: false,
+                    status: "running".into(),
+                    exit_code: None,
+                    incarnation_id: Some(format!("live-{}", member.runtime_id)),
+                });
+            }
+        }
+        let exec = |run: &MissionRunView| {
+            store.desired_subjects_for_owner_run(&run.subject).unwrap().into_iter()
+                .find(|subject| subject.kind == "exec").expect("the delivered exec is declared")
+        };
+        let child_exec = exec(&child);
+        let unrelated_exec = exec(&unrelated);
+        assert_eq!(actual_field(&store.latest_actual_value(&child_exec.subject).unwrap().unwrap(), "status").and_then(Value::as_str), Some("running"));
+        assert_eq!(actual_field(&store.latest_actual_value(&unrelated_exec.subject).unwrap().unwrap(), "status").and_then(Value::as_str), Some("running"));
+        store.request_mission_run_cancellation(&root.id, "operator cancelled the root").unwrap();
+        let cancelling = store.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(cancelling.phase, "cleanup-cancelled", "subscription descendants need durable cancellation");
+        let claim = store.latest_claim(&child.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["phase"], "cleanup-cancelled");
+        let step = &cancelling.steps[0];
+        let claim = store.latest_claim(&step.subject, Some("step-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["status"], "cancelled");
+        // Exercise root cleanup itself: no independent child cleanup or generic
+        // terminal-owner runtime sweep may rescue the missing descendant stop.
+        reconciler.reconcile_mission_run_cleanup(
+            &store.mission_run(&root.id).unwrap().unwrap(),
+        ).unwrap();
+        let desired = store.desired_subjects().unwrap();
+        assert!(desired.iter().any(|subject| subject.subject == child_exec.subject && subject.kind == "stop"),
+            "root cleanup must emit an exact stop for its descendant exec");
+        assert_eq!(store.mission_run(&other.id).unwrap().unwrap().status, other.status);
+        assert_eq!(store.mission_run(&unrelated.id).unwrap().unwrap().status, unrelated.status);
+        assert!(desired.iter().any(|subject| subject.subject == unrelated_exec.subject && subject.kind == "exec"));
+        // The fake runtime confirms that this exact exec has ended, allowing
+        // the existing cleanup lifecycle to write the terminal cancellation.
+        runtime.execs.lock().unwrap().remove(&child_exec.member.as_ref().unwrap().runtime_id);
+        for _ in 0..8 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let cancelled = store.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.phase, "terminal");
+        let claim = store.latest_claim(&child.subject, Some("mission-run.state")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["status"], "cancelled");
+        assert_eq!(store.mission_run(&unrelated.id).unwrap().unwrap().status, unrelated.status);
+    }
+
     #[tokio::test]
     async fn one_cancellation_wake_converges_through_runtime_cleanup() {
         let store = Arc::new(Store::open_memory("node").unwrap());

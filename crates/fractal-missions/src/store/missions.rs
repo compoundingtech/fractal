@@ -1710,6 +1710,8 @@ pub trait MissionsStore {
     fn run_generations(&self, run: &str) -> Result<Vec<RunGenerationView>>;
     fn run_generation(&self, generation: &str) -> Result<Option<RunGenerationView>>;
     fn descendant_run_generations(&self, generation: &str) -> Result<Vec<String>>;
+    /// Descendant owners, using the same traversal as durable cancellation.
+    fn descendant_mission_run_subjects(&self, generation: &str) -> Result<Vec<String>>;
     fn revision_proposal_for_run(&self, run: &str) -> Result<Option<RevisionProposalView>>;
     fn revision_proposal(&self, proposal: &str) -> Result<Option<RevisionProposalView>>;
     fn create_revision_proposal(
@@ -3329,6 +3331,21 @@ impl MissionsStore for Store {
         let generation = generation_id_from_subject(generation);
         let connection = self.readers.get();
         Ok(run_generation_view_tx(&connection, generation).optional()?)
+    }
+
+    fn descendant_mission_run_subjects(&self, generation: &str) -> Result<Vec<String>> {
+        let generation = generation_id_from_subject(generation);
+        let connection = self.readers.get();
+        // Cancellation changes these owners even when their synthetic subscription
+        // parent is not a step. Register those same reads for incremental cleanup.
+        Ok(descendant_mission_run_ids_tx(&connection, generation)?
+            .into_iter()
+            .map(|id| {
+                let subject = format!("mission-run/{id}");
+                smallclaims::touched::note_read(|| subject.clone());
+                subject
+            })
+            .collect())
     }
 
     fn descendant_run_generations(&self, generation: &str) -> Result<Vec<String>> {
