@@ -18,6 +18,7 @@ use super::*;
     verification_hidden: AtomicBool,
     provenance_error: AtomicBool,
     ending_unverified: AtomicBool,
+    end_before_result: AtomicBool,
     closed_operation: std::sync::OnceLock<String>,
 }
 
@@ -110,6 +111,13 @@ use super::*;
                 .insert(member.runtime_id.clone());
         }
         self.inner.start(member)?;
+        if self.end_before_result.load(Ordering::Acquire) {
+            let mut observations = self.inner.ptys.lock().unwrap();
+            let observation = observations.iter_mut()
+                .find(|observation| observation.runtime_id == member.runtime_id).unwrap();
+            observation.status = "exited".into();
+            observation.exit_code = Some(23);
+        }
         let _ = self.started.send(member.runtime_id.clone());
         Ok(())
     }
@@ -282,6 +290,7 @@ use super::*;
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        end_before_result: AtomicBool::new(false),
         closed_operation: std::sync::OnceLock::new(),
     });
     let reconciler = Arc::new(Reconciler::new(
@@ -481,6 +490,156 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
     );
     assert!(store.pending_runtime_starts().unwrap().is_empty());
     assert!(runtime.starts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_panicking_completion_is_isolated_without_dropping_the_broad_pass() {
+    let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/held-next\" { workspace \"/tmp\"; command \"true\" }",
+        "completion-panic-isolation",
+    );
+    let first = "agent/example/worker";
+    let second = "agent/example/held-next";
+    assert!(launch(&reconciler, first));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    let (pass_entered, mut pass_entered_rx) = mpsc::unbounded_channel();
+    let (pass_release, pass_held) = std::sync::mpsc::channel();
+    let pass_release = ReleaseOnDrop(pass_release);
+    *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(move || {
+        pass_entered.send(()).unwrap();
+        pass_held.recv().unwrap();
+    }));
+    *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(|| {
+        panic!("fixture completion application panic");
+    }));
+    let pass_reconciler = reconciler.clone();
+    let pass = tokio::spawn(async move {
+        pass_reconciler.blocking(|this| this.reconcile_once()).await
+    });
+    let completion_reconciler = reconciler.clone();
+    let task = tokio::spawn(async move { completion_reconciler.consume_start_results().await });
+    tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
+    release.0.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if store.observations_for(&format!("daemon/{}", reconciler.host), "reconcile.fault").unwrap().iter().any(|claim| {
+                claim.body["fields"]["scope"] == format!("start-completion:{first}")
+                    && claim.body["fields"]["status"] == "faulted"
+                    && claim.body["fields"]["reason"].as_str()
+                        .is_some_and(|reason| reason.contains("fixture completion application panic"))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the completion panic was not recorded as an isolated item fault");
+    assert!(!pass.is_finished(), "the completion panic dropped the running broad pass");
+    // A later result must still be consumed while that same broad pass remains held.
+    assert!(launch(&reconciler, second));
+    tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+    release.0.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !store.observations_for(second, "runtime.action.succeeded").unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the completion consumer stopped after an item panic");
+    assert!(!pass.is_finished(), "the original broad pass must remain active");
+    task.abort();
+    let _ = task.await;
+    pass_release.0.send(()).unwrap();
+    // The cfg(test) fault collector is shared across both lanes and reports at
+    // the end of a pass. Production records this isolated item fault without
+    // failing the pass; accept exactly the deliberately injected panic here.
+    assert_eq!(
+        pass.await.unwrap().unwrap_err().to_string(),
+        format!(
+            "reconcile faults: daemon/{} start-completion:{first}: panicked: fixture completion application panic",
+            reconciler.host
+        )
+    );
+    workers_done(&reconciler).await;
+}
+
+#[tokio::test]
+async fn start_results_are_adopted_while_the_broad_pass_is_held() {
+    for (stale, ended) in [(false, false), (true, false), (false, true)] {
+        // A superseded producer deliberately ignores its launch guard, so this
+        // exercises refusal at completion application, not just before launch.
+        let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, !stale);
+        runtime.end_before_result.store(ended, Ordering::Release);
+        let subject = "agent/example/worker";
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; one-shot }",
+            "prompt-start-adoption",
+        );
+        assert!(launch(&reconciler, subject));
+        tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
+        let operation = store.runtime_start_for(subject).unwrap().unwrap();
+        assert!(operation.body["member"]["driver"].is_null(), "this must cover command-only seats");
+        assert_eq!(operation.body["member"]["one_shot"], true);
+        let (pass_entered, mut pass_entered_rx) = mpsc::unbounded_channel();
+        let (pass_release, pass_held) = std::sync::mpsc::channel();
+        // Release even on an assertion failure: no blocked worker leaks out of the test.
+        let pass_release = ReleaseOnDrop(pass_release);
+        *reconciler.start_stage_finished_hook.lock().unwrap() = Some(Box::new(move || {
+            pass_entered.send(()).unwrap();
+            pass_held.recv().unwrap();
+        }));
+        let pass_reconciler = reconciler.clone();
+        let pass = tokio::spawn(async move {
+            pass_reconciler.blocking(|this| this.reconcile_once()).await
+        });
+        let completion_reconciler = reconciler.clone();
+        let task = tokio::spawn(async move { completion_reconciler.consume_start_results().await });
+        tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
+        if stale {
+            apply_source(&store, "version 2\nstop \"agent/example/worker\"", "stale-start-adoption");
+        }
+        release.0.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let applied = store.runtime_start_for(subject).unwrap().is_none_or(|start| start.applied);
+                let adopted = store.latest_observation(subject, "runtime.observed").unwrap()
+                    .is_some_and(|claim| claim.body["fields"]["adopted"] == true);
+                if applied && (stale || adopted) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("start-result adoption waited for the held broad pass");
+        let succeeded = store.observations_for(subject, "runtime.action.succeeded").unwrap();
+        assert_eq!(succeeded.len(), usize::from(!stale));
+        if !stale {
+            assert_eq!(succeeded[0].body["fields"]["operation"], operation.id);
+            let observed = store.latest_observation(subject, "runtime.observed").unwrap().unwrap();
+            assert_eq!(observed.body["fields"]["incarnation_id"], "blocked-start-incarnation");
+            assert_eq!(observed.body["fields"]["adopted"], true);
+            assert_eq!(observed.body["fields"]["status"], if ended { "exited" } else { "running" });
+            if ended {
+                assert_eq!(observed.body["fields"]["exit_code"], 23);
+            }
+        } else {
+            assert!(!store.observations_for(subject, "runtime.observed").unwrap().iter()
+                .any(|claim| claim.body["fields"]["adopted"] == true));
+        }
+        // The same signal and the broad pass's start stage are both idempotent.
+        let before = store.observations_for(subject, "runtime.observed").unwrap().len();
+        assert!(!reconciler.apply_start_result(&operation.id, subject).unwrap());
+        reconciler.reconcile_start_jobs().unwrap();
+        assert_eq!(store.observations_for(subject, "runtime.observed").unwrap().len(), before);
+        assert_eq!(store.observations_for(subject, "runtime.action.succeeded").unwrap().len(), succeeded.len());
+        task.abort();
+        let _ = task.await;
+        pass_release.0.send(()).unwrap();
+        pass.await.unwrap().unwrap();
+        workers_done(&reconciler).await;
+    }
 }
 
     #[tokio::test]
@@ -779,6 +938,7 @@ agent "example/worker" { workspace "/tmp"; command "true" }
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        end_before_result: AtomicBool::new(false),
         closed_operation: std::sync::OnceLock::new(),
     });
     let notify = Arc::new(Notify::new());
