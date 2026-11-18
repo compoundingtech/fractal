@@ -208,6 +208,9 @@ pub struct Entry {
     /// Durable lower bound for an in-flight handoff whose native answer may still be buffered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempted_at_unix_ms: Option<u64>,
+    /// Abandoned handoffs remain uncertain even when the at-least-once contract permits retry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_attempt_starts: Vec<Option<u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +221,8 @@ struct Record {
     agent: String,
     runtime_id: String,
     entries: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    unresolved_input_attempts: std::collections::BTreeMap<String, Option<u64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,6 +284,7 @@ impl Ledger {
                 agent: agent.to_owned(),
                 runtime_id: runtime_id.to_owned(),
                 entries: Vec::new(),
+                unresolved_input_attempts: Default::default(),
             },
             quarantine: None,
         };
@@ -448,6 +454,9 @@ impl Ledger {
             Some(index) => {
                 let entry = &mut self.record.entries[index];
                 let retrying_refused_attempt = entry.negative.is_some();
+                if entry.negative == Some(NegativeReceipt::RetryAfterAbandonedIncarnation) {
+                    entry.unresolved_attempt_starts.push(entry.attempted_at_unix_ms);
+                }
                 entry.binding = begin.binding;
                 entry.correlation = begin.correlation;
                 entry.incarnation = begin.incarnation;
@@ -474,6 +483,7 @@ impl Ledger {
                     negative: None,
                     input_acceptances: Vec::new(),
                     attempted_at_unix_ms: Some(acceptance_time()?),
+                    unresolved_attempt_starts: Vec::new(),
                 };
                 self.record.entries.push(entry.clone());
                 entry
@@ -562,6 +572,11 @@ impl Ledger {
     /// Record an authoritative negative receipt. A settled entry is never reopened.
     pub fn negative(&mut self, filename: &str, receipt: NegativeReceipt) -> Result<Retention> {
         self.ensure_writable()?;
+        if receipt == NegativeReceipt::Absent
+            && self.record.unresolved_input_attempts.remove(filename).is_some()
+        {
+            self.persist()?;
+        }
         let retention = self.retention(filename);
         if retention == Retention::Release {
             return Ok(retention);
@@ -578,6 +593,9 @@ impl Ledger {
             return Ok(Retention::Hold(HoldReason::NegativeReceipt));
         }
         entry.negative = Some(receipt);
+        if receipt == NegativeReceipt::Absent {
+            entry.unresolved_attempt_starts.clear();
+        }
         // An explicit retry receipt is itself an observation about this attempt and is the only
         // authority that may re-open a carried-forward transport.
         entry.attestation = Attestation::Observed;
@@ -637,26 +655,51 @@ impl Ledger {
         }
     }
 
-    /// Keep only entries for the selected thread or session.
-    pub fn rebind(&mut self, binding: &str) -> Result<()> {
+    /// Keep only entries for the selected binding, retaining source uncertainty independently.
+    pub fn rebind(&mut self, binding: &str, incarnation: Option<&str>) -> Result<()> {
+        self.retain(incarnation, |entry| entry.binding == binding)
+    }
+
+    /// Recipient settlement may prune transport state, but cannot erase an unresolved old RPC.
+    pub fn prune(&mut self, incarnation: Option<&str>, is_unread: impl Fn(&str) -> bool) -> Result<()> {
+        self.retain(incarnation, |entry| is_unread(&entry.filename))
+    }
+
+    fn retain(&mut self, incarnation: Option<&str>, keep: impl Fn(&Entry) -> bool) -> Result<()> {
         let before = self.record.entries.len();
-        self.record.entries.retain(|entry| entry.binding == binding);
-        if self.record.entries.len() != before {
-            self.persist()?;
-        }
+        let unresolved = &mut self.record.unresolved_input_attempts;
+        self.record.entries.retain(|entry| {
+            if keep(entry) { return true; }
+            let accepted_here = incarnation.is_some_and(|owner|
+                entry.incarnation.as_deref() == Some(owner)
+                    && entry.input_acceptances.iter().any(|receipt| receipt.incarnation == owner));
+            let absent = matches!(entry.negative, Some(NegativeReceipt::Absent | NegativeReceipt::Rejected));
+            let mut starts = entry.unresolved_attempt_starts.iter().copied()
+                .chain((!accepted_here && !absent).then_some(entry.attempted_at_unix_ms));
+            if let Some(first) = starts.next() {
+                let bound = starts.fold(first, |bound, start| match (bound, start) {
+                    (Some(left), Some(right)) => Some(left.min(right)),
+                    _ => None,
+                });
+                unresolved.entry(entry.filename.clone()).and_modify(|prior| {
+                    *prior = match (*prior, bound) {
+                        (Some(left), Some(right)) => Some(left.min(right)),
+                        _ => None,
+                    };
+                }).or_insert(bound);
+            }
+            false
+        });
+        if self.record.entries.len() != before { self.persist()?; }
         Ok(())
     }
 
-    /// Reconcile entries against the recipient-owned unread set.
-    pub fn prune(&mut self, is_unread: impl Fn(&str) -> bool) -> Result<()> {
-        let before = self.record.entries.len();
-        self.record
-            .entries
-            .retain(|entry| is_unread(&entry.filename));
-        if self.record.entries.len() != before {
-            self.persist()?;
+    pub fn receipt_snapshot(&self) -> ReceiptSnapshot {
+        ReceiptSnapshot {
+            entries: self.record.entries.clone(),
+            retained_frontier: self.record.unresolved_input_attempts.values()
+                .try_fold(u64::MAX, |bound, start| Some(bound.min(start.as_ref()?.saturating_sub(1)))),
         }
-        Ok(())
     }
 
     fn ensure_writable(&self) -> Result<()> {
@@ -699,6 +742,25 @@ pub fn asserted(
         negative: None,
         input_acceptances: Vec::new(),
         attempted_at_unix_ms: None,
+        unresolved_attempt_starts: Vec::new(),
+    }
+}
+
+pub struct ReceiptSnapshot {
+    pub entries: Vec<Entry>,
+    retained_frontier: Option<u64>,
+}
+
+impl Default for ReceiptSnapshot {
+    fn default() -> Self {
+        Self { entries: Vec::new(), retained_frontier: Some(u64::MAX) }
+    }
+}
+
+impl ReceiptSnapshot {
+    pub fn input_acceptance_frontier(&self, incarnation: &str, cut: u64) -> Option<u64> {
+        let through = input_acceptance_frontier(&self.entries, incarnation, cut)?;
+        Some(through.min(self.retained_frontier?))
     }
 }
 
@@ -708,8 +770,10 @@ pub fn asserted(
 pub fn input_acceptance_frontier(entries: &[Entry], incarnation: &str, cut: u64) -> Option<u64> {
     let mut through = cut;
     for entry in entries {
-        if entry.incarnation.as_deref().is_some_and(|owner| owner != incarnation)
-            || entry.negative.is_some()
+        for start in &entry.unresolved_attempt_starts {
+            through = through.min(start.as_ref()?.saturating_sub(1));
+        }
+        if matches!(entry.negative, Some(NegativeReceipt::Absent | NegativeReceipt::Rejected))
             || entry.input_acceptances.iter().any(|receipt| receipt.incarnation == incarnation)
         {
             continue;
@@ -805,6 +869,47 @@ mod tests {
                 incarnation: Some("incarnation-1".to_owned()),
             })
             .unwrap()
+    }
+
+    #[test]
+    fn settled_current_acceptance_leaves_no_phantom_source_bound_after_prune() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ledger = open(root.path(), Harness::Codex);
+        let entry = begin(&mut ledger, "native-main", FILE_A);
+        let cut = entry.attempted_at_unix_ms.unwrap() + 10_000;
+        ledger.accept_codex_turn(FILE_A, "turn-current").unwrap();
+        ledger.prune(Some("incarnation-1"), |_| false).unwrap();
+        assert_eq!(open(root.path(), Harness::Codex).receipt_snapshot()
+            .input_acceptance_frontier("incarnation-1", cut), Some(cut));
+    }
+
+    #[test]
+    fn previous_incarnation_uncertainty_survives_retry_prune_and_restart_until_native_absence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ledger = open(root.path(), Harness::Codex);
+        let first = begin(&mut ledger, "native-main", FILE_A);
+        let start = first.attempted_at_unix_ms.unwrap();
+        let cut = start + 10_000;
+        assert_eq!(ledger.receipt_snapshot().input_acceptance_frontier("incarnation-2", cut), Some(start - 1));
+        ledger.negative(FILE_A, NegativeReceipt::RetryAfterAbandonedIncarnation).unwrap();
+        assert_eq!(ledger.receipt_snapshot().input_acceptance_frontier("incarnation-2", cut), Some(start - 1));
+        ledger.begin(Begin {
+            filename: FILE_A.into(), binding: "native-main".into(),
+            correlation: Correlation::native(correlation("native-main", FILE_A)),
+            incarnation: Some("incarnation-2".into()),
+        }).unwrap();
+        ledger.accept_codex_turn(FILE_A, "turn-replacement").unwrap();
+        assert_eq!(ledger.receipt_snapshot().input_acceptance_frontier("incarnation-2", cut), Some(start - 1));
+        ledger.prune(Some("incarnation-2"), |_| false).unwrap();
+        assert!(ledger.entries().is_empty(), "uncertainty must not block unrelated transport work");
+        let mut reopened = open(root.path(), Harness::Codex);
+        assert_eq!(reopened.receipt_snapshot().input_acceptance_frontier("incarnation-2", cut), Some(start - 1));
+        reopened.negative(FILE_A, NegativeReceipt::Absent).unwrap();
+        assert_eq!(open(root.path(), Harness::Codex).receipt_snapshot()
+            .input_acceptance_frontier("incarnation-2", cut), Some(cut));
+        let mut historical = first;
+        historical.attempted_at_unix_ms = None;
+        assert_eq!(input_acceptance_frontier(&[historical], "incarnation-2", cut), None);
     }
 
     #[test]
@@ -1063,6 +1168,7 @@ mod tests {
             agent: "h.worker".to_owned(),
             runtime_id: "runtime".to_owned(),
             entries: Vec::new(),
+            unresolved_input_attempts: Default::default(),
         };
 
         // Write and traverse, but not read: staging and renaming still work, opening the
@@ -1148,7 +1254,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut ledger = open(tmp.path(), Harness::Codex);
         begin(&mut ledger, "thread-old", FILE_A);
-        ledger.rebind("thread-new").unwrap();
+        ledger.rebind("thread-new", Some("incarnation-1")).unwrap();
         assert!(ledger.entries().is_empty());
         assert_eq!(ledger.retry(FILE_A), RetryDecision::Retry);
     }
@@ -1190,6 +1296,7 @@ mod tests {
                 agent: "h.worker".to_owned(),
                 runtime_id: "runtime".to_owned(),
                 entries: Vec::new(),
+                unresolved_input_attempts: Default::default(),
             },
         )
         .unwrap();
@@ -1207,6 +1314,7 @@ mod tests {
                 harness: "codex".to_owned(),
                 agent: "h.worker".to_owned(),
                 runtime_id: "runtime".to_owned(),
+                unresolved_input_attempts: Default::default(),
                 entries: vec![Entry {
                     filename: FILE_A.to_owned(),
                     binding: "thread-main".to_owned(),
@@ -1218,6 +1326,7 @@ mod tests {
                     negative: None,
                     input_acceptances: Vec::new(),
                     attempted_at_unix_ms: None,
+                    unresolved_attempt_starts: Vec::new(),
                 }],
             },
         )

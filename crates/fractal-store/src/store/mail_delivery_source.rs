@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 pub fn create_schema(connection: &Connection) -> anyhow::Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h07fcffc237a4 owner=fractal_store::store::mail_delivery_source TODO=chunk-or-reference-variable-columns */
+        /* sqlite-large-value: allow-for-now lv-h9e7b4835d556 owner=fractal_store::store::mail_delivery_source TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS local_mail_delivery_source_v1 (
             message TEXT NOT NULL,
             recipient TEXT NOT NULL,
@@ -18,7 +18,13 @@ pub fn create_schema(connection: &Connection) -> anyhow::Result<()> {
             kind TEXT NOT NULL,
             at_ms INTEGER NOT NULL,
             PRIMARY KEY(message,consumer,kind)
-        );",
+        );
+        CREATE INDEX IF NOT EXISTS mail_delivery_source_sent_v1 ON local_mail_delivery_source_v1(sent_ms);
+        CREATE TABLE IF NOT EXISTS local_mail_delivery_pending_v1 (
+            message TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            PRIMARY KEY(message,recipient)
+        ) WITHOUT ROWID;",
     )?;
     Ok(())
 }
@@ -27,7 +33,38 @@ pub fn create_schema(connection: &Connection) -> anyhow::Result<()> {
 /// source rows survive source retention, and rollbacks can leave newly admitted source facts.
 pub fn install(connection: &Connection) -> anyhow::Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h04e43f8b0ce9 owner=fractal_store::store::mail_delivery_source TODO=prepare-body-and-predecessor-values */
+        /* sqlite-large-value: allow-for-now lv-h928dbba5cdb3 owner=fractal_store::store::mail_delivery_source TODO=bound-or-reference-values-and-reclamation */
+        "CREATE TRIGGER IF NOT EXISTS mail_delivery_pending_insert_v1 AFTER INSERT ON local_mail_delivery_source_v1 BEGIN
+            INSERT OR IGNORE INTO local_mail_delivery_pending_v1(message,recipient)
+            SELECT NEW.message,NEW.recipient WHERE COALESCE(json_extract(NEW.fields,'$.sent_clock_valid'),0)=0
+                OR (NOT EXISTS(SELECT 1 FROM local_mail_delivery_steps_v1 WHERE message=NEW.message
+                    AND kind IN ('message.delivered','message.read','message.closed','message.expired'))
+                    AND NOT EXISTS(SELECT 1 FROM local_mail_input_acceptance_v1 WHERE message=NEW.message));
+        END;
+        CREATE TRIGGER IF NOT EXISTS mail_delivery_pending_update_v1 AFTER UPDATE ON local_mail_delivery_source_v1 BEGIN
+            DELETE FROM local_mail_delivery_pending_v1 WHERE message=NEW.message AND recipient=NEW.recipient;
+            INSERT OR IGNORE INTO local_mail_delivery_pending_v1(message,recipient)
+            SELECT NEW.message,NEW.recipient WHERE COALESCE(json_extract(NEW.fields,'$.sent_clock_valid'),0)=0
+                OR (NOT EXISTS(SELECT 1 FROM local_mail_delivery_steps_v1 WHERE message=NEW.message
+                    AND kind IN ('message.delivered','message.read','message.closed','message.expired'))
+                    AND NOT EXISTS(SELECT 1 FROM local_mail_input_acceptance_v1 WHERE message=NEW.message));
+        END;
+        CREATE TRIGGER IF NOT EXISTS mail_delivery_pending_step_v1 AFTER INSERT ON local_mail_delivery_steps_v1
+        WHEN NEW.kind IN ('message.delivered','message.read','message.closed','message.expired') BEGIN
+            DELETE FROM local_mail_delivery_pending_v1 WHERE message=NEW.message AND EXISTS(
+                SELECT 1 FROM local_mail_delivery_source_v1 source WHERE source.message=NEW.message
+                    AND source.recipient=local_mail_delivery_pending_v1.recipient
+                    AND json_extract(source.fields,'$.sent_clock_valid')=1);
+        END;
+        CREATE TRIGGER IF NOT EXISTS mail_delivery_pending_accept_v1 AFTER INSERT ON local_mail_input_acceptance_v1 BEGIN
+            DELETE FROM local_mail_delivery_pending_v1 WHERE message=NEW.message AND EXISTS(
+                SELECT 1 FROM local_mail_delivery_source_v1 source WHERE source.message=NEW.message
+                    AND source.recipient=local_mail_delivery_pending_v1.recipient
+                    AND json_extract(source.fields,'$.sent_clock_valid')=1);
+        END;",
+    )?;
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h24098c683ff1 owner=fractal_store::store::mail_delivery_source TODO=prepare-body-and-predecessor-values */
         "CREATE TRIGGER IF NOT EXISTS mail_delivery_send_v1 AFTER INSERT ON claims
         WHEN NEW.kind='message.sent' BEGIN
             INSERT INTO local_mail_delivery_source_v1(message,recipient,sent_ms,fields)
@@ -99,7 +136,13 @@ pub fn install(connection: &Connection) -> anyhow::Result<()> {
         ON CONFLICT(message,consumer,kind) DO UPDATE SET at_ms=MIN(at_ms,excluded.at_ms);
         INSERT INTO local_mail_delivery_steps_v1(message,consumer,kind,at_ms)
         SELECT message,consumer,'message.staged',recorded_at_unix_ms FROM local_message_staged WHERE true
-        ON CONFLICT(message,consumer,kind) DO UPDATE SET at_ms=MIN(at_ms,excluded.at_ms);",
+        ON CONFLICT(message,consumer,kind) DO UPDATE SET at_ms=MIN(at_ms,excluded.at_ms);
+        INSERT OR IGNORE INTO local_mail_delivery_pending_v1(message,recipient)
+        SELECT source.message,source.recipient FROM local_mail_delivery_source_v1 source
+        WHERE COALESCE(json_extract(source.fields,'$.sent_clock_valid'),0)=0 OR (
+            NOT EXISTS(SELECT 1 FROM local_mail_delivery_steps_v1 step WHERE step.message=source.message
+                AND step.kind IN ('message.delivered','message.read','message.closed','message.expired'))
+            AND NOT EXISTS(SELECT 1 FROM local_mail_input_acceptance_v1 accepted WHERE accepted.message=source.message));",
     )?;
     Ok(())
 }
@@ -154,5 +197,25 @@ mod tests {
         }
         stream_send_clock(&connection, "message/example-clock", "90").unwrap();
         assert_eq!(clock(), (90, true));
+        let pending = || connection.query_row(
+            "SELECT COUNT(*) FROM local_mail_delivery_pending_v1", [], |row| row.get::<_, u64>(0),
+        ).unwrap();
+        assert_eq!(pending(), 1);
+        stream_step(&connection, "message/example-clock", "agent/example/worker", "message.closed", 110).unwrap();
+        assert_eq!(pending(), 0);
+        stream_send_clock(&connection, "message/example-clock", "broken").unwrap();
+        assert_eq!(pending(), 1, "invalid clocks remain relevant even after terminal evidence");
+        stream_send_clock(&connection, "message/example-clock", "90").unwrap();
+        assert_eq!(pending(), 0);
+        connection.execute(
+            "INSERT INTO local_stream_sent(subject,sent_ms,fields,stream_index)
+             VALUES('message/example-certificate',100,'{\"to\":\"agent/example/worker\",\"tags\":[]}',2)", [],
+        ).unwrap();
+        stream_send_clock(&connection, "message/example-certificate", "100").unwrap();
+        assert_eq!(pending(), 1);
+        crate::store::mail_input_acceptance::record(
+            &connection, "message/example-certificate", "agent/example/worker", "one", 110, 120,
+        ).unwrap();
+        assert_eq!(pending(), 0);
     }
 }

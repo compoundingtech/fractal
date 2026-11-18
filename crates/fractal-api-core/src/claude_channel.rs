@@ -837,9 +837,11 @@ fn input_acceptance_frontier(state: &State, cut: u64) -> Option<u64> {
     let mut through = cut;
     for message in &state.attempted {
         let incarnation = state.attempt_incarnations.get(message)?;
-        if incarnation != &state.fence.incarnation { continue; }
         if state.input_acceptances.get(message)
-            .is_some_and(|receipt| receipt.incarnation == *incarnation) { continue; }
+            .is_some_and(|receipt| receipt.incarnation == *incarnation)
+            && (incarnation == &state.fence.incarnation
+                || (!state.accepted.contains(message) && !state.confirmed.contains(message)))
+        { continue; }
         through = through.min(state.attempt_started_at.get(message)?.saturating_sub(1));
     }
     Some(through)
@@ -1733,6 +1735,28 @@ mod tests {
         bytes.resize(TRANSCRIPT_WINDOW + 4, b' ');
         std::fs::write(&path, &bytes).unwrap();
         assert_eq!(Transcript::default().appended(&path).unwrap(), [record]);
+    }
+
+    #[test]
+    fn claude_replacement_frontier_keeps_old_unresolved_or_unacknowledged_handoffs() {
+        let mut state = State {
+            fence: Fence::new("agent/fixture", "runtime-2", "delivery"),
+            ..Default::default()
+        };
+        state.attempted.insert("message/old".into());
+        state.attempt_incarnations.insert("message/old".into(), "runtime-1".into());
+        assert_eq!(input_acceptance_frontier(&state, 300), None);
+        state.attempt_started_at.insert("message/old".into(), 100);
+        assert_eq!(input_acceptance_frontier(&state, 300), Some(99));
+        let record = json!({"type":"queue-operation","operation":"enqueue",
+            "content":"SIGNAL","timestamp":"2026-11-18T00:00:00.123Z"});
+        record_input_acceptance(&mut state, &record, "message/old", "SIGNAL");
+        state.accepted.insert("message/old".into());
+        assert_eq!(input_acceptance_frontier(&state, 300), Some(99),
+            "a stranded old certificate cannot be POSTed under the replacement fence");
+        state.accepted.remove("message/old");
+        assert_eq!(input_acceptance_frontier(&state, 300), Some(300),
+            "the original receipt ACK resolves source uncertainty");
     }
 
     #[test]

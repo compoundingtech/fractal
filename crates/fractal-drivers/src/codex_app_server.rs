@@ -1293,7 +1293,7 @@ impl CodexInboxDelivery {
     /// recipient agent's act and the only settlement authority: an entry whose file left the inbox
     /// releases ownership, and this pump never moves a file.
     fn reconcile_inbox(&mut self, unread: &[message::Message]) -> Result<()> {
-        self.ledger.prune(|filename| {
+        self.ledger.prune(Some(self.runtime.incarnation()), |filename| {
             crate::push_mailbox::is_unread(&self.config.agent_dir, filename, unread)
         })
     }
@@ -1392,7 +1392,7 @@ impl CodexInboxDelivery {
             .binding()
             .is_some_and(|binding| binding != state.thread_id())
         {
-            self.ledger.rebind(state.thread_id())?;
+            self.ledger.rebind(state.thread_id(), Some(self.runtime.incarnation()))?;
         }
         let Some(head) = self.head.clone() else {
             return Ok(None);
@@ -1910,6 +1910,7 @@ pub fn consumed_delivery_filenames(
     runtime_id: &str,
 ) -> Result<BTreeSet<String>> {
     Ok(delivery_receipts(state_dir, identity, runtime_id)?
+        .entries
         .into_iter()
         .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
         .map(|entry| entry.filename)
@@ -1921,10 +1922,10 @@ pub fn delivery_receipts(
     state_dir: &Path,
     identity: &str,
     runtime_id: &str,
-) -> Result<Vec<delivery_ledger::Entry>> {
+) -> Result<delivery_ledger::ReceiptSnapshot> {
     let path = state_dir.join(delivery_ledger::LEDGER_FILE);
     if !path.is_file() {
-        return Ok(Vec::new());
+        return Ok(delivery_ledger::ReceiptSnapshot::default());
     }
     let ledger = delivery_ledger::Ledger::open(
         &path,
@@ -1936,7 +1937,7 @@ pub fn delivery_receipts(
     if let Some(reason) = ledger.quarantined() {
         anyhow::bail!("Codex delivery receipt ledger is quarantined: {reason}");
     }
-    Ok(ledger.entries().to_vec())
+    Ok(ledger.receipt_snapshot())
 }
 
 fn codex_delivery_request(

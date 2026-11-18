@@ -18680,7 +18680,7 @@ fn accept_managed_channel_frame(
                 == Some(state.incarnation.as_str())
             && let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
             && let Some(timestamp) = frame["acceptedAtUnixMs"].as_u64()
-            && let Some(dir) = &state.todo_outbox
+            && let Some(dir) = &state.pending.input_source_dir
         {
             let first = fractal_drivers::native_channel::record_input_acceptance(
                 dir, message, timestamp)?;
@@ -18690,14 +18690,14 @@ fn accept_managed_channel_frame(
             state.pending.input_source_ready = true;
         }
         if let Some(message) = frame.pointer("/meta/messageId").and_then(Value::as_str)
-            && let Some(dir) = &state.todo_outbox
+            && let Some(dir) = &state.pending.input_source_dir
             && frame.pointer("/meta/inputIncarnation").and_then(Value::as_str)
                 .is_none_or(|incarnation| incarnation == state.incarnation)
         {
             if frame["type"] == "delivered" && frame["acceptedAtUnixMs"].as_u64().is_none() {
                 fractal_drivers::native_channel::record_input_attempt(dir, message, None)?;
             } else if frame["type"] == "failed" {
-                fractal_drivers::native_channel::reject_input_attempt(dir, message)?;
+                fractal_drivers::native_channel::resolve_input_attempt(dir, message)?;
             }
         }
         let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
@@ -18847,6 +18847,14 @@ struct PiChannelResume {
 }
 
 impl PiChannelResume {
+    fn record_input_attempt(&self, message: &str) -> Result<()> {
+        let dir = self.pending.input_source_dir.as_deref()
+            .context("native input source has no durable journal")?;
+        fractal_drivers::native_channel::record_input_attempt(
+            dir, message, Some(u64::try_from(current_unix_ms()?)?),
+        )
+    }
+
     fn record_pending_todo(&mut self) -> Result<()> {
         if let Some(fields) = &self.todo_pending
             && let Some(dir) = &self.todo_outbox
@@ -19049,12 +19057,6 @@ impl PiFamilyReports {
         session: &str,
     ) -> Result<()> {
         let source_cut = u64::try_from(current_unix_ms()?)?;
-        let frontier = if self.input_source_ready {
-            if let Some(dir) = &self.input_source_dir {
-                // Snapshot after the cut; unresolved pre-frame markers bound any stdio backlog.
-                fractal_drivers::native_channel::input_acceptance_frontier(dir, source_cut)?
-            } else { None }
-        } else { None };
         if let Some((status, sequence)) = self.state.clone() {
             let _: ClaimRecord = client
                 .post(
@@ -19108,9 +19110,17 @@ impl PiFamilyReports {
         {
             if let Some(fence) = &self.fence {
                 mailbox_input_acceptance(client, fence, &message, timestamp).await?;
+                if let Some(dir) = &self.input_source_dir {
+                    fractal_drivers::native_channel::resolve_input_attempt(dir, &message)?;
+                }
             }
             self.input_acceptances.remove(&message);
         }
+        let frontier = if self.input_source_ready {
+            if let Some(dir) = &self.input_source_dir {
+                fractal_drivers::native_channel::recipient_input_acceptance_frontier(dir, source_cut)?
+            } else { None }
+        } else { None };
         if let (Some(fence), Some(through)) = (&self.fence, frontier) {
             mailbox_input_acceptance_frontier(client, fence, through).await?;
         }
@@ -20863,8 +20873,10 @@ impl NativeMailbox {
                 identity,
                 runtime_id,
             )?,
-            _ => Vec::new(),
+            _ => fractal_drivers::delivery_ledger::ReceiptSnapshot::default(),
         };
+        let frontier = evidence.input_acceptance_frontier(&self.fence.incarnation, source_cut);
+        let evidence = evidence.entries;
         let consumed: BTreeSet<_> = evidence.iter()
             .filter(|entry| entry.phase == fractal_drivers::delivery_ledger::Phase::Consumed)
             .map(|entry| entry.filename.clone()).collect();
@@ -20938,9 +20950,7 @@ impl NativeMailbox {
         if let Some(error) = first_error {
             return Err(error);
         }
-        if sealed_source && let Some(through) = fractal_drivers::delivery_ledger::input_acceptance_frontier(
-            &evidence, &self.fence.incarnation, source_cut,
-        ) {
+        if sealed_source && let Some(through) = frontier {
             mailbox_input_acceptance_frontier(client, &self.fence, through).await?;
         }
         Ok(())

@@ -32,6 +32,8 @@ struct Snapshot {
     unknown: usize,
     source_cut: u64,
     error: Option<String>,
+    #[cfg(test)]
+    source_work: [usize; 3],
 }
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
@@ -56,6 +58,8 @@ pub fn start(state: &crate::api::AppState) {
                 Ok(Ok(snapshot)) => snapshot,
                 error => Snapshot { observed_ms: now(), generation, samples: Vec::new(), held: 0, unknown: 1,
                     covered_from_ms: now(), source_through_ms: 0, recapture_at_ms: None,
+                    #[cfg(test)]
+                    source_work: [0; 3],
                     source_cut: 0, error: Some(format!("mail source capture unavailable: {error:?}")) },
             };
             snapshot.generation = generation;
@@ -187,14 +191,16 @@ fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
         let connection = store.readers.get();
         let source_cut = store.index()?;
         let mut statement = connection.prepare_cached(
-            "SELECT message,recipient,sent_ms,fields FROM local_mail_delivery_source_v1 source
-             WHERE COALESCE(json_extract(fields,'$.sent_clock_valid'),0)=0 OR sent_ms>=?1 OR (
-                NOT EXISTS(SELECT 1 FROM local_mail_delivery_steps_v1 step WHERE step.message=source.message
-                    AND step.kind IN ('message.delivered','message.read','message.closed','message.expired'))
-                AND NOT EXISTS(SELECT 1 FROM local_mail_input_acceptance_v1 accepted WHERE accepted.message=source.message))
-             ORDER BY message,recipient")?;
+            "SELECT source.message,source.recipient,source.sent_ms,source.fields
+             FROM (
+                SELECT message,recipient FROM local_mail_delivery_source_v1 WHERE sent_ms>=?1
+                UNION SELECT message,recipient FROM local_mail_delivery_pending_v1
+             ) eligible JOIN local_mail_delivery_source_v1 source USING(message,recipient)
+             ORDER BY source.message,source.recipient")?;
         let raw = statement.query_map([now.saturating_sub(HORIZON.saturating_add(DEADLINE).saturating_add(FRESHNESS))], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
             row.get::<_, u64>(2)?, row.get::<_, String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        #[cfg(test)]
+        let mut source_work = [raw.len(), 0, 0];
         let mut source = BTreeMap::<(String, String), (u64, Value)>::new();
         let mut unknown = 0;
         let mut covered_from_ms = now;
@@ -232,23 +238,34 @@ fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
                 _ => {}
             }
         }
-        let mut statement = connection.prepare_cached(
-            "SELECT message,recipient,MIN(accepted_at_unix_ms) FROM local_mail_input_acceptance_v1 GROUP BY message,recipient")?;
-        let raw = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Both ledgers retain audit history indefinitely. Read only PK ranges for this
+        // host's relevant source population, never global aggregates or identity lookups.
+        let messages = source.keys().map(|(message, _)| message).collect::<std::collections::BTreeSet<_>>();
+        let mut acceptance_query = connection.prepare_cached(
+            "SELECT recipient,MIN(accepted_at_unix_ms) FROM local_mail_input_acceptance_v1
+             WHERE message=?1 GROUP BY recipient")?;
+        let mut step_query = connection.prepare_cached(
+            "SELECT consumer,kind,at_ms FROM local_mail_delivery_steps_v1 WHERE message=?1")?;
         let mut accepted = BTreeMap::<(String, String), u64>::new();
-        for (message, recipient, at) in raw {
-            let key = (message, canonical(&connection, &recipient)?);
-            accepted.entry(key).and_modify(|first| *first = (*first).min(at)).or_insert(at);
-        }
-        let mut statement = connection.prepare_cached("SELECT message,consumer,kind,at_ms FROM local_mail_delivery_steps_v1")?;
-        let raw = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?, row.get::<_, u64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut steps = BTreeMap::<(String, String), BTreeMap<String, u64>>::new();
-        for (message, consumer, kind, at) in raw {
-            let consumer = if consumer.is_empty() { consumer } else { canonical(&connection, &consumer)? };
-            steps.entry((message, consumer)).or_default().entry(kind)
-                .and_modify(|first| *first = (*first).min(at)).or_insert(at);
+        for message in messages {
+            let raw = acceptance_query.query_map([message], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            #[cfg(test)]
+            { source_work[1] += raw.len(); }
+            for (recipient, at) in raw {
+                let key = (message.clone(), canonical(&connection, &recipient)?);
+                accepted.entry(key).and_modify(|first| *first = (*first).min(at)).or_insert(at);
+            }
+            let raw = step_query.query_map([message], |row| Ok((row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?, row.get::<_, u64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            #[cfg(test)]
+            { source_work[2] += raw.len(); }
+            for (consumer, kind, at) in raw {
+                let consumer = if consumer.is_empty() { consumer } else { canonical(&connection, &consumer)? };
+                steps.entry((message.clone(), consumer)).or_default().entry(kind)
+                    .and_modify(|first| *first = (*first).min(at)).or_insert(at);
+            }
         }
         // The mirror's own cut must include every stream item visible to its shard.
         let shard = crate::store::messages_shard::mailbox_reads::position(store)?;
@@ -313,6 +330,8 @@ fn capture(store: &Store, now: u64) -> anyhow::Result<Snapshot> {
             }
         }
         Ok(Snapshot { observed_ms: now, generation: 0, covered_from_ms, source_through_ms, recapture_at_ms,
+            #[cfg(test)]
+            source_work,
             samples, held, unknown, source_cut, error: None })
     })
 }

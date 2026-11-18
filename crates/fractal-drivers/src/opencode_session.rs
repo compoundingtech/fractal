@@ -1721,7 +1721,7 @@ impl Delivery {
         // Archive is the recipient agent's act and the only settlement authority. An entry whose
         // file left the inbox releases ownership here; this pump never moves a file itself.
         self.ledger
-            .prune(|filename| crate::push_mailbox::is_unread(self.inbox.parent().and_then(Path::parent).unwrap(), filename, &unread))?;
+            .prune(self.control.incarnation().as_deref(), |filename| crate::push_mailbox::is_unread(self.inbox.parent().and_then(Path::parent).unwrap(), filename, &unread))?;
         // Continue receipt read-back for an existing attempt. No new input can pass
         // `send` while held.
         if self.control.held() && self.ledger.entries().is_empty() {
@@ -1757,7 +1757,7 @@ impl Delivery {
             .binding()
             .is_some_and(|binding| binding != target)
         {
-            self.ledger.rebind(&target)?;
+            self.ledger.rebind(&target, self.control.incarnation().as_deref())?;
         }
         // Fail closed. An unreadable ledger holds and surfaces instead of guessing, and it never
         // refused to start: a driver that will not start delivers nothing at all. The
@@ -1989,6 +1989,7 @@ pub fn consumed_delivery_paths(
     runtime_id: &str,
 ) -> Result<BTreeSet<String>> {
     Ok(delivery_receipts(session_dir, identity, runtime_id)?
+        .entries
         .into_iter()
         .filter(|entry| entry.phase == delivery_ledger::Phase::Consumed)
         .map(|entry| entry.filename)
@@ -2000,10 +2001,10 @@ pub fn delivery_receipts(
     session_dir: &Path,
     identity: &str,
     runtime_id: &str,
-) -> Result<Vec<delivery_ledger::Entry>> {
+) -> Result<delivery_ledger::ReceiptSnapshot> {
     let path = session_dir.join(delivery_ledger::LEDGER_FILE);
     if !path.is_file() {
-        return Ok(Vec::new());
+        return Ok(delivery_ledger::ReceiptSnapshot::default());
     }
     let owner = identity.to_owned();
     let ledger = delivery_ledger::Ledger::open(
@@ -2016,7 +2017,7 @@ pub fn delivery_receipts(
     if let Some(reason) = ledger.quarantined() {
         anyhow::bail!("OpenCode delivery receipt ledger is quarantined: {reason}");
     }
-    Ok(ledger.entries().to_vec())
+    Ok(ledger.receipt_snapshot())
 }
 
 #[cfg(test)]

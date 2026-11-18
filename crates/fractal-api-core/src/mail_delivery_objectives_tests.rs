@@ -140,7 +140,7 @@ fn uncertain_historical_delivery_has_a_one_shot_horizon_expiry() {
     let snapshot = capture(&store, sent + DEADLINE + 1).unwrap();
     assert_eq!(snapshot.unknown, 1);
     let expiry = sent + DEADLINE + HORIZON + FRESHNESS + 1;
-    assert!(snapshot.recapture_at.is_some_and(|at| at <= expiry));
+    assert!(snapshot.recapture_at_ms.is_some_and(|at| at <= expiry));
     assert_eq!(capture(&store, expiry).unwrap().unknown, 0);
 }
 
@@ -256,4 +256,46 @@ fn accounting_clock_stops_at_the_native_frontier_not_the_daemon_heartbeat() {
     let stale = rows(&store, later).unwrap().remove(0);
     assert_eq!(stale["status"], "no-data");
     assert_eq!(stale["source"]["coverage_known"], false);
+}
+
+#[test]
+fn expired_audit_history_is_not_materialized_on_unrelated_events() {
+    let store = Store::open_memory("example-host").unwrap();
+    declared(&store);
+    let sent = send(&store, "message/example-archived", json!([]));
+    let accepted = step(&store, "message/example-archived", "message.delivered");
+    {
+        let connection = store.connection.write();
+        for index in 0..512 {
+            let message = format!("message/example-audit-{index}");
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h7f3a847a2da6 owner=fractal_api_core::mail_delivery_objectives_tests TODO=bound-or-reference-values-and-reclamation */
+                "INSERT INTO local_mail_delivery_source_v1 VALUES(?1,'agent/example/worker',?2,
+                 '{\"from\":\"agent/example/sender\",\"tags\":[],\"sent_clock_valid\":1}')",
+                rusqlite::params![message, sent],
+            ).unwrap();
+            crate::store::mail_input_acceptance::record(
+                &connection, &message, "agent/example/worker", "incarnation-one", accepted, accepted,
+            ).unwrap();
+            crate::store::mail_delivery_source::stream_step(
+                &connection, &message, "agent/example/worker", "message.delivered", accepted,
+            ).unwrap();
+        }
+    }
+    let expired = sent + DEADLINE + HORIZON + FRESHNESS + 1;
+    assert_eq!(capture(&store, expired).unwrap().source_work, [0, 0, 0]);
+    store.append_claim(&ClaimInput {
+        subject: "node/example-unrelated".into(), kind: "node.observed".into(), actor: None,
+        fields: BTreeMap::from([("status".into(), json!("online"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert_eq!(capture(&store, expired).unwrap().source_work, [0, 0, 0]);
+    let current = send(&store, "message/example-current-population", json!([]));
+    frontier(&store, current);
+    let snapshot = capture(&store, current).unwrap();
+    assert_eq!(snapshot.source_work[0], 514);
+    // At the real current clock these fixtures are in-window; advancing the accounting
+    // horizon discards all completed audit history but retains the unresolved message.
+    let snapshot = capture(&store, expired).unwrap();
+    assert_eq!(snapshot.source_work, [1, 0, 0]);
 }

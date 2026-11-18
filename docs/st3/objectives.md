@@ -687,3 +687,12 @@ retention. They contain recipient identity, source timestamps, sender/tags and l
 provenance, not message content or model output. They currently retain this audit metadata
 without automatic deletion; 30d applies to budget evaluation, not a destructive ledger TTL.
 
+Capture does not aggregate these indefinitely retained ledgers on each event. Producer
+transactions maintain a rebuildable pending-message key projection (unresolved or invalid
+original send clocks), and an indexed send-time range supplies the current window. Capture
+unions those populations, then reads lifecycle and certificate primary-key ranges only for
+relevant messages assigned to this host. Completed history outside the window therefore
+causes no historical lifecycle/certificate reads on unrelated daemon events. Startup replay
+rebuilds this projection from durable metadata; no timer refresh or cached-success fallback
+substitutes for producer facts.
+

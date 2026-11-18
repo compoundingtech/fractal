@@ -1631,21 +1631,39 @@ async fn publish_harness_state(
     Ok(())
 }
 
+fn activate_channel_input_acceptance(
+    catalog: &Path, subject: &str, state: &mut PiChannelResume,
+) -> Result<()> {
+    let seat = hex::encode(Sha256::digest(subject.as_bytes()));
+    let incarnation = hex::encode(Sha256::digest(state.incarnation.as_bytes()));
+    let dir = catalog.join(".st3-input-acceptance").join(seat).join(incarnation);
+    fs::create_dir_all(&dir)?;
+    if let Some(previous) = &state.pending.input_source_dir {
+        if previous != &dir {
+            for (message, timestamp) in fractal_drivers::native_channel::input_attempts(previous)? {
+                fractal_drivers::native_channel::record_input_attempt(&dir, &message, timestamp)?;
+            }
+            for (message, timestamp) in fractal_drivers::native_channel::input_acceptances(previous)? {
+                fractal_drivers::native_channel::record_input_acceptance(&dir, &message, timestamp)?;
+            }
+        }
+    } else {
+        for message in &state.delivered {
+            fractal_drivers::native_channel::record_input_attempt(&dir, message, None)?;
+        }
+    }
+    state.pending.input_acceptances =
+        fractal_drivers::native_channel::input_acceptances(&dir)?;
+    state.pending.input_source_dir = Some(dir);
+    Ok(())
+}
+
 fn activate_channel_todo_observations(
     catalog: &Path, subject: &str, state: &mut PiChannelResume,
 ) -> Result<NativeObservations> {
     let dir = prepare_channel_todo_outbox(catalog, subject, &state.incarnation)?;
     fractal_drivers::harness_events::enable(&dir, &state.incarnation)?;
     let observations = NativeObservations::start(&dir, &state.incarnation)?;
-    state.pending.input_acceptances =
-        fractal_drivers::native_channel::input_acceptances(&dir)?;
-    if state.pending.input_source_dir.is_none() {
-        // An older replacement image may have handed off mail without pre-frame clocks.
-        for message in &state.delivered {
-            fractal_drivers::native_channel::record_input_attempt(&dir, message, None)?;
-        }
-    }
-    state.pending.input_source_dir = Some(dir.clone());
     state.todo_outbox = Some(dir);
     state.record_pending_todo()?;
     Ok(observations)
@@ -1760,6 +1778,7 @@ async fn run_pi_channel(
     } else {
         None
     };
+    activate_channel_input_acceptance(catalog, subject, &mut state)?;
     let mut last_warning = PiChannelWarnings::default();
     let mut todo_observations = None;
     if driver == "omp" && observer.is_none() {
@@ -2099,10 +2118,7 @@ async fn run_pi_channel(
                     {
                         warn_pi_channel(subject, &error, &mut last_warning);
                     }
-                    let dir = state.todo_outbox.as_deref().context("native input source has no durable outbox")?;
-                    fractal_drivers::native_channel::record_input_attempt(
-                        dir, &message.subject, Some(u64::try_from(current_unix_ms()?)?),
-                    )?;
+                    state.record_input_attempt(&message.subject)?;
                     stdout.write_all(serde_json::to_string(&frame)?.as_bytes()).await?;
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;

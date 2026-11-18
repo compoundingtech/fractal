@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Updated pi-family hook assets add acceptedAtUnixMs only after the typed harness handoff succeeds; older hook frames without that source timestamp still deliver normally but do not certify acceptance."
+    "detail": "Updated pi-family hook assets add acceptedAtUnixMs only after the typed harness handoff succeeds; older hook frames without that source timestamp still deliver normally but do not certify acceptance. Every Pi/OMP channel independently initializes its mandatory acceptance journal, including Pi and OMP with an existing event observer. Optional todo-observation startup, shutdown and cleanup do not own or remove this journal."
   },
   "downtime": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Durable acceptance evidence is replayed after producer restart. A different runtime incarnation cannot relabel an earlier native acceptance."
+    "detail": "Durable acceptance evidence is replayed after producer restart. A different runtime incarnation cannot relabel an earlier native acceptance or discard an unresolved native handoff. Pi/OMP retain recipient-scoped incarnation journals until native rejection or receipt acknowledgement resolves pending attempts. Native delivery ledgers retain abandoned-attempt bounds independently of transport entries, so retry, rebind and recipient settlement cannot silently advance completeness past uncertainty."
   }
 }
