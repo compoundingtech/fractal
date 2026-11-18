@@ -377,7 +377,8 @@ pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, ro
             snapshots.complete.clear();
         }
         // A separate WAL read transaction preserves corrected images across continuations.
-        let reader = Connection::open_with_flags(connection.path().context("capture plugin has no database path")?, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut reader = Connection::open_with_flags(connection.path().context("capture plugin has no database path")?, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        smallclaims::sqlite::observe(&mut reader);
         reader.execute_batch(/* sqlite-large-value: allow-for-now lv-h5234cc786356 owner=fractal_reconcile::reconcile::github_capture TODO=trace-statement-and-value-representation */ "BEGIN DEFERRED")?;
         ensure!(current_head(&reader, &source)?.1.as_deref() == Some(projection.revision.as_str()), "capture head changed while pinning snapshot");
         let mut builder = SnapshotBuilder::new(projection);

@@ -48,6 +48,30 @@ fn builder() -> SnapshotBuilder {
 }
 
 #[test]
+fn shared_capture_statements_contribute_to_sqlite_work_samples() -> Result<()> {
+    use smallclaims::sqlite::{histogram, work};
+
+    let state = tempfile::tempdir()?;
+    let plugin = GithubPluginStore::shared(state.path())?;
+    let connection = plugin.connection.lock().unwrap_or_else(PoisonError::into_inner);
+    migrate(&connection)?;
+    histogram::take_on_this_thread();
+    let before = work::total();
+    let scope = work::SqliteWorkScope::start();
+    assert!(held::<AuthorityGrant>(&connection, "absent-grant", AUTHORITY_KIND)?.is_none());
+    let scoped = scope.finish();
+    let sample = work::total() - before;
+    let shapes = histogram::take_on_this_thread();
+    assert_eq!(scoped.statements, 1, "the real plugin connection must count capture SQL");
+    assert!(scoped.vm_steps > 0, "capture work must include SQLite VM instructions");
+    assert!(sample.statements >= scoped.statements && sample.vm_steps >= scoped.vm_steps,
+        "capture SQL must contribute to the same process-wide samples as daemon_cost");
+    assert!(shapes.iter().any(|(sql, shape)| sql.contains("capture_v1_claims") && shape.count == 1),
+        "the measured statement must read a real capture table: {shapes:?}");
+    Ok(())
+}
+
+#[test]
 fn dependencies_replay_out_of_order_without_partial_publication() -> Result<()> {
     let mut db = database()?;
     root(&db)?;
