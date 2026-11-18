@@ -122,6 +122,36 @@ The `owner_run` addition in `restart-retries-a-parked-launch.json` illustrates t
 gap: its text requires daemons to deploy together, despite compatibility `none`.
 That historical fragment is immutable; its classification needs a fresh correction.
 
+### Residency evidence reader foundation
+
+The eight `residency.*` evidence kinds and the `residency/HOST/EPISODE/ID`
+subject family are registered reader-first. This adds no evidence writer, timer,
+sensor scheduling, objective, or idle-suspend activation. Evidence is durable,
+system-only, closed-schema, and does not wake reconciliation.
+
+Older registries quarantine these kinds as retryable `unknown-claim-kind` records;
+known claims still admit. A supporting reader retries the retained original records
+after upgrade. Deploy readers before enabling any future evidence producer; this
+foundation does not establish an all-member activation gate or the adjacent-release
+guarantee. The registry and retention digests change; SQLite storage does not.
+
+Times are Unix milliseconds; outcome flags are integer 0/1. `reason` is a nonempty
+string bounded to 128 UTF-8 bytes without control characters. Sleep `end_class` is
+`wake`, `manual`, `stop`, or `retire`; unrouted `kind` is `attach` or `explicit-resume`.
+Host samples omit `held_silent_age_seconds` when the sensor is unavailable, never
+substitute zero. `memory_coverage` is `complete` (both deltas), `partial` (one), or
+`unavailable` (neither). Signed byte deltas are host available after minus before
+(`host_available_delta_bytes`) and private memory before minus after
+(`private_reclaimed_bytes`), not a sum of resident sizes. Optional `seat` is an agent
+subject reference; native session, incarnation, source message, and turn identity
+remain evidence fields rather than metric labels.
+
+Regenerate `schema.md` with
+`nix develop -c cargo run --locked -p fractal-schema --example schema_markdown -- docs/st3/schema.md`.
+Client code generation does not apply: this change does not alter client-v0 schemas,
+operations, declarations, or templates.
+
+
 ### Fleet feature activation and offline rejoin
 
 Design sketch (**open, [#4002](https://github.com/compoundingtech/fractal/issues/4002)**):
