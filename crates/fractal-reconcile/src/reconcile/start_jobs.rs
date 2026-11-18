@@ -488,16 +488,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         apply: impl FnOnce() -> Result<T>,
     ) -> Option<T> {
-        if reconcile_decision_admitted(subject) {
-            self.isolate("start-completion", subject, apply)
-        } else {
-            // Gates are not admitted reconciliation-fault subjects.
-            self.isolate(
-                &format!("start-completion:{subject}"),
-                &format!("daemon/{}", self.host),
-                apply,
-            )
-        }
+        // Completion subjects include agents, execs and gates, which are not
+        // admitted reconciliation-fault subjects. Keep each item's fault
+        // independent under the daemon's valid recorder.
+        self.isolate(
+            &format!("start-completion:{subject}"),
+            &format!("daemon/{}", self.host),
+            apply,
+        )
     }
 
     pub(super) fn reconcile_start_operation(

@@ -438,13 +438,18 @@ async fn a_panicking_completion_is_isolated_without_dropping_the_broad_pass() {
     *reconciler.start_jobs.completion_hook.lock().unwrap() = Some(Box::new(|| {
         panic!("fixture completion application panic");
     }));
-    let task = tokio::spawn(reconciler.clone().run());
+    let pass_reconciler = reconciler.clone();
+    let pass = tokio::spawn(async move {
+        pass_reconciler.blocking(|this| this.reconcile_once()).await
+    });
+    let completion_reconciler = reconciler.clone();
+    let task = tokio::spawn(async move { completion_reconciler.consume_start_results().await });
     tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
     release.0.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if store.observations_for(first, "reconcile.fault").unwrap().iter().any(|claim| {
-                claim.body["fields"]["scope"] == "start-completion"
+            if store.observations_for(&format!("daemon/{}", reconciler.host), "reconcile.fault").unwrap().iter().any(|claim| {
+                claim.body["fields"]["scope"] == format!("start-completion:{first}")
                     && claim.body["fields"]["status"] == "faulted"
                     && claim.body["fields"]["reason"].as_str()
                         .is_some_and(|reason| reason.contains("fixture completion application panic"))
@@ -454,7 +459,7 @@ async fn a_panicking_completion_is_isolated_without_dropping_the_broad_pass() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("the completion panic was not recorded as an isolated item fault");
-    assert!(!task.is_finished(), "the completion panic dropped the running broad pass");
+    assert!(!pass.is_finished(), "the completion panic dropped the running broad pass");
     // A later result must still be consumed while that same broad pass remains held.
     assert!(launch(&reconciler, second));
     tokio::time::timeout(Duration::from_secs(5), entered.recv()).await.unwrap().unwrap();
@@ -467,10 +472,11 @@ async fn a_panicking_completion_is_isolated_without_dropping_the_broad_pass() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.expect("the completion consumer stopped after an item panic");
-    assert!(!task.is_finished(), "the original broad pass must remain active");
+    assert!(!pass.is_finished(), "the original broad pass must remain active");
     task.abort();
     let _ = task.await;
     pass_release.0.send(()).unwrap();
+    pass.await.unwrap().unwrap();
     workers_done(&reconciler).await;
 }
 
@@ -500,7 +506,12 @@ async fn start_results_are_adopted_while_the_broad_pass_is_held() {
             pass_entered.send(()).unwrap();
             pass_held.recv().unwrap();
         }));
-        let task = tokio::spawn(reconciler.clone().run());
+        let pass_reconciler = reconciler.clone();
+        let pass = tokio::spawn(async move {
+            pass_reconciler.blocking(|this| this.reconcile_once()).await
+        });
+        let completion_reconciler = reconciler.clone();
+        let task = tokio::spawn(async move { completion_reconciler.consume_start_results().await });
         tokio::time::timeout(Duration::from_secs(5), pass_entered_rx.recv()).await.unwrap().unwrap();
         if stale {
             apply_source(&store, "version 2\nstop \"agent/example/worker\"", "stale-start-adoption");
@@ -541,6 +552,7 @@ async fn start_results_are_adopted_while_the_broad_pass_is_held() {
         task.abort();
         let _ = task.await;
         pass_release.0.send(()).unwrap();
+        pass.await.unwrap().unwrap();
         workers_done(&reconciler).await;
     }
 }

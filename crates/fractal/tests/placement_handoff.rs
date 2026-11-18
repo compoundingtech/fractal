@@ -727,7 +727,11 @@ async fn move_running_seat(terminal: bool) {
         "waiting-for-destination"
     );
     cobalt.pass();
-    assert_eq!(cobalt.show().await["handoff"]["phase"], "starting");
+    assert_eq!(cobalt.show().await["handoff"]["phase"], "running");
+    assert_eq!(
+        cobalt.store.latest_observation(SEAT, "runtime.observed").unwrap().unwrap().body["fields"]["adopted"],
+        true
+    );
     cobalt.pass();
     assert_eq!(cobalt.running(), 1);
     assert_eq!(cobalt.show().await["handoff"]["phase"], "running");
