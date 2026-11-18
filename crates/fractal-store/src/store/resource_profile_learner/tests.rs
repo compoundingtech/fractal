@@ -204,8 +204,12 @@ fn integer_margin_preserves_precision_and_rejects_overflow() {
     }
     assert!(memory_max(0).is_err());
     assert!(memory_max(u64::MAX).is_err());
-    assert_eq!(remaining_disk(100, 40), 60);
-    assert_eq!(remaining_disk(100, 101), 0);
+    assert_eq!(remaining_disk(100, 40),
+        DiskRemaining { remaining_bytes: 60, overshot: false });
+    assert_eq!(remaining_disk(100, 100),
+        DiskRemaining { remaining_bytes: 0, overshot: false });
+    assert_eq!(remaining_disk(100, 101),
+        DiskRemaining { remaining_bytes: 0, overshot: true });
 }
 
 #[test]

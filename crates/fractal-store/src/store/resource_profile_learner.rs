@@ -117,7 +117,8 @@ impl RetirementSample {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", content = "reason", rename_all = "kebab-case")]
 pub enum RecordOutcome {
     Recorded,
     Duplicate,
@@ -292,9 +293,20 @@ pub fn estimate(
     })
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiskRemaining {
+    pub remaining_bytes: u64,
+    pub overshot: bool,
+}
+
 /// Host free space already reflects consumed allocation; reserve only unrealized growth.
-pub fn remaining_disk(estimate: u64, allocated_high_water: u64) -> u64 {
-    estimate.saturating_sub(allocated_high_water)
+/// An overshoot closes new admission; this value never authorizes terminating a holder.
+pub fn remaining_disk(estimate: u64, allocated_high_water: u64) -> DiskRemaining {
+    DiskRemaining {
+        remaining_bytes: estimate.saturating_sub(allocated_high_water),
+        overshot: allocated_high_water > estimate,
+    }
 }
 
 #[cfg(test)]
