@@ -2848,6 +2848,7 @@ pub async fn agent_declaration(
     let accountable = fractal_schema::accountable::from_desired(&tree)
         .map_err(|e| ApiError::bad(FractalError::new(e.code, e.message)))?.map(str::to_owned);
     let declared_admission = fractal_api_core::api::client_declared_admission(&tree);
+    let idle_suspend = crate::model::declared_idle_suspend(Some(&tree));
     let mut value = json!({
         "id": subject,
         "revision": revision,
@@ -2858,6 +2859,9 @@ pub async fn agent_declaration(
     if let Some(person) = accountable { value["accountable"] = json!(person); }
     if let Some(admission) = declared_admission {
         value["declared_admission"] = serde_json::to_value(admission).map_err(ApiError::internal)?;
+    }
+    if let Some(policy) = idle_suspend {
+        value["idle_suspend"] = json!(policy);
     }
     Ok(Json(value))
 }
