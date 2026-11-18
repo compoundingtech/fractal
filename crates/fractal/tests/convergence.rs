@@ -1350,13 +1350,13 @@ impl World {
         let records = |wanted: &str| {
             held.values().filter(|claim| {
                 claim.kind == wanted
-                    && claim.fields.get("record").is_some_and(|record| record["source"] == json!(source))
+                    && claim.body.get("record").is_some_and(|record| record["source"] == json!(source))
             }).collect::<Vec<_>>()
         };
         let grants = records(AUTHORITY_KIND);
         let commits = records(COMMIT_KIND);
         let previous = commits.iter().max_by_key(|claim| {
-            claim.fields["record"]["sequence"].as_u64().expect("generated capture sequence")
+            claim.body["record"]["sequence"].as_u64().expect("generated capture sequence")
         });
         let now = u64::try_from(self.now()).expect("positive simulation clock");
         let (subject, record) = match kind {
@@ -1383,11 +1383,11 @@ impl World {
                 let grant = grants.first()?;
                 let facts = records(FACT_KIND);
                 let claim = facts.last()?;
-                let fact: ObservedFact = serde_json::from_value(claim.fields["record"].clone()).unwrap();
+                let fact: ObservedFact = serde_json::from_value(claim.body["record"].clone()).unwrap();
                 let (_, repository, _) = fact.fact.identity();
                 let commit = CaptureCommit {
                     version: VERSION, source: source.clone(), epoch: 1, authority_grant: grant.id.clone(),
-                    sequence: previous.map_or(1, |claim| claim.fields["record"]["sequence"].as_u64().unwrap() + 1),
+                    sequence: previous.map_or(1, |claim| claim.body["record"]["sequence"].as_u64().unwrap() + 1),
                     predecessor: previous.map(|claim| claim.id.clone()),
                     facts: vec![FactReference { claim_id: claim.id.clone(), digest: fact.digest().unwrap() }],
                     checkpoint: Some(ScanCheckpoint {
