@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn native_row_corpus_covers_every_shipped_row() {
-        use fractal_kernel::objective::Indicator;
+        use crate::objective::Indicator;
 
         let targets: Vec<_> = crate::slo::shipped().iter()
             .filter(|objective| !matches!(objective.indicator, Indicator::Divergence))
