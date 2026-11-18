@@ -18,24 +18,35 @@ pub fn render_mission_kdl(mission: &MissionSpec) -> Result<MissionDeclarationTex
     Ok(MissionDeclarationText { text: document.to_string(), legacy: has_legacy_loop_shapes(mission) })
 }
 
-fn escalation_node(policies: &[crate::model::EscalationSpec]) -> KdlNode {
-    use crate::model::{EscalationClock, EscalationAction};
-    block(node("escalation", []), policies.iter().map(|policy| {
+fn escalation_node(value: &crate::model::EscalationOverride) -> Option<KdlNode> {
+    use crate::model::{EscalationClock, EscalationAction, EscalationOverride};
+    let policies = match value {
+        EscalationOverride::Inherit => return None,
+        EscalationOverride::Disable => {
+            let mut root = node("escalation", []);
+            root.push(kdl::KdlEntry::new_prop("disabled", true));
+            return Some(root);
+        }
+        EscalationOverride::Replace { policies } => policies,
+    };
+    Some(block(node("escalation", []), policies.iter().map(|policy| {
         let mut root = text("policy", &policy.id);
         property(&mut root, "state", policy.state.as_str());
         property(&mut root, "clock", match policy.clock {
             EscalationClock::SinceProgress => "since-progress",
-            EscalationClock::InState => "in-state",
+            EscalationClock::SinceEntered => "since-entered",
         });
         block(root, policy.stages.iter().map(|stage| {
-            let mut stage_node = text("stage", &format!("{}ms", stage.after_ms));
+            let delay = [(86_400_000, "d"), (3_600_000, "h"), (60_000, "m"), (1_000, "s"), (1, "ms")]
+                .into_iter().find(|(unit, _)| stage.after_ms % unit == 0).unwrap();
+            let mut stage_node = text("stage", &format!("{}{}", stage.after_ms / delay.0, delay.1));
             match &stage.action {
                 EscalationAction::Notify(to) => property(&mut stage_node, "notify", to.as_str()),
                 EscalationAction::Ask(to) => property(&mut stage_node, "ask", to.as_str()),
             }
             stage_node
         }).collect())
-    }).collect())
+    }).collect()))
 }
 
 fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
@@ -64,7 +75,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
     let goals = if parent.is_some() { goals.get(1..).ok_or_else(||
         FractalError::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
-    if !escalation.is_empty() { children.push(escalation_node(escalation)); }
+    if let Some(node) = escalation_node(escalation) { children.push(node); }
     if let Some(priority) = declared_priority { children.push(text("declared-priority", priority.as_str())); }
     if let Some(lane) = declared_lane { children.push(text("declared-lane", lane.as_str())); }
     if let Some(budgets) = declared_budgets {
@@ -162,7 +173,7 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         comment(&mut root, "display-only resource lane: embedded exec redacted; this step is not republishable source");
     }
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
-    if let Some(policies) = escalation { children.push(escalation_node(policies)); }
+    if let Some(node) = escalation_node(escalation) { children.push(node); }
     for (name, value) in [("fresh-context", fresh_context), ("keep-open", keep_open)] {
         if *value { children.push(node(name, [])); }
     }

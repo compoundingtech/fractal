@@ -800,12 +800,21 @@ export const EscalationActionSchema = Schema.Union([
   Schema.TaggedStruct('ask', { recipient: PersonReferenceSchema }),
 ]).annotate({ identifier: 'Fractal.EscalationAction' })
 
-/** Absolute stage delays; a step array replaces mission defaults, [] disables them. */
+/** Step states mirror the existing WorkState literal union, not presentation labels. */
+const StepEscalationState = Schema.Literals([
+  'waiting-person', 'waiting', 'ready', 'claimed', 'blocked', 'verifying',
+  'completed', 'failed', 'cancelled',
+])
+const RunEscalationState = Schema.Literals([
+  'queued', 'running', 'waiting', 'completed', 'failed', 'cancelled',
+])
+const EscalationClock = Schema.Literals(['since-progress', 'since-entered'])
+/** Absolute stage delays. IDs are required and unique within their declaration scope. */
 export const EscalationSchema = Schema.Struct({
   id: LocalId,
   when: Schema.Struct({
-    state: Schema.Literals(['ready', 'claimed', 'working', 'blocked', 'failed', 'normal', 'revision-draining', 'final']),
-    clock: Schema.Literals(['since-progress', 'in-state']),
+    state: StepEscalationState,
+    clock: EscalationClock,
   }),
   stages: Schema.NonEmptyArray(Schema.Struct({
     after: EscalationAfter,
@@ -817,22 +826,46 @@ export const EscalationSchema = Schema.Struct({
   { message: 'escalation stages must have strictly increasing absolute delays' },
 )).annotate({ identifier: 'Fractal.Escalation' })
 
-const EscalationsSchema = Schema.Array(EscalationSchema).check(Schema.makeFilter(
-  (policies) => new Set(policies.map((policy) => policy.id)).size === policies.length,
-  { message: 'escalation policy IDs must be unique within a scope' },
+export const MissionEscalationSchema = Schema.Struct({
+  ...EscalationSchema.fields,
+  when: Schema.Struct({ state: RunEscalationState, clock: EscalationClock }),
+}).check(Schema.makeFilter(
+  (policy) => policy.stages.every((stage, index) =>
+    index === 0 || EffectDuration.greaterThan(stage.after, policy.stages[index - 1]!.after)),
+  { message: 'escalation stages must have strictly increasing absolute delays' },
 ))
+export const StepEscalationOverrideSchema = Schema.Union([
+  Schema.TaggedStruct('inherit', {}),
+  Schema.TaggedStruct('disable', {}),
+  Schema.TaggedStruct('replace', {
+    policies: Schema.NonEmptyArray(EscalationSchema).check(Schema.makeFilter(
+      (policies) => new Set(policies.map((policy) => policy.id)).size === policies.length,
+      { message: 'escalation policy IDs must be unique within a scope' },
+    )),
+  }),
+])
+export const MissionEscalationOverrideSchema = Schema.Union([
+  Schema.TaggedStruct('inherit', {}),
+  Schema.TaggedStruct('disable', {}),
+  Schema.TaggedStruct('replace', {
+    policies: Schema.NonEmptyArray(MissionEscalationSchema).check(Schema.makeFilter(
+      (policies) => new Set(policies.map((policy) => policy.id)).size === policies.length,
+      { message: 'escalation policy IDs must be unique within a scope' },
+    )),
+  }),
+])
 
-type EscalationInput = typeof EscalationSchema.Encoded
+type EscalationInput = typeof EscalationSchema.Encoded | typeof MissionEscalationSchema.Encoded
 /** Named constructors expand directly into native policy content. */
-export const silence = (input: Omit<EscalationInput, 'when'> & {
-  readonly state: EscalationInput['when']['state']
-}): EscalationInput => ({
+export const silence = <TState extends EscalationInput['when']['state']>(input: Omit<EscalationInput, 'when'> & {
+  readonly state: TState
+}): Omit<EscalationInput, 'when'> & { when: { state: TState; clock: 'since-progress' } } => ({
   id: input.id, when: { state: input.state, clock: 'since-progress' }, stages: input.stages,
 })
-export const residency = (input: Omit<EscalationInput, 'when'> & {
-  readonly state: EscalationInput['when']['state']
-}): EscalationInput => ({
-  id: input.id, when: { state: input.state, clock: 'in-state' }, stages: input.stages,
+export const residency = <TState extends EscalationInput['when']['state']>(input: Omit<EscalationInput, 'when'> & {
+  readonly state: TState
+}): Omit<EscalationInput, 'when'> & { when: { state: TState; clock: 'since-entered' } } => ({
+  id: input.id, when: { state: input.state, clock: 'since-entered' }, stages: input.stages,
 })
 
 const lowerEscalationAction = (action: typeof EscalationActionSchema.Type): Record<string, Value> => {
@@ -842,25 +875,37 @@ const lowerEscalationAction = (action: typeof EscalationActionSchema.Type): Reco
   }
 }
 
-const lowerEscalation = (policies: readonly (typeof EscalationSchema.Type)[] | undefined): Node[] =>
-  policies === undefined ? [] : [block({
+const lowerEscalation = (
+  value: typeof StepEscalationOverrideSchema.Type | typeof MissionEscalationOverrideSchema.Type | undefined,
+): Node[] => {
+  if (value === undefined || value._tag === 'inherit') return []
+  if (value._tag === 'disable') return [node({ name: 'escalation', props: { disabled: true } })]
+  return [block({
     name: 'escalation',
-    children: policies.map((policy) => node({
+    children: value.policies.map((policy) => node({
       name: 'policy',
       args: [policy.id],
       props: { state: policy.when.state, clock: policy.when.clock },
       children: policy.stages.map((stage) => node({
         name: 'stage',
-        args: [`${EffectDuration.toMillis(stage.after)}ms`],
+        args: [humanEscalationDuration(EffectDuration.toMillis(stage.after))],
         props: lowerEscalationAction(stage.action),
       })),
     })),
   })]
+}
+
+const humanEscalationDuration = (millis: number): string => {
+  for (const [unit, suffix] of [[86_400_000, 'd'], [3_600_000, 'h'], [60_000, 'm'], [1_000, 's'], [1, 'ms']] as const) {
+    if (millis % unit === 0) return `${millis / unit}${suffix}`
+  }
+  return `${millis}ms`
+}
 
 /** One mission step. */
 export const StepSchema = Schema.Struct({
   id: LocalId,
-  escalation: Schema.optionalKey(EscalationsSchema),
+  escalation: Schema.optionalKey(StepEscalationOverrideSchema),
   ...OwnedDeclarationFields,
   documents: Schema.optionalKey(Schema.Array(PinnedDocumentReferenceSchema)),
   timeout: Schema.optionalKey(Duration),
@@ -1055,7 +1100,7 @@ export const MissionSchema = Schema.Struct({
   ...OwnedDeclarationFields,
   state: Schema.Literal('ready'),
   reportTo: ReportToSchema,
-  escalation: Schema.optionalKey(EscalationsSchema),
+  escalation: Schema.optionalKey(MissionEscalationOverrideSchema),
   assignedTo: Schema.optionalKey(Schema.Union([AgentReferenceSchema, PersonReferenceSchema])),
   concurrentRuns: Schema.optionalKey(
     Schema.Int.pipe(

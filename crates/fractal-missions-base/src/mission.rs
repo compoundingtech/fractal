@@ -11,7 +11,7 @@ use crate::model::{
     LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec,
     MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, ProgramSpec,
     RetrySpec, RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector,
-    EscalationSpec, EscalationClock, EscalationStage, EscalationAction,
+    EscalationSpec, EscalationClock, EscalationStage, EscalationAction, EscalationState, EscalationOverride,
 };
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
@@ -588,7 +588,7 @@ fn parse_mission(
         id,
         state,
         revision: String::new(),
-        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(parse_escalation).transpose()?.unwrap_or_default(),
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(|node| parse_escalation(node, false)).transpose()?.unwrap_or_default(),
         system,
         declared_priority: admission.priority,
         declared_lane: admission.lane,
@@ -926,7 +926,7 @@ fn parse_loop_group(
     let mut step = StepSpec {
         id,
         path,
-        escalation: None,
+        escalation: EscalationOverride::Inherit,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -1725,7 +1725,7 @@ fn parse_step(
     let mut step = StepSpec {
         id,
         path,
-        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(parse_escalation).transpose()?,
+        escalation: node.children().and_then(|body| body.nodes().iter().find(|n| n.name().value() == "escalation")).map(|node| parse_escalation(node, true)).transpose()?.unwrap_or_default(),
         fresh_context,
         keep_open,
         queue: None,
@@ -2598,7 +2598,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
     let mut step = StepSpec {
         id: AFTER_RUN_STEP.into(),
         path: AFTER_RUN_STEP.into(),
-        escalation: None,
+        escalation: EscalationOverride::Inherit,
         fresh_context: false,
         keep_open: false,
         queue: None,
@@ -3010,11 +3010,19 @@ pub(crate) fn validate_id(value: &str, kind: &str) -> Result<(), FractalError> {
     Ok(())
 }
 
-/// A single block keeps an explicit empty step override distinct from inheritance.
-fn parse_escalation(node: &KdlNode) -> Result<Vec<EscalationSpec>, FractalError> {
-    ensure_bare(node)?;
-    let Some(body) = node.children() else { return Ok(Vec::new()); };
-    let invalid = || FractalError::new("invalid-escalation", "expected unique policy IDs, valid state/clock, and increasing positive stages with exactly one typed recipient");
+/// Scope determines the closed runtime state vocabulary; absence is handled by the caller.
+fn parse_escalation(node: &KdlNode, step: bool) -> Result<EscalationOverride, FractalError> {
+    reject_type(node)?;
+    crate::declaration_syntax::ensure_only_properties(node, &["disabled"])?;
+    let invalid = || FractalError::new("invalid-escalation", "expected unique policy IDs, scope-valid state/clock, and increasing positive stages with exactly one typed recipient");
+    if node.entries().iter().any(|entry| entry.name().is_none()) { return Err(invalid()); }
+    if let Some(disabled) = node.get("disabled") {
+        if disabled.as_bool() != Some(true) || node.children().is_some() {
+            return Err(invalid());
+        }
+        return Ok(EscalationOverride::Disable);
+    }
+    let body = node.children().ok_or_else(invalid)?;
     let mut ids = BTreeSet::new();
     let mut policies = Vec::new();
     for policy in body.nodes() {
@@ -3023,11 +3031,23 @@ fn parse_escalation(node: &KdlNode) -> Result<Vec<EscalationSpec>, FractalError>
         let id = one_string_with_children(policy)?;
         validate_id(&id, "escalation")?;
         if !ids.insert(id.clone()) { return Err(invalid()); }
-        let state = property_string(policy, "state")?.ok_or_else(invalid)?;
-        if !matches!(state.as_str(), "ready" | "claimed" | "working" | "blocked" | "failed" | "normal" | "revision-draining" | "final") { return Err(invalid()); }
+        let state = match property_string(policy, "state")?.as_deref() {
+            Some("waiting-person") if step => EscalationState::WaitingPerson,
+            Some("ready") if step => EscalationState::Ready,
+            Some("claimed") if step => EscalationState::Claimed,
+            Some("blocked") if step => EscalationState::Blocked,
+            Some("verifying") if step => EscalationState::Verifying,
+            Some("queued") if !step => EscalationState::Queued,
+            Some("running") if !step => EscalationState::Running,
+            Some("waiting") => EscalationState::Waiting,
+            Some("completed") => EscalationState::Completed,
+            Some("failed") => EscalationState::Failed,
+            Some("cancelled") => EscalationState::Cancelled,
+            _ => return Err(invalid()),
+        };
         let clock = match property_string(policy, "clock")?.as_deref() {
             Some("since-progress") => EscalationClock::SinceProgress,
-            Some("in-state") => EscalationClock::InState,
+            Some("since-entered") => EscalationClock::SinceEntered,
             _ => return Err(invalid()),
         };
         let mut stages = Vec::new();
@@ -3053,7 +3073,8 @@ fn parse_escalation(node: &KdlNode) -> Result<Vec<EscalationSpec>, FractalError>
         if stages.is_empty() { return Err(invalid()); }
         policies.push(EscalationSpec { id, state, clock, stages });
     }
-    Ok(policies)
+    if policies.is_empty() { return Err(invalid()); }
+    Ok(EscalationOverride::Replace { policies })
 }
 
 /// The mission's opt-in run report: who hears of a failed, cancelled or stalled run, how long a
@@ -3711,33 +3732,35 @@ mod tests {
         let source = r#"mission "refresh" state="ready" {
             goal "Refresh";
             escalation {
-                policy "pending-refresh" state="working" clock="in-state" {
+                policy "pending-refresh" state="running" clock="since-entered" {
                     stage "30m" notify="agent/example/manager";
                     stage "4h" notify="agent/example/manager";
                     stage "24h" ask="person/owner";
                 }
             }
             step "inherit" { agentless; }
-            step "approval" { agentless; escalation {} }
+            step "approval" { agentless; escalation disabled=#true; }
         }"#;
         let mission = super::parse_missions(&source.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
-        assert_eq!(mission.escalation[0].stages[2].after_ms, 86_400_000);
-        assert!(mission.steps["inherit"].escalation.is_none());
-        assert_eq!(mission.steps["approval"].escalation, Some(vec![]));
+        let crate::model::EscalationOverride::Replace { policies } = &mission.escalation else { panic!("expected replacement"); };
+        assert_eq!(policies[0].stages[2].after_ms, 86_400_000);
+        assert_eq!(mission.steps["inherit"].escalation, crate::model::EscalationOverride::Inherit);
+        assert_eq!(mission.steps["approval"].escalation, crate::model::EscalationOverride::Disable);
         let rendered = crate::mission_render::render_mission_kdl(&mission).unwrap();
-        assert!(rendered.text.contains("1800000ms"));
-        assert!(rendered.text.contains("86400000ms"));
+        assert!(rendered.text.contains("30m"));
+        assert!(rendered.text.contains("1d"));
+        assert!(rendered.text.contains("disabled=#true"));
         let roundtrip = super::parse_missions(&rendered.text.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
         assert_eq!(mission.revision, roundtrip.revision);
         assert_eq!(mission.escalation, roundtrip.escalation);
         assert_eq!(mission.steps["approval"].escalation, roundtrip.steps["approval"].escalation);
         for (from, to) in [
             ("24h", "25h"),
-            ("in-state", "since-progress"),
-            ("state=\"working\"", "state=\"blocked\""),
+            ("since-entered", "since-progress"),
+            ("state=\"running\"", "state=\"waiting\""),
             ("person/owner", "person/reviewer"),
             ("pending-refresh", "residency"),
-            ("escalation {}", ""),
+            ("escalation disabled=#true;", ""),
         ] {
             let changed = source.replace(from, to);
             let changed = super::parse_missions(&changed.parse().unwrap(), "node").unwrap().remove("refresh").unwrap();
@@ -3760,23 +3783,27 @@ mod tests {
             r#"stage "30m" ask="person/";"#,
             r#"stage "30m" notify="agent/a" {}"#,
         ] {
-            let source = format!(r#"escalation {{ policy "p" state="working" clock="since-progress" {{ {stages} }} }}"#);
+            let source = format!(r#"escalation {{ policy "p" state="claimed" clock="since-progress" {{ {stages} }} }}"#);
             let doc: kdl::KdlDocument = source.parse().unwrap();
-            assert!(super::parse_escalation(&doc.nodes()[0]).is_err(), "{source}");
+            assert!(super::parse_escalation(&doc.nodes()[0], true).is_err(), "{source}");
         }
     }
 
     #[test]
     fn inline_escalation_rejects_invalid_policies_and_duplicate_blocks() {
-        let policy = r#"policy "p" state="working" clock="since-progress" { stage "1m" notify="agent/example/manager"; }"#;
+        let policy = r#"policy "p" state="claimed" clock="since-progress" { stage "1m" notify="agent/example/manager"; }"#;
         for body in [
             format!("{policy} {policy}"),
             policy.replace("since-progress", "activation-age"),
-            policy.replace("working", "unknown"),
+            policy.replace("claimed", "unknown"),
             policy.replace("stage \"1m\" notify=\"agent/example/manager\";", ""),
+            policy.replace("since-progress", "in-state"),
+            policy.replace("\"p\"", "\"\""),
+            policy.replace("\"p\"", ""),
+            String::new(),
         ] {
             let document: kdl::KdlDocument = format!("escalation {{ {body} }}").parse().unwrap();
-            assert!(super::parse_escalation(&document.nodes()[0]).is_err());
+            assert!(super::parse_escalation(&document.nodes()[0], true).is_err());
         }
         for body in [
             "escalation {}; escalation {}; step \"work\" { agentless; }",
@@ -3784,6 +3811,18 @@ mod tests {
         ] {
             let source = format!("mission \"test\" state=\"ready\" {{ goal \"Test\"; {body} }}");
             assert!(super::parse_missions(&source.parse().unwrap(), "node").is_err());
+        }
+        for state in ["waiting-person", "waiting", "ready", "claimed", "blocked", "verifying", "completed", "failed", "cancelled", "queued", "running", "working", "normal", "revision-draining", "final", "unknown"] {
+            let source = format!(r#"escalation {{ policy "p" state="{state}" clock="since-entered" {{ stage "30m" notify="agent/a"; }} }}"#);
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert_eq!(super::parse_escalation(&doc.nodes()[0], true).is_ok(),
+                matches!(state, "waiting-person" | "waiting" | "ready" | "claimed" | "blocked" | "verifying" | "completed" | "failed" | "cancelled"), "{state}");
+            assert_eq!(super::parse_escalation(&doc.nodes()[0], false).is_ok(),
+                matches!(state, "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled"), "{state}");
+        }
+        for source in ["escalation {}", "escalation", "escalation disabled=#false", "escalation disabled=\"true\"", "escalation disabled=#true {}", "escalation disabled=#true { policy \"p\"; }"] {
+            let doc: kdl::KdlDocument = source.parse().unwrap();
+            assert!(super::parse_escalation(&doc.nodes()[0], true).is_err(), "{source}");
         }
     }
 }

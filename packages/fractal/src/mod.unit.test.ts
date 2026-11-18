@@ -1202,20 +1202,27 @@ describe('Fractal declarations', () => {
       { after: Duration.hours(24), action: { _tag: 'ask' as const, recipient: person('person/reviewer') } },
     ] as const
     const escalation = [
-      silence({ id: 'silence', state: 'working', stages }),
+      silence({ id: 'silence', state: 'claimed', stages }),
       residency({ id: 'residency', state: 'blocked', stages }),
-    ]
+    ] as const
     const decoded = Schema.decodeSync(EscalationSchema)(escalation[0]!)
     expect(Duration.toMillis(decoded.stages[0].after)).toBe(1_800_000)
     const rendered = emit([mission({
-      ...fanInMission(), escalation, steps: [{ id: 'approval', escalation: [] }],
+      ...fanInMission(),
+      escalation: { _tag: 'replace', policies: [silence({ id: 'silence', state: 'running', stages })] },
+      steps: [
+        { id: 'approval', escalation: { _tag: 'disable' } },
+        { id: 'work', escalation: { _tag: 'replace', policies: escalation } },
+      ],
     })])
     expect(rendered).toContain('clock="since-progress"')
-    expect(rendered).toContain('clock="in-state"')
-    expect(rendered).toContain('stage "1800000ms" notify="agent/example/owner"')
-    expect(rendered).toContain('stage "86400000ms" ask="person/reviewer"')
-    expect(rendered.match(/escalation/g)).toHaveLength(2)
-    expect(Schema.decodeSync(StepSchema)({ id: 'approval', escalation: [] }).escalation).toEqual([])
+    expect(rendered).toContain('clock="since-entered"')
+    expect(rendered).toContain('stage "30m" notify="agent/example/owner"')
+    expect(rendered).toContain('stage "1d" ask="person/reviewer"')
+    expect(rendered.match(/escalation/g)).toHaveLength(3)
+    expect(rendered).toContain('escalation disabled=#true')
+    expect(Schema.decodeSync(StepSchema)({ id: 'approval', escalation: { _tag: 'disable' } }).escalation).toEqual({ _tag: 'disable' })
+    expect(Schema.decodeSync(StepSchema)({ id: 'inherited', escalation: { _tag: 'inherit' } }).escalation).toEqual({ _tag: 'inherit' })
     expect(Schema.decodeSync(StepSchema)({ id: 'inherited' }).escalation).toBeUndefined()
   })
   it('rejects malformed actions, delays, ordering and duplicate policy IDs', () => {
@@ -1233,14 +1240,33 @@ describe('Fractal declarations', () => {
       [],
     ]) {
       expect(() => Schema.decodeUnknownSync(EscalationSchema)({
-        id: 'silence', when: { state: 'working', clock: 'since-progress' }, stages,
+        id: 'silence', when: { state: 'claimed', clock: 'since-progress' }, stages,
       })).toThrow()
     }
-    const policy = silence({ id: 'silence', state: 'working', stages: [
+    const policy = silence({ id: 'silence', state: 'claimed', stages: [
       { after: Duration.minutes(30), action: { _tag: 'notify', recipient: owner } },
     ] })
     expect(() => Schema.decodeUnknownSync(StepSchema)({
-      id: 'duplicate', escalation: [policy, policy],
+      id: 'duplicate', escalation: { _tag: 'replace', policies: [policy, policy] },
+    })).toThrow()
+    for (const escalation of [[], { _tag: 'replace', policies: [] }]) {
+      expect(() => Schema.decodeUnknownSync(StepSchema)({ id: 'work', escalation })).toThrow()
+    }
+    for (const state of ['working', 'unknown', 'normal', 'running', 'queued']) {
+      expect(() => Schema.decodeUnknownSync(StepSchema)({
+        id: 'work', escalation: { _tag: 'replace', policies: [{ ...policy, when: { state, clock: 'since-entered' } }] },
+      })).toThrow()
+    }
+    for (const state of ['working', 'unknown', 'normal', 'ready', 'claimed', 'blocked', 'verifying', 'waiting-person']) {
+      expect(() => Schema.decodeUnknownSync(MissionSchema)({
+        ...fanInMission(), escalation: { _tag: 'replace', policies: [{ ...policy, when: { state, clock: 'since-entered' } }] },
+      })).toThrow()
+    }
+    for (const id of [undefined, '', 'bad id']) {
+      expect(() => Schema.decodeUnknownSync(EscalationSchema)({ ...policy, id })).toThrow()
+    }
+    expect(() => Schema.decodeUnknownSync(EscalationSchema)({
+      ...policy, when: { state: 'claimed', clock: 'in-state' },
     })).toThrow()
   })
   it('requires imported objects for step assignment and under targets', () => {
