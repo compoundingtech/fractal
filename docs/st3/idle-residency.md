@@ -177,23 +177,80 @@ Every label is a closed vocabulary; seat identity stays in spans and `agents sho
 | `st.residency.suspends` | Counter | — | `result`: `suspended`, `refused`, `cancelled` | suspend outcomes |
 | `st.residency.refusals` | Counter | — | `reason`: suspend refusal code, else `other` | coverage lost, once per epoch |
 | `st.residency.wakes` | Counter | — | `source`: `person`, `agent`, `daemon`, `github`; `outcome`: `turn`, `no-turn` | wake mix; wakes not followed by a turn within 10 minutes |
-| `st.residency.wake.duration` | Histogram | `s` | `phase`: `admitted`, `resumed`, `first-turn` | accepted wake to each phase |
 | `st.residency.resume.failures` | Counter | — | `code`: resume failure code, else `other` | resume failures |
 | `st.residency.short_sleeps` | Counter | — | — | idle suspensions woken within `idle_suspend_after` |
 | `st.residency.unrouted` | Counter | — | `kind`: `attach`, `explicit-resume` | someone needed an idle-suspended seat awake with no wake demand pending |
 | `st.residency.suspended` | Observable gauge | — | `cause`: `idle`, `manual` | seats suspended now |
 | `st.residency.pending.oldest_age` | Observable gauge | `s` | `class`: `wake`, `silent` | oldest pending demand and held silent mail |
-| `st.residency.reclaimed` | Histogram | `By` | `measure`: `host-available`, `private` | measured change around each suspend, never a sum of resident sizes |
+| `st.residency.reclaimed` | Observable gauge | `By` | `measure`: `host-available`, `private` | measured change around the latest suspend, never a sum of resident sizes |
+
+Latency percentiles come from the wake objectives' `interval` rows rather than a histogram, which
+keeps the residency instruments to a few dozen series.
 
 Each suspend and resume operation is one trace with the seat in span attributes and the phase as
 `span.label`.
 
-Objectives over these signals, with their targets and error budgets, are DQ1.
+Metrics feed dashboards. Objectives read the durable evidence claims below, so a missed target
+is judged from the same records on every member.
+
+## Objectives (IDLE-R14)
+
+The owner daemon writes one evidence claim per logical episode under
+`residency/<host>/...`. Retried writes repeat the same subject and event time, so at-least-once
+writing does not inflate a sample. Seat, session and source message stay in claim fields, never
+in metric labels.
+
+| Subject suffix | Kind | Fields | Written |
+| --- | --- | --- | --- |
+| `wake/<demand id>` | `residency.wake-demand` | `host`, `demand_at`, source message, suspended incarnation | when the first wake-class message is accepted for the suspension, before admission |
+| same | `residency.resumed` | `host`, `resumed_at`, native session, incarnation | when the exact session is bound and its channel is ready |
+| same | `residency.first-turn` | `host`, `first_turn_at`, turn identity | at the resumed incarnation's first native turn |
+| `outcome/<operation id>` | `residency.outcome` | `host`, `observed_at`, `resume_failed` 0/1, `useless` 0/1, bounded `reason` | on failure or deadline, or 10 minutes after a verified resume |
+| `sleep/<suspension id>` | `residency.sleep-ended` | `host`, `suspended_at`, `ended_at`, `short_sleep` 0/1, `end_class` | when an idle suspension ends; `short_sleep` is 1 below `idle_suspend_after` |
+| `eligibility/<epoch id>` | `residency.eligibility-outcome` | `host`, `eligible_since`, `decided_at`, `refused` 0/1, bounded `reason` | once per eligible epoch that reaches its due time |
+| `unrouted/<incident id>` | `residency.unrouted` | `host`, `observed_at`, `kind` | on terminal attach or explicit resume of an idle-suspended seat with no wake demand |
+| `host/<host>` | `residency.host-sample` | `host`, `observed_at`, `held_silent_age_seconds`, `asleep_seats`, memory deltas with coverage | every 5 minutes on an enabled member; a failed sensor writes no age, never zero |
+
+A fleet declares objectives over these claims with `fractal apply`, one set per enabled member,
+each with an `only "host"` filter so a busy member cannot hide a quiet one. The recommended set
+uses seven-day windows, because one-day windows on a member with few wakes are mostly no-data:
+
+| Objective | Indicator | Target |
+| --- | --- | --- |
+| wake → first turn | `interval` `wake-demand` → `first-turn`; unfinished demand counts as slow | p95 ≤ 120 s, min 20 samples |
+| wake → resumed | `interval` `wake-demand` → `resumed` | p95 ≤ 60 s, min 20 samples |
+| resume failures | `ratio` over `outcome`, bad when `resume_failed` > 0 | < 1%, min 10 |
+| useless wakes | `ratio` over `outcome`, bad when `useless` > 0 | < 10%, min 10 |
+| short sleeps | `ratio` over `sleep-ended` with `end_class` `wake`, bad when `short_sleep` > 0 | < 50%, min 10 |
+| refused epochs | `ratio` over `eligibility-outcome`, bad when `refused` > 0 | < 5%, min 10 |
+| held silent age | `gauge` over `host-sample`, bad above 86,400 s | < 1% of covered time |
+| unrouted activity | `count` over `unrouted` | max 0 per hour |
+
+```kdl
+objective "example/residency-first-turn" {
+  about "Accepted wake demand to the first native turn on one member, unfinished demand included"
+  indicator "interval" {
+    subject-prefix "residency/amber/wake/"
+    start "residency.wake-demand" at="demand_at"
+    stop "residency.first-turn" at="first_turn_at"
+  }
+  window "7d" min-samples=20
+  target "p95" within="120s"
+  on-breach "fault" owner="agent/example/ops" condition="residency-first-turn"
+}
+```
+
+Benefit is not an objective: memory released and asleep seat-hours are measurements on the host
+sample and dashboards. A fault goes to the declared owner, who changes the member's
+`idle_suspend_after` or proposes a change to the wake set; nothing changes the policy automatically.
+Individual stuck resumes still raise their own operation failure; an objective is not the only
+liveness signal.
 
 ## Design questions
 
-- **DQ1 Objective set:** which objectives cover IDLE-R14, their indicators, targets, windows and
-  on-breach owner. Resolved by a replay-calibrated bakeoff of candidate objective formulations.
+- **DQ1 Metric headroom:** O11Y-R14 caps a daemon at 2,000 active series, and existing
+  instruments already claim most of it. The residency instruments need a measured allocation, or
+  existing series reallocated, before they ship.
 - **DQ2 Harness-local timers:** a harness timer or loop that would start a turn without a message
   never fires while the seat is suspended. A 13-day replay of one fleet's claim log found under one
   turn start a day with no message behind it, and every sampled start traced to a message.
