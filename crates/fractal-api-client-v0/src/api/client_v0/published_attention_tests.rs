@@ -540,3 +540,162 @@ async fn after_a_forget_attention_folds_again_only_once_a_window_reads_it() {
     assert_eq!(items.len(), 1);
     state.store.stop_attention_list_refresher();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published_attention_stream_updates_only_the_owner_thread_hint() {
+    use axum::body::to_bytes;
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    use tower::ServiceExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "thread-attention-list");
+    let person = "person/ada";
+    let agent = "agent/garden/reviewer";
+    let origin_thread = "thread/origin";
+    let linked_thread = "thread/linked";
+    let intent = crate::graph::parse_intent(
+        r#"version 2
+agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
+"#,
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "declare-hint-agent").unwrap();
+    state.store.configure_thread_write_rollout([]);
+    let app = crate::api::router(state.clone());
+    let action = |actor: &'static str, action: &'static str, key: &'static str, parameters: Value| {
+        let app = app.clone();
+        let snapshot = new_client_snapshot(&state).id;
+        async move {
+            let body = json!({
+                "api_version": CLIENT_API_VERSION, "id": format!("action/{key}"),
+                "type": action, "idempotency_key": format!("inbox-thread-hint-{key}"),
+                "fence": {"snapshot_id": snapshot}, "parameters": parameters,
+            });
+            let mut request = axum::http::Request::builder()
+                .method("POST").uri("/v1/client/actions")
+                .header(LOCAL_PERSON_HEADER, actor).header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body.to_string())).unwrap();
+            if actor == agent {
+                request.extensions_mut().insert(crate::api::BoundAgent(agent.into()));
+            }
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["value"].clone()
+        }
+    };
+    let ask = action(agent, "work.ask", "ask", json!({
+        "person_id": person, "title": "Review CI", "reason": "Can we proceed?",
+    })).await;
+    let ask = ask["affected_ids"][0].as_str().unwrap();
+    let episode = state.store.newest_claim_for_subject_kind(ask, "work.person-asked")
+        .unwrap().unwrap().id;
+    action(person, "thread.start", "start", json!({
+        "target_id": origin_thread, "agent_id": agent,
+        "origin": {"source_id": ask, "episode": episode}, "title": "Review CI", "content": "Check worker tests.",
+    })).await;
+    let reply = |thread, key| action(agent, "thread.reply", key,
+        json!({"target_id":thread, "content":"Tests passed."}));
+    let first = reply(origin_thread, "first-reply").await;
+    let read = |thread, key, reply: &Value| {
+        let message = &reply["affected_ids"][1];
+        action(person, "thread.read", key, json!({
+            "target_id":thread, "through_message_id":message, "seen_message_ids":[message],
+        }))
+    };
+    crate::store::thread_metadata::apply(
+        &state.store, person, linked_thread, "create-linked-hint-thread",
+        crate::store::thread_metadata::Edit::Create { agent, title: "Other discussion" },
+    ).unwrap();
+    reply(linked_thread, "unlinked-reply").await;
+
+    // Hold one immutable publication. Reply, read, and link must change only its
+    // live owner overlay without another attention fold or publication.
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::refresh_attention_list(&state.store).unwrap();
+    let publication = state.store.newest_attention_list().1.unwrap();
+    let folds = state.store.attention_list_folds();
+    let serving = state.clone();
+    let app = axum::Router::new().route(
+        "/stream",
+        axum::routing::get(move |upgrade: WebSocketUpgrade| {
+            let state = serving.clone();
+            async move {
+                upgrade.on_upgrade(move |socket| {
+                    let windows = collection_windows::Windows::attach(&state.store);
+                    collection_stream_socket_with_reader(
+                        socket, state, ClientSession::local(Some(person)).unwrap(), None,
+                        move |state, session, request, permit| {
+                            let windows = windows.clone();
+                            async move {
+                                collection_items_with_windows(&state, &session, &request, permit, windows).await
+                            }
+                        },
+                    )
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+    socket.send(Message::Text(json!({
+        "kind":"subscribe", "id":"inbox", "collection":"attention", "limit":20,
+        "attention_thread_hints":true,
+    }).to_string().into())).await.unwrap();
+    let first_frame = super::tests::next_data_frame(&mut socket).await;
+    assert_eq!(first_frame["kind"], "snapshot", "{first_frame}");
+    let initial = &first_frame["items"][0];
+    assert_eq!(initial["source_id"], ask, "{first_frame}");
+    assert_eq!(initial["thread_unread"], true, "{first_frame}");
+    assert_eq!(first_frame["items"].as_array().unwrap().len(), 1);
+
+    let owner = ClientSession::local(Some(person)).unwrap();
+    let (_, legacy_rows, _) = window(&state, &owner, None, 20).await.unwrap();
+    assert_eq!(legacy_rows.len(), 1);
+    assert!(legacy_rows[0].get("thread_unread").is_none(), "{legacy_rows:?}");
+    let request: CollectionSubscribe = serde_json::from_value(json!({
+        "kind":"subscribe", "id":"agent", "collection":"attention", "limit":20,
+        "person":person, "attention_thread_hints":true,
+    })).unwrap();
+    let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
+    let (_, agent_rows, _, _) = collection_items(
+        &state, &ClientSession::local(Some(agent)).unwrap(), &request, permit,
+    ).await.unwrap();
+    assert_eq!(agent_rows.len(), 1);
+    assert!(agent_rows[0].get("thread_unread").is_none(), "{agent_rows:?}");
+    let (_, other_rows, _) = window(&state, &ClientSession::local(Some("person/robin")).unwrap(), None, 20).await.unwrap();
+    assert!(other_rows.is_empty());
+
+    let mut expected = initial.clone();
+    expected.as_object_mut().unwrap().remove("thread_unread");
+    read(origin_thread, "first-read", &first).await;
+    let down = super::tests::next_data_frame(&mut socket).await;
+    assert_eq!(down["upserts"], json!([expected]), "{down}");
+    assert_eq!(down["removes"], json!([]), "{down}");
+    assert_eq!(down["order"], first_frame["order"], "{down}");
+    assert_eq!(down["has_more"], first_frame["has_more"], "{down}");
+    let second = reply(origin_thread, "second-reply").await;
+    let up = super::tests::next_data_frame(&mut socket).await;
+    assert_eq!(up["upserts"], json!([initial]), "{up}");
+    assert_eq!(up["order"], first_frame["order"], "{up}");
+    assert_eq!(up["removes"], json!([]), "{up}");
+    read(origin_thread, "second-read", &second).await;
+    let down = super::tests::next_data_frame(&mut socket).await;
+    assert_eq!(down["upserts"], json!([expected]), "{down}");
+    action(agent, "thread.link-ask", "link", json!({
+        "target_id":linked_thread, "ask_id":ask, "ask_episode":episode,
+    })).await;
+    let linked = super::tests::next_data_frame(&mut socket).await;
+    assert_eq!(linked["upserts"], json!([initial]), "{linked}");
+    assert_eq!(linked["order"], first_frame["order"], "{linked}");
+    assert_eq!(linked["removes"], json!([]), "{linked}");
+    assert_eq!(state.store.attention_list_folds(), folds);
+    assert_eq!(state.store.newest_attention_list().1.unwrap().cut, publication.cut);
+    assert_eq!(publication.rows.len(), 1);
+    server.abort();
+}
