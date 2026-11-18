@@ -5863,6 +5863,7 @@ jobs:
               "apps/fractal-web/src/data/nativeDetailsSource.ts",
               "apps/fractal-web/src/data/observedClock.ts",
               "apps/fractal-web/src/data/objectivesSource.ts",
+              "apps/fractal-web/src/data/outbox/**",
               "apps/fractal-web/src/data/pins.ts",
               "apps/fractal-web/src/data/projections.ts",
               "apps/fractal-web/src/data/react.tsx",

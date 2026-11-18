@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refresh generated workflows with browser outbox kit coverage",
+  "replay": {"status": "none", "detail": "Generated CI workflow refresh only; no delivery, retry or replay behavior changes."},
+  "schema": {"status": "none", "detail": "No browser or server schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Generated workflows embed the updated kit change detector for browser outbox modules; no runtime compatibility changes."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes are required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery behavior changes."}
+}
