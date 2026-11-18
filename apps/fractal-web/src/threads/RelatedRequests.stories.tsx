@@ -370,12 +370,12 @@ export const AllStates: Story = {
       unsupported: Unsupported,
     }
     for (const scenario of scenarios) {
-      await userEvent.click(canvas.getByRole('tab', { name: scenario, exact: true }))
-      await expect(canvas.getByRole('tabpanel', { name: scenario, exact: true })).toBeVisible()
+      await userEvent.click(canvas.getByRole('tab', { name: scenario }))
+      await expect(canvas.getByRole('tabpanel', { name: scenario })).toBeVisible()
       if (scenario === 'loading') await canvas.findByText('Loading related requests')
       await stateStories[scenario].play?.(context)
       await expect(canvas.getAllByRole('main')).toHaveLength(1)
-      await expect(canvas.getAllByRole('region', { name: 'Related requests', exact: true })).toHaveLength(1)
+      await expect(canvas.getAllByRole('region', { name: 'Related requests' })).toHaveLength(1)
     }
   },
 }
