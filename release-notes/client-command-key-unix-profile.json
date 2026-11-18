@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Paired command-only clients retain their own P-256 key, support explicit client Unix sockets, and sign purpose-bound device results without message authority.",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "Consumes shared client-result canonical schema."},
+  "rules": {"status": "none", "detail": "No checkpoint rules changed."},
+  "compatibility": {"status": "changed", "detail": "Device profiles can retain P-256 keys for control.commands without a message delegation chain; existing message signing remains unchanged."},
+  "downtime": {"status": "none", "detail": "No activation or restart."},
+  "manual": {"status": "none", "detail": "Source only; pairing and enrollment still require their approvals."},
+  "recovery": {"status": "none", "detail": "Revoke the isolated pairing and revert the source change."}
+}
