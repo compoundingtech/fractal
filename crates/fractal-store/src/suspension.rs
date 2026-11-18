@@ -21,7 +21,10 @@
 //! (`quiescent` and `blocking` on `harness.observed`); core adds only st's own blockers.
 
 use crate::model::ClaimRecord;
-use crate::store::Store;
+use crate::store::{Store, claim_by_id_tx, claims_for_subject_kind_at_tx,
+    desired_lineage_from_at_tx, desired_row_at, same_declared_launch};
+use rusqlite::{Connection, OptionalExtension};
+use smallclaims::store::{claim_from_row, operation_id_for_key};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -440,7 +443,7 @@ pub fn current_at_tx(connection: &Connection, subject: &str, at: Option<u64>) ->
             }) { moved = true; break; }
         }
     }
-    let mut applies = evidence(request, 0)
+    let applies = evidence(request, 0)
         .is_some_and(|token| lineage.iter().any(|item| item == token));
     if !moved && !applies {
         return Ok(None);

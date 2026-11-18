@@ -1,6 +1,7 @@
 //! Owner-writer admission for automatic suspension and wake. Runtime actions remain the
 //! durable authority; preflight evidence is usable only at an unchanged writer frontier.
 use super::*;
+use crate::model::MemberSpec;
 
 const FEATURE: declared_admission::FleetFeature = declared_admission::FleetFeature {
     keys: &["idle_residency"],
@@ -65,20 +66,21 @@ pub fn end_sleep_tx(
     ended_at_unix_ms: u128,
     end_class: &str,
 ) -> Result<(), FractalError> {
-    declared_admission::validate_fleet(transaction, origin, &FEATURE)?;
+    if declared_admission::validate_fleet(transaction, origin, &FEATURE).is_err() { return Ok(()); }
     let operation = suspension.suspend_operation_id.as_deref()
         .unwrap_or(&suspension.operation_id);
-    let key = format!("sleep-ended:{seat}:{operation}");
-    let id = operation_id_for_key(&format!("residency-evidence:{key}"));
+    let key = format!("runtime-residency:sleep:{operation}");
+    let id = operation_id_for_key(operation);
     let subject = format!("residency/{origin}/sleep/{}", id.trim_start_matches("op/"));
-    let short_sleep = suspension
-        .suspended_at_unix_ms
-        .is_some_and(|suspended| ended_at_unix_ms.saturating_sub(suspended) < 300_000)
-        as i64;
+    let threshold: Option<u64> = transaction.query_row(
+        "SELECT json_extract(body,'$.fields.idle_after_ms') FROM claims WHERE id=?1",
+        [operation], |row| row.get(0)).optional().map_err(internal)?.flatten();
+    let short_sleep = suspension.suspended_at_unix_ms.zip(threshold)
+        .is_some_and(|(suspended, threshold)| ended_at_unix_ms.saturating_sub(suspended) < u128::from(threshold)) as i64;
     append_receipt_claim_tx(transaction, origin, &subject, "residency.sleep-ended", None,
         &json!({"fields": {"suspended_at": suspension.suspended_at_unix_ms, "ended_at": ended_at_unix_ms,
             "short_sleep": short_sleep, "end_class": end_class, "host": origin, "seat": seat}}),
-        &[], None, &key)?;
+        &[], None, &key).map_err(internal)?;
     Ok(())
 }
 
@@ -211,7 +213,7 @@ impl Store {
                     "idle_eligible_since_unix_ms":residency.eligible_since_unix_ms,
                     "idle_frontier":frontier_fields(&demand.frontier)}}), &[], None, &key)?;
             Ok(Some(claim.id))
-        })?)
+        }).map_err(anyhow::Error::msg)?)
     }
 
     /// Revalidate the admitted launch and policy at the last reversible stop boundary.
@@ -242,7 +244,7 @@ impl Store {
                 && fields["idle_enabled_at_unix_ms"] == json!(enabled_at)
                 && fields["idle_eligible_since_unix_ms"] == json!(residency.eligible_since_unix_ms)
                 && runtime.is_some_and(|runtime| runtime["status"] == "running" && runtime["incarnation_id"] == fields["incarnation_id"]))
-        })?)
+        }).map_err(anyhow::Error::msg)?)
     }
 
     /// Person demand wins the bounded owner-local wake queue. Failures retain their lineage
@@ -317,7 +319,7 @@ impl Store {
                         "idle_frontier":frontier_fields(&demand.frontier)}}), &[], None, &key)?.id
             };
             Ok(IdleWakeAdmission { operation_id: Some(id), retry_at_unix_ms: None })
-        })?)
+        }).map_err(anyhow::Error::msg)?)
     }
 }
 
@@ -528,7 +530,7 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(receipts.0, 1, "a replayed retire reuses the sleep episode");
         assert_eq!(receipts.1["end_class"], "retire");
-        assert_eq!(receipts.1["short_sleep"], 1);
+        assert_eq!(receipts.1["short_sleep"], 0, "a zero idle threshold cannot have a shorter sleep");
     }
 
     #[test]

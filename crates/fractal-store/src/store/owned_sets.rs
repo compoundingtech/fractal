@@ -2133,7 +2133,14 @@ pub fn commit_tx(
     let now = smallclaims::store::now_ms();
     for (subject, change) in &plan.preview.changes {
         if *change != "retiring" && *change != "retired" { continue; }
-        let Ok(hold) = crate::suspension::current_at_tx(transaction, subject, None) else { continue };
+        let row = super::desired_row_at(transaction, subject, None).map_err(internal)?;
+        let cut = if let Some(row) = row.filter(|row| row.kind != "agent") {
+            let index: u64 = transaction.query_row(
+                "SELECT store_index FROM claims WHERE id=?1", [&row.claim_id], |row| row.get(0))
+                .map_err(internal)?;
+            Some(index.saturating_sub(1))
+        } else { None };
+        let hold = crate::suspension::current_at_tx(transaction, subject, cut).map_err(internal)?;
         if let Some(hold) = hold.filter(|hold| hold.cause() == "idle") {
             let origin = transaction.query_row(
                 "SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1",

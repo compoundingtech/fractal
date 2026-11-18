@@ -11315,7 +11315,7 @@ pub fn desired_lineage_from_tx(
 }
 
 /// `desired_lineage_from_tx` over the claims accepted at or before `at`.
-fn desired_lineage_from_at_tx(
+pub(crate) fn desired_lineage_from_at_tx(
     connection: &Connection,
     mut current: String,
     equivalent: fn(&Value, &Value) -> bool,

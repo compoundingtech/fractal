@@ -7101,7 +7101,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
                     if subject.kind == "stop"
-                        && let Some(hold) = crate::suspension::current(&self.store, &subject.subject)?
+                        && let Some(token) = self.store.selected_desired_token(&subject.subject)?
+                        && let Some(declaration) = self.store.claim_by_id(&token)?
+                        && let Some(hold) = crate::suspension::current_at(&self.store, &subject.subject,
+                            Some(declaration.store_index.saturating_sub(1)))?
                             .filter(|hold| hold.cause() == "idle")
                     {
                         self.idle_residency_evidence.lock()

@@ -302,7 +302,7 @@ mod tests {
         const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
         store.bind_fleet(FLEET).unwrap();
         store.pin_fleet_anchor(key.public()).unwrap();
-        store.set_member_key(Some(key)).unwrap();
+        store.set_member_key(Some(key.clone())).unwrap();
         store.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
         store.append_claim(&ClaimInput {
             subject: "daemon/amber".into(), kind: "daemon.started".into(), actor: None,
@@ -339,3 +339,4 @@ mod tests {
         assert!(!receipt(&store, &subject, "residency.sleep-ended", input, Vec::new(), "gated".into()).unwrap());
         assert!(store.claims_for(&subject, Some("residency.sleep-ended")).unwrap().is_empty());
     }
+}
