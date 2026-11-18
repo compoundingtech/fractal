@@ -400,7 +400,7 @@ fn gauge_lower_limits_are_exclusive_and_native_bindings_inherit_policy() {
 
 #[test]
 fn native_row_reference_grammar_matches_the_typescript_corpus() {
-    let corpus: Value = serde_json::from_str(include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
+    let corpus: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h04cf92495779 owner=fractal_kernel::objective_tests TODO=trace-statement-and-value-representation */ include_str!("../../../fixtures/objective-native-rows.json")).unwrap();
     let binding = |row: &str| {
         one(&format!(
             "objective \"acme/native-owner\" {{\n  about \"Fleet ownership of a built-in row\"\n  indicator \"native\" {{ objective {row:?}; }}\n}}"
