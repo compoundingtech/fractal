@@ -181,7 +181,7 @@ const styles = stylex.create({
   indicator: { display: 'inline-flex', alignItems: 'center', gap: s.xs, whiteSpace: 'nowrap', color: c.fg, fontSize: t.metaSize, lineHeight: t.metaLeading, paddingInline: s.xs },
   bell: { display: 'inline-flex', color: c.primary },
   button: { flexShrink: 0, whiteSpace: 'nowrap', color: c.fgMuted, fontSize: t.metaSize,
-    borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
+    backgroundColor: 'transparent', borderWidth: 0, borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
     ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}` },
     ':disabled': { opacity: 0.5, cursor: 'default' } },
   touch: { minHeight: g.touchTarget },

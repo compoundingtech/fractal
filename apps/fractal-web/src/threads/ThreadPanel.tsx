@@ -212,7 +212,7 @@ const styles = stylex.create({
   readHeader: { position: 'sticky', top: 0, zIndex: 1, backgroundColor: c.canvas },
   readHeadingRow: { display: 'flex', alignItems: 'center', paddingInlineEnd: s.sm },
   readButton: { flexShrink: 0, whiteSpace: 'nowrap', color: c.fgMuted, fontSize: t.metaSize,
-    borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
+    backgroundColor: 'transparent', borderWidth: 0, borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
     ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}` },
     ':disabled': { opacity: 0.5, cursor: 'default' } },
   readTouch: { minHeight: g.touchTarget },
