@@ -702,7 +702,8 @@ mod tests {
             for value in [
                 "1",
                 "0001",
-                "+1",
+                "2e9",
+                "2000000000",
                 "512M",
                 "8G",
                 "8g",
@@ -717,7 +718,7 @@ mod tests {
                 parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}")).unwrap();
             }
             for value in [
-                "", "0", "0G", "00G", "-1", "1.5G", "8GB", "1P", " 1", "1 ", "１G", "G",
+                "", "0", "0G", "00G", "+1", "-1", "1.5G", "8GB", "1P", " 1", "1 ", "１G", "G",
             ] {
                 let error = parse_fields(&format!("declared-budgets {{ {child} \"{value}\"; }}"))
                     .unwrap_err();

@@ -98,6 +98,25 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Custom-shell first work claim (PR #6692)
+
+`fractal_api_core::api::work_incarnation_tests` owns `lv-hc143d361eb67`,
+`lv-h2519c27cb02c`, `lv-hc3b8ab661222`, `lv-h2b140334f07c`,
+`lv-h21aa596bea94` and `lv-hd2266ef36f4b`. These regression-fixture statements
+insert a local start's subject, operation ID, body/result JSON and completion flags,
+then mutate or remove its original request or completion to exercise refusal.
+They keep the existing inline table representation; they introduce no production
+producer. The maintainer retains `bound-or-reference-values-and-reclamation`:
+any future representation must preserve exact request snapshots and refusal tests.
+
+`fractal_seats::store::runtime_starts` owns `lv-hc2a32f40789d`. The dynamic
+canonical-observation selector binds one subject and the maximum position, reads
+one existing claim ID, then loads its existing fields JSON for writer-fenced
+admission. Keeping this selector inline preserves the same newest-observation
+authority as normal reconciliation; `LIMIT 1` does not prove value sizes.
+The maintainer retains `trace-statement-and-value-representation` to trace the
+selected claim ID/body and their existing storage before changing representation.
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds
@@ -799,6 +818,18 @@ The schema TODO is to chunk or reference variable columns and keys; the mutation
 TODO is to bound or reference bodies and account for their cleanup without
 weakening fencing or releasing uncertain execution custody. Neither queue order,
 capacity counts nor the host-local authority proves value sizes.
+
+The same producer owns `lv-h156314ba7532`, reviewed for PR #6665: replacement
+of one historical profile-less installed policy binds its existing host/lane TEXT
+keys and reclaims that policy row inside the admission writer transaction. It
+does not delete membership custody or synthesize a new body; the existing
+`lv-hacf1fd1c6d10` insertion installs the first explicit profile only after member
+limit and coverage are checked. These keys and policy values remain inline to
+preserve the atomic authority transition, not because their encoded size or
+cleanup cost has been proved bounded. The producer's
+`bound-or-reference-values-and-reclamation` obligation includes moving policy
+keys/values to a bounded or referenced representation and carrying this
+transactional replacement and custody preservation into its cleanup path.
 
 ### Composer history source headers
 

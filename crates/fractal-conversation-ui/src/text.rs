@@ -11,6 +11,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+#[path = "ask_markdown.rs"]
+mod ask;
+pub use ask::markdown as ask_markdown;
+
+/// Ask prose with per-cell safe link targets; activation belongs to the caller.
+pub fn ask_markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
+    record_links(base, &[], || ask_markdown(input, width, base, theme))
+}
+
 /// Remove escape sequences, control characters and zero-width marks; expand tabs.
 pub fn sanitize(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
@@ -415,13 +424,17 @@ pub struct DrawnLink {
 /// written out in the text (a document's `doc/...` references): each place one is drawn, on every
 /// row it wraps to, comes back with its whole address too.
 pub fn markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme, references: &[String]) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
+    record_links(base, references, || markdown(input, width, base, theme))
+}
+
+fn record_links(base: Style, references: &[String], render: impl FnOnce() -> Vec<Line<'static>>) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
     // Places are marked as underline colours; a caller's own underline colour could read as one.
     if base.underline_color.is_some() {
-        return (markdown(input, width, base, theme), Vec::new());
+        return (render(), Vec::new());
     }
     let recording = Recording { drawn: Vec::new(), references: references.to_vec() };
     let outer = RECORDING.with(|cell| cell.replace(Some(recording)));
-    let mut lines = markdown(input, width, base, theme);
+    let mut lines = render();
     let recorded = RECORDING.with(|cell| cell.replace(outer)).map(|recording| recording.drawn).unwrap_or_default();
     let mut drawn = Vec::new();
     for (index, line) in lines.iter_mut().enumerate() {

@@ -28,6 +28,7 @@ let
       ../apps/fractal-web/package.json
       ../packages/fractal-sdk/package.json
       ../apps/ios/package.json
+      ../apps/macos/Fractal/design/package.json
       ../clients/typescript/fractal-client/package.json
       ../clients/typescript/fractal-declarations/package.json
       ../clients/typescript/fractal-scenarios/package.json
