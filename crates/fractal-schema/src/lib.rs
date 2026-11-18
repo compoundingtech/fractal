@@ -9,6 +9,7 @@ pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
 pub mod full_value;
+pub mod github_capture;
 pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
@@ -785,6 +786,7 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        github_capture::validate(subject, kind, fields)?;
         private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
@@ -1253,6 +1255,30 @@ fn build_registry() -> Registry {
             "pty/RUN/LOCAL_ID",
             "A mission-run terminal runtime.",
             false,
+        ),
+        (
+            github_capture::FACT_FAMILY,
+            "github-fact/REVISION_DIGEST",
+            "One bounded normalized GitHub entity revision, visible only through a committed capture.",
+            false,
+        ),
+        (
+            github_capture::COMMIT_FAMILY,
+            "github-capture/COMMIT_DIGEST",
+            "A bounded source capture visibility marker and coverage frontier.",
+            false,
+        ),
+        (
+            github_capture::AUTHORITY_FAMILY,
+            "github-source/NAME",
+            "An explicitly configured GitHub source and its fenced acquisition authority.",
+            true,
+        ),
+        (
+            "github-scope",
+            "github-scope/NAME",
+            "An effective-dated versioned repository roster for native GitHub objectives.",
+            true,
         ),
         (
             github_plugin::EVENT_FAMILY,
@@ -2247,6 +2273,42 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("resources"),
             true,
             &["resource"],
+        ),
+        (
+            github_capture::FACT_KIND,
+            &[github_capture::FACT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::COMMIT_KIND,
+            &[github_capture::COMMIT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::FENCED_KIND,
+            &[github_capture::AUTHORITY_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            github_capture::AUTHORITY_KIND,
+            &[github_capture::AUTHORITY_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
         ),
         (
             github_plugin::ITEM_STATE,
@@ -3413,6 +3475,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("oldCommit", required_string()), ("newCommit", required_string()),
         ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
+        github_capture::FACT_KIND | github_capture::COMMIT_KIND | github_capture::AUTHORITY_KIND | github_capture::FENCED_KIND =>
+            &[("record", FieldSpec { required: true, ..object() })],
         github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
         github_plugin::EVENT => github_plugin::event_fields(),
         github_plugin::WORKFLOW_RUN => github_plugin::workflow_run_fields(),
@@ -5397,6 +5461,14 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        for kind in [github_capture::FACT_KIND, github_capture::COMMIT_KIND,
+            github_capture::AUTHORITY_KIND, github_capture::FENCED_KIND] {
+            current.claims.remove(kind).unwrap();
+        }
+        for family in [github_capture::FACT_FAMILY, github_capture::COMMIT_FAMILY,
+            github_capture::AUTHORITY_FAMILY, "github-scope"] {
+            current.subjects.remove(family).unwrap();
+        }
         current.claims.get_mut("operational.failure").unwrap().fields.remove("objective").unwrap();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("resource.exec-receipt").unwrap();

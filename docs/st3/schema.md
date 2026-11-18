@@ -27,8 +27,12 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `file` | `file/HOST:/ABSOLUTE_PATH` | no | A read-only file gate target. |
 | `fleet-invite` | `fleet-invite/ID` | no | A single-use fleet join invite. |
 | `gate-operation` | `gate-operation/IDENTITY` | no | One gate evaluation attempt. |
+| `github-capture` | `github-capture/COMMIT_DIGEST` | no | A bounded source capture visibility marker and coverage frontier. |
 | `github-event` | `github-event/RESOURCE/ITEM/NUMBER/KEY` | no | One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller. |
+| `github-fact` | `github-fact/REVISION_DIGEST` | no | One bounded normalized GitHub entity revision, visible only through a committed capture. |
 | `github-post` | `github-post/OWNER/REPO/KIND/ID` | no | A GitHub comment or review an agent seat posted, by its GitHub ID. |
+| `github-scope` | `github-scope/NAME` | yes | An effective-dated versioned repository roster for native GitHub objectives. |
+| `github-source` | `github-source/NAME` | yes | An explicitly configured GitHub source and its fenced acquisition authority. |
 | `github-workflow-run` | `github-workflow-run/OWNER/REPO/RUN_ID` | no | One completed CI run of a GitHub repository, written once by its repository's poller. |
 | `glass` | `glass/person/NAME/UUID` | no | A private person workspace. |
 | `harness-question` | `harness-question/ID` | no | A question a seat's harness asked natively: question ids and option positions, never text. |
@@ -132,7 +136,11 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `gate.review-verdict` | `gate-operation` | `capability-holder` | `append` | `durable` | `attempt!:integer`, `binding_claim!:string`, `carry_forward_from:string`, `change!:object`, `episode!:integer`, `evidence!:array`, `finding_refs!:array`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `request!:string`, `review_targets!:array`, `reviewed_head!:object`, `reviewer!:subject-reference(agent|person)`, `scope!:object`, `source!:object`, `verdict!:string` | `gate` |
 | `gate.review-withdrawn` | `gate-operation` | `system-only` | `append` | `durable` | `attempt!:integer`, `authorization_evidence!:array`, `binding_claim!:string`, `episode!:integer`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `previous_binding!:string`, `reason!:string`, `request!:string`, `reviewer!:subject-reference(agent|person)`, `verdict!:string`, `withdrawing_actor!:subject-reference(agent|person)` | `gate` |
 | `gate.reviewer-reassigned` | `gate-operation` | `authorized-requester` | `append` | `durable` | `owner:subject-reference`, `previous_reviewer:subject-reference`, `request:string`, `reviewer:subject-reference` | `gate` |
+| `github.capture.authority` | `github-source` | `system-only` | `append` | `durable` | `record!:object` |  |
+| `github.capture.committed` | `github-capture` | `system-only` | `once` | `durable` | `record!:object` |  |
+| `github.capture.fenced` | `github-source` | `system-only` | `append` | `durable` | `record!:object` |  |
 | `github.event` | `github-event` | `system-only` | `once` | `durable` | `at!:string`, `detail:object`, `event!:string`, `head_sha:string`, `item!:subject-reference(resource)`, `observer!:subject-reference(observer)`, `version!:integer` |  |
+| `github.fact.observed` | `github-fact` | `system-only` | `once` | `durable` | `record!:object` |  |
 | `github.posted` | `github-post` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `id!:integer`, `item!:integer`, `kind!:string`, `login:string`, `repository!:string`, `url:string` |  |
 | `github.workflow-run` | `github-workflow-run` | `system-only` | `once` | `durable` | `attempt!:integer`, `completed_at!:string`, `conclusion!:string`, `created_at!:string`, `duration_ms!:integer`, `event!:string`, `flakes!:integer`, `flaky_tests!:integer`, `head_sha!:string`, `observer!:subject-reference(observer)`, `repository!:string`, `run_id!:integer`, `started_at!:string`, `version!:integer`, `workflow!:string` |  |
 | `glass.deleted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `replaced_revision:string` |  |
