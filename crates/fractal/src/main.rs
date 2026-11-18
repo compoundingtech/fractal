@@ -2261,6 +2261,30 @@ const READ_ONLY_PAIRING_SCOPES: &[&str] = &[
     "terminal.read",
 ];
 
+/// CLI mirror of the daemon's person-pairing ceiling; the daemon revalidates the grant.
+const PERSON_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
+    "read.glasses",
+    "control.glasses",
+    "read.arrangements",
+    "control.arrangements",
+    "terminal.read",
+    "control.attention",
+    "control.launches",
+];
+
+fn parse_person_pairing_scope(value: &str) -> std::result::Result<String, String> {
+    if PERSON_PAIRING_SCOPES.contains(&value) {
+        Ok(value.to_owned())
+    } else {
+        Err(format!("person pairing scope `{value}` is not one of the limited pairing scopes: {}", PERSON_PAIRING_SCOPES.join(", ")))
+    }
+}
+
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
 /// Hard maximum grant lifetime.
@@ -2295,6 +2319,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// One exact person-device scope from the limited pairing ceiling; repeat for each scope.
+        /// Nothing is granted implicitly. Use --scope instead for assistant grants.
+        #[arg(long = "person-scope", value_name = "SCOPE", value_parser = parse_person_pairing_scope, conflicts_with_all = ["read_only", "full_control", "assistant"])]
+        person_scopes: Vec<String>,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
@@ -10367,6 +10395,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            person_scopes,
             fabric_gateway,
             gateway,
             assistant: None,
@@ -10386,23 +10415,29 @@ async fn run_devices(
                     );
                 }
             }
-            let response = client
-                .pairing_begin_person(&PersonPairingBegin {
-                    api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name,
-                    person_id: person.clone(),
-                    full_control: full_control.then_some(true),
-                    scopes: read_only.then(|| {
+            let request = PersonPairingBegin {
+                api_version: CLIENT_V0_API_VERSION.into(),
+                device_name,
+                person_id: person.clone(),
+                full_control: full_control.then_some(true),
+                scopes: if person_scopes.is_empty() {
+                    read_only.then(|| {
                         READ_ONLY_PAIRING_SCOPES
                             .iter()
                             .map(|scope| (*scope).to_owned())
                             .collect()
-                    }),
-                    fabric_gateway: fabric_gateway.then_some(true),
-                })
-                .await?;
+                    })
+                } else {
+                    Some(person_scopes)
+                },
+                fabric_gateway: fabric_gateway.then_some(true),
+            };
+            let response = client.pairing_begin_person(&request).await?;
             print_client_value(&response, json_output)?;
             if !json_output {
+                if let Some(scopes) = &request.scopes {
+                    println!("Requested scopes: {}", scopes.join(", "));
+                }
                 if let Some(fingerprint) = &response.value.person_root_fingerprint {
                     println!(
                         "Person-root fingerprint: {fingerprint}\nCopy this separately from the pairing code to the new device's fingerprint field or --fingerprint option."
@@ -10719,6 +10754,7 @@ async fn run_devices_complete(
             },
             path.display()
         );
+        println!("Granted scopes: {}", device.session.scopes.join(", "));
     }
     Ok(())
 }
