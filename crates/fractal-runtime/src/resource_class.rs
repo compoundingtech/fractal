@@ -25,11 +25,12 @@ mod tests {
     #[test]
     fn class_weights_are_strictly_ordered_without_changing_core_quota() {
         let landing = weights(RequestClass::Landing);
+        assert_eq!(weights(RequestClass::Recovery), landing);
         let check = weights(RequestClass::Check);
         let agent = weights(RequestClass::Agent);
         assert!(landing.cpu > check.cpu && check.cpu > agent.cpu);
         assert!(landing.io > check.io && check.io > agent.io);
-        for class in [RequestClass::Landing, RequestClass::Check, RequestClass::Agent] {
+        for class in [RequestClass::Recovery, RequestClass::Landing, RequestClass::Check, RequestClass::Agent] {
             let value = weights(class);
             assert!((1..=10000).contains(&value.cpu));
             assert!((1..=10000).contains(&value.io));

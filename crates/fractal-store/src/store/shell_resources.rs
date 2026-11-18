@@ -444,7 +444,8 @@ mod tests {
             &fractal_runtime::Launch::Argv(vec!["/bin/sh".into(), "-c".into(),
                 "test \"$SECRET\" = shell-environment-security-regression-sentinel && test \"$ST3_START_OPERATION\" = \"$SECRET\"".into()]),
             directory.path(), &environment,
-            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, member_capacity: None, memory_high_bytes: None, require_enforced: false },
+            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, member_capacity: None, memory_high_bytes: None,
+                class: RequestClass::Check, require_enforced: false },
             &|| Ok(())).unwrap();
         assert!(generation.start_operation.is_none());
         let exited = runtime.wait_for_exit("secret", &generation.generation_id).unwrap();
@@ -484,6 +485,7 @@ mod tests {
             execution.result = Some(PayloadResult {
                 head_start: None, head_end: None, clean_start: None, clean_end: None,
                 exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None,
+                evidence: None,
             });
             store.update_shell_resource(&execution).unwrap();
         }
