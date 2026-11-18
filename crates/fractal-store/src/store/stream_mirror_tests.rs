@@ -397,6 +397,20 @@ fn wake_demand_prefers_person_then_canonical_time_and_subject() {
     }
     graph.connection.batched(wake_demand::flush).unwrap().unwrap();
     assert_eq!(graph.wake_demand("agent/cedar").unwrap().oldest.unwrap().subject, "message/person-a");
+    // Independent writers replicate the same send subject at different accepted times.
+    // The later duplicate must not move person-a behind person-z or change its onset.
+    for (origin, at) in [("early-writer", 20), ("later-writer", 200)] {
+        let source = Store::open_memory(origin).unwrap();
+        source.set_write_clock_at(at).unwrap();
+        let mut input = sent("message/person-a", "agent/cedar", &[]);
+        input.actor = Some("external/example".into());
+        input.fields.insert("from".into(), json!("external/example"));
+        source.append_claim(&input).unwrap();
+        glasses_tests_shared_delivery::sync(&source, &graph);
+        let oldest = graph.wake_demand("agent/cedar").unwrap().oldest.unwrap();
+        assert_eq!(oldest.subject, "message/person-a");
+        assert_eq!(oldest.sent_ms, 20);
+    }
     let plan: Vec<String> = graph.readers.get().prepare(
         "EXPLAIN QUERY PLAN SELECT subject,sent_ms,class FROM local_wake_demand_v1
          WHERE recipient=?1 AND pending=1 AND class>0 ORDER BY class DESC,sent_ms,subject LIMIT 1",
