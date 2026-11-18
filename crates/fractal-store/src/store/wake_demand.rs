@@ -8,7 +8,7 @@ const COMPLETE: &str = "local_wake_demand_v1_complete";
 const AFTER: &str = "local_wake_demand_v1_after";
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch("
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3eddd3ad87ca owner=fractal_store::store::wake_demand TODO=chunk-or-reference-variable-columns */ "
         CREATE TABLE IF NOT EXISTS local_wake_demand_v1 (
             subject TEXT PRIMARY KEY, recipient TEXT NOT NULL, class INTEGER NOT NULL,
             sent_ms INTEGER NOT NULL, pending INTEGER NOT NULL
@@ -36,7 +36,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
             "NEW.kind IN ('message.staged','message.delivered','message.read','message.closed')".to_owned()
         };
         let old_condition = condition.replace("NEW.", "OLD.");
-        connection.execute_batch(&format!("
+        connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hc986dc3c5735 owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "
             CREATE TRIGGER IF NOT EXISTS wake_v1_{table}_insert AFTER INSERT ON {table}
             WHEN {condition} BEGIN
                 UPDATE {TABLE} SET pending=0 WHERE subject=NEW.{subject} AND {receipt};
@@ -72,12 +72,12 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
             let transaction = connection.unchecked_transaction()?;
             for subject in &subjects { fold(&transaction, subject)?; }
             after = subjects.last().unwrap().clone();
-            transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![AFTER, after])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h7de6575aa7e5 owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![AFTER, after])?;
             transaction.commit()?;
         }
         let transaction = connection.unchecked_transaction()?;
-        transaction.execute("INSERT OR IGNORE INTO meta(key,value) VALUES(?1,'1')", [COMPLETE])?;
-        transaction.execute("DELETE FROM meta WHERE key=?1", [AFTER])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h9eed8a526c41 owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES(?1,'1')", [COMPLETE])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hcaf12b1aa1c2 owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [AFTER])?;
         transaction.commit()?;
     }
     // Also drain work left by an interrupted projection pass.
@@ -105,7 +105,7 @@ fn fold(connection: &Connection, subject: &str) -> Result<()> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?,
     };
-    connection.execute("DELETE FROM local_wake_demand_v1 WHERE subject=?1", [subject])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h7883dab4ee98 owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_wake_demand_v1 WHERE subject=?1", [subject])?;
     let Some((fields, sent_ms)) = sent else { return Ok(()); };
     let fields: Value = serde_json::from_str(&fields)?;
     let from = fields["from"].as_str().unwrap_or_default();
@@ -115,7 +115,7 @@ fn fold(connection: &Connection, subject: &str) -> Result<()> {
         && !crate::silent::always_wakes(from, &tags);
     let class = if held { 0 } else if from.starts_with("person/") || from.starts_with("external/") { 2 } else { 1 };
     connection.execute(
-        "INSERT INTO local_wake_demand_v1(subject,recipient,class,sent_ms,pending)
+        /* sqlite-large-value: allow-for-now lv-hc920614e4c86 owner=fractal_store::store::wake_demand TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_wake_demand_v1(subject,recipient,class,sent_ms,pending)
          SELECT ?1,?2,?3,?4,NOT (
              EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind IN
                  ('message.staged','message.delivered','message.read','message.closed'))
@@ -136,7 +136,7 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
         if subjects.is_empty() { return Ok(()); }
         for subject in subjects {
             fold(transaction, &subject)?;
-            transaction.execute("DELETE FROM local_wake_demand_pending_v1 WHERE subject=?1", [&subject])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h58fc3f27c31a owner=fractal_store::store::wake_demand TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_wake_demand_pending_v1 WHERE subject=?1", [&subject])?;
         }
     }
 }
