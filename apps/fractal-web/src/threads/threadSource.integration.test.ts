@@ -859,9 +859,9 @@ it.each([false, true])('waits for protected startup before granting thread sends
     registry.set(source.draft('draft/startup'), newer)
     release()
     if (unavailable) {
-      await vi.waitFor(() => expect(registry.get(source.access).failure).toMatchObject({
-        _tag: 'Unavailable', detail: 'Saved messages are unavailable. Retry later.',
-      }))
+      await vi.waitFor(() => expect(registry.get(source.access).sendUnavailable).toBe('Saved messages are unavailable. Retry later.'))
+      expect(registry.get(source.access).read).toBe(true)
+      expect(registry.get(source.access).failure).toBeUndefined()
       expect(registry.get(source.access).actions.size).toBe(0)
     } else {
       await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))

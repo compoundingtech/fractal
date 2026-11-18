@@ -9,6 +9,8 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
+import { createScopedChatOutbox, type ScopedChatOutbox } from '../data/outbox/scoped.ts'
 import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -44,10 +46,11 @@ const live: FeedSyncObservation = { status: { _tag: 'Live', since: 0 }, observed
 type Reply = (url: URL, init: RequestInit | undefined) => Response | Promise<Response>
 
 /** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, `unreachable` fails every request, capabilities included, `agents` is the roster, and `adapt` may replace parts of the mounted thread source. */
-async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation, agents = [], adapt }: {
+async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation, agents = [], adapt, outbox }: {
   readonly actions?: readonly string[]; readonly reply: Reply; readonly capabilities?: () => Response | undefined; readonly unreachable?: () => boolean; readonly conversation?: ConversationPage
   readonly agents?: readonly AgentRow[]
   readonly adapt?: (threads: ThreadSource) => ThreadSource
+  readonly outbox?: (client: FractalClient) => ScopedChatOutbox
 }) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
@@ -75,7 +78,8 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
   } })
   const registry = AtomRegistry.make()
   const gateway = Atom.make<FeedSyncObservation>(live).pipe(Atom.keepAlive)
-  const threads = gatewayThreads(client, registry)
+  const owner = outbox?.(client)
+  const threads = gatewayThreads(client, registry, undefined, undefined, owner)
   const source = { ...fixtureSource({ world: {
     now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents, missions: [], attention: [ask],
     conversations: conversation === undefined ? {} : { [agent]: conversation }, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
@@ -98,6 +102,7 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
     dispose: async () => {
       await act(async () => root.unmount())
       registry.dispose()
+      owner?.close()
       host.remove()
       vi.unstubAllGlobals()
     },
@@ -723,4 +728,63 @@ it.each([['unprotected', true], ['absent', false]] as const)('marks start and re
     }
     expect(view.host.textContent?.includes(notice)).toBe(shown)
   } finally { await view.dispose() }
+})
+
+it.each(['SecurityError', 'blocked upgrade'] as const)('keeps thread list and timeline readable when send storage fails with %s', async failure => {
+  const factory = new IDBFactory()
+  const databaseName = 'thread-read-storage-failure'
+  let held: IDBDatabase | undefined
+  let opening: IDBOpenDBRequest | undefined
+  if (failure === 'blocked upgrade') {
+    held = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = factory.open(databaseName, 1)
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+  }
+  const view = await mount(<LiveAgentThreads agentId={agent} />, {
+    capabilities: () => Response.json({ ...base, value: { ...base.value,
+      issuer: 'person/example', issuer_key: 'issuer-key/storage-read', transport: 'local-web',
+      capabilities: [...base.value.capabilities,
+        { id: 'threads-v1', version: 3, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
+        { id: 'thread.reply', version: 0, state: 'granted' },
+        { id: 'thread.read', version: 0, state: 'granted' }],
+    } }),
+    outbox: client => createScopedChatOutbox(client, { databaseName, indexedDB: {
+      open: name => {
+        if (failure === 'SecurityError') throw new DOMException('Storage disabled', 'SecurityError')
+        opening = factory.open(name, 2)
+        return opening
+      },
+    } }),
+    reply: url => url.pathname.endsWith('/threads') ? page([row('thread/readable', 'Readable thread')])
+      : url.pathname.endsWith('/timeline') ? page([{ kind: 'message', id: 'message/readable', actor_id: agent,
+        content: 'The existing timeline still loads.', accepted_at_unix_ms: 1, thread_quote_id: null }])
+      : Response.json({ ...base, value: row('thread/readable', 'Readable thread') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 1'))
+    await act(async () => view.host.querySelector('summary')?.click())
+    await act(async () => view.host.querySelector<HTMLButtonElement>('[data-thread-panel] button[aria-expanded]')?.click())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The existing timeline still loads.'))
+    expect(view.host.querySelector('[role="status"]')?.textContent).toContain('Saved messages are unavailable. Retry later.')
+    expect(view.host.querySelector('textarea')).toBeNull()
+    await expect(view.threads.reply({ target_id: 'thread/readable', content: 'Do not submit' })).resolves.toMatchObject({
+      _tag: 'Refused', detail: 'Saved messages are unavailable. Retry later.',
+    })
+    expect(view.requests.some(url => url.pathname.endsWith('/actions'))).toBe(false)
+    expect(view.host.textContent).not.toContain('Fractal could not load threads.')
+  } finally {
+    await view.dispose()
+    if (held !== undefined) {
+      const finished = new Promise<void>((resolve, reject) => {
+        if (opening === undefined) return resolve()
+        opening.addEventListener('success', () => resolve(), { once: true })
+        opening.addEventListener('error', () => reject(opening?.error), { once: true })
+      })
+      held.close()
+      await finished
+    }
+  }
 })

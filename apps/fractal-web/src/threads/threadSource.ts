@@ -68,6 +68,8 @@ type ThreadAccess = {
   readonly actions: ReadonlySet<string>
   readonly actor?: string
   readonly protection?: 'durable' | 'unprotected'
+  /** Local send storage is unavailable; successful read grants remain authoritative. */
+  readonly sendUnavailable?: string
   /** Fractal has not answered which thread operations this connection holds, because the path to it is lost: `read: false` is a default, not a refusal. */
   readonly unknown?: true
   /** The capabilities read completed and failed: a refused credential, or a broken answer (an HTTP error or one that does not decode). */
@@ -142,7 +144,7 @@ const logReadFailure = (message: string, error: unknown) => Effect.runSync(Effec
 }))
 const sameAccess = (a: ThreadAccess, b: ThreadAccess) => a.failure === undefined && b.failure === undefined
   && a.read === b.read && a.inboxOrigins === b.inboxOrigins && a.upgradeRequired === b.upgradeRequired
-  && a.unknown === b.unknown && a.actor === b.actor && a.protection === b.protection && a.actions.size === b.actions.size && [...b.actions].every(action => a.actions.has(action))
+  && a.sendUnavailable === b.sendUnavailable && a.unknown === b.unknown && a.actor === b.actor && a.protection === b.protection && a.actions.size === b.actions.size && [...b.actions].every(action => a.actions.has(action))
 
 /** `transportLive`, when given, re-reads access each time the gateway connection is live again, as grants do. */
 export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches, transportLive?: Atom.Atom<boolean>, outbox: ScopedChatOutbox = createScopedChatOutbox(client)): ThreadSource {
@@ -157,13 +159,9 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     get.addFinalizer(() => abort.abort())
     void client.capabilities({ signal: abort.signal }).then(async response => {
       const caps = outbox.observe(response)
+      let sendUnavailable: string | undefined
       try { await outbox.initialize(response) }
-      catch {
-        if (!abort.signal.aborted) get.setSelf(observedAccess = {
-          ...noAccess, failure: unavailable({ reason: 'failed', detail: 'Saved messages are unavailable. Retry later.' }),
-        })
-        return
-      }
+      catch { sendUnavailable = 'Saved messages are unavailable. Retry later.' }
       const upgradeRequired = ([['threads-v1', threadProtocolVersion], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
       const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= threadProtocolVersion && capability.state === 'granted')
       const read = inboxOrigins && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')
@@ -172,8 +170,10 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         const actions = new Set(read ? caps.capabilities.filter(capability =>
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
+          && (sendUnavailable === undefined || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        const answered = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor, protection: outbox.protection() }
+        const answered = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor, protection: outbox.protection(),
+          ...(sendUnavailable === undefined ? {} : { sendUnavailable }) }
         // An unchanged answer keeps its identity, so reading access again does not read every thread projection twice.
         if (observedAccess === undefined || !sameAccess(observedAccess, answered)) observedAccess = answered
         get.setSelf(observedAccess)
@@ -538,7 +538,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     if (previous !== undefined && previous.actor !== grant.actor) return Promise.resolve(reject('Return to the original account to inspect or retry this thread action.'))
     if (previous?.pending !== undefined) return previous.pending
     if (previous?.deliveryState === 'unconfirmed') return Promise.resolve(reject('Fractal has not confirmed this action. Do not send it again.'))
-    if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
+    if (!grant.actions.has(kind)) return Promise.resolve(reject(grant.sendUnavailable ?? 'This connection cannot perform that thread action.'))
     const key = previous?.key ?? crypto.randomUUID()
     const input: ThreadOutboxInput = previous?.threadInput ?? ('target_id' in intent
       ? { key, type: 'thread.reply', parameters: intent }

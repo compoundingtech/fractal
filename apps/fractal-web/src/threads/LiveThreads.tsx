@@ -689,6 +689,7 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
   readonly timelineRef: React.Ref<HTMLDivElement>
 }) {
   const [, setDraft] = useAtom(source.draft(thread.id))
+  const { sendUnavailable } = useAtomValue(source.access)
   const gatewayLive = useGatewayLive()
   const input = React.useRef<HTMLTextAreaElement>(null)
   const didFocus = React.useRef(false)
@@ -706,7 +707,7 @@ function ThreadConversation({ source, thread, agentName, canReply, observed, foc
   } : undefined
   return <>
     <div ref={timelineRef}><ThreadTimeline source={source} threadId={thread.id} agentId={thread.agent_id} agentName={agentName} onQuote={quote} /></div>
-    {!canReply ? <p {...stylex.props(styles.note)}>{readOnlyThread}</p> : !editable ? null : <>
+    {!canReply ? <p role="status" {...stylex.props(styles.note)}>{sendUnavailable ?? readOnlyThread}</p> : !editable ? null : <>
       {/* Replying never changes the lifecycle; only Reopen does. */}
       {thread.state === 'closed' ? <p {...stylex.props(styles.note)}>This thread is closed. Replying won’t reopen it.</p> : null}
       <UnprotectedNotice source={source} />
