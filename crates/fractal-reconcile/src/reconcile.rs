@@ -85,6 +85,7 @@ mod schedule_replication_block;
 pub mod member_admission;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
+pub use crate::config::{IdleResidencyPolicy, IdleResidencySettings};
 
 /// Register the reconciler's daemon metrics with the meter provider `otel` installed.
 pub fn init_metrics() {
@@ -1521,6 +1522,8 @@ pub struct Reconciler<R = NativeRuntime> {
     start_stage_finished_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
+    /// Off-by-default residency diagnostics; never author a suspension here.
+    idle_residency: Mutex<IdleResidencyPolicy>,
     /// When stalls of runs that name no reporter were last turned on, or `None` while off; see
     /// `run_report`.
     default_stall_reports_since: Mutex<Option<u128>>,
@@ -1800,6 +1803,7 @@ impl Reconciler<NativeRuntime> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
+            idle_residency: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -2034,6 +2038,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
+            idle_residency: Mutex::default(),
             default_stall_reports_since: Mutex::new(Some(now_ms())),
             #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
@@ -6510,6 +6515,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 smallclaims::touched::note_due(due);
             }
         }
+        self.evaluate_idle_residency(agent, now)?;
 
         if !harness.as_ref().is_some_and(CurrentHarnessView::is_ready) {
             return Ok(());
