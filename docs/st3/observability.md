@@ -934,6 +934,25 @@ evidence, not a runtime measurement. Before activation, the decision owner must
 approve a revised budget or a lossless dimension policy: never truncate agents,
 silently use SDK overflow, or discard counts to meet a budget.
 
+### Inert residency host sensors
+
+`fractal_telemetry::residency_host_sample` provides an explicit default-off
+sampling gate, not a daemon timer or claim writer. Its caller supplies the
+snapshot-consistent asleep-seat count and process set. On Linux it reads
+`/proc/meminfo` `MemAvailable` and each process's `smaps_rollup` private clean,
+dirty and huge-page bytes. These are not RSS sums. Missing/malformed files,
+incomplete process sets and unsupported platforms (including macOS) produce
+absent measurements, never zero. A real measured zero remains valid.
+Paired deltas use host available after minus before, and private before minus
+after; both endpoints are required and coverage is complete, partial or unavailable.
+
+The held-silent input interface distinguishes unavailable coverage from a
+caught-up projection cut with an optional oldest accepted timestamp. Empty or
+lagging coverage emits no age. The wake-demand reader in #6726 does not expose
+held-silent selection yet: **the store adapter and active host-sample producer
+are intentionally absent**, not stubbed. Integration must select held silent
+mail at the same proven frontier before enabling the five-minute host samples.
+
 ### Signal gaps and implementation boundary
 
 This source assessment is pinned to `bb31fd6fc90dddcf8fbabb39c315510ba1a0d993`.
