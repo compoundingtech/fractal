@@ -25,7 +25,7 @@ pub(super) fn row(store: &Store, state_dir: &Path, objective: &Objective, declar
         let end = if config.as_of_watermark { now.min(frontier) } else { now };
         let start = measurement::history_start(end, &config.timezone)?;
         let view_id = format!("{}:{}", config.timezone, config.as_of_watermark);
-        let snapshot = crate::reconcile::github_capture::measurement_snapshot(store, state_dir, &config.source, &config.roster, start, end, &view_id, required)?
+        let snapshot = crate::reconcile::github_capture::measurement_snapshot(store, state_dir, &config.source, &config.roster, start..end, &view_id, required)?
             .ok_or_else(|| anyhow::anyhow!("source or roster projection is unavailable or completing a bounded snapshot page"))?;
         let projection = &snapshot.projection;
         if config.as_of_watermark && projection.frontier_ms < snapshot.end_ms {

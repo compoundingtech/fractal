@@ -348,7 +348,8 @@ pub fn measurement_frontier(store: &Store, state_dir: &Path, source_id: &str, ro
 /// Each retry advances a bounded keyset page. Pending reads pin a SQLite read transaction,
 /// revision and bounds, so regular acquisition and a moving Now cut cannot starve completion.
 /// A completed read reports its actual cut; subsequent requests refresh newer revisions.
-pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, roster_id: &str, start_ms: u64, end_ms: u64, view_id: &str, required: &[FactFamily]) -> Result<Option<MeasurementSnapshot>> {
+pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, roster_id: &str, window: std::ops::Range<u64>, view_id: &str, required: &[FactFamily]) -> Result<Option<MeasurementSnapshot>> {
+    let std::ops::Range { start: start_ms, end: end_ms } = window;
     let (Some(definition), Some(roster)) = (selected_source(store, source_id)?, selected_roster(store, roster_id)?) else { return Ok(None) };
     let plugin = GithubPluginStore::shared(state_dir)?;
     let mut connection = plugin.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

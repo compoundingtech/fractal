@@ -134,16 +134,15 @@ fn the_fractal_ci_objectives_are_declarable_over_workflow_run_claims() {
     );
     assert!(objectives.iter().all(Objective::declarable));
     let run = |at: &str| Event { kind: "github.workflow-run".into(), at: Some(at.into()) };
-    for (objective, start, event) in [(&objectives[0], "started_at", "pull_request")] {
-        let Indicator::Interval(interval) = &objective.indicator else { panic!("{} is an interval", objective.name) };
-        assert_eq!(interval.subject_prefix, "github-workflow-run/compoundingtech/fractal/");
-        assert_eq!((&interval.start, &interval.stop), (&run(start), &(run("completed_at"), None)));
-        assert_eq!(interval.kinds(), ["github.workflow-run"]);
-        assert_eq!(
-            interval.only,
-            [only("workflow", &["Workspace CI"]), only("event", &[event]), only("conclusion", &["success"]), only("attempt", &["1"])]
-        );
-    }
+    let objective = &objectives[0];
+    let Indicator::Interval(interval) = &objective.indicator else { panic!("{} is an interval", objective.name) };
+    assert_eq!(interval.subject_prefix, "github-workflow-run/compoundingtech/fractal/");
+    assert_eq!((&interval.start, &interval.stop), (&run("started_at"), &(run("completed_at"), None)));
+    assert_eq!(interval.kinds(), ["github.workflow-run"]);
+    assert_eq!(
+        interval.only,
+        [only("workflow", &["Workspace CI"]), only("event", &["pull_request"]), only("conclusion", &["success"]), only("attempt", &["1"])]
+    );
     let Indicator::Count(count) = &objectives[1].indicator else { panic!("flakes is a count") };
     assert_eq!((count.event.as_str(), count.at.as_str()), ("github.workflow-run", "completed_at"));
     assert_eq!(count.only, [only("workflow", &["Workspace CI"])]);
