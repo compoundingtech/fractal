@@ -1032,6 +1032,39 @@ objective "example/latency" {
 }
 
 #[test]
+fn domain_rows_compose_with_native_ownership_and_preserve_unknown_episodes() {
+    for status in ["burning", "exhausted", "missed"] {
+        let store = store_with(r#"version 2
+objective "example/delivery" {
+  about "Delivery measurement owner"
+  indicator "native" { objective "delivery/merged"; }
+  on-breach "fault" owner="agent/other.ops" condition="delivery-throughput"
+}
+"#);
+        with_owner(&store, "other");
+        let source = json!({
+            "id": "delivery/merged", "kind": "objective", "about": "Committed GitHub merges",
+            "target": "7 merges per hour", "current": "3 merges", "window": "rolling 1h",
+            "remaining_percent": 0.0, "status": status, "explain": "Complete effective-roster coverage",
+            "measurement": {"rolling_hour": {"complete": true, "merged_count": 3}},
+        });
+        let evaluated = crate::api::slo_rows(&store, vec![source.clone()]).unwrap();
+        let owned = evaluated.iter().find(|row| row["id"] == "example/delivery").unwrap();
+        assert_eq!(owned["status"], status);
+        assert_eq!(owned["measurement"], source["measurement"]);
+        assert_eq!(check(&store, &evaluated).unwrap().opened, 1);
+        let unknown = crate::api::slo_rows(&store, Vec::new()).unwrap();
+        assert_eq!(unknown.iter().find(|row| row["id"] == "example/delivery").unwrap()["status"], "no-data");
+        assert_eq!(check(&store, &unknown).unwrap().recovered, 0);
+        assert!(store.operational_failure("slo-objective/node/example/delivery").unwrap().is_some());
+        let mut recovered = source;
+        recovered["status"] = json!("met");
+        let evaluated = crate::api::slo_rows(&store, vec![recovered]).unwrap();
+        assert_eq!(check(&store, &evaluated).unwrap().recovered, 1);
+    }
+}
+
+#[test]
 fn known_ratio_source_without_recent_events_is_not_missing_source_data() {
     let store = store_with(&numeric_declaration("ratio", ""));
     assert_eq!(evaluate(&store)["example/quality"]["status"], "no-data");

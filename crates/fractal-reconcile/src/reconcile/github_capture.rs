@@ -324,26 +324,32 @@ fn coverage(connection: &Connection, source: &str, roster: &Roster) -> Result<Ve
     Ok(result)
 }
 
-pub fn measurement_frontier(store: &Store, state_dir: &Path, source_id: &str, roster_id: &str) -> Result<Option<u64>> {
+/// Finite evidence horizon, not a completeness verdict. Missing required coverage
+/// remains visible to each measurement window instead of erasing covered history.
+fn measurement_horizon(records: &[Coverage], roster: &Roster, required: &[FactFamily]) -> Option<u64> {
+    records.iter().filter(|record| required.contains(&record.family)
+        && record.complete && record.authoritative && record.error.is_none())
+        .flat_map(|record| roster.members.iter().filter_map(move |member| {
+            let end = record.through_ms.min(member.effective_until_ms.unwrap_or(u64::MAX));
+            (member.repository_id == record.repository_id
+                && end > record.history_from_ms.max(member.effective_from_ms)).then_some(end)
+        })).max()
+}
+
+pub fn measurement_frontier(store: &Store, state_dir: &Path, source_id: &str, roster_id: &str, required: &[FactFamily]) -> Result<Option<u64>> {
     let (Some(definition), Some(roster)) = (selected_source(store, source_id)?, selected_roster(store, roster_id)?) else { return Ok(None) };
     let plugin = GithubPluginStore::shared(state_dir)?;
     let mut connection = plugin.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !ready(store, &mut connection, &definition)? { return Ok(None); }
     let records = coverage(&connection, &projection_key(&definition)?, &roster)?;
-    let mut frontier = None;
-    for member in &roster.members {
-        for kind in [FactFamily::PullRequest,FactFamily::Lifecycle,FactFamily::Merge] {
-            let Some(record) = records.iter().find(|record| record.repository_id == member.repository_id && record.family == kind && record.complete && record.authoritative && record.error.is_none()) else { return Ok(None) };
-            frontier = Some(frontier.map_or(record.through_ms, |value: u64| value.min(record.through_ms)));
-        }
-    }
-    Ok(frontier)
+    Ok(measurement_horizon(&records, &roster, required))
 }
 
 /// Each retry advances a bounded keyset page. Pending reads pin a SQLite read transaction,
 /// revision and bounds, so regular acquisition and a moving Now cut cannot starve completion.
 /// A completed read reports its actual cut; subsequent requests refresh newer revisions.
-pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, roster_id: &str, start_ms: u64, end_ms: u64, view_id: &str) -> Result<Option<MeasurementSnapshot>> {
+pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, roster_id: &str, window: std::ops::Range<u64>, view_id: &str, required: &[FactFamily]) -> Result<Option<MeasurementSnapshot>> {
+    let std::ops::Range { start: start_ms, end: end_ms } = window;
     let (Some(definition), Some(roster)) = (selected_source(store, source_id)?, selected_roster(store, roster_id)?) else { return Ok(None) };
     let plugin = GithubPluginStore::shared(state_dir)?;
     let mut connection = plugin.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -353,7 +359,7 @@ pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, ro
     let Some(head) = head else { return Ok(None) };
     // Independent view definitions (civil timezone and Now/watermark cut) must not consume
     // each other's differently bounded reads. The caller supplies that stable view identity.
-    let cache_key = (state_dir.to_path_buf(), source.clone(), serde_json::to_string(&roster)?, view_id.to_owned());
+    let cache_key = (state_dir.to_path_buf(), source.clone(), serde_json::to_string(&roster)?, format!("{view_id}:{required:?}"));
     let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(snapshot) = snapshots.complete.get(&cache_key) {
         if snapshot.projection.revision == head && snapshot.start_ms == start_ms && snapshot.end_ms == end_ms {
@@ -363,7 +369,7 @@ pub fn measurement_snapshot(store: &Store, state_dir: &Path, source_id: &str, ro
     }
     if !snapshots.building.contains_key(&cache_key) {
         let records = coverage(&connection, &source, &roster)?;
-        let frontier_ms = records.iter().filter(|record| record.complete && record.authoritative && record.error.is_none()).map(|record| record.through_ms).min().unwrap_or(0);
+        let frontier_ms = measurement_horizon(&records, &roster, required).unwrap_or(0);
         let projection = Projection { source: definition.source,revision:head,frontier_ms,roster,pull_requests:Vec::new(),lifecycle:Vec::new(),merges:Vec::new(),coverage:records,ready_cycles:BTreeMap::new() };
         // Keep a bounded number of independent requests, rather than an unbounded query cache.
         if snapshots.building.len() + snapshots.complete.len() >= 8 {
