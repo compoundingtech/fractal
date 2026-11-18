@@ -47,6 +47,33 @@ only devices presenting a real signing public key enroll one. Devices can be
 revoked through the existing device revocation action, and a browser can revoke
 its own grant through `POST /v1/client/pairing/browser-requests/revoke-current`.
 
+### Idle residency policy
+
+The daemon accepts these optional settings in its local configuration:
+
+```toml
+[reconcile]
+idle_suspend_after = "off"
+idle_resume_concurrency = 2
+```
+
+`idle_suspend_after` defaults to `"off"`. A configured duration, such as `"30m"`,
+must be at least one minute; supported units are `s`, `m`, `h`, and `d`.
+`idle_resume_concurrency` defaults to `2` and must be a positive integer,
+including when the threshold is off.
+
+**This release evaluates idle residency for diagnostics only.** Setting a
+threshold does not suspend seats or automatically resume suspended seats. The
+threshold and concurrency limit configure the policy without activating an
+automatic suspension producer.
+
+Both settings reload with the daemon policies on the existing two-minute loop;
+no daemon restart is needed. Missing, unreadable, malformed, or invalid
+configuration keeps the last valid policies. Removing these settings restores
+the defaults on the next valid reload. Older binaries reject the new keys, so
+remove them before downgrading a configuration reader.
+
+
 ## KDL documents
 
 Every declaration file starts with `version 2`. Declarations follow directly:
