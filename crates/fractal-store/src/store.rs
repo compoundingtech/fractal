@@ -256,6 +256,7 @@ use smallclaims::windows::holds;
 
 pub mod accounts;
 pub mod declared_objectives;
+mod github_capture_config;
 pub mod objective_series;
 pub mod runtime_starts;
 pub mod runtime_cleanup;

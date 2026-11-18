@@ -98,6 +98,42 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### GitHub capture rebuildable projection
+
+The `fractal_reconcile::reconcile::github_capture` maintainer owns the
+`capture_v1_*` cache schema (`lv-h6b101dd45bbc`), including serialized claim,
+fact, coverage and checkpoint records and the source, repository, entity,
+authority and claim identifiers used in columns and index expressions.
+These remain inline in a rebuildable plugin projection; authoritative claims
+are unchanged. The schema TODO requires bounded physical units or references
+for variable columns **and index keys**, preserving replay and lookup semantics.
+
+The same maintainer owns ingestion (`lv-h8b8be878a0a1`), conflict insertion and
+reclamation (`lv-hd1bc48ebaa1b`, `lv-h0fde81c700c9`), cursor publication
+(`lv-h822e800d8a42`), authority-scoped heads (`lv-h6a2ba291f8fd`,
+`lv-hbd54d59b8187`), fact images (`lv-hdf91a9ae9fee`), coverage
+(`lv-h0e8f2194bce1`), checkpoints (`lv-hf86388bd4ff5`), receipts
+(`lv-h4ed2b30a6d8e`) and history (`lv-hd74cfac88e82`). Their TODOs retain
+debt for complete encoded value/key and cleanup costs; checkpoint preparation,
+publication and reclamation must preserve the exact committed generation.
+Row/page bounds do not establish encoded-byte or statement-cost bounds.
+
+`lv-h5234cc786356` is the conservative unresolved-sink registration for the
+literal `BEGIN DEFERRED` that pins a read-only WAL snapshot, not a payload
+write. Its tracing TODO must retain the pinned-reader lifetime and coherent
+paged measurement semantics when resolving the physical representation.
+
+The `fractal_reconcile::reconcile::github_capture_tests` maintainer owns
+fixture claim/conflict inserts (`lv-h4237074c7d77`, `lv-h5478e08a3895`) and
+the corresponding pinned-reader statement (`lv-hc21aef8d0305`). The
+`fractal_reconcile::reconcile::github_capture_writer_tests` maintainer owns
+checkpoint and coverage abort triggers (`lv-h3c8316ee30c4`,
+`lv-h3fc1c5936921`). These use generic fixture records and literal trigger
+messages to prove replay, conflict detection, snapshot coherence and crash
+recovery. Representation changes must retain those assertions and trace their
+keys/records back to the production projection; the fixtures are not a
+permanent size exemption.
+
 ### Person cancellation projection repair (PR #6672)
 
 The `fractal_store::store` maintainer owns `lv-h7f69e83e8327`, the literal

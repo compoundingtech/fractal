@@ -23608,6 +23608,54 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
     }
 
+    /// Capture replaces only the durable merge writer. Historical merged baselines stay
+    /// silent; live mirror transitions remain visible and unrelated events still replicate.
+    #[test]
+    fn capture_retires_only_configured_durable_merge_events() {
+        for (enabled, repository, canonical) in [
+            (Some(true), "ACME/GARDEN", true),
+            (Some(false), "acme/garden", false),
+            (Some(true), "acme/other", false),
+            (None, "acme/garden", false),
+        ] {
+            let store = Store::open_memory("node").unwrap();
+            if let Some(enabled) = enabled {
+                apply_source(&store, &format!(r#"version 2
+github-source "public-capture" {{
+  host "github.com"; generation 1; authority-grant "grant-one"
+  repository "{repository}"; enabled #{enabled}; checkpoint-every-ms 60000; replicate-private #false
+}}"#), "capture-event-ownership");
+            }
+            let plugin = github_plugin_store::GithubPluginStore::memory();
+            let spec = crate::model::ObserverSpec {
+                resource: "resource/github/acme/garden".into(),
+                provider: "github.repository".into(), locator: "acme/garden".into(),
+                fields: Vec::new(), every_ms: None, stopped: false,
+            };
+            let item = |number, state: &str, merged| crate::model::RecordedItem {
+                subject: format!("{}/pull-request/{number}", spec.resource),
+                kind: "vcs.pull-request".into(),
+                facts: serde_json::json!({"number": number, "state": state, "merged": merged}),
+                claim: format!("claim-{number}"),
+            };
+            let observer = "observer/github/acme/garden";
+            let baseline = [item(7, "open", false), item(8, "closed", true), item(9, "open", false)];
+            mirror_observation(&store, &plugin, observer, &spec, None, Some("c1"), &baseline);
+            assert!(plugin.events(&spec.resource, None, 10).unwrap().is_empty(), "history is not live");
+            assert!(store.github_events(&spec.resource, None, 10).unwrap().is_empty());
+            let changed = [item(7, "closed", true), item(8, "closed", true), item(9, "closed", false)];
+            mirror_observation(&store, &plugin, observer, &spec, Some("c1"), Some("c2"), &changed);
+            let live = plugin.events(&spec.resource, Some(7), 10).unwrap();
+            assert_eq!(live.len(), 1, "the live merge remains in the operational mirror");
+            assert_eq!(live[0]["event"], "merged");
+            assert_eq!(store.github_events(&spec.resource, Some(7), 10).unwrap().len(), usize::from(!canonical));
+            assert_eq!(store.github_events(&spec.resource, Some(9), 10).unwrap()[0]["event"], "closed");
+            mirror_observation(&store, &plugin, observer, &spec, Some("c2"), Some("c3"), &changed);
+            assert_eq!(plugin.events(&spec.resource, Some(7), 10).unwrap().len(), 1, "no repeated merge");
+            assert!(plugin.events(&spec.resource, Some(8), 10).unwrap().is_empty(), "backfill never emits");
+        }
+    }
+
     /// In compact mode a poller records a change confined to compact facts as `vcs.item.state`
     /// alone, and each derived event as one `github.event` claim. A change to a fact a wake or
     /// a delivery reads, such as a new comment, still writes a full snapshot, so when polling

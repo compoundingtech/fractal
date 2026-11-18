@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v35.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v36.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -225,6 +225,42 @@ fn the_corpus_generates_valid_attention_control_inputs() {
     let expected = world.nodes[0].store.attention_controls(&keys).unwrap();
     assert!(!expected.is_empty());
     assert_eq!(world.oracle.attention_controls(&keys).unwrap(), expected);
+}
+
+#[test]
+fn the_corpus_generates_valid_native_capture_inputs() {
+    use fractal_schema::github_capture::*;
+    let mut world = World::new(1, Sabotage::None);
+    let mut written = BTreeMap::new();
+    for kind in [AUTHORITY_KIND, FACT_KIND, COMMIT_KIND, COMMIT_KIND, FENCED_KIND] {
+        let spec = &corpus()[kind];
+        assert_eq!(
+            serde_json::to_value(spec).unwrap(),
+            serde_json::to_value(&fractal_schema::registry().claims[kind]).unwrap(),
+            "{kind} must exercise the current capture record"
+        );
+        let input = world.claim_of(spec, 0).expect("generate native capture input");
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        let claim = world.nodes[0].store.append_claim(&input).unwrap();
+        if kind == COMMIT_KIND {
+            let commit: CaptureCommit = serde_json::from_value(input.fields["record"].clone()).unwrap();
+            assert_eq!(commit.authority_grant, written[AUTHORITY_KIND]);
+            assert_eq!(commit.facts[0].claim_id, written[FACT_KIND]);
+            assert_eq!(commit.predecessor.as_ref(), written.get(COMMIT_KIND));
+            assert_eq!(commit.sequence, if written.contains_key(COMMIT_KIND) { 2 } else { 1 });
+        } else if kind == FENCED_KIND {
+            let receipt: FenceReceipt = serde_json::from_value(input.fields["record"].clone()).unwrap();
+            assert_eq!(receipt.authority_grant, written[AUTHORITY_KIND]);
+            assert_eq!(receipt.final_commit.as_ref(), written.get(COMMIT_KIND));
+        }
+        written.insert(kind, claim.id);
+        world.tap(0);
+    }
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let replicated = claims(&world.oracle);
+    for id in written.values() {
+        assert!(replicated.contains_key(id), "capture claim {id} must replicate");
+    }
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -1104,6 +1140,12 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if matches!(spec.kind.as_str(), fractal_schema::github_capture::FACT_KIND
+            | fractal_schema::github_capture::COMMIT_KIND | fractal_schema::github_capture::AUTHORITY_KIND
+            | fractal_schema::github_capture::FENCED_KIND)
+        {
+            return self.capture_claim(&spec.kind, index);
+        }
         if matches!(spec.kind.as_str(), fractal_schema::effects::KIND_INTENDED
             | fractal_schema::effects::KIND_IN_FLIGHT | fractal_schema::effects::KIND_CONFIRMED
             | fractal_schema::effects::KIND_UNRESOLVED)
@@ -1291,6 +1333,95 @@ impl World {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(self.fresh("any")),
+        })
+    }
+
+    /// Capture records bind their subjects to encoded content and commits to actual admitted
+    /// authority/fact claims. Dependencies may arrive in any replication order.
+    fn capture_claim(&mut self, kind: &str, index: usize) -> Option<ClaimInput> {
+        use fractal_schema::github_capture::*;
+        let source = Source {
+            host: "github.com".into(),
+            id: format!("convergence-{}", self.nodes[index].name),
+            generation: 1,
+        };
+        let source_subject = format!("{AUTHORITY_FAMILY}/{}", source.id);
+        let held = claims(&self.nodes[index].store);
+        let records = |wanted: &str| {
+            held.values().filter(|claim| {
+                claim.kind == wanted
+                    && claim.body.get("record").is_some_and(|record| record["source"] == json!(source))
+            }).collect::<Vec<_>>()
+        };
+        let grants = records(AUTHORITY_KIND);
+        let commits = records(COMMIT_KIND);
+        let previous = commits.iter().max_by_key(|claim| {
+            claim.body["record"]["sequence"].as_u64().expect("generated capture sequence")
+        });
+        let now = u64::try_from(self.now()).expect("positive simulation clock");
+        let (subject, record) = match kind {
+            AUTHORITY_KIND => {
+                let grant = AuthorityGrant {
+                    version: VERSION, source: source.clone(), member: self.nodes[index].name.clone(),
+                    epoch: 1, predecessor_grant: None, final_predecessor_commit: None, fencing_receipt: None,
+                };
+                (source_subject, serde_json::to_value(grant).unwrap())
+            }
+            FACT_KIND => {
+                let fact = ObservedFact {
+                    version: VERSION, source: source.clone(), observed_at_ms: now, supersedes: None,
+                    fact: FactImage::Repository(RepositoryFact {
+                        id: self.fresh("repository"), locator: "acme/convergence".into(), is_private: false,
+                    }),
+                };
+                (fact.subject().unwrap(), serde_json::to_value(fact).unwrap())
+            }
+            COMMIT_KIND => {
+                if !records(FENCED_KIND).is_empty() {
+                    return None;
+                }
+                let grant = grants.first()?;
+                let facts = records(FACT_KIND);
+                let claim = facts.last()?;
+                let fact: ObservedFact = serde_json::from_value(claim.body["record"].clone()).unwrap();
+                let (_, repository, _) = fact.fact.identity();
+                let commit = CaptureCommit {
+                    version: VERSION, source: source.clone(), epoch: 1, authority_grant: grant.id.clone(),
+                    sequence: previous.map_or(1, |claim| claim.body["record"]["sequence"].as_u64().unwrap() + 1),
+                    predecessor: previous.map(|claim| claim.id.clone()),
+                    facts: vec![FactReference { claim_id: claim.id.clone(), digest: fact.digest().unwrap() }],
+                    checkpoint: Some(ScanCheckpoint {
+                        repository_id: repository.into(), pass_started_at_ms: now, cursor: None,
+                        pass_complete: true, pull_request_id: None, upstream_updated_at_ms: None,
+                    }),
+                    coverage: vec![Coverage {
+                        repository_id: repository.into(), family: FactFamily::Repository, complete: true,
+                        authoritative: true, history_from_ms: now, through_ms: now, error: None,
+                    }],
+                    observed_at_ms: now,
+                };
+                (commit.subject().unwrap(), serde_json::to_value(commit).unwrap())
+            }
+            FENCED_KIND => {
+                let grant = grants.first()?;
+                let receipt = FenceReceipt {
+                    version: VERSION, source: source.clone(), member: self.nodes[index].name.clone(),
+                    epoch: 1, authority_grant: grant.id.clone(),
+                    final_commit: Some(previous?.id.clone()), stopped_at_ms: now,
+                };
+                (source_subject, serde_json::to_value(receipt).unwrap())
+            }
+            _ => unreachable!("capture kind"),
+        };
+        Some(ClaimInput {
+            subject, kind: kind.into(), actor: None,
+            fields: BTreeMap::from([("record".into(), record)]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(if kind == AUTHORITY_KIND {
+                format!("capture-authority:{}", source.id)
+            } else {
+                self.fresh("capture")
+            }),
         })
     }
 
@@ -2193,8 +2324,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v35 resource execution receipts shift the seeded schedule (see the
-/// fixed-seed characterization in fixtures/convergence/README.md).
+/// Corpus v36 adds native GitHub capture inputs, shifting the seeded schedule.
+/// The prior v35 characterization is recorded in fixtures/convergence/README.md.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
 const NEVER_TRIMS: &[u64] = &[179];
@@ -2207,7 +2338,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v35 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v36 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2216,7 +2347,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v35 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v36 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2224,7 +2355,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v35 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v36 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2437,7 +2568,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v35.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v36.json"
         }))
         .unwrap(),
     )
