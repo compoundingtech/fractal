@@ -4357,12 +4357,6 @@ fn client_agent_cards_presented(
                 ),
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
-                "residency": {
-                    "policy": residency.policy,
-                    "eligible_since": residency.eligible_since_unix_ms.map(client_timestamp),
-                    "due_at": residency.due_at_unix_ms.map(client_timestamp),
-                    "refusal_reason": residency.refusal_reason,
-                },
                 "handoff": handoff,
                 "stopping": stopping,
                 "rollout": if card_reads.may_have_rollout(&subject.subject) {
@@ -4370,6 +4364,12 @@ fn client_agent_cards_presented(
                 } else {
                     None
                 },
+            });
+            value["residency"] = json!({
+                "policy": residency.policy,
+                "eligible_since": residency.eligible_since_unix_ms.map(client_timestamp),
+                "due_at": residency.due_at_unix_ms.map(client_timestamp),
+                "refusal_reason": residency.refusal_reason,
             });
             value["live_model"] = live_model.map_or(Value::Null, Value::String);
             if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
