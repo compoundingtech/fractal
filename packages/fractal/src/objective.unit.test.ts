@@ -238,7 +238,7 @@ objective "acme/merge-latency" {
     },
   ]
   it.each(native)('lowers indicator $indicator.kind', ({ indicator, targets, kdl }) => {
-    expect(render({ name: 'shipped', about: 'Measured', indicator, targets })).toBe(
+    expect(render({ name: 'shipped', about: 'Measured', indicator, ...(targets === undefined ? {} : { targets }) })).toBe(
       `version 2\nobjective "shipped" {\n  about "Measured"\n${kdl}}\n`,
     )
   })
