@@ -373,7 +373,10 @@ mod tests {
             "driver":"omp", "transport":"omp-channel", "state":"idle",
             "incarnation_id":"one", "background_jobs":0,
             "quiescent":true, "blocking":[], "ask":"none", "blocked_on":"none",
-            "input_buffer":"unknown"
+            "input_buffer":"unknown",
+            // Repeated observations must be distinct claims, not content-addressed replays of
+            // the fixture's first quiet report (which would predate newly authored work).
+            "reason":format!("fixture-observation-{}", WRITE_CLOCK.load(std::sync::atomic::Ordering::SeqCst))
         });
         fields.as_object_mut().unwrap().extend(changes.as_object().unwrap().clone());
         append(store, SEAT, "harness.observed", fields)
