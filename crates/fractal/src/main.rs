@@ -8853,7 +8853,7 @@ async fn start_mission_run(
         &run_id,
         mission_id,
         &mission.revision,
-        args.revision.is_none(),
+        mission_start_follows_head(args.revision.as_deref(), &health),
         &workspace,
         &requester,
         &inputs,
@@ -8906,6 +8906,15 @@ async fn start_mission_run(
         print!("{}", cli_help::mission_next_steps(&started));
     }
     follow_mission_run(client, started, response.store_index, json_output, 50).await
+}
+
+fn mission_start_follows_head(revision: Option<&str>, health: &Value) -> bool {
+    // Older daemons reject the authored follow-head child. Preserve their exact-revision
+    // declaration during rolling upgrades, even though they will record it as pinned.
+    revision.is_none()
+        && health["capabilities"]["mission_run_follow_head"]
+            .as_u64()
+            .is_some_and(|version| version >= 1)
 }
 
 fn mission_start_run_id(mission_id: &str, requested: Option<&str>) -> String {

@@ -5543,6 +5543,42 @@ fn mission_start_preserves_explicit_revision_pin_intent() {
 }
 
 #[test]
+fn mission_start_keeps_exact_declarations_for_older_daemons() {
+    let revision = "a".repeat(64);
+    for (health, supported) in [
+        (json!({}), false),
+        (json!({"capabilities": {}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 0}}), false),
+        (json!({"capabilities": {"mission_run_follow_head": 1}}), true),
+    ] {
+        for explicit_revision in [None, Some(revision.as_str())] {
+            let follow_head = mission_start_follows_head(explicit_revision, &health);
+            assert_eq!(follow_head, supported && explicit_revision.is_none());
+            let kdl = mission_run_intent(
+                "release/demo/skew",
+                "release/demo",
+                &revision,
+                follow_head,
+                Path::new("/work/demo"),
+                "person/operator",
+                &BTreeMap::new(),
+                "run",
+                None,
+                None,
+                false,
+            );
+            assert!(kdl.contains(&format!("mission \"mission/release/demo@{revision}\"")), "{kdl}");
+            assert_eq!(kdl.contains("follow-head"), follow_head, "{kdl}");
+            let intent = fractal_daemon::graph::parse_intent(&kdl, "node").unwrap();
+            let creation = intent.mission_runs["mission-run/release/demo/skew"]
+                .creation.as_ref().unwrap();
+            assert_eq!(creation.revision, revision);
+            assert_eq!(creation.follow_head, follow_head);
+        }
+    }
+}
+
+#[test]
 fn mission_start_explicit_paths_and_default_ids_are_preserved() {
     for requested in ["release/demo/test", "mission-run/release/demo/test"] {
         assert_eq!(
