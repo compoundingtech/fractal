@@ -86,8 +86,11 @@ stale observations hold admission rather than count as healthy. Darwin admission
 `recovery` requires an operator-declared `recoveryCapable` profile and a measured filesystem
 observation. At most one recovery execution holds the host recovery slot. It bypasses only
 the disk floor/reservation check; CPU, memory, PSI, holds, membership and IO limits still apply.
-Its receipt records the disk-floor exemption. Class contention weights are 1000 for recovery
-and landing, 100 for check and 10 for agent; priority does not create extra capacity.
+Execution state and both durable/file receipts preserve `admissionDecision`, including the
+`disk-floor` exemption, admission timestamp (`atMs`) and measured free bytes
+(`freeBytesAtAdmission`). These observations remain frozen across replay and retirement.
+Class contention weights are 1000 for recovery and landing, 100 for check and 10 for agent;
+priority does not create extra capacity.
 
 
 
