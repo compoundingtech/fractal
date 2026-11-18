@@ -8,6 +8,8 @@ pub mod otel;
 pub mod otel_client_class;
 /// Wake and pass telemetry of the reconcile loop.
 pub mod reconcile_telemetry;
+/// Inert residency metrics and precomputed summaries.
+pub mod residency;
 /// Observes git and gh calls without changing their command behavior.
 pub mod recorder;
 /// Summarizes command recorder logs from one or more hosts.
