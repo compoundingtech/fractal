@@ -231,12 +231,16 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
   single-host resume support; cross-host requests refuse until their storage adapters are built.
 - Suspend requires an absolute Git workspace path, a commit, and the working tree root.
   Workspaces containing submodules refuse with `workspace-submodule-unsupported`.
+  [Idle residency](idle-residency.md#snapshot-modes-idle-r09-idle-r10) specifies an in-place
+  mode for such workspaces; it is not implemented yet.
 - Archives are host-local and capped at 256 MiB, including Git history. Ignored files and
   host-owned credentials and environment are not transported.
 - Every other relaunch continues the seat's last native session when its harness can, and
   otherwise starts a new one: it names the session in `ST3_NATIVE_CONTINUE_SESSION`, which a
   driver may refuse without ending the launch. Only a resume must come back on its exact session.
 - Mail does not wake a suspended seat. Only `fractal agents resume` does.
+  [Idle residency](idle-residency.md) specifies daemon-owned idle suspension that wake-class mail
+  resumes; it is not implemented yet.
 - OpenCode delivery follows the session the server reports most recently. A seat whose OpenCode
   session ran a subagent session last may record that session.
 
