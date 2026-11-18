@@ -70,13 +70,12 @@ export interface OpenOutboxOptions {
 interface PacketMetadata { readonly packetBytes: readonly number[]; readonly fingerprint: { readonly version: 1; readonly sha256: string } }
 const transaction = <T>(db: IDBDatabase, mode: IDBTransactionMode, operation: string,
   work: (tx: IDBTransaction, done: (value: T) => void, fail: (cause: unknown) => void) => void,
-): Promise<T> => {
-  const { promise, resolve, reject } = Promise.withResolvers<T>()
+): Promise<T> => new Promise<T>((resolve, reject) => {
   let tx: IDBTransaction
   try {
     try { tx = db.transaction([attemptsStore, spoolStore], mode, { durability: 'strict' }) }
     catch (cause) { if (!(cause instanceof TypeError)) throw cause; tx = db.transaction([attemptsStore, spoolStore], mode) }
-  } catch (cause) { reject(error(cause, operation)); return promise }
+  } catch (cause) { reject(error(cause, operation)); return }
   let result: T
   let failure: OutboxError | undefined
   const fail = (cause: unknown): void => { failure = error(cause, operation); try { tx.abort() } catch { reject(failure) } }
@@ -84,14 +83,12 @@ const transaction = <T>(db: IDBDatabase, mode: IDBTransactionMode, operation: st
   tx.onabort = () => reject(failure ?? error(tx.error, operation))
   tx.onerror = () => { /* Transaction abort, not request success, is the durability barrier. */ }
   try { work(tx, (value) => { result = value }, fail) } catch (cause) { fail(cause) }
-  return promise
-}
+})
 
 const openDatabase = Effect.fn('Outbox.openDatabase')(function* (options: Pick<OpenOutboxOptions, 'indexedDB' | 'databaseName'>) {
   const factory = yield* Effect.try({ try: () => options.indexedDB ?? globalThis.indexedDB, catch: (cause) => error(cause, 'open') })
   if (factory === undefined) return yield* new OutboxStorageError({ code: 'disabled', operation: 'open', message: 'IndexedDB is unavailable; Send was not accepted.' })
-  const db = yield* Effect.tryPromise({ try: () => {
-    const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase>()
+  const db = yield* Effect.tryPromise({ try: () => new Promise<IDBDatabase>((resolve, reject) => {
     let blocked = false
     const request = factory.open(options.databaseName ?? defaultDatabaseName, 1)
     request.onupgradeneeded = () => {
@@ -101,8 +98,7 @@ const openDatabase = Effect.fn('Outbox.openDatabase')(function* (options: Pick<O
     request.onerror = () => reject(request.error)
     request.onblocked = () => { blocked = true; reject(new OutboxStorageError({ code: 'disabled', operation: 'open', message: 'Outbox database upgrade is blocked.' })) }
     request.onsuccess = () => { if (blocked) request.result.close(); else resolve(request.result) }
-    return promise
-  }, catch: (cause) => error(cause, 'open') })
+  }), catch: (cause) => error(cause, 'open') })
   db.onversionchange = () => db.close()
   return db
 })

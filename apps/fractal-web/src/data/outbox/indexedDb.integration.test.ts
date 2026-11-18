@@ -226,7 +226,7 @@ describe('durable core IndexedDB outbox', () => {
   it('lists corrupt/future/old rows as persistent discard-only recovery, never dispatchable', async () => {
     const factory = new IDBFactory()
     const repo = await open(factory)
-    const future = { localAttemptId: 'future', scope, schemaVersion: 999, secret: 'same-owner-data' }
+    const future = { localAttemptId: 'future', scope, schemaVersion: 999, retainedData: 'same-owner-data' }
     const corrupt = { localAttemptId: 'corrupt', scope, schemaVersion: 2, record: { revision: 5 } }
     const legacy = { localAttemptId: 'legacy', scope: { account: 'old-account' }, schemaVersion: 1, intent: { bytes: [9] } }
     await raw(factory, [future, corrupt, legacy])
