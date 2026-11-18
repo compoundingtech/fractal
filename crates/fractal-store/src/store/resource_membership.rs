@@ -42,6 +42,37 @@ pub struct LaneRequest {
     pub disk: Option<DiskRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io: Option<IoClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_estimate: Option<fractal_runtime::ResourceProfileEstimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_path: Option<String>,
+}
+
+/// Historical tuple policies remain authoritative. Keyed policy identity deliberately excludes
+/// the immutable estimate carried by each membership.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(untagged)]
+enum InstalledPolicy {
+    Keyed {
+        version: u32,
+        #[serde(rename = "maxMembers")]
+        max_members: u32,
+        profile: String,
+        coverage: Coverage,
+    },
+    Declared((u32, Option<Capacity>, Coverage)),
+}
+
+impl InstalledPolicy {
+    fn for_request(request: &LaneRequest) -> Self {
+        match &request.profile {
+            Some(profile) => Self::Keyed { version: 1, max_members: request.max_members,
+                profile: profile.clone(), coverage: request.coverage },
+            None => Self::Declared((request.max_members, request.capacity, request.coverage)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -344,6 +375,32 @@ impl Store {
         smallclaims::touched::note_read(|| dependency(&member.request.host, &member.request.name));
         Ok(member)
     }
+    /// Reconciliation reuses the host's first durable estimate, including while queued.
+    pub fn resource_profile_request(&self, id: &str) -> Result<Option<LaneRequest>> {
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT body FROM resource_memberships_v1 WHERE id=?1", [id], |row| row.get(0)).optional()?;
+        body.map(|body| serde_json::from_str::<Membership>(&body).map(|member| member.request))
+            .transpose().map_err(Into::into)
+    }
+
+    /// The parent containment covers every live frozen member, not latest-estimate × slots.
+    pub fn resource_lane_aggregate(&self, host: &str, lane: &str) -> Result<Option<Capacity>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare("SELECT body FROM resource_memberships_v1
+            WHERE host=?1 AND lane=?2 AND state IN ('admitted','launched','retiring','uncertain')")?;
+        let rows = statement.query_map(rusqlite::params![host, lane], |row| row.get::<_, String>(0))?;
+        let mut aggregate: Option<Capacity> = None;
+        for row in rows {
+            let member: Membership = serde_json::from_str(&row?)?;
+            if let Some(capacity) = member.request.capacity {
+                let current = aggregate.get_or_insert(Capacity { cores: 0, memory: 0 });
+                current.cores = current.cores.checked_add(capacity.cores).context("aggregate lane cores overflow")?;
+                current.memory = current.memory.checked_add(capacity.memory).context("aggregate lane memory overflow")?;
+            }
+        }
+        Ok(aggregate)
+    }
+
 
     pub fn resource_memberships_for_host(&self, host: &str) -> Result<Vec<Membership>> {
         let connection = self.readers.get();
@@ -494,17 +551,19 @@ impl Store {
         let transaction = connection.transaction()?;
         let epoch: String = transaction.query_row("SELECT epoch FROM resource_authorities_v1 WHERE host=?1", [&request.host], |r| r.get(0))?;
         if request.capacity.is_some() {
-            let policy = serde_json::to_string(&(request.max_members, request.capacity, request.coverage))?;
+            let expected = InstalledPolicy::for_request(request);
+            let policy = serde_json::to_string(&expected)?;
             let installed: Option<String> = transaction.query_row("SELECT policy FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                 rusqlite::params![request.host,request.name], |row| row.get(0)).optional()?;
-            if let Some(installed) = installed.filter(|installed| *installed != policy) {
-                let previous: (u32, Option<Capacity>, Coverage) = serde_json::from_str(&installed)?;
-                anyhow::ensure!(previous == (request.max_members, None, request.coverage),
-                    "resource lane policy differs from host-installed policy");
-                // Earlier writers installed profile-less policies. Define the missing profile
-                // without changing their custody; resource_blocking drains those holders first.
+            if let Some(installed) = installed {
+                let previous: InstalledPolicy = serde_json::from_str(&installed)?;
+                if previous != expected {
+                    anyhow::ensure!(previous == InstalledPolicy::Declared((request.max_members, None, request.coverage)),
+                        "resource lane policy differs from host-installed policy");
+                    // Only the historical profile-less policy may acquire its first footprint.
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-h156314ba7532 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_lane_policies_v1 WHERE host=?1 AND lane=?2",
                     rusqlite::params![request.host,request.name])?;
+                }
             }
             transaction.execute(/* sqlite-large-value: allow-for-now lv-hacf1fd1c6d10 owner=fractal_store::store::resource_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO resource_lane_policies_v1 VALUES(?1,?2,?3)",
                 rusqlite::params![request.host,request.name,policy])?;
@@ -865,6 +924,7 @@ mod tests {
         LaneRequest { id: id.into(), name: "executor/activation".into(), host: "host-a".into(),
             max_members: 1, capacity: Some(Capacity { cores: 1, memory: 256 << 20 }), coverage: Coverage::Logical, admission_timeout_ms: None,
             class: RequestClass::Agent, disk: None, io: None,
+            profile: None, profile_estimate: None, disk_path: None,
             owner: Owner { run: format!("mission-run/{id}"), step: format!("step-run/{id}"),
                 attempt: 1, invocation: Some(format!("invocation/{id}")) } }
     }
@@ -1477,7 +1537,8 @@ mod tests {
         let mut holder = request("native-holder");
         holder.name = format!("resource-test-{}", uuid::Uuid::new_v4().simple());
         let current = grant(&store, &holder, wall());
-        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity, require_enforced: false };
+        let policy = fractal_runtime::FiniteLane { name: holder.name.clone(), capacity: holder.capacity,
+            member_capacity: holder.capacity, memory_high_bytes: None, require_enforced: false };
         store.prepare_resource_membership(&current, "holder").unwrap();
         let binding = fractal_runtime::ResourceExecutionBinding {
             membership_id: current.membership_id.clone(), generation: current.generation.clone(),
