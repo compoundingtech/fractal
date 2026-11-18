@@ -176,12 +176,12 @@ const reveal = (row: Element) => {
 }
 
 const styles = stylex.create({
-  group: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0, minWidth: 0, gap: s.xs },
-  row: { display: 'flex', alignItems: 'center', gap: s.xs },
+  group: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0, minWidth: 0, maxWidth: '100%', gap: s.xs },
+  row: { display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', maxWidth: '100%', gap: s.xs },
   indicator: { display: 'inline-flex', alignItems: 'center', gap: s.xs, whiteSpace: 'nowrap', color: c.fg, fontSize: t.metaSize, lineHeight: t.metaLeading, paddingInline: s.xs },
   bell: { display: 'inline-flex', color: c.primary },
   button: { flexShrink: 0, whiteSpace: 'nowrap', color: c.fgMuted, fontSize: t.metaSize,
-    borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
+    backgroundColor: 'transparent', borderWidth: 0, borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
     ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}` },
     ':disabled': { opacity: 0.5, cursor: 'default' } },
   touch: { minHeight: g.touchTarget },

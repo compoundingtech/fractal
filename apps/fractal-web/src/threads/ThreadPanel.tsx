@@ -196,7 +196,7 @@ const styles = stylex.create({
   inList: { borderWidth: 0, borderRadius: 0, borderBlockStartWidth: { default: g.hairline, ':first-child': 0 }, borderBlockStartStyle: 'solid', borderBlockStartColor: c.border },
   dedicated: { boxSizing: 'border-box', width: '100%', maxInlineSize: g.lane, marginInline: 'auto' },
   // Disclosure | unread dot | title | metadata | age. Fixed leading columns align rows down a list; metadata and age stay at the end.
-  header: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'baseline', columnGap: { default: s.sm, '@container thread-panel (max-width: 360px)': s.xs }, boxSizing: 'border-box', width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightRegular },
+  header: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'baseline', columnGap: { default: s.sm, '@container thread-panel (max-width: 360px)': s.xs }, boxSizing: 'border-box', width: '100%', flexBasis: g.sidebarMin, flexGrow: 1, minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightRegular },
   rowColumns: { gridTemplateColumns: `${g.statusSm} ${g.statusSm} minmax(0, 1fr)` },
   dotColumns: { gridTemplateColumns: `${g.statusSm} minmax(0, 1fr)` },
   titleColumns: { gridTemplateColumns: 'minmax(0, 1fr)' },
@@ -210,9 +210,10 @@ const styles = stylex.create({
   age: { minWidth: { default: g.sidebarMetric, '@container thread-panel (max-width: 360px)': 0 }, color: c.fgMuted, fontVariantNumeric: 'tabular-nums', textAlign: 'end', whiteSpace: 'nowrap' },
   origin: { margin: 0, paddingInline: s.sm, paddingBlockEnd: s.sm, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   readHeader: { position: 'sticky', top: 0, zIndex: 1, backgroundColor: c.canvas },
-  readHeadingRow: { display: 'flex', alignItems: 'center', paddingInlineEnd: s.sm },
+  // Wrap read actions before they escape the themed surface or squeeze the title down to its padding.
+  readHeadingRow: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', rowGap: s.xs, paddingInlineEnd: s.sm },
   readButton: { flexShrink: 0, whiteSpace: 'nowrap', color: c.fgMuted, fontSize: t.metaSize,
-    borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
+    backgroundColor: 'transparent', borderWidth: 0, borderRadius: r.sm, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
     ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}` },
     ':disabled': { opacity: 0.5, cursor: 'default' } },
   readTouch: { minHeight: g.touchTarget },

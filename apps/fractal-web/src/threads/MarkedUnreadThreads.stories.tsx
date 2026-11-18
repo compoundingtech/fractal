@@ -8,6 +8,7 @@ import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
+import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
@@ -81,14 +82,13 @@ const createFixture = (scenario: Scenario) => {
   return { registry, source }
 }
 
-const MarkedUnreadScene = ({ scenario, label }: { readonly scenario: Scenario; readonly label?: string }) => {
+const MarkedUnreadScene = ({ scenario }: { readonly scenario: Scenario }) => {
   const [fixture] = React.useState(() => createFixture(scenario))
   React.useEffect(() => () => fixture.registry.dispose(), [fixture])
   const [opened, setOpened] = React.useState<string>()
   const title = [review, cancellation, rollout].find(thread => thread.id === opened)?.title
   return <RegistryContext.Provider value={fixture.registry}>
     <div data-marked-unread-scene={scenario} {...stylex.props(styles.scene)}>
-      {label === undefined ? null : <p {...stylex.props(styles.label)}>{label}</p>}
       <MarkedUnreadThreads source={fixture.source} onOpenThread={setOpened} />
       {/* Story harness only: stands in for the workspace navigation the Inbox passes as onOpenThread. */}
       {title === undefined ? null : <p data-story-opened={opened} {...stylex.props(styles.label)}>Story navigation: opened “{title}” at the reply marked unread.</p>}
@@ -230,25 +230,49 @@ const allStates: ReadonlyArray<{ readonly scenario: Scenario; readonly label: st
   { scenario: 'page-bound', label: 'Page bound reached' },
 ]
 
-/** Every list state side by side, each paging its own source. */
+/** Visit every owner-wide list state with only the selected Inbox section mounted. */
 export const AllStates: Story = {
   render: ({ scheme }) => <Canvas scheme={scheme}>
-    <div {...stylex.props(styles.grid)}>{allStates.map(state => <MarkedUnreadScene key={state.scenario} {...state} />)}</div>
+    <Tabs defaultSelectedKey="rows">
+      <TabList aria-label="Marked-unread thread states">
+        {allStates.map(({ scenario, label }) => <Tab key={scenario} id={scenario}>{label}</Tab>)}
+      </TabList>
+      {allStates.map(({ scenario }) => <TabPanel key={scenario} id={scenario}>
+        <MarkedUnreadScene key={scenario} scenario={scenario} />
+      </TabPanel>)}
+    </Tabs>
   </Canvas>,
-  play: async ({ canvasElement }) => {
-    const scene = (scenario: Scenario) => canvasElement.querySelector<HTMLElement>(`[data-marked-unread-scene="${scenario}"]`)!
-    await waitFor(() => expect(rows(scene('rows'))).toHaveLength(3))
-    await expect(rows(scene('empty-page-with-cursor'))).toHaveLength(1)
-    await expect(within(scene('empty')).getByText('No marked-unread threads')).toBeVisible()
-    for (const [scenario, tag] of [['fetch-failed', 'FetchFailed'], ['repeated-cursor', 'RepeatedCursor'], ['page-bound', 'PageBoundExceeded']] as const) {
-      await expect(scene(scenario).querySelector(`[data-marked-unread-error="${tag}"]`)).not.toBeNull()
+  play: async context => {
+    const canvas = within(context.canvasElement)
+    const stateStories: Record<Scenario, Story> = {
+      rows: Rows,
+      empty: Empty,
+      'empty-page-with-cursor': EmptyPageWithCursor,
+      loading: Loading,
+      'fetch-failed': FetchFailed,
+      'repeated-cursor': RepeatedCursor,
+      'page-bound': PageBoundExceeded,
     }
+    for (const { scenario, label } of allStates) {
+      await userEvent.click(canvas.getByRole('tab', { name: label }))
+      await expect(canvas.getByRole('tabpanel', { name: label })).toBeVisible()
+      await stateStories[scenario].play?.(context)
+      await expect(canvas.getAllByRole('region', { name: 'Marked unread' })).toHaveLength(1)
+      // Count DOM nodes too: hidden or retained panels must not keep another list mounted.
+      await expect(context.canvasElement.querySelectorAll('[data-marked-unread-threads]')).toHaveLength(1)
+      await expect(context.canvasElement.querySelectorAll('[data-marked-unread-scene]')).toHaveLength(1)
+    }
+    // React Aria owns keyboard selection as well as the tab/panel relationships.
+    await userEvent.keyboard('{Home}')
+    await expect(canvas.getByRole('tab', { name: 'Rows across two pages' })).toHaveAttribute('aria-selected', 'true')
+    await expect(canvas.getByRole('tabpanel', { name: 'Rows across two pages' })).toBeVisible()
+    await waitFor(() => expect(rows(context.canvasElement)).toHaveLength(3))
+    await expect(context.canvasElement.querySelectorAll('[data-marked-unread-threads]')).toHaveLength(1)
   },
 }
 
 const styles = stylex.create({
   canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: s.section, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize },
   scene: { display: 'flex', flexDirection: 'column', gap: s.sm, maxWidth: g.lane, width: '100%', marginInline: 'auto', minWidth: 0 },
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))', gap: s.section, alignItems: 'start' },
   label: { margin: 0, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
 })
