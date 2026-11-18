@@ -13,6 +13,22 @@
 # can reach this account's st state or credentials. The pnpm store is kept
 # (pnpm_config_store_dir, default ~/.cache/ci-local-pnpm-store), as CI keeps it between runs.
 set -euo pipefail
+# A direct invocation owns one native phase; st-test supplies the enclosing root.
+# The profile/receipt flags are provisional until the native profile contract merges.
+if [ -z "${FRACTAL_RESOURCE_PARENT:-}" ]; then
+  receipt_root=$HOME/.cache/st-test/admission
+  mkdir -p "$receipt_root"
+  receipt=$receipt_root/ci-local-web-$(date +%s)-$$.json
+  echo "ci-local-web: admission receipt: $receipt" >&2
+  if [ -n "${CI_LOCAL_QUEUE_LOG:-}" ]; then
+    printf 'wait %s resources\n' "$(date +%s)" >> "$CI_LOCAL_QUEUE_LOG"
+  fi
+  exec fractal resources exec --lane st-test --class check --profile st-test-build \
+    --receipt-file "$receipt" -- bash "$0" "$@"
+fi
+if [ -n "${CI_LOCAL_QUEUE_LOG:-}" ]; then
+  printf 'slot %s resources\n' "$(date +%s)" >> "$CI_LOCAL_QUEUE_LOG"
+fi
 umask 022
 scratch_root=${CI_LOCAL_SCRATCH_ROOT:-$HOME/.cache/ci-local}
 mkdir -p "$scratch_root"
@@ -34,13 +50,14 @@ while IFS='=' read -r -d '' name value; do
   case "$name" in
     # The web dev shell's own settings (nix/web-shell.nix: the Buck root) stay when they name a store path; a seat's do not.
     FRACTAL_WEB_*) [[ "$value" == /nix/store/* && "$value" != *..* ]] || unset "$name" ;;
+    FRACTAL_RESOURCE_PARENT|FRACTAL_RESOURCE_EXEC_ID|ST3_ENDPOINT|FRACTAL_ENDPOINT) ;;
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*|LD_PRELOAD|KIT_*|APP_TEST_SET) unset "$name" ;;
   esac
 done < <(env -0)
 # Neither a seat's command recorder (inside the account's st state) nor the account's own tool wrappers (~/.local/bin: the host's
 # build admission front doors for nix, npm and cargo) stay on PATH: a CI runner has neither, and a wrapper that execs "the next
 # nix on PATH" loops forever under a test that puts its own nix stub first (scripts/ci-web-shell-test). The run is already
-# governed: fractal-test starts it under one heavy-slot ticket in builds.slice.
+# governed: st-test starts it inside one native st-test-build phase.
 st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
 account_bin=$HOME/.local/bin
 kept=()
@@ -49,25 +66,6 @@ for entry in "${entries[@]}"; do
   case "$entry" in "$st_state"|"$st_state"/*|"$account_bin"|"$account_bin"/) ;; *) kept+=("$entry") ;; esac
 done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
-# The kit plays keep several browsers busy, and they start no cargo or nix the host's build admission would see: two of them at once took
-# every core of a build host. So on a host with build admission (the program under the account's home, as scripts/ci-local finds it), the
-# play stage waits for a heavy-build slot like a compile (scripts/ci-fractal-web, KIT_PLAY_ADMISSION_BIN) and runs at most its share of
-# the cores: the cores over the host's heavy slots (KIT_PLAY_WORKERS; the gate never runs more than 6). The admission program reads its
-# limits and queue under the account's home, which HOME below hides, so they are named. A host without it runs the plays as CI does.
-account_home=$HOME
-kit_admission=
-if [ -x "${BUILD_ADMISSION_BIN:-$account_home/.local/bin/build-admission}" ]; then
-  kit_admission=${BUILD_ADMISSION_BIN:-$account_home/.local/bin/build-admission}
-  export BUILD_ADMISSION_CONFIG="${BUILD_ADMISSION_CONFIG:-$account_home/.config/build-admission}"
-  export BUILD_ADMISSION_STATE="${BUILD_ADMISSION_STATE:-$account_home/.local/state/st3/operations}"
-  export BUILD_ADMISSION_FALLBACK_LOCK="${BUILD_ADMISSION_FALLBACK_LOCK:-$account_home/.local/state/st3/operations/build-admission-fallback.lock}"
-  [ -r "$account_home/.config/cargo-priority" ] && export CARGO_PRIORITY_FILE="${CARGO_PRIORITY_FILE:-$account_home/.config/cargo-priority}"
-fi
-heavy_slots=${CARGO_HEAVY_SLOTS:-}
-if [ -z "$heavy_slots" ] && [ -r "$account_home/.config/cargo-heavy-slots" ]; then heavy_slots=$(tr -d '[:space:]' < "$account_home/.config/cargo-heavy-slots"); fi
-[[ "$heavy_slots" =~ ^[1-9][0-9]*$ ]] || heavy_slots=1
-kit_workers=$(( $(nproc) / heavy_slots ))
-(( kit_workers >= 1 )) || kit_workers=1
 # Buck's file watcher is the host's Watchman service (.buckconfig file_watcher = watchman), found by its socket under the account's
 # state: the stages' HOME below would hide it, so it is named.
 watchman_sock=${XDG_STATE_HOME:-$HOME/.local/state}/watchman/$(id -un)-state/sock
@@ -80,6 +78,7 @@ touch "$GITHUB_STEP_SUMMARY"
 head=$(git rev-parse HEAD)
 export KIT_INPUTS=true KIT_SHARD_INDEX=0 KIT_SHARD_COUNT=1 KIT_PLAY_SET=all KIT_PLAY_A11Y=on APP_TEST_SET=all
 export KIT_RECEIPT_DIRECTORY="$scratch/kit-play-receipts" BASE_SHA="$head" HEAD_SHA="$head"
-export KIT_PLAY_WORKERS="$kit_workers" KIT_PLAY_ADMISSION_BIN="$kit_admission"
+# Match the pilot profile's declared cores; native custody owns enforcement.
+export KIT_PLAY_WORKERS=4
 python3 scripts/ci-web-shell-test
 bash scripts/ci-fractal-web

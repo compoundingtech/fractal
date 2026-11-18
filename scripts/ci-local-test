@@ -87,7 +87,8 @@ class CiLocal(unittest.TestCase):
         native = self.bin / 'fractal'
         native.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CI_LOCAL_TEST_LOG.admission"\n'
                           'while [ "$1" != -- ]; do shift; done\nshift\n'
-                          'export FRACTAL_RESOURCE_PARENT=fixture\nexec "$@"\n')
+                          'export FRACTAL_RESOURCE_PARENT=fixture FRACTAL_RESOURCE_EXEC_ID=fixture-root\n'
+                          'export ST3_ENDPOINT=unix:/fixture-native FRACTAL_ENDPOINT=unix:/fixture-native\nexec "$@"\n')
         native.chmod(0o755)
         (self.work / 'scripts/ci-install-built-hooks').write_text(RECORD)
         # nix and the compat-binary script stand in for CI's test-build preparation (they record that they ran).
@@ -189,9 +190,11 @@ class CiLocal(unittest.TestCase):
             # no compiler cache server: one started here would keep this run's HOME and TMPDIR, removed at exit, for every build
             self.assertNotIn('RUSTC_WRAPPER', env)
             self.assertNotIn('CARGO_BUILD_RUSTC_WRAPPER', env)
-            for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
+            for name in ('ST_AGENT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
                          'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST2_OTELITE_BIN', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
+            self.assertEqual(env['ST3_ENDPOINT'], 'unix:/fixture-native')
+            self.assertEqual(env['FRACTAL_ENDPOINT'], 'unix:/fixture-native')
             # The dev shell's collector for the OTLP export tests stays, as in CI; the same name pointing anywhere else does not.
             self.assertEqual(env.get('FRACTAL_OTELITE_BIN'), '/nix/store/x-otelite/bin/otelite')
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.

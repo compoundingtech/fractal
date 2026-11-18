@@ -734,6 +734,18 @@ class NativeAdmissionTest(unittest.TestCase):
             self.assertEqual([line.split()[0] for line in queue.read_text().splitlines()], ['wait', 'slot'])
             self.assertGreater(limit.remaining(), 0)
 
+    def test_inherited_custody_cannot_create_phase_receipts(self):
+        with mock.patch.dict(os.environ, {'FRACTAL_RESOURCE_PARENT': 'host-grant'}, clear=True):
+            with self.assertRaisesRegex(st_test.Failure, 'phase-receipts-require-root'):
+                st_test.governed(['/bin/true'], 'linux-gate')
+
+    def test_native_context_survives_the_control_plane_scrub(self):
+        context = {'FRACTAL_RESOURCE_PARENT': 'host-grant', 'FRACTAL_RESOURCE_EXEC_ID': 'root-id',
+                   'ST3_ENDPOINT': 'unix:/native', 'FRACTAL_ENDPOINT': 'unix:/native'}
+        with mock.patch.dict(os.environ, context, clear=True):
+            st_test.scrub_seat_environment()
+            self.assertEqual(dict(os.environ), context)
+
     def test_real_tool_path_excludes_the_legacy_shim_directory(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {'HOME': home}, clear=True):
             shim = Path(home, '.local/bin')

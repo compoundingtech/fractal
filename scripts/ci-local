@@ -98,7 +98,7 @@ while IFS='=' read -r -d '' name value; do
     # The dev shell's own test settings (flake.nix): the collector CI's OTLP export tests run against. Kept when they name a store
     # path, so a seat's own setting of the same name still leaves.
     ST3_OTELITE_BIN|FRACTAL_OTELITE_BIN) [[ "$value" == /nix/store/* && "$value" != *..* ]] || unset "$name" ;;
-    FRACTAL_RESOURCE_PARENT) ;; # native custody, not seat credentials
+    FRACTAL_RESOURCE_PARENT|FRACTAL_RESOURCE_EXEC_ID|ST3_ENDPOINT|FRACTAL_ENDPOINT) ;; # native custody, not seat credentials
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
   esac
 done < <(env -0)

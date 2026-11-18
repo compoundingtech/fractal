@@ -240,7 +240,8 @@ def selecting(name):
 
 
 SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'FRACTAL_', 'CLAUDE', 'ANTHROPIC_', 'PTY_')
-KEPT_SEAT = ('ST_AGENT', 'FRACTAL_AGENT', 'FRACTAL_RESOURCE_PARENT', 'ST_SKIP_EVIDENCE')
+KEPT_SEAT = ('ST_AGENT', 'FRACTAL_AGENT', 'FRACTAL_RESOURCE_PARENT', 'FRACTAL_RESOURCE_EXEC_ID',
+             'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'ST_SKIP_EVIDENCE')
 
 
 # The directories every check's PATH is made of, in this order (those that exist), plus the one `nix` is in: cargo's build scripts record
@@ -996,6 +997,8 @@ def governed(argv, name, output=None):
     Receipts outlive temporary check trees. Queue events keep admission time out
     of the payload clock, including checks that never enter ci-local.
     """
+    if os.environ.get('FRACTAL_RESOURCE_PARENT'):
+        raise Failure('phase-receipts-require-root: start st-test outside native resource custody; inherited grants cannot own phase receipt files')
     fractal = RESOURCE_EXEC or shutil.which('fractal')
     if not fractal:
         raise Failure('native-admission-unavailable: fractal resources exec is required')
@@ -3235,6 +3238,10 @@ def run_main(argv, cleanup):
                     if args.out:
                         wrap += ['--out', args.out]
                     environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+                    if name not in BUILDS:
+                        for variable in ('FRACTAL_AGENT', 'FRACTAL_RESOURCE_PARENT', 'FRACTAL_RESOURCE_EXEC_ID',
+                                         'ST3_ENDPOINT', 'FRACTAL_ENDPOINT'):
+                            environment.pop(variable, None)
                     shell_report = Path(scratch) / f'typescript-shell-{round_number}.log' if name == 'typescript-client' else None
                     if shell_report is not None:
                         environment['CI_WEB_SHELL_DIAGNOSTICS'] = str(shell_report)
@@ -3318,7 +3325,8 @@ def run_main(argv, cleanup):
                         wrap += ['--input-file', f'pre_start_s={pre_start}']
                     command = wrap + ['--'] + LOCAL[name]
                     print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=output or sys.stderr, flush=True)
-                    command = governed(command, name, output=output) if name in BUILDS else command
+                    # Stage-signed checks already ran their heavy phase above; this command only reads and signs its report.
+                    command = governed(command, name, output=output) if name in BUILDS and name not in STAGE_SIGNED else command
                     ran.add(name)
                     if streams:
                         # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept

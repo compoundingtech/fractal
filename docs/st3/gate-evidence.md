@@ -2077,7 +2077,13 @@ The host owns resource scheduling and whole-tree custody, including detached tes
 load averages, slot probes, caller priority files and lane bursts no longer independently veto work.
 Receipts persist in `~/.cache/st-test/admission/`; `admission_receipts` in the run ledger links each phase to its profile and file.
 The queue log retains separate admission and payload budgets. Receipt `queue_wait_ms` and `wall_duration_ms` are the host's terminal measurements.
-Host disk seeds are warm-run estimates, not cold full-run measurements; configure their free-disk floor per host.
+Phase receipt files are root-only: the orchestrator must start outside native custody, and refuses inherited parent grants rather than
+double-admitting or stripping them. The heavy phases are sibling roots; their native `FRACTAL_RESOURCE_PARENT`,
+`FRACTAL_RESOURCE_EXEC_ID`, `ST3_ENDPOINT` and `FRACTAL_ENDPOINT` context survives control-plane and local-runner scrubbing.
+Proposed seeds for both keys are 4 cores, 20,615,843,021 bytes of memory, 10,000,000,000 bytes of disk and heavy IO,
+with a proposed 16 GiB memory-high threshold. These are declared-provisional full-suite envelopes with client-only learning coverage:
+neither a separately attributed build/run peak nor measured warm disk growth was found. The disk declaration is not a cold full-run
+measurement; host free-disk floors are separate policy.
 
 **How long a run takes, and the objective.** A full warm run of the per-PR suite (`scripts/fractal-test` with no `--check` and no `--crate`,
 every default check including the per-crate `rust-tests` signing, on a pool tree whose kept target already holds a build) takes 12 minutes
@@ -2223,8 +2229,8 @@ and cache directories are a scratch directory that is removed afterwards, and no
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness
 configuration or credentials, and no PATH entry inside the account's Fractal state stays. Kept from the account: the cargo and
-rustup homes (the dependency cache), `XDG_RUNTIME_DIR` and `FRACTAL_RESOURCE_PARENT` (native custody, not seat credentials).
-A direct `scripts/ci-local` call enters `st-test-build` itself; under st-test it inherits the enclosing native phase.
+rustup homes (the dependency cache), `XDG_RUNTIME_DIR` and the native resource parent, exec ID and selected daemon endpoints.
+A direct `scripts/ci-local` or `scripts/ci-local-web` call enters `st-test-build` itself; under st-test it inherits the enclosing native phase.
 All setup, parallel stages and their descendants stay in that one phase. Account-local admission shims are removed from PATH, and the
 dev shell's own cargo is selected first (`CI_LOCAL_CARGO`, or the first non-shim cargo outside the account's home).
 The stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own);
