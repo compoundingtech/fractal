@@ -131,8 +131,10 @@ At the due time the owner runs the ordinary suspend operation with cause `idle`:
 
 1. Under the owner writer, fence the declaration, the running incarnation, the policy setting and
    the eligible epoch, and record the seat's **demand frontier**: the newest accepted message to it.
-2. Run the suspend refusal checks again. Any refusal ends the attempt; the seat stays running and
-   the refusal is recorded once per epoch, not once per deadline.
+2. Run the suspend refusal checks again, plus `wake-pending`: the wake-demand projection, read at
+   the frontier, shows a wake-class message to the seat that is not yet offered. A lagging
+   projection refuses too. Any refusal ends the attempt; the seat stays running and the refusal is
+   recorded once per epoch, not once per deadline.
 3. Wake-class demand accepted after the frontier and before the runtime stop cancels the attempt.
 4. Demand accepted after the stop has begun is latched: the suspend completes, then the seat goes
    straight to wake admission. Two processes for one seat never race.
@@ -149,9 +151,10 @@ a manual suspend keeps today's refusals. Resume in either mode uses the same str
 
 ## Wake demand (IDLE-R05, IDLE-R06, IDLE-R08)
 
-**Wake demand** is the set of wake-class messages to an idle-suspended seat accepted after its
-demand frontier and not yet offered. It is derived from the native message stream: every
-`message.sent` claim for the recipient, wherever the store keeps it, including the messages
+**Wake demand** is the set of wake-class messages to an idle-suspended seat that are not yet
+offered. Suspend admission guarantees that none were outstanding at the frontier, so every message
+in it was accepted after the frontier. It is derived from the native message stream:
+every `message.sent` claim for the recipient, wherever the store keeps it, including the messages
 shard, joined with its staged, delivered and read receipts. The primary claim log alone is not
 enough: it does not hold sends kept in the messages shard. The existing idle-mail pending index
 tracks any pending input; it is neither wake-class-aware nor staging-aware. It must not be reused
