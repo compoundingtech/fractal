@@ -164,6 +164,7 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         }
         property(&mut lane_node, "max-members", i128::from(lane.max_members));
         property(&mut lane_node, "class", match lane.class {
+            fractal_runtime::RequestClass::Recovery => "recovery",
             fractal_runtime::RequestClass::Landing => "landing",
             fractal_runtime::RequestClass::Check => "check",
             fractal_runtime::RequestClass::Agent => "agent",
