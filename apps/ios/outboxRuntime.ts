@@ -14,6 +14,7 @@ import type { Picked } from './images.ts';
 export interface OutboxOwner {
   repository: IosOutboxRepository;
   acceptIntent(id: string, text: string, images: readonly Picked[], metadata: OutboxMessageMetadata): Promise<OutboxPreparingRecord>;
+  commitRetry(child: OutboxPreparingRecord): Promise<boolean>;
   readAttachment(reference: string): Promise<Uint8Array>;
   authorize(): void;
   cleanup(now: number): Promise<void>;
@@ -185,7 +186,7 @@ export class OutboxRuntime {
       this.authorize(intent);
       const childIntent: OutboxMessageIntent = { ...intent, parentAttemptId: id };
       const child = createOutboxRecord(childId, childIntent);
-      if (!await this.owner.repository.commit(child)) return;
+      if (!await this.owner.commitRetry(child)) return;
       await this.refresh();
       this.launch(childId);
     } catch (error) { this.signalIssue(error); }

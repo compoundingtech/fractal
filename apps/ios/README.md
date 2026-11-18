@@ -84,6 +84,8 @@ Only proven not-applied recovery offers Retry as new attempt: an explicit user a
 commits a fresh child id with the original draft, attachments and binding, retaining
 the parent id. It never resends the parent's signed packet. Unknown has no Retry,
 and lifecycle restoration never redispatches terminal not-applied attempts.
+Child acceptance shares the filesystem acceptance/cleanup barrier and verifies every
+retained attachment before committing; unavailable bytes prevent child creation.
 There is no exclusion/seal protocol, and no claim to reconcile every lost receipt.
 Storage failure preserves drafts and recovery, with a retry-later storage action.
 Saved Start metadata remains packetless unknown. Protected-profile migration commits

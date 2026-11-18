@@ -3,6 +3,7 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { createSqliteOutboxRepository, migrateOutboxDatabase, withOutboxTransaction } from './outboxSqlite.ts';
 import type { IosOutboxRepository, OutboxSqlExecutor, OutboxSqlSession } from './outboxSqlite.ts';
 import type { OutboxScope } from '../../clients/typescript/fractal-client/outbox.ts';
+import type { OutboxPreparingRecord } from '../../clients/typescript/fractal-client/outbox.ts';
 import FractalOutboxFiles from './modules/fractal-outbox-files/index.ts';
 import { acceptProtectedOutboxIntent, openProtectedOutboxStorage, readOutboxAttachment, requireProtectedOutboxStorage, OutboxStorageProtectionError, outboxStorageOperation } from './outboxSpool.ts';
 import type { OutboxHash } from './outboxSpool.ts';
@@ -88,6 +89,17 @@ export const openNativeOutbox = async (scope: OutboxScope, authorize: (scope: Ou
           const capturedMetadata: OutboxMessageMetadata | undefined = metadata ? JSON.parse(JSON.stringify(metadata)) : undefined;
           authorize(storage.scope);
           return serializeFiles(() => acceptProtectedOutboxIntent(repository, bridge, directory, sha256, id, text, captured, capturedMetadata));
+        },
+        commitRetry: (child: OutboxPreparingRecord): Promise<boolean> => {
+          const captured: OutboxPreparingRecord = JSON.parse(JSON.stringify(child));
+          return serializeFiles(async () => {
+            authorize(storage.scope);
+            // Cleanup cannot remove these references between validation and durable commit.
+            for (const attachment of captured.intent.attachments) {
+              await readOutboxAttachment(bridge, directory, sha256, attachment.reference);
+            }
+            return repository.commit(captured);
+          });
         },
         cleanup: (now: number) => serializeFiles(async () => {
           await requireProtectedOutboxStorage(bridge, directory);

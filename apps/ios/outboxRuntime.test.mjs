@@ -44,6 +44,7 @@ const fixture = async t => {
   let authorized = true;
   const owner = { repository, authorize: () => { if (!authorized) throw new Error('re-pair required'); },
     acceptIntent: (id, text, images, context) => acceptProtectedOutboxIntent(repository, bridge, '/private/outbox', hash, id, text, images, context),
+    commitRetry: child => repository.commit(child),
     readAttachment: async reference => new Uint8Array(Buffer.from(files.get(reference), 'base64')),
     cleanup: now => repository.cleanup(now, async ref => files.delete(ref)), close: async () => {} };
   const transport = { authorize: () => owner.authorize(),
