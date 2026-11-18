@@ -135,7 +135,6 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     }),
     timeline: id => Atom.make(get => observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: { items: scenario === 'clock-skew' && ordering === 'timestamp' ? [...(get(history)[id] ?? [])].sort((a, b) => b.accepted_at_unix_ms - a.accepted_at_unix_ms) : get(history)[id] ?? [], next_cursor: Option.none() } })),
     pendingChange: () => unconfirmed,
-    retryChange: async () => { registry.set(unconfirmed, undefined); return undefined },
     draft: drafts,
     start: async (_draft, input) => {
       const refused = refusal("Couldn't start this thread.")
@@ -455,8 +454,10 @@ export const UnconfirmedChange: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await canvas.findByText('Fractal has not confirmed the previous rename.', {}, { timeout: 60_000 })
-    await userEvent.click(canvas.getByRole('button', { name: 'Retry rename' }))
-    await waitFor(() => expect(canvas.queryByText('Fractal has not confirmed the previous rename.')).toBeNull())
+    await expect(canvas.queryByRole('button', { name: 'Retry rename' })).toBeNull()
+    await expect(canvas.getByRole('button', { name: 'Rename' })).toBeDisabled()
+    await expect(canvas.getByRole('button', { name: 'Close thread' })).toBeDisabled()
+    await expect(canvas.getByText('Do not send it again.')).toBeVisible()
   },
 }
 /** Close acts at once; the confirmed result names the thread, and the lifecycle button beside it now reads Reopen. */

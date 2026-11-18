@@ -37,8 +37,6 @@ export interface ThreadPanelProps {
   readonly onRename?: (title: string, titleRevision: string) => Promise<ThreadRefusal | undefined>
   readonly onChangeState?: (state: ThreadPanelSummary['state']) => Promise<ThreadRefusal | undefined>
   readonly pendingChange?: string
-  readonly retryPending?: boolean
-  readonly onRetryChange?: () => Promise<ThreadRefusal | undefined>
   readonly onMarkRead?: () => Promise<ThreadRefusal | undefined>
   readonly canMarkRead?: boolean
   /** The person's unread reminder controls, shown in the sticky heading row beside Mark read while expanded. */
@@ -49,7 +47,7 @@ export interface ThreadPanelProps {
 
 /** The same conversation surface works inline in any context or as a standalone pane. */
 export function ThreadPanel({
-  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onActivate, inList = false, age, origin, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, retryPending = false, onRetryChange, onMarkRead, canMarkRead = false, unreadControls, children,
+  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onActivate, inList = false, age, origin, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, onMarkRead, canMarkRead = false, unreadControls, children,
 }: ThreadPanelProps): React.ReactNode {
   const narrow = React.useContext(NarrowLayoutContext)
   const [expanded, setExpanded] = React.useState(initiallyExpanded)
@@ -179,9 +177,8 @@ export function ThreadPanel({
         {embedded && onOpenInTab !== undefined ? <ActionButton variant="outline" onPress={onOpenInTab}>Open in tab</ActionButton> : null}
       </div>
       {flash === undefined ? null : <div role="status" data-thread-confirmed="" {...stylex.props(styles.flash)}><Icon name="check" size={12} />{flash}</div>}
-      {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status" {...stylex.props(styles.actions, styles.pending)}>
-        {retryPending ? 'Sending…' : `Fractal has not confirmed the previous ${pendingChange}.`}
-        <ActionButton variant="outline" isDisabled={pending || retryPending} onPress={() => { void run(onRetryChange, closeRename) }}>Retry {pendingChange}</ActionButton>
+      {pendingChange === undefined ? null : <div role="status" {...stylex.props(styles.actions, styles.pending)}>
+        <span>Fractal has not confirmed the previous {pendingChange}.</span><span>Do not send it again.</span>
       </div>}
       {markRead === null ? feedback : null}
     </div> : null}

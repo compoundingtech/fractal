@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Threads keep an unconfirmed rename or lifecycle change visible without offering to resend an action whose outcome is unknown.",
+  "replay": { "status": "none", "detail": "No history replay or rebuild changes." },
+  "schema": { "status": "none", "detail": "No storage or wire schema changes." },
+  "rules": { "status": "none", "detail": "Delivery certainty and grants are unchanged; unknown actions remain non-replayable." },
+  "compatibility": { "status": "none", "detail": "The web notice no longer depends on a retry callback. Existing pending changes remain visible and keep conflicting changes disabled." },
+  "downtime": { "status": "none", "detail": "No service interruption required." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No persistent state changes to recover." }
+}
