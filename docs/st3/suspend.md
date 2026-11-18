@@ -19,8 +19,8 @@ declaration.
 
 The suspension block in `agents show` includes its cause (`manual` or `idle`) and snapshot mode
 (`git` or `in-place`). Missing metadata in historical records means `manual` and `git`; unfamiliar
-values stay visible rather than being reclassified. This release only adds readers: ordinary
-suspend still captures Git, and no daemon automatically writes idle suspensions.
+values stay visible rather than being reclassified. Ordinary manual suspend still requires a
+Git snapshot; no daemon automatically writes idle suspensions in this prerequisite.
 
 An explicit suspend of an already idle-suspended seat converts the hold to manual, preserving
 the original suspend operation, snapshot and native session. Repeating the same request is
@@ -61,6 +61,25 @@ written what a resume reads. Suspend captures a Git snapshot commit, records the
 stops the runtime, and freezes portable transcript files after the process ends. It leaves the seat `suspended`. A suspended seat
 stays declared. Its restart policy does not restart it, `fractal agents restart` refuses it, and mail
 sent to it waits until it resumes.
+
+Idle-cause OMP operations may instead capture `in-place` when Git refuses with
+`workspace-not-git`, `workspace-unborn`, `workspace-not-root`, or
+`workspace-submodule-unsupported`. The workspace stays untouched on its source host.
+The snapshot receipt records the mode before stopping; after the stop fence, the owner freezes
+the native transcript without a Git bundle. Same-host resume validates the frozen transcript's
+digest, native session header and absolute workspace path, then checks that the original native
+binding still contains those bytes. It launches the original authoritative transcript, so later
+ordinary restarts retain post-resume turns rather than selecting a stale inventory copy.
+Missing or mismatched content fails rather than selecting a fresh conversation. Retrying after
+a daemon restart reuses the captured mode and original native inventory.
+
+Git snapshot receipts omit the mode field: absence already means `git`, preserving ordinary
+manual suspension interoperability with older members.
+
+An in-place suspension is pinned to its source host: `resume --host` elsewhere refuses with
+`snapshot-in-place` before changing placement. Converting the suspension to manual retains
+this restriction. All active members must have the cause/mode readers before idle writers
+are enabled; this change does not enable them.
 
 An incarnation-bearing report is accepted only while the latest runtime observation records
 that incarnation as running. The writer checks this authority before replaying or deduplicating
@@ -212,12 +231,16 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
   single-host resume support; cross-host requests refuse until their storage adapters are built.
 - Suspend requires an absolute Git workspace path, a commit, and the working tree root.
   Workspaces containing submodules refuse with `workspace-submodule-unsupported`.
+  [Idle residency](idle-residency.md#snapshot-modes-idle-r09-idle-r10) specifies an in-place
+  mode for such workspaces; it is not implemented yet.
 - Archives are host-local and capped at 256 MiB, including Git history. Ignored files and
   host-owned credentials and environment are not transported.
 - Every other relaunch continues the seat's last native session when its harness can, and
   otherwise starts a new one: it names the session in `ST3_NATIVE_CONTINUE_SESSION`, which a
   driver may refuse without ending the launch. Only a resume must come back on its exact session.
 - Mail does not wake a suspended seat. Only `fractal agents resume` does.
+  [Idle residency](idle-residency.md) specifies daemon-owned idle suspension that wake-class mail
+  resumes; it is not implemented yet.
 - OpenCode delivery follows the session the server reports most recently. A seat whose OpenCode
   session ran a subagent session last may record that session.
 

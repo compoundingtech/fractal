@@ -26,6 +26,8 @@ pub struct Manifest {
     pub suspend_operation: String,
     pub source_host: String,
     pub workspace: String,
+    #[serde(default = "git_mode")]
+    pub mode: String,
     pub head: String,
     pub branch: Option<String>,
     pub commit: String,
@@ -33,9 +35,46 @@ pub struct Manifest {
     pub harness: String,
     pub native_session_id: String,
     pub transcript: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<PathBuf>,
     pub transcript_sha256: String,
 }
 
+fn git_mode() -> String {
+    "git".into()
+}
+
+/// Only idle operations may retain a workspace that cannot be snapshotted by Git.
+/// The on-disk decision survives a restart before the snapshot receipt is appended.
+pub fn capture(
+    state: &Path,
+    subject: &str,
+    member: &MemberSpec,
+    suspension: &Suspension,
+) -> Result<&'static str> {
+    let dir = directory(state, &suspension.operation_id);
+    if dir.join("in-place").is_file() {
+        anyhow::ensure!(suspension.cause() == "idle", "in-place capture requires idle cause");
+        return Ok("in-place");
+    }
+    match workspace(state, subject, &suspension.operation_id, member) {
+        Ok(()) => Ok("git"),
+        Err(error) if suspension.cause() == "idle" && matches!(code(&error),
+            "workspace-not-git" | "workspace-unborn" | "workspace-not-root"
+                | "workspace-submodule-unsupported") =>
+        {
+            fs::create_dir_all(&dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+            }
+            fs::File::create(dir.join("in-place"))?.sync_all()?;
+            Ok("in-place")
+        }
+        Err(error) => Err(error),
+    }
+}
 fn refusal(code: &'static str, message: impl Into<String>) -> anyhow::Error {
     FractalError::new(code, message).into()
 }
@@ -240,8 +279,9 @@ pub fn seal(
                 "the suspended native transcript is missing",
             )
         })?;
+    let in_place = suspension.mode() == "in-place";
     if fs::metadata(&transcript)?.len() > MAX_BYTES
-        || fs::metadata(dir.join("workspace.bundle"))?.len() > MAX_BYTES
+        || (!in_place && fs::metadata(dir.join("workspace.bundle"))?.len() > MAX_BYTES)
     {
         return Err(refusal(
             "snapshot-too-large",
@@ -253,25 +293,32 @@ pub fn seal(
         .context("transcript has no filename")?
         .to_string_lossy()
         .into_owned();
-    let workspace: serde_json::Value =
-        serde_json::from_slice(&fs::read(dir.join("workspace.json"))?)?;
+    let workspace: serde_json::Value = if in_place {
+        serde_json::json!({})
+    } else {
+        serde_json::from_slice(&fs::read(dir.join("workspace.json"))?)?
+    };
     let manifest = Manifest {
         subject: subject.into(),
         suspend_operation: operation.into(),
         source_host: member.host.clone(),
         workspace: member.workspace.clone(),
-        head: workspace["head"].as_str().unwrap().into(),
+        mode: suspension.mode().into(),
+        head: workspace["head"].as_str().unwrap_or_default().into(),
         branch: workspace["branch"].as_str().map(str::to_owned),
-        commit: workspace["commit"].as_str().unwrap().into(),
-        reference: workspace["reference"].as_str().unwrap().into(),
+        commit: workspace["commit"].as_str().unwrap_or_default().into(),
+        reference: workspace["reference"].as_str().unwrap_or_default().into(),
         harness: harness.into(),
         native_session_id: id.into(),
         transcript: filename.clone(),
+        transcript_path: in_place.then(|| transcript.clone()),
         transcript_sha256: hex::encode(Sha256::digest(fs::read(&transcript)?)),
     };
     let mut archive = tar::Builder::new(fs::File::create(dir.join("payload.tmp"))?);
     archive.follow_symlinks(false);
-    archive.append_path_with_name(dir.join("workspace.bundle"), "workspace.bundle")?;
+    if !in_place {
+        archive.append_path_with_name(dir.join("workspace.bundle"), "workspace.bundle")?;
+    }
     let bytes = serde_json::to_vec(&manifest)?;
     let mut header = tar::Header::new_gnu();
     header.set_size(bytes.len() as u64);
@@ -362,6 +409,10 @@ pub fn restore(
     }
     let manifest: Manifest =
         serde_json::from_slice(&fs::read(staging.path().join("manifest.json"))?)?;
+    if manifest.mode == "in-place" && manifest.source_host != member.host {
+        return Err(refusal("snapshot-in-place", "an in-place suspension can only resume on its source host"));
+    }
+    anyhow::ensure!(matches!(manifest.mode.as_str(), "git" | "in-place"), "unknown snapshot mode");
     anyhow::ensure!(
         manifest.subject == subject
             && manifest.source_host == member.host
@@ -410,6 +461,24 @@ pub fn restore(
         ));
     }
     let workspace = Path::new(&member.workspace);
+    if manifest.mode == "in-place" {
+        if !workspace.is_dir() {
+            return Err(refusal("workspace-path-mismatch", "the in-place workspace is missing"));
+        }
+        // Resume the existing authoritative file, not an inventory-detached copy. Future
+        // ordinary restarts must see every post-resume turn through the same inventory.
+        let path = manifest.transcript_path.as_deref()
+            .filter(|path| path.is_absolute())
+            .context("in-place snapshot has no absolute native binding")?;
+        let current = fs::read(path).map_err(|_| refusal(
+            "transcript-missing", "the in-place native binding is missing",
+        ))?;
+        anyhow::ensure!(
+            hex::encode(Sha256::digest(&current)) == manifest.transcript_sha256,
+            "in-place transcript differs from its sealed content"
+        );
+        return Ok(manifest);
+    }
     if fs::symlink_metadata(workspace).is_ok() {
         return Err(refusal(
             "workspace-occupied",
@@ -522,6 +591,9 @@ pub async fn transfer(
     suspension: Suspension,
 ) -> Result<()> {
     use base64::Engine as _;
+    if suspension.mode() == "in-place" {
+        return Err(refusal("snapshot-in-place", "an in-place suspension cannot move to another host"));
+    }
     let operation = suspension
         .suspend_operation_id
         .as_deref()
@@ -928,5 +1000,100 @@ mod tests {
             ),
             "workspace-not-git"
         );
+    }
+
+    #[test]
+    fn idle_in_place_capture_seal_and_strict_restore_survive_restarts() {
+        for refusal_class in ["workspace-not-git", "workspace-unborn",
+            "workspace-not-root", "workspace-submodule-unsupported"] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut member, mut suspension, store) = fixture(root.path());
+            let native = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
+            suspension.native_session_id = Some(native.into());
+            let original = PathBuf::from(&member.workspace);
+            match refusal_class {
+                "workspace-not-git" => fs::remove_dir_all(original.join(".git")).unwrap(),
+                "workspace-unborn" => {
+                    fs::remove_dir_all(original.join(".git")).unwrap();
+                    git(&original, &["init", "-q"], None, None).unwrap();
+                }
+                "workspace-not-root" => {
+                    let nested = original.join("nested");
+                    fs::create_dir(&nested).unwrap();
+                    fs::write(nested.join("tracked"), "changed\n").unwrap();
+                    member.workspace = nested.to_string_lossy().into_owned();
+                }
+                _ => {
+                    let source = root.path().join("submodule-source");
+                    git(root.path(), &["clone", "-q", &original.to_string_lossy(), &source.to_string_lossy()], None, None).unwrap();
+                    git(&original, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &source.to_string_lossy(), "nested"], None, None).unwrap();
+                }
+            }
+            let transcript = sessions(&root.path().join("state/drivers"), "agent/sample", "omp")
+                .join(format!("2026-11-18_{native}.jsonl"));
+            fs::write(&transcript, format!("{}\n{}\n",
+                serde_json::json!({"type":"session", "id":native, "cwd":member.workspace}),
+                serde_json::json!({"role":"user", "content":"frozen"}))).unwrap();
+            let state = root.path().join("state");
+            // Manual requests retain every original refusal, without stopping the seat.
+            assert_eq!(code(&capture(&state, "agent/sample", &member, &suspension).unwrap_err()), refusal_class);
+            suspension.cause = Some("idle".into());
+            assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "in-place");
+            // Reopening between capture and the receipt must retain the mode decision.
+            let mut reopened = suspension.clone();
+            assert_eq!(capture(&state, "agent/sample", &member, &reopened).unwrap(), "in-place");
+            reopened.mode = Some("in-place".into());
+            let manifest = seal(&state, &store, "agent/sample", &member, &reopened).unwrap().unwrap();
+            assert_eq!(manifest.mode, "in-place");
+            assert!(manifest.commit.is_empty());
+            let dir = directory(&state, "snapshot");
+            let payload = dir.join("payload.tar");
+            let names: Vec<_> = tar::Archive::new(fs::File::open(&payload).unwrap())
+                .entries().unwrap().map(|entry| entry.unwrap().path().unwrap().into_owned()).collect();
+            assert!(!names.contains(&PathBuf::from("workspace.bundle")));
+            // Missing native authority refuses instead of publishing a detached inventory copy.
+            let frozen = fs::read(&transcript).unwrap();
+            fs::remove_file(&transcript).unwrap();
+            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap_err()), "transcript-missing");
+            fs::write(&transcript, &frozen).unwrap();
+            for _restart in 0..2 {
+                let restored = restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).unwrap();
+                assert_eq!(restored.native_session_id, native);
+                assert_eq!(restored.transcript_path.as_ref(), Some(&transcript));
+                assert!(fs::read_to_string(&transcript).unwrap().contains("frozen"));
+            }
+            assert_eq!(fs::read_to_string(Path::new(&member.workspace).join("tracked")).unwrap(), "changed\n");
+            let mut moved = member.clone();
+            moved.host = "birch".into();
+            assert_eq!(code(&restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &moved, native).unwrap_err()), "snapshot-in-place");
+            assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, "wrong-session").is_err());
+            // A new turn after strict resume must remain visible to ordinary continuation,
+            // which selects by native ID from the managed inventory.
+            let inventory = sessions(&state.join("drivers"), "agent/sample", "omp");
+            let resumed = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, native, Some(&transcript)).unwrap();
+            assert_eq!(resumed[2], transcript.to_string_lossy());
+            let mut continued = frozen;
+            continued.extend_from_slice(b"{\"role\":\"assistant\",\"content\":\"post-resume turn\"}\n");
+            fs::write(&transcript, &continued).unwrap();
+            let restarted = crate::native_resume::pi_family_argv("omp", vec!["omp".into()], &inventory, native, None).unwrap();
+            assert_eq!(restarted, resumed);
+            assert!(fs::read_to_string(&restarted[2]).unwrap().contains("post-resume turn"));
+            // Another strict restore must not overwrite divergent native state.
+            assert!(restore(&payload, &state.join("drivers"), "agent/sample", "snapshot", &member, native).is_err());
+        }
+    }
+
+    #[test]
+    fn idle_git_capture_stays_portable_and_in_place_requires_a_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let (member, mut suspension, store) = fixture(root.path());
+        let state = root.path().join("state");
+        suspension.cause = Some("idle".into());
+        assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "git");
+        fs::remove_dir_all(Path::new(&member.workspace).join(".git")).unwrap();
+        assert_eq!(capture(&state, "agent/sample", &member, &suspension).unwrap(), "in-place");
+        suspension.mode = Some("in-place".into());
+        fs::remove_dir_all(sessions(&state.join("drivers"), "agent/sample", "omp")).unwrap();
+        assert_eq!(code(&seal(&state, &store, "agent/sample", &member, &suspension).unwrap_err()), "transcript-missing");
     }
 }
