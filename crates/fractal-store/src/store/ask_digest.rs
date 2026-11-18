@@ -5,7 +5,7 @@ use crate::ask_digest_clock::{ask_digest_policy, ask_digest_window};
 use crate::external_sessions::timestamp;
 use fractal_schema::notice;
 
-const OVERRIDE_WINDOW_MS: u128 = 7 * 24 * 60 * 60_000;
+pub(super) const OVERRIDE_WINDOW_MS: u128 = 7 * 24 * 60 * 60_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AskDigestPass {
@@ -175,14 +175,17 @@ fn append_notice(tx: &Transaction<'_>, origin: &str, subject: &str, kind: &str,
     append_claim_tx(tx, origin, subject, kind, Some(notice::RUNTIME_ACTOR), &json!({"fields":fields}), predecessors, None)
 }
 
-fn resolution_row(connection: &Connection, resolution: &str, episode: &str, now: u128) -> Result<Option<Value>> {
+pub(super) fn resolution_row(connection: &Connection, resolution: &str, episode: &str, now: u128) -> Result<Option<Value>> {
     let ask = claim_by_id_tx(connection, episode)?.context("digest ask disappeared")?;
     let applied = claim_by_id_tx(connection, resolution)?.context("digest resolution disappeared")?;
     let person = ask.body["fields"]["person"].as_str().context("digest ask person missing")?;
     let overridden: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims answer WHERE subject=?1
         AND kind IN ('work.person-override','work.person-done','work.person-cancelled')
         AND actor=?2 AND json_extract(body,'$.fields.episode')=?3)",params![ask.subject,person,episode],|r|r.get(0))?;
-    if overridden || ask.kind != "work.person-asked" || applied.origin != ask.origin || applied.subject != ask.subject {
+    if overridden || ask.kind != "work.person-asked" || applied.origin != ask.origin || applied.subject != ask.subject
+        || applied.kind != "work.person-done" || applied.actor.as_deref() != Some("daemon/runtime")
+        || applied.body["fields"]["resolved_by"] != "deadline"
+        || applied.body["fields"]["episode"] != episode {
         return Ok(None);
     }
     let mut row = json!({"resolution_id":resolution,"title":ask.body["fields"]["title"],

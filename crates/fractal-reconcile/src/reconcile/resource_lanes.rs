@@ -22,6 +22,7 @@ fn lower_request(lane: &crate::model::ResourceLaneSpec, id: String, owner: Owner
             crate::model::ResourceLaneCoverage::Enforced => Coverage::Enforced,
         },
         admission_timeout_ms: lane.admission_timeout_ms,
+        class: lane.class, disk: lane.disk.clone(), io: lane.io,
     }
 }
 
@@ -106,32 +107,97 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    pub(super) fn resource_lane_fit(&self, candidate: &str, capacity: Option<fractal_runtime::Capacity>) -> Result<Fit> {
-        let (Some(host), Some(capacity)) = (self.seat_admission.lanes, capacity) else { return Ok(Fit::default()); };
-        if self.store.resource_memberships_for_host(&self.host)?.iter()
-            .any(|record| record.request.id == candidate && record.state != "queued")
+    fn resource_disk_fit(&self, disk: &fractal_runtime::DiskRequest) -> Result<crate::store::resource_membership::DiskFit> {
+        anyhow::ensure!(Path::new(&disk.path).is_absolute(), "disk reservation path must be absolute");
+        let probe = self.disk_probe.as_ref().context("disk reservation observation unavailable")?;
+        let mount = probe(Path::new(&disk.path)).context("reading disk reservation mount")?;
+        let policy = &self.seat_admission.finite_policy;
+        let mut configured_floor = None;
+        for (path, configured) in &policy.disk_floors {
+            anyhow::ensure!(path.is_absolute(), "disk floor path must be absolute");
+            let configured_mount = probe(path).context("reading configured disk floor mount")?;
+            if configured_mount.filesystem == mount.filesystem {
+                configured_floor = Some(configured_floor.map_or(*configured, |floor: u64| floor.max(*configured)));
+            }
+        }
+        smallclaims::touched::note_read(|| "host-lane-disk".into());
+        Ok(crate::store::resource_membership::DiskFit {
+            filesystem: mount.filesystem, available: mount.available,
+            floor: configured_floor.unwrap_or(policy.disk_floor_bytes),
+        })
+    }
+
+    pub(super) fn resource_lane_fit(&self, request: &LaneRequest) -> Result<Fit> {
+        if request.capacity.is_none() { return Ok(Fit::default()); }
+        let memberships = self.store.resource_memberships_for_host(&self.host)?;
+        if memberships.iter()
+            .any(|record| record.request.id == request.id && record.state != "queued")
         {
             return Ok(Fit::default());
         }
         smallclaims::touched::note_read(|| "seat-admission".into());
+        smallclaims::touched::note_read(|| format!("resource-membership/{}", request.host));
+        let policy = &self.seat_admission.finite_policy;
+        let mut fit = Fit { heavy_io_slots: policy.heavy_io_slots, ..Fit::default() };
+        if request.io == Some(fractal_runtime::IoClass::Heavy) && policy.heavy_io_slots == Some(0) {
+            return Ok(fit);
+        }
+        fit.room = self.seat_admission.lanes.map(|host| host.room).or_else(|| {
+            (request.coverage == Coverage::Logical)
+                .then(fractal_runtime::host::size).flatten().map(fractal_runtime::host::for_lanes)
+        });
+        if request.capacity.is_some_and(|capacity| fit.room.is_none_or(|room|
+            capacity.cores > room.cores || capacity.memory > room.memory))
+        {
+            return Ok(fit);
+        }
+        if let Some(disk) = &request.disk {
+            let mount = self.resource_disk_fit(disk)?;
+            fit.disk = Some(mount);
+            fit.disk_mounts.insert(disk.path.clone(), mount);
+        }
+        for member in memberships.iter().take_while(|member| member.request.id != request.id)
+            .filter(|member| member.state == "queued" && member.request.class == request.class)
+        {
+            if let Some(disk) = &member.request.disk
+                && !fit.disk_mounts.contains_key(&disk.path)
+            {
+                fit.disk_mounts.insert(disk.path.clone(), self.resource_disk_fit(disk)?);
+            }
+        }
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
-        // Finite custody is summed atomically by the store writer, not from this snapshot.
-        let held_bytes = self.lanes_held(candidate, now, true, false)?;
-        let reserve = self.burst_reserve(candidate, capacity)?;
-        let outside_bytes = (host.outside)().context("UnsupportedCoverage: outside-lane host observation unavailable")?;
-        let impossible = capacity.cores > host.room.cores || capacity.memory > host.room.memory;
-        let reserve_wait = capacity.memory > host.room.memory.saturating_sub(reserve.full);
-        let head = self.seat_admission.status.lane_head(now).filter(|head| head != candidate);
-        if self.seat_admission.status.lane_wait(candidate,
-            "finite execution waits for native admission".into(), !impossible && !reserve_wait, now)
+        if let (Some(host), Some(_)) = (self.seat_admission.lanes, request.capacity) {
+            smallclaims::touched::note_read(|| "host-lane-memory".into());
+            fit.held_bytes = self.lanes_held(&request.id, now, true, false)?;
+            fit.reserve_bytes = self.finite_burst_reserve(&request.id)?.kept;
+            let observation = (host.outside)().context("UnsupportedCoverage: outside-lane host observation unavailable")?;
+            fit.outside_bytes = observation.outside_bytes;
+            fit.psi_blocked = observation.psi_blocked;
+        } else if request.coverage == Coverage::Logical {
+            // Advisory execution still reserves custody when the host's lane backend is off.
+            // There is no configured lane/outside-memory probe or enforcement claim.
+            if fit.room.is_some() && request.capacity.is_some() {
+                fit.held_bytes = self.lanes_held(&request.id, now, true, false)?;
+                fit.reserve_bytes = self.finite_burst_reserve(&request.id)?.kept;
+            }
+        }
+        if self.seat_admission.status.lane_wait_class(&request.id,
+            "finite execution waits for native admission".into(), true, now, request.class)
         {
             self.incremental.touch("seat-admission");
             self.signal_changed();
         }
-        Ok(Fit {
-            room: Some(host.room), held_bytes, outside_bytes, reserve_bytes: reserve.kept,
-            fifo_predecessor: if reserve_wait && !impossible { Some("burst reserve".into()) } else { head },
-        })
+        // Finite class/backfill/aging order is decided atomically from durable memberships.
+        // Keep only the separate seat predecessor fence from the shared host accountant.
+        fit.fifo_predecessor = self.seat_admission.status.lane_head(now).filter(|head|
+            *head != request.id && !memberships.iter().any(|member| member.request.id == *head));
+        self.seat_admission.status.state().finite_fit = Some(fractal_runtime::seat_admission_status::FiniteFit {
+            subject: request.id.clone(), room: fit.room, seat_held_bytes: fit.held_bytes,
+            finite_held_bytes: self.store.held_resource_membership_bytes(&self.host, &request.id)?,
+            outside_bytes: fit.outside_bytes, reserve_bytes: fit.reserve_bytes,
+            arc_credit_bytes: fractal_runtime::host::arc_credit_bytes(), observed_at: now,
+        });
+        Ok(fit)
     }
 
     pub(super) fn admit_resource_lane(&self, subject: &DesiredSubject, member: &MemberSpec) -> Result<bool> {
@@ -158,11 +224,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         smallclaims::touched::note_read(|| crate::store::resource_membership::dependency(&request.host, &request.name));
         let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
-        let fit = self.resource_lane_fit(&request.id, request.capacity)?;
+        let fit = self.resource_lane_fit(&request)?;
         let prior = self.store.resource_memberships_for_host(&self.host)?.into_iter()
             .find(|record| record.request.id == request.id).map(|record| record.state);
         let admission = self.store.request_resource_membership(&request, fit, now)?;
         let current = self.store.resource_membership_record(&request.id, &request.owner)?;
+        if current.state != "queued" {
+            self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != request.id);
+        }
         if prior.as_deref() != Some(current.state.as_str()) {
             self.incremental.touch(&crate::store::resource_membership::dependency(&request.host, &request.name));
             self.incremental.touch("seat-admission");
@@ -216,6 +285,176 @@ impl<R: RuntimeControl> Reconciler<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const GIB: u64 = 1 << 30;
+
+    fn test_fit() -> Fit {
+        Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 * GIB }), ..Fit::default() }
+    }
+
+    #[test]
+    fn disabled_heavy_io_refuses_before_disk_or_memory_observation() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let policy = fractal_runtime::host::FinitePolicy { heavy_io_slots: Some(0), ..Default::default() };
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy));
+        let candidate = LaneRequest {
+            id: "disabled".into(), name: "checks".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check,
+            disk: Some(fractal_runtime::DiskRequest { bytes: 1, path: "/unavailable".into() }),
+            io: Some(fractal_runtime::IoClass::Heavy),
+            owner: Owner { run: "shell".into(), step: "shell".into(), attempt: 1, invocation: None },
+        };
+        let fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 1).unwrap(),
+            Admission::Refused { code: crate::store::resource_membership::RefusalCode::Impossible, .. }));
+    }
+
+    #[test]
+    fn existing_disk_observer_wakes_finite_requests_when_mount_space_changes() {
+        use super::super::tests::FakeRuntime;
+        use std::sync::atomic::AtomicU64;
+        const GIB: u64 = 1 << 30;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let available = Arc::new(AtomicU64::new(100 * GIB));
+        let reading = available.clone();
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_disk_probe(vec![], Arc::new(move |_| Ok(crate::disk::DiskSpace {
+                filesystem: 7, available: reading.load(Ordering::Relaxed), total: 200 * GIB,
+            })));
+        let candidate = LaneRequest {
+            id: "disk-wait".into(), name: "checks".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check,
+            disk: Some(fractal_runtime::DiskRequest { bytes: 99 * GIB, path: "/work".into() }), io: None,
+            owner: Owner { run: "shell".into(), step: "shell".into(), attempt: 1, invocation: None },
+        };
+        let fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 1).unwrap(), Admission::Queued { .. }));
+        reconciler.reconcile_disk_space(&[]).unwrap();
+        let before = *reconciler.event_notify.borrow();
+        available.store(102 * GIB, Ordering::Relaxed);
+        reconciler.reconcile_disk_space(&[]).unwrap();
+        assert!(*reconciler.event_notify.borrow() > before);
+        let fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 2).unwrap(), Admission::Admitted(_)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_logical_requests_use_native_custody_without_linux_lane_observation() {
+        use super::super::tests::FakeRuntime;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let candidate = LaneRequest {
+            id: "logical".into(), name: "checks".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check, disk: None, io: None,
+            owner: Owner { run: "shell".into(), step: "shell".into(), attempt: 1, invocation: None },
+        };
+        let fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert!(fit.room.is_some());
+        assert_eq!(fit.outside_bytes, 0);
+        let Admission::Admitted(grant) = store.request_resource_membership(&candidate, fit, 1).unwrap()
+            else { panic!("advisory logical request must acquire native custody"); };
+        assert_eq!(grant.coverage, Coverage::Logical);
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 1);
+    }
+
+    #[test]
+    fn host_policy_maps_disk_paths_to_mounts_and_defaults_to_one_heavy_slot() {
+        use super::super::tests::FakeRuntime;
+        use fractal_runtime::{DiskRequest, IoClass, RequestClass};
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let policy = fractal_runtime::host::FinitePolicy {
+            disk_floor_bytes: 10,
+            disk_floors: std::collections::BTreeMap::from([(PathBuf::from("/mount"), 40)]),
+            ..Default::default()
+        };
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()))
+            .with_finite_resources(Some(policy))
+            .with_disk_probe(vec![], Arc::new(|_| Ok(crate::disk::DiskSpace { filesystem: 7, available: 100, total: 200 })));
+        let candidate = LaneRequest {
+            id: "ci-check".into(), name: "ci".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: RequestClass::Check, disk: Some(DiskRequest { bytes: 61, path: "/mount/work".into() }),
+            io: Some(IoClass::Heavy),
+            owner: Owner { run: "ci-run".into(), step: "ci-check".into(), attempt: 1, invocation: None },
+        };
+        let fit = reconciler.resource_lane_fit(&candidate).unwrap();
+        assert_eq!(fit.disk.unwrap().filesystem, 7);
+        assert_eq!(fit.disk.unwrap().floor, 40);
+        assert_eq!(fit.heavy_io_slots, Some(1));
+        assert!(matches!(store.request_resource_membership(&candidate, fit, 1).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&candidate.id, &candidate.owner).unwrap().blocked_by,
+            Some(crate::store::resource_membership::BlockedBy::Disk));
+    }
+
+    #[test]
+    fn arc_observation_unwedges_twenty_zero_holder_requests_without_a_seat_reserve() {
+        use super::super::tests::FakeRuntime;
+        use fractal_runtime::{Capacity, host};
+        const GIB: u64 = 1 << 30;
+        thread_local! { static HIGH_PSI: std::cell::Cell<bool> = const { std::cell::Cell::new(true) }; }
+        fn outside() -> Option<host::HostMemoryObservation> {
+            let pressure = HIGH_PSI.with(|high| if high.get() {
+                "full avg10=0.00 avg60=2.00 avg300=0.00 total=50\n"
+            } else {
+                "full avg10=0.00 avg60=0.99 avg300=0.00 total=50\n"
+            });
+            host::outside_memory(
+                "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n",
+                Some("size 4 37258870784\nc_min 4 4187593114\n\
+                    mru_evictable_data 4 5368709120\nmru_evictable_metadata 4 5368709120\n\
+                    mfu_evictable_data 4 5368709120\nmfu_evictable_metadata 4 5368709120\n"),
+                None, Some(pressure))
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.start_resource_authority("node", "epoch").unwrap();
+        let mut reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let room = host::for_lanes(Capacity { cores: 32, memory: 125 * GIB });
+        reconciler.seat_admission.lanes = Some(seat_admission::LaneHost {
+            room, outside, burst_lane: Some(seat_admission::BURST_LANE),
+        });
+        let capacity = Capacity { cores: 4, memory: 15 * GIB };
+        let requests: Vec<_> = (0..20).map(|index| LaneRequest {
+            id: format!("queued-{index:02}"), name: "checks".into(), host: "node".into(),
+            max_members: 1, capacity: Some(capacity), coverage: Coverage::Logical,
+            admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
+            owner: Owner { run: "run".into(), step: "step".into(), attempt: 1, invocation: None },
+        }).collect();
+        // Twenty waiters, no holders: PSI suppresses the fictional 20 GiB evictable credit.
+        let observation = outside().unwrap();
+        assert!(observation.psi_blocked);
+        for request in &requests {
+            let fit = Fit { room: Some(room), outside_bytes: observation.outside_bytes,
+                psi_blocked: observation.psi_blocked, ..Fit::default() };
+            assert!(matches!(store.request_resource_membership(request, fit, 1).unwrap(), Admission::Queued { .. }));
+        }
+        let waiting = store.resource_membership_record(&requests[0].id, &requests[0].owner).unwrap();
+        assert_eq!(waiting.blocked_by, Some(crate::store::resource_membership::BlockedBy::Psi));
+        assert!(waiting.reason.contains("PSI"));
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 0);
+        // The next host-memory observation changes fit; no holder release or admission timeout.
+        HIGH_PSI.with(|high| high.set(false));
+        let head = &requests[0];
+        let fit = reconciler.resource_lane_fit(head).unwrap();
+        assert_eq!(fit.reserve_bytes, 0, "a finite member is not a burst-capable seat");
+        assert_eq!(fit.outside_bytes, outside().unwrap().outside_bytes);
+        assert!(!fit.psi_blocked);
+        assert!(matches!(store.request_resource_membership(head, fit, 2).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 15 * GIB);
+    }
+
     #[test]
     fn inherited_exec_retries_keep_distinct_roots_in_parent_retirement_custody() {
         use super::super::tests::{FakeRuntime, apply_source};
@@ -232,14 +471,15 @@ mod tests {
         apply_source(&store, source, "inherited-retry");
         let parent = LaneRequest {
             id: "program-parent".into(), name: "verification".into(), host: "node".into(),
-            max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner {
                 run: "mission-run/parent".into(), step: "mission-step/parent/work".into(),
                 attempt: 1, invocation: None,
             },
         };
         store.start_resource_authority("node", "authority").unwrap();
-        let Admission::Admitted(grant) = store.request_resource_membership(&parent, Fit::default(), 100).unwrap()
+        let Admission::Admitted(grant) = store.request_resource_membership(&parent, test_fit(), 100).unwrap()
             else { panic!("parent membership must admit"); };
         let child = store.mission_run_subject_for_idempotency_key("inherited-retry-run");
         store.attach_resource_child(&grant, &parent.owner, &child).unwrap();
@@ -326,7 +566,7 @@ mod tests {
             goal "Verify."
             step "verify" {
                 agentless
-                lane "verification" host="node" max-members=1 coverage="logical" admission-timeout="2s"
+                lane "verification" host="node" max-members=1 coverage="logical" admission-timeout="2s" { capacity cores=1 memory="1G"; }
                 exec "verify" { command "true"; }
             }
         }"#;
@@ -347,19 +587,19 @@ mod tests {
         assert!(bound.launch_changes(&bound).is_empty());
         let program: LaneRequest = serde_json::from_value(serde_json::json!({
             "id": "program", "name": "verification", "host": "node", "maxMembers": 1,
-            "capacity": null, "coverage": "logical", "admissionTimeoutMs": 2000, "owner": owner,
+            "capacity": {"cores": 1, "memory": GIB}, "coverage": "logical", "admissionTimeoutMs": 2000, "owner": owner,
         })).unwrap();
         let store = Store::open_memory("node").unwrap();
         store.start_resource_authority("node", "authority").unwrap();
-        let Admission::Admitted(first) = store.request_resource_membership(&data, Fit::default(), 100).unwrap() else { panic!("data request must admit"); };
-        assert!(matches!(store.request_resource_membership(&program, Fit::default(), 200).unwrap(), Admission::Queued { .. }));
+        let Admission::Admitted(first) = store.request_resource_membership(&data, test_fit(), 100).unwrap() else { panic!("data request must admit"); };
+        assert!(matches!(store.request_resource_membership(&program, test_fit(), 200).unwrap(), Admission::Queued { .. }));
         let queued = store.resource_membership_record("program", &program.owner).unwrap();
         assert_eq!(queued.queued_at, 200);
         assert!(queued.payload_released_at.is_none(), "queueing must not open execution time");
         store.cancel_resource_membership(&first, &data.owner, 300).unwrap();
         let runtime = fractal_runtime::ExecRuntime::new(std::path::PathBuf::new(), std::path::PathBuf::new());
         assert!(store.retire_resource_membership(&first, &data.owner, &runtime, 300).unwrap());
-        assert!(matches!(store.request_resource_membership(&program, Fit::default(), 400).unwrap(), Admission::Admitted(_)));
+        assert!(matches!(store.request_resource_membership(&program, test_fit(), 400).unwrap(), Admission::Admitted(_)));
         let admitted = store.resource_membership_record("program", &program.owner).unwrap();
         assert_eq!(admitted.admitted_at, Some(400));
         assert!(admitted.payload_released_at.is_none());
@@ -388,7 +628,7 @@ mod tests {
                 "inherited-exec" => r#"agentless
                     exec "payload" { command "true"; }"#.to_owned(),
                 "queued-exec" => r#"agentless
-                    lane "checks" host="node" max-members=1 coverage="logical"
+                    lane "checks" host="node" max-members=1 coverage="logical" { capacity cores=1 memory="1G"; }
                     exec "payload" { command "true"; }"#.to_owned(),
                 _ => unreachable!(),
             };
@@ -420,12 +660,13 @@ mod tests {
             };
             let parent = LaneRequest {
                 id: "parent".into(), name: "checks".into(), host: "node".into(),
-                max_members: 1, capacity: None, coverage: Coverage::Logical,
+                max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: GIB }), coverage: Coverage::Logical,
                 admission_timeout_ms: None, owner: owner.clone(),
+                class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             };
             store.start_resource_authority("node", "clock-authority").unwrap();
             let Admission::Admitted(grant) = store.request_resource_membership(
-                &parent, Fit::default(), START as u64,
+                &parent, test_fit(), START as u64,
             ).unwrap() else { panic!("parent must be admitted"); };
             // Resource context must exist before the child becomes runnable, so the child
             // run is created only after its inherited scope is attached.
@@ -467,7 +708,7 @@ mod tests {
                 let request = desired.iter().filter_map(|subject| subject.member.as_ref())
                     .find_map(|member| request(member).unwrap()).unwrap();
                 assert!(matches!(store.request_resource_membership(
-                    &request, Fit::default(), START as u64,
+                    &request, test_fit(), START as u64,
                 ).unwrap(), Admission::Queued { .. }));
             }
             smallclaims::store::set_thread_clock(Some(START + 1_001));

@@ -82,6 +82,196 @@ fn assert_queue_converged(store: &Store) {
 }
 
 #[test]
+fn mission_supersession_answered_human_gates_retain_sources_and_owned_descendants() {
+    for descendant in [false, true] {
+        for step_owned in [false, true] {
+            let store = Store::open_memory("owner").unwrap();
+            publish_mission(&store, ORIGINAL, "human-gate-original");
+            let source = start_source(&store, None);
+            let owner = if descendant {
+                store.create_child_mission_run(&MissionRunRequest {
+                    mission: "retry-work".into(), revision: Some(source.revision.clone()),
+                    workspace: source.workspace.clone(), requester: Some(source.requester.clone()),
+                    mode: Some(source.mode.clone()),
+                    inputs: source.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+                    idempotency_key: "human-gate-child".into(),
+                }, &source, &source.steps[0].subject, None).unwrap()
+            } else { source.clone() };
+            let step = &owner.steps[0];
+            let request = store.append_claim(&ClaimInput {
+                subject: "gate-operation/continuity-human".into(), kind: "gate.requested".into(),
+                actor: None, fields: BTreeMap::from([
+                    ("owner".into(), json!(if step_owned { &step.subject } else { &owner.subject })),
+                    ("reviewer".into(), json!("person/requester")),
+                    ("question".into(), json!("Approve unchanged work?")),
+                    ("operation".into(), json!("gate-operation/continuity-human")),
+                    ("mission_revision".into(), json!(owner.revision)),
+                    ("step_definition".into(), json!(step.definition_hash)),
+                    ("attempt".into(), json!(step.attempt)),
+                ]), evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some("human-gate-request".into()),
+            }).unwrap();
+            let answer = store.append_claim(&ClaimInput {
+                subject: request.subject.clone(), kind: "gate.result".into(),
+                actor: Some("person/requester".into()), fields: BTreeMap::from([
+                    ("request".into(), json!(request.id)), ("verdict".into(), json!("pass")),
+                ]), evidence: vec![request.id.clone()], expected_subject: None,
+                idempotency_key: Some("human-gate-answer".into()),
+            }).unwrap();
+            assert_eq!(store.human_review_answer(&request.id).unwrap().unwrap().id, answer.id);
+            assert!(current(&store, &source).steps.iter().all(|step| step.status != "completed"));
+            assert!(current(&store, &owner).steps.iter().all(|step| step.status != "completed"));
+            publish_mission(&store, &ORIGINAL.replace("Prepare.", "Prepare the same work."), "human-gate-prose");
+            requeue_heads(&store);
+            store.supersede_mission_publications().unwrap();
+            assert!(current(&store, &source).superseded_by.is_none());
+            assert!(current(&store, &owner).superseded_by.is_none());
+            assert!(!store.supersede_current_mission_run(&current(&store, &source)).unwrap());
+            assert_eq!(store.human_review_answer(&request.id).unwrap().unwrap().id, answer.id);
+            assert_eq!(store.claims_for(&request.subject, Some("gate.requested")).unwrap().len(), 1);
+            assert_queue_converged(&store);
+        }
+    }
+}
+
+#[test]
+fn mission_supersession_completed_work_waits_across_reopen_and_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let store = Store::open(&path, "owner").unwrap();
+    publish_mission(&store, ORIGINAL, "evidence-original");
+    let source = start_source(&store, None);
+    let work = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    store.set_step_state(&work.subject, "completed", None).unwrap();
+    publish_mission(&store, &ORIGINAL.replace("Prepare.", "Prepare the same work."), "evidence-prose");
+    assert!(current(&store, &source).superseded_by.is_none());
+    assert_queue_converged(&store);
+    drop(store);
+
+    let store = Store::open(&path, "owner").unwrap();
+    rebuild(&store, &[&source]);
+    requeue_heads(&store);
+    store.supersede_mission_publications().unwrap();
+    let retained = current(&store, &source);
+    let index = store.index().unwrap();
+    assert!(!store.supersede_current_mission_run(&retained).unwrap());
+    assert!(!store.mission_run_supersession_pending_tx(&store.readers.get(), &retained).unwrap());
+    assert_eq!(store.index().unwrap(), index);
+    assert_eq!(retained.generation, source.generation);
+    assert_eq!(retained.phase, "normal");
+    assert!(retained.superseded_by.is_none());
+    assert!(retained.supersession_fault.is_none());
+    assert_eq!(store.step_run(&work.subject).unwrap().unwrap().status, "completed");
+    assert_queue_converged(&store);
+}
+
+#[test]
+fn mission_supersession_person_responses_wait_without_reasking() {
+    use crate::store::person_work::PersonWorkStore;
+
+    for cancel in [false, true] {
+        let store = Store::open_memory("controller").unwrap();
+        let original = ORIGINAL.replace("step \"prepare\" {", "step \"prepare\" { assigned-to \"agent/controller.worker\";");
+        publish_mission(&store, &original, "answer-original");
+        apply_source(&store,
+            "version 2\nagent \"worker\" { workspace \"/work/retry\"; command \"true\"; restart always; }\n",
+            "answer-worker");
+        let source = start_source(&store, None);
+        let work = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+        store.set_step_state(&work.subject, "ready", None).unwrap();
+        store.work_action(&work.subject, "claim", &WorkRequest {
+            actor: Some("agent/controller.worker".into()), incarnation: Some("answer-worker".into()),
+            wait_ms: None, summary: None, reason: None, evidence: Vec::new(),
+            idempotency_key: "answer-claim".into(),
+        }).unwrap();
+        let ask = store.ask_person(&crate::model::PersonAskRequest {
+            person: "person/requester".into(), title: "Choose the input".into(),
+            reason: "The worker needs the requested choice.".into(), actor: "agent/controller.worker".into(),
+            step: Some(work.subject.clone()), incarnation: Some("answer-worker".into()),
+            new_run: None, request: None, priority: None, deadline_ms: None,
+            default_answer: None, legacy_request: None, idempotency_key: "answer-ask".into(),
+        }).unwrap();
+        store.finish_person_step(&crate::model::PersonStepResponse {
+            subject: ask.subject.clone(),
+            actor: if cancel { "agent/controller.worker" } else { "person/requester" }.into(),
+            summary: "Use the existing input.".into(), delegation: None,
+            evidence: Vec::new(), episode: None, answer: None,
+            idempotency_key: "answer-response".into(),
+        }, cancel).unwrap();
+        if cancel {
+            assert!(current(&store, &source).steps.iter().all(|step| step.status != "completed"),
+                "a cancellation response must be protected independently of completed steps");
+        }
+        let asks = store.claims_for(&ask.subject, Some("work.person-asked")).unwrap();
+        publish_mission(&store, &original.replace("Prepare.", "Prepare the same work."), "answer-prose");
+        rebuild(&store, &[&source]);
+        requeue_heads(&store);
+        store.supersede_mission_publications().unwrap();
+        let retained = current(&store, &source);
+        assert!(!store.supersede_current_mission_run(&retained).unwrap());
+        assert!(!store.mission_run_supersession_pending_tx(&store.readers.get(), &retained).unwrap());
+        assert!(retained.superseded_by.is_none());
+        assert_eq!(retained.phase, "normal");
+        assert_eq!(retained.generation, source.generation);
+        assert_eq!(store.claims_for(&ask.subject, Some("work.person-asked")).unwrap().len(), asks.len());
+        assert!(store.claims_for(&source.subject, Some("mission-run.supersede-linked")).unwrap().is_empty());
+        assert_queue_converged(&store);
+    }
+}
+
+#[test]
+fn mission_supersession_owned_descendant_completion_requires_review() {
+    let store = Store::open_memory("owner").unwrap();
+    publish_mission(&store, ORIGINAL, "descendant-original");
+    let source = start_source(&store, None);
+    let parent_step = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    let child = store.create_child_mission_run(&MissionRunRequest {
+        mission: "retry-work".into(), revision: Some(source.revision.clone()),
+        workspace: source.workspace.clone(), requester: Some(source.requester.clone()),
+        mode: Some(source.mode.clone()),
+        inputs: source.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+        idempotency_key: "descendant-run".into(),
+    }, &source, &parent_step.subject, None).unwrap();
+    let work = child.steps.iter().find(|step| step.step == "prepare").unwrap();
+    store.set_step_state(&work.subject, "completed", None).unwrap();
+    assert!(current(&store, &source).steps.iter().all(|step| step.status != "completed"));
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "descendant-target");
+    store.supersede_mission_publications().unwrap();
+    assert!(current(&store, &source).superseded_by.is_none());
+    assert!(current(&store, &child).superseded_by.is_none());
+    assert_eq!(store.step_run(&work.subject).unwrap().unwrap().status, "completed");
+    assert!(!store.supersede_current_mission_run(&current(&store, &source)).unwrap());
+    assert_queue_converged(&store);
+}
+
+#[test]
+fn mission_supersession_completed_work_releases_idle_drain_for_review() {
+    let store = Store::open_memory("owner").unwrap();
+    let definition = ORIGINAL.replace("state=\"ready\"", "state=\"ready\" revision-cutover=\"when-idle\"");
+    let mission = publish_mission(&store, &definition, "review-original");
+    let source = start_source(&store, None);
+    let work = source.steps.iter().find(|step| step.step == "prepare").unwrap();
+    store.set_step_state(&work.subject, "working", None).unwrap();
+    let target = publish_mission(&store, &definition.replace("exit 1", "exit 0"), "review-target");
+    assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &mission).unwrap(), Some(true));
+    assert_eq!(current(&store, &source).phase, "revision-draining");
+    store.set_step_state(&work.subject, "completed", None).unwrap();
+    assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &mission).unwrap(), Some(true));
+    let retained = current(&store, &source);
+    assert_eq!(retained.phase, "normal");
+    assert!(retained.superseded_by.is_none());
+    assert_eq!(store.supersede_idle_mission_run(&retained, &mission).unwrap(), None);
+    // The existing approval transaction's authorized cutover is still available.
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    let successor = store.supersede_mission_run_at_revision_tx(&transaction, &retained, &target.revision).unwrap();
+    transaction.commit().unwrap();
+    drop(connection);
+    assert_eq!(current(&store, &source).superseded_by.as_deref(), Some(successor.subject.as_str()));
+    assert_eq!(successor.revision, target.revision);
+}
+
+#[test]
 fn mission_supersession_reopen_and_rebuild_wait_for_entire_cleanup_ancestry() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");
@@ -358,7 +548,15 @@ fn mission_supersession_equivalent_publication_preserves_pins_and_refusal_episod
         let original = ORIGINAL.replace("host \"local\"", "host \"orchid\"");
         publish_mission(&owner, &original, "equivalent-original");
         let source = start(&owner);
-        let source = if pinned { fail(&owner, &source) } else { source };
+        let source = if pinned {
+            // A same-revision retry is pinned independently of completed evidence. Keep
+            // this fixture free of carried completions, which require explicit recovery.
+            for step in &source.steps {
+                owner.set_step_state(&step.subject, "failed", Some("script failed")).unwrap();
+            }
+            owner.set_mission_run_state(&source.id, "failed", "terminal", Some("script failed")).unwrap();
+            current(&owner, &source)
+        } else { source };
         let fixed = original.replace("exit 1", "exit 0");
         let fixed = if pinned { fixed } else {
             fixed.replace("input \"value\"", "input \"replacement\"")
@@ -367,6 +565,9 @@ fn mission_supersession_equivalent_publication_preserves_pins_and_refusal_episod
         let run = if pinned {
             owner.retry_mission_run(&source.subject, &retry_options("equivalent-pin", true)).unwrap()
         } else { source };
+        if pinned {
+            assert!(run.steps.iter().all(|step| step.status == "pending"));
+        }
         let head = || owner.readers.get().query_row(
             "SELECT claim_id FROM mission_definitions WHERE mission_id='retry-work'",
             [], |row| row.get::<_, String>(0),
@@ -419,7 +620,7 @@ fn mission_supersession_when_idle_drains_without_dispatching_a_new_generation() 
     assert_eq!(store.supersede_idle_mission_run(&draining, &first).unwrap(), Some(false));
     rebuild(&store, &[&source]);
     assert_eq!(current(&store, &source).phase, "revision-draining");
-    store.set_step_state(&work.subject, "completed", None).unwrap();
+    store.set_step_state(&work.subject, "failed", None).unwrap();
     assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
     let fresh = replacement(&store, &source);
     assert_eq!(fresh.revision, target.revision);
@@ -443,7 +644,7 @@ fn mission_supersession_when_idle_refusal_releases_the_source_and_recovers() {
     let incompatible = definition.replace("input \"value\"", "input \"renamed\"");
     let target = publish_mission(&store, &incompatible, "idle-incompatible");
     assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
-    store.set_step_state(&work.subject, "completed", None).unwrap();
+    store.set_step_state(&work.subject, "failed", None).unwrap();
     assert_eq!(store.supersede_idle_mission_run(&current(&store, &source), &first).unwrap(), Some(true));
     let refused = current(&store, &source);
     assert_eq!(refused.phase, "normal");
@@ -673,4 +874,102 @@ fn mission_supersession_program_dispatch_credential_is_fenced_before_its_source_
     let error = store.issue_run_credential(&step.subject, step.attempt, 60_000).unwrap_err();
     assert!(error.to_string().contains("automatic revision cutover"));
     assert_eq!(store.run_credentials_issued_for_tests(&step.subject), 0);
+}
+
+
+fn workspace_request(workspace: &str, key: &str) -> MissionRunRequest {
+    MissionRunRequest {
+        mission: "retry-work".into(), revision: None, workspace: workspace.into(),
+        requester: Some("person/requester".into()), mode: None,
+        inputs: BTreeMap::from([("value".into(), "unchanged".into())]),
+        idempotency_key: key.into(),
+    }
+}
+
+fn workspace_schedule(root: &str) -> String {
+    format!("version 2\nschedule \"workspace\" {{ every \"1h\"; anchor \"2026-01-01T00:00:00Z\"; work {{ mission \"retry-work\"; workspace {root:?} }} }}\n")
+}
+
+#[test]
+fn mission_supersession_resolves_current_schedule_workspace_across_reopen_and_lineage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("workspace.sqlite");
+    let store = Store::open(&path, "owner").unwrap();
+    publish_mission(&store, ORIGINAL, "workspace-original");
+    apply_source(&store, &workspace_schedule("/work/before"), "schedule-before");
+    let occurrence = Store::scheduled_mission_run_subject("schedule/workspace", 7);
+    let suffix = &occurrence.trim_start_matches("mission-run/")[..16];
+    let source = store.create_scheduled_mission_run(
+        &workspace_request(&format!("/work/before/{suffix}"), "workspace-occurrence"),
+        None, "schedule/workspace", 7,
+    ).unwrap();
+    drop(store);
+    let store = Store::open(&path, "owner").unwrap();
+    apply_source(&store, &workspace_schedule("/work/current"), "schedule-current");
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "workspace-second");
+    let target = replacement(&store, &source);
+    assert_eq!(target.workspace, format!("/work/current/{suffix}"));
+    assert_eq!(current(&store, &source).workspace, source.workspace);
+    let creation = store.claims_for(&target.subject, Some("mission-run.created")).unwrap();
+    assert_eq!(creation[0].body["fields"]["workspace_declaration"]["subject"], "schedule/workspace");
+    rebuild(&store, &[&source, &target]);
+    apply_source(&store, &workspace_schedule("/work/latest"), "schedule-latest");
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 2"), "workspace-third");
+    assert_eq!(replacement(&store, &target).workspace, format!("/work/latest/{suffix}"));
+}
+
+#[test]
+fn mission_supersession_resolves_current_subscription_workspace_from_launcher() {
+    let store = Store::open_memory("owner").unwrap();
+    publish_mission(&store, ORIGINAL, "subscription-original");
+    let declaration = r#"version 2
+resource "workspace" { kind "filesystem.file" }
+observer "workspace" { resource "resource/workspace"; provider "local.file"; locator "/work/input"; field "content_hash" }
+subscription "workspace" { observer "observer/workspace"; on "content_hash"; delivery "mission" { mission "retry-work"; resource "value"; workspace "/work/before" } }
+"#;
+    apply_source(&store, declaration, "subscription-before");
+    let source = store.create_subscription_mission_run(
+        &workspace_request("/work/before/delivery", "subscription-mission:workspace"),
+        None, "subscription/workspace", "resource/workspace", "workspace-discovery",
+    ).unwrap();
+    apply_source(&store, &declaration.replace("/work/before", "/work/current"), "subscription-current");
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "subscription-second");
+    let target = replacement(&store, &source);
+    assert_eq!(target.workspace, "/work/current/delivery");
+    let creation = store.claims_for(&target.subject, Some("mission-run.created")).unwrap();
+    assert_eq!(creation[0].body["fields"]["workspace_declaration"]["subject"], "subscription/workspace");
+}
+
+#[test]
+fn mission_supersession_refuses_stopped_workspace_declaration() {
+    let store = Store::open_memory("owner").unwrap();
+    publish_mission(&store, ORIGINAL, "stopped-workspace-original");
+    apply_source(&store, &workspace_schedule("/work/before"), "stopped-schedule-before");
+    let occurrence = Store::scheduled_mission_run_subject("schedule/workspace", 7);
+    let suffix = &occurrence.trim_start_matches("mission-run/")[..16];
+    let source = store.create_scheduled_mission_run(
+        &workspace_request(&format!("/work/before/{suffix}"), "stopped-workspace-occurrence"),
+        None, "schedule/workspace", 7,
+    ).unwrap();
+    apply_source(&store, "version 2\nschedule \"workspace\" { stop }\n", "stop-workspace-schedule");
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "stopped-workspace-second");
+    let refused = current(&store, &source);
+    assert!(refused.superseded_by.is_none());
+    assert_eq!(refused.workspace, source.workspace);
+    assert!(refused.supersession_fault.as_deref().unwrap().contains("workspace declaration"));
+}
+
+#[test]
+fn mission_supersession_explicit_agent_workspace_never_infers_declaration_inheritance() {
+    let store = Store::open_memory("owner").unwrap();
+    publish_mission(&store, ORIGINAL, "explicit-workspace-original");
+    apply_source(&store, "version 2\nagent \"workspace.owner\" { workspace \"/work/explicit\"; command \"true\" }\n", "agent-before");
+    let mut request = workspace_request("/work/explicit", "explicit-workspace");
+    request.requester = Some("agent/workspace.owner".into());
+    let source = store.create_mission_run(&request).unwrap();
+    apply_source(&store, "version 2\nagent \"workspace.owner\" { workspace \"/work/changed\"; command \"true\" }\n", "agent-after");
+    publish_mission(&store, &ORIGINAL.replace("exit 1", "exit 0"), "explicit-workspace-second");
+    assert_eq!(replacement(&store, &source).workspace, "/work/explicit");
+    let created = store.claims_for(&source.subject, Some("mission-run.created")).unwrap();
+    assert!(created[0].body["fields"].get("workspace_declaration").is_none());
 }

@@ -79,6 +79,10 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [3, 0, 0, 0, 0],
         },
         Exception {
+            reason: "finish_open, open_with_ivm_views and open_shared_memory install only shell_resources_v1 and its host/state index before returning the store; these three startup schema writers neither mutate mission-run records nor grant resource membership or release payloads",
+            counts: [3, 0, 0, 0, 0],
+        },
+        Exception {
             reason: "finish_open, open_with_ivm_views and open_shared_memory install rebuildable host-local digest cache schema at startup; no run action admission or payload-release decision",
             counts: [3, 0, 0, 0, 0],
         },

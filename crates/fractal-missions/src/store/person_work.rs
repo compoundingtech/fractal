@@ -7,6 +7,11 @@ pub use fractal_delivery::store::person_work::*;
 pub use fractal_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod revision_provenance_tests;
+pub use fractal_store::store::person_work::continuity;
+#[cfg(test)]
+#[path = "person_work/continuity/tests.rs"]
+mod continuity_tests;
+pub use continuity::{AskContinuityBinding, continuity_step_binding_tx, step_answers_bound_tx, step_answers_eligible_tx};
 
 /// A person may replace a deadline resolution for seven days after it was recorded.
 pub const PERSON_OVERRIDE_WINDOW_MS: u128 = 7 * 24 * 60 * 60 * 1_000;
@@ -450,9 +455,7 @@ pub trait PersonWorkStore {
     /// person's home until they open or read it, and it is refused unless `about` names the
     /// person's own run or step, or their message to the poster.
     fn post_update(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
-    /// Nothing an ask waited on disappears silently: when its requester, originating step or
-    /// owning run ends, the requester hears once that the ask is gone, and the person gets one
-    /// update saying so.
+    /// When an owning episode ends, tell the requester once; history retains the withdrawal.
     fn tell_ask_ended(&self, tx: &Transaction<'_>, ask: &ClaimRecord) -> Result<()>;
     /// One update step for `person`, about the work `structured` names.
     #[allow(clippy::too_many_arguments)]
@@ -566,11 +569,27 @@ impl PersonWorkStore for Store {
                     "cannot ask from step `{origin_subject}`: status `{}`, claimant `{}`, expected incarnation `{}`, given `{}`; only its live claimant can block this step. Refresh `work ls` and use its current claim and incarnation, or omit --step for an independent ask",
                     origin.status, origin.claimant.as_deref().unwrap_or("<none>"), origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));
             }
+            let binding = if super::adhoc_work::is_adhoc(tx, &origin.run).map_err(internal)? {
+                None
+            } else {
+                continuity::ask_binding_tx(tx, &origin, input, &structured).map_err(internal)?
+            };
+            if let Some(answered) = binding.as_ref().map(|binding| continuity::equivalent_answer_tx(tx, &origin, binding)).transpose().map_err(internal)?.flatten() {
+                let fields = &answered.body["fields"];
+                append_claim_tx(tx, &self.origin, &origin_subject, "step-run.carried", Some(&input.actor),
+                    &json!({"fields":{"source_step_run":fields["origin_step"],
+                        "source_attempt":fields["origin_attempt"],"attempt":origin.attempt,
+                        "status":origin.status,"worker_reported":origin.worker_reported},
+                        "evidence":[answered.id]}), std::slice::from_ref(&answered.id), None).map_err(claim_append_error)?;
+                return step(tx, &answered.subject).map_err(internal)?
+                    .ok_or_else(|| FractalError::new("missing-step-run", "the original answered ask is no longer retained"));
+            }
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(&input.actor),
                 &with_priority(with_deadline(with_request(json!({"fields": {"run": origin.run, "generation": origin.generation,
                     "origin_step": origin_subject, "origin_attempt": origin.attempt,
+                    "continuity": binding,
                     "person": input.person, "title": input.title, "reason": input.reason,
                     "key": input.idempotency_key, "attempt": 1, "status": "ready", "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
@@ -737,6 +756,11 @@ impl PersonWorkStore for Store {
             let evidence = ask.as_ref().map(|a| vec![a.id.clone()]).unwrap_or_default();
             let mut body = json!({"fields": {"attempt": view.attempt, "status": if cancel { "cancelled" } else { "completed" },
                 "summary": summary, "key": input.idempotency_key, "episode": ask.as_ref().map(|a| a.id.clone()).unwrap_or_else(|| format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch))}, "evidence": input.evidence});
+            if ask.is_none() && !cancel && !super::adhoc_work::is_adhoc(tx, &view.run).map_err(internal)? {
+                body["fields"]["continuity"] = serde_json::to_value(
+                    continuity::direct_person_binding_tx(tx, &view, response_actor).map_err(internal)?
+                ).map_err(internal)?;
+            }
             if let Some(answer) = &answer {
                 body["fields"]["answer"] = answer.clone();
             }
@@ -880,7 +904,7 @@ impl PersonWorkStore for Store {
     }
 
     fn reconcile_person_asks_at(&self, now: u128) -> Result<PersonAskPass> {
-        /// How many asks one pass ends, each with its cancellation, message and update.
+        /// How many asks one pass ends, each with its cancellation and requester message.
         const ENDED_ASKS_PER_PASS: usize = 32;
         let deadlines = self.ask_deadlines();
         // Off, the count restarts when deadlines are next on, so asks made meanwhile do not
@@ -920,8 +944,8 @@ impl PersonWorkStore for Store {
                 if fractal_store::store::run_projection_pending_tx(tx, &ask.subject)? {
                     continue;
                 }
-                // Each ending writes a cancellation, a message and an update while holding the
-                // single writer; the rest end on the next pass, which this one's commit wakes.
+                // Each ending holds the single writer; the rest end on the next pass,
+                // which this one's commit wakes.
                 if ended == ENDED_ASKS_PER_PASS {
                     break;
                 }
@@ -1145,14 +1169,6 @@ impl PersonWorkStore for Store {
                 "title": format!("Ask cancelled: {title}"), "in_reply_to": null,
                 "tags": [format!("st3-ask-ended:{}", ask.subject)]}}), std::slice::from_ref(&ask.id), None)?;
         }
-        if person.starts_with("person/") {
-            let update = json!({"version": 1, "type": "update", "about": ask.subject});
-            self.append_update_tx(tx, "daemon/runtime", person,
-                &format!("Cancelled: {title}"),
-                &format!("{requester} asked you \"{title}\". That ask ended because {why}, so nothing waits on your answer now."),
-                &format!("st3-ask-ended:{}", ask.id), &update)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        }
         Ok(())
     }
 
@@ -1184,10 +1200,13 @@ impl PersonWorkStore for Store {
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"update\" {{ assigned-to {:?}; goal {:?}; }} }}", title, person, reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
             let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the update mission could not be parsed"))?;
+            let owner = current_desired_row(tx, actor).map_err(internal)?;
             let claim = append_claim_tx(tx, &self.origin, &subject, "work.person-asked", Some(actor),
                 &with_request(json!({"fields": {"run": format!("mission-run/person-update/{}", &hash[..32]),
                     "generation": format!("run-generation/{generation}"), "person": person, "title": title,
-                    "reason": reason, "key": idempotency_key, "attempt": 1, "status": "ready", "mission_spec": mission}}), structured),
+                    "reason": reason, "key": idempotency_key, "attempt": 1, "status": "ready", "mission_spec": mission,
+                    "owner_run": owner.as_ref().and_then(|row| row.owner_run.as_deref()),
+                    "owner_generation": owner.as_ref().and_then(|row| row.owner_generation.as_deref())}}), structured),
                 &[], None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the update could not be projected"))
@@ -1243,6 +1262,7 @@ impl PersonWorkStore for Store {
             let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal {:?}; step \"ask\" {{ assigned-to {:?}; goal {:?}; }} }}", input.title, input.person, input.reason);
             let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
             let mission = intent.missions.remove(&mission_id).ok_or_else(|| FractalError::new("internal", "the person mission could not be parsed"))?;
+            let owner = current_desired_row(tx, &input.actor).map_err(internal)?;
             let run = format!("mission-run/person-ask/{}", &hash[..32]);
             let waiting_since = input.legacy_request.as_ref().map(|id| tx.query_row("SELECT accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='attention.requested'", [id], |row| row.get::<_, String>(0))).transpose().map_err(internal)?;
             let evidence = input.legacy_request.iter().cloned().collect::<Vec<_>>();
@@ -1250,6 +1270,8 @@ impl PersonWorkStore for Store {
                 &with_priority(with_deadline(with_request(json!({"fields": {"run": run, "generation": format!("run-generation/{generation}"),
                     "person": input.person, "title": input.title, "reason": input.reason, "key": input.idempotency_key,
                     "attempt": 1, "status": "ready", "mission_spec": mission,
+                    "owner_run": owner.as_ref().and_then(|row| row.owner_run.as_deref()),
+                    "owner_generation": owner.as_ref().and_then(|row| row.owner_generation.as_deref()),
                     "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), priority), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))

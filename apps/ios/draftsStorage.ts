@@ -4,6 +4,11 @@ export const DRAFTS_KEY = 'st3.drafts.local.v1';
 const MAX_BYTES = 2 * 1024 * 1024;
 /** Draft content has its own local key; it never enters a quality summary. */
 export class LocalDrafts {
+  private issue: string | null = null;
+  private listeners = new Set<() => void>();
+  snapshot = (): string | null => this.issue;
+  subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
+  private report(issue: string | null) { if (this.issue === issue) return; this.issue = issue; for (const listener of this.listeners) listener(); }
   private writing: Promise<void> | null = null;
   private pendingOwner = '';
   private pendingDrafts: ReadonlyMap<string, string> | null = null;
@@ -17,8 +22,8 @@ export class LocalDrafts {
       const parsed: unknown = JSON.parse(raw);
       if (!parsed || typeof parsed !== 'object' || !('owner' in parsed) || parsed.owner !== owner || !('entries' in parsed) || !Array.isArray(parsed.entries)) return 0;
       let restored = 0;
-      for (const entry of parsed.entries.slice(-24)) {
-        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || typeof entry[1] !== 'string' || !entry[1] || into.has(entry[0]) || into.size >= 24) continue;
+      for (const entry of parsed.entries) {
+        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || typeof entry[1] !== 'string' || !entry[1] || into.has(entry[0])) continue;
         into.set(entry[0], entry[1]); restored++;
       }
       return restored;
@@ -41,8 +46,13 @@ export class LocalDrafts {
     while (this.pendingDrafts || this.clearing) {
       const drafts = this.pendingDrafts, owner = this.pendingOwner;
       this.pendingDrafts = null; this.clearing = false;
-      const raw = drafts ? JSON.stringify({ owner, entries: [...drafts].slice(-24) }) : '';
-      if (raw.length <= MAX_BYTES) { try { await this.storage.setItem(DRAFTS_KEY, raw); } catch { /* best-effort local recovery */ } }
+      const raw = drafts ? JSON.stringify({ owner, entries: [...drafts] }) : '';
+      if (new TextEncoder().encode(raw).length > MAX_BYTES) {
+        this.report('Draft storage is full. Current edits stay in this app session. The last saved copy is kept, so older text may reappear after reopening. Send or clear drafts to make room.');
+      } else {
+        try { await this.storage.setItem(DRAFTS_KEY, raw); this.report(null); }
+        catch { this.report('Drafts could not be saved on this device. Current edits stay in this app session. The last saved copy is kept, so older text may reappear after reopening.'); }
+      }
     }
     this.writing = null;
   }

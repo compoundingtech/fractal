@@ -26,6 +26,7 @@ pub struct LaneWait {
     /// When admission last found it waiting. A seat no longer tried, such as one suspended or
     /// crash-looping, stops holding its place once this is older than [`LANE_WAIT_STALE_SECS`].
     pub checked: u64,
+    pub class: crate::RequestClass,
 }
 
 /// How long a waiting seat keeps its place without being tried again: longer than a full
@@ -53,6 +54,20 @@ pub struct LaneBurst {
     pub wait: Option<String>,
     /// Why it can never be held; the holder is told once and the burst is gone.
     pub refused: Option<String>,
+}
+
+/// Last native finite fit observation; diagnostics only, never an authority to grant.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiniteFit {
+    pub subject: String,
+    pub room: Option<crate::Capacity>,
+    pub seat_held_bytes: u64,
+    pub finite_held_bytes: u64,
+    pub outside_bytes: u64,
+    pub reserve_bytes: u64,
+    pub arc_credit_bytes: Option<u64>,
+    pub observed_at: u64,
 }
 
 pub struct State {
@@ -83,6 +98,7 @@ pub struct State {
     /// The room admission keeps from starts for a burst, as it last judged a seat's start: the
     /// seat, the reserve with no burst held, and what is left of it now.
     pub burst_reserve: Option<(String, u64, u64)>,
+    pub finite_fit: Option<FiniteFit>,
 }
 
 pub struct Status(Mutex<State>);
@@ -106,6 +122,7 @@ impl Default for Status {
             lanes_found: false,
             bursts_lapsed: 0,
             burst_reserve: None,
+            finite_fit: None,
         }))
     }
 }
@@ -128,6 +145,7 @@ impl Status {
             "laneBursts": state.lane_bursts.iter().map(|burst| burst_value(burst, now)).collect::<Vec<_>>(),
             "laneBurstsDroppedByLease": state.bursts_lapsed,
             "laneBurstReserve": state.burst_reserve.as_ref().map(|(subject, full, kept)| json!({"subject": subject, "full": full, "kept": kept})),
+            "finiteFit": state.finite_fit,
         })
     }
 
@@ -169,22 +187,28 @@ impl Status {
     /// [`LANE_WAIT_STALE_SECS`] holds no place.
     pub fn lane_head(&self, now: u64) -> Option<String> {
         self.state().lane_waits.iter()
-            .find(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
+            .filter(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
+            .min_by_key(|wait| wait.class)
             .map(|wait| wait.subject.clone())
     }
 
     /// Records why `subject` waits for room, keeping its place in line. True when the wait is new
     /// or moved in or out of line; a reason whose figures moved is served as it is, unannounced.
     pub fn lane_wait(&self, subject: &str, reason: String, queued: bool, now: u64) -> bool {
+        self.lane_wait_class(subject, reason, queued, now, crate::RequestClass::Agent)
+    }
+
+    pub fn lane_wait_class(&self, subject: &str, reason: String, queued: bool, now: u64, class: crate::RequestClass) -> bool {
         let mut state = self.state();
         if let Some(wait) = state.lane_waits.iter_mut().find(|wait| wait.subject == subject) {
-            let changed = wait.queued != queued;
+            let changed = wait.queued != queued || wait.class != class;
             wait.reason = reason;
             wait.queued = queued;
+            wait.class = class;
             wait.checked = now;
             return changed;
         }
-        state.lane_waits.push_back(LaneWait { subject: subject.into(), since: now, reason, queued, checked: now });
+        state.lane_waits.push_back(LaneWait { subject: subject.into(), since: now, reason, queued, checked: now, class });
         true
     }
 
@@ -194,7 +218,8 @@ impl Status {
     pub fn aged_lane_head(&self, now: u64, aged: u64) -> Option<(String, u64)> {
         let state = self.state();
         state.lane_waits.iter()
-            .find(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
+            .filter(|wait| wait.queued && now.saturating_sub(wait.checked) <= LANE_WAIT_STALE_SECS)
+            .min_by_key(|wait| wait.class)
             .filter(|wait| now.saturating_sub(wait.since) >= aged)
             .map(|wait| (wait.subject.clone(), now.saturating_sub(wait.since)))
     }
@@ -313,9 +338,13 @@ fn burst_value(burst: &LaneBurst, now: u64) -> Value {
 }
 
 fn lane_wait_value(state: &State, wait: &LaneWait, now: u64) -> Value {
-    let position = state.lane_waits.iter().filter(|other| other.queued)
-        .position(|other| other.subject == wait.subject);
-    json!({"subject": wait.subject, "pending": true, "queuePosition": position.map(|position| position + 1),
+    let position = wait.queued.then(|| {
+        let higher = state.lane_waits.iter().filter(|other| other.queued && other.class < wait.class).count();
+        let preceding = state.lane_waits.iter().take_while(|other| other.subject != wait.subject)
+            .filter(|other| other.queued && other.class == wait.class).count();
+        higher + preceding + 1
+    });
+    json!({"subject": wait.subject, "class": wait.class, "pending": true, "queuePosition": position,
         "queuedSince": wait.since, "pendingAgeSecs": now.saturating_sub(wait.since), "reason": wait.reason})
 }
 
@@ -327,6 +356,26 @@ fn pending_value(p: &Pending, index: usize, reason: &str, now: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_queue_prioritizes_finite_classes_without_bypassing_their_heads() {
+        use crate::RequestClass::{Agent, Check, Landing};
+        let status = Status::default();
+        status.lane_wait_class("standing-seat", "waiting".into(), true, 1, Agent);
+        status.lane_wait_class("ci-check", "waiting".into(), true, 2, Check);
+        status.lane_wait_class("landing-first", "does not fit".into(), true, 3, Landing);
+        status.lane_wait_class("landing-next", "fits".into(), true, 4, Landing);
+        assert_eq!(status.lane_head(4).as_deref(), Some("landing-first"));
+        status.lane_tried("landing-first", 5);
+        assert_eq!(status.lane_head(5).as_deref(), Some("landing-first"));
+        for (id, next) in [
+            ("landing-first", "landing-next"), ("landing-next", "ci-check"),
+            ("ci-check", "standing-seat"),
+        ] {
+            status.lane_admitted(id, crate::Capacity { cores: 1, memory: 1 }, 6);
+            assert_eq!(status.lane_head(6).as_deref(), Some(next));
+        }
+    }
 
     #[test]
     fn a_held_burst_is_restored_only_for_a_raise_found_at_start_that_the_slice_still_holds() {

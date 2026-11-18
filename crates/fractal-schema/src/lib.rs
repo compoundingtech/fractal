@@ -1589,6 +1589,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
     let mut claims = BTreeMap::new();
     let definitions: &[ClaimDefinition<'_>] = &[
         (
+            "resource.exec-receipt",
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
+        ),
+        (
             "person.delegation-set",
             &["person"],
             WritePolicy::SameSubjectActor,
@@ -1889,6 +1898,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "mission-run.supersede-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
+            "mission-run.gate-carried",
             &["mission-run"],
             WritePolicy::SystemOnly,
             Cardinality::Append,
@@ -3338,6 +3356,26 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "resource.exec-receipt" => &[
+            ("exec_id", required_string()),
+            ("host", required_string()),
+            ("class", required_enum(&["landing", "check", "agent"])),
+            ("owner", required_object()),
+            ("coverage", required_enum(&["logical", "enforced"])),
+            ("state", required_enum(&["completed", "refused", "cancelled"])),
+            ("memory_bytes", integer()),
+            ("disk_reserved_bytes", required_integer()),
+            ("io", enumeration(&["heavy"])),
+            ("head_start", string()),
+            ("head_end", string()),
+            ("clean_start", boolean()),
+            ("clean_end", boolean()),
+            ("exit_code", integer()),
+            ("exit_signal", integer()),
+            ("wall_duration_ms", required_integer()),
+            ("queue_wait_ms", required_integer()),
+            ("memory_peak_bytes", integer()),
+        ],
         "deploy.go" => &[
             ("version", required_integer()),
             ("host", required_string()),
@@ -3572,6 +3610,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("root_revision", string()),
             ("root_mission_run", reference()),
             ("workspace", string()),
+            ("workspace_declaration", object()),
             ("requester", reference()),
             ("mode", string()),
             ("inputs", object()),
@@ -3600,6 +3639,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source", required_reference_to(&["mission-run"])),
             ("replacement", required_reference_to(&["mission-run"])),
             ("publication", required_string()),
+        ],
+        "mission-run.gate-carried" => &[
+            ("source_run", required_reference_to(&["mission-run"])),
+            ("source_request", required_string()),
+            ("source_answer", required_string()),
+            ("target_generation", required_reference_to(&["run-generation"])),
+            ("continuity", required_object()),
+            ("legacy_confirmed", boolean()),
+            ("source_confirmation", string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -3682,6 +3730,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source", reference()),
             ("source_step_run", reference()),
             ("source_generation", reference()),
+            ("source_attempt", integer()),
+            ("source_gate_request", string()),
+            ("person_continuity", object()),
             ("definition_hash", string()),
             ("status", string()),
             ("attempt", integer()),
@@ -3720,12 +3771,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("legacy_request", string()),
             ("requester_declaration", string()),
             ("request", object()),
+            ("continuity", object()),
             ("deadline_unix_ms", integer()),
             ("deadline_ms", integer()),
             ("default_answer", string()),
             ("priority", enumeration(availability::PRIORITIES)),
         ],
         "work.person-done" | "work.person-cancelled" => &[
+            ("continuity", object()),
             ("attempt", integer()),
             ("status", string()),
             ("summary", string()),
@@ -3788,6 +3841,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("waits", array()),
         ],
         "gate.requested" => &[
+            ("continuity", object()),
             ("status", string()),
             ("owner", reference()),
             ("reviewer", reference()),
@@ -4547,6 +4601,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("lease_owner", required_string()),
             ("lease_incarnation", required_string()),
             ("recovering_actor", string()),
+            ("resolution", enumeration(&["human"])),
+            ("outcome", enumeration(&["abandoned"])),
             ("provider_ref", string()),
             ("result_digest", string()),
             ("error", string()),
@@ -5341,6 +5397,7 @@ mod tests {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("resource.exec-receipt").unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
         current.claims.remove(read_positions::KIND).unwrap();
@@ -5367,8 +5424,15 @@ mod tests {
         }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
-        for field in ["phase", "admission_publication"] {
+        current.claims.remove("mission-run.gate-carried").unwrap();
+        for field in ["phase", "admission_publication", "workspace_declaration"] {
             current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
+        }
+        for kind in ["work.person-asked", "work.person-done", "work.person-cancelled", "gate.requested"] {
+            current.claims.get_mut(kind).unwrap().fields.remove("continuity").unwrap();
+        }
+        for field in ["source_attempt", "source_gate_request", "person_continuity"] {
+            current.claims.get_mut("step-run.carried").unwrap().fields.remove(field).unwrap();
         }
         current.claims.get_mut("reconcile.fault").unwrap().fields.remove("publication").unwrap();
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {

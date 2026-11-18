@@ -15,6 +15,87 @@ import time
 BUNDLE_ID = "com.compoundingtech.fractal"
 
 
+def policy_digest(policy):
+    """Canonical approved BODY digest; the later native decision is outside it."""
+    return hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+def is_policy_digest(value):
+    return (isinstance(value, str) and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value))
+
+
+def validate_update_policy(envelope, updater_sha256):
+    """Pure format/scope checks, not native approval or activation authentication.
+
+    The reviewed activation authenticates the decision. Effect admission also
+    binds the actual store file, active job, deny file and device state.
+    This helper enables no scheduler and performs no I/O.
+    """
+    if (not isinstance(envelope, dict) or set(envelope) != {"version", "policy", "approval"}
+            or type(envelope["version"]) is not int or envelope["version"] != 1):
+        raise ValueError("Invalid update policy envelope")
+    policy, approval = envelope["policy"], envelope["approval"]
+    if (not isinstance(policy, dict) or set(policy) != {
+            "enabled", "policy_revision", "updater_sha256", "lock", "deny_file", "lanes"}
+            or policy["enabled"] is not True
+            or type(policy["policy_revision"]) is not int or policy["policy_revision"] < 1
+            or not is_policy_digest(updater_sha256) or policy["updater_sha256"] != updater_sha256
+            or any(not isinstance(policy[key], str) or not Path(policy[key]).is_absolute()
+                   or ".." in Path(policy[key]).parts for key in ("lock", "deny_file"))):
+        raise ValueError("Invalid or disabled update policy body")
+    try:
+        digest = policy_digest(policy)
+    except (TypeError, ValueError):
+        raise ValueError("Update policy body is not canonical JSON") from None
+    if (not isinstance(approval, dict) or set(approval) != {"decision", "sha256"}
+            or not isinstance(approval["decision"], str) or not approval["decision"].strip()
+            or approval["sha256"] != digest):
+        raise ValueError("Update policy approval does not match exact policy")
+    lanes = policy["lanes"]
+    keys = {"id", "device", "state", "repo", "ref", "team", "developer_dir",
+            "expected_origin", "trusted_commit", "bundle", "certificate_sha256",
+            "profile_uuid", "entitlements", "distribution", "effects", "max_deferral", "build_backoff"}
+    if not isinstance(lanes, list) or len(lanes) != 2:
+        raise ValueError("Update policy requires exactly two normal-device lanes")
+    for lane in lanes:
+        if (not isinstance(lane, dict) or set(lane) != keys
+                or any(not isinstance(lane[key], str) or not lane[key].strip() for key in
+                       keys - {"effects", "entitlements", "max_deferral", "build_backoff"})
+                or lane["bundle"] != BUNDLE_ID or lane["distribution"] != "development"
+                or not isinstance(lane["entitlements"], dict)
+                or lane["entitlements"].get("get-task-allow") is not True
+                or lane["effects"] != ["install", "launch", "recover"]
+                or any(type(lane[key]) is not int or lane[key] < 0
+                       for key in ("max_deferral", "build_backoff"))
+                or not is_policy_digest(lane["certificate_sha256"])
+                or len(lane["trusted_commit"]) != 40
+                or any(character not in "0123456789abcdef" for character in lane["trusted_commit"])
+                or any(not Path(lane[key]).is_absolute() or ".." in Path(lane[key]).parts
+                       for key in ("state", "repo", "developer_dir"))):
+            raise ValueError("Invalid normal-device policy lane")
+    if ({lane["id"] for lane in lanes} != {"iphone", "ipad"}
+            or len({lane["device"].casefold() for lane in lanes}) != 2
+            or len({str(Path(lane["state"])).casefold() for lane in lanes}) != 2):
+        raise ValueError("Update policy lanes must have distinct devices and state")
+    return policy
+
+
+def revoked_policy_digests(contents):
+    """Decode deny-file contents without creating, repairing or changing the file."""
+    if not isinstance(contents, str):
+        raise ValueError("Invalid update policy deny contents")
+    if contents == "":
+        return frozenset()
+    lines = contents.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    if any(not is_policy_digest(line) for line in lines):
+        raise ValueError("Malformed update policy deny line")
+    return frozenset(lines)
+
+
 def bundle_id(variant):
     return BUNDLE_ID + (".test" if variant == "test" else "")
 
@@ -226,7 +307,7 @@ def build_release(args):
         "scripts/prepare-pnpm-source-inputs.py")
         + str(shutil.which("node")) + str(shutil.which("pnpm"))).encode()).hexdigest()
     try:
-        run([sys.executable, str(repo / "scripts/prepare-pnpm-source-inputs.py"), "prepare"],
+        run([sys.executable, str(repo / "scripts/prepare-pnpm-source-inputs.py"), "prepare", "--cache-only"],
             cwd=repo, env=env)
     except (OSError, subprocess.SubprocessError) as error:
         save(output / "failure.json", {"reason": "source_inputs_preparation_failed",
@@ -247,7 +328,8 @@ def build_release(args):
     if config["ios"]["bundleIdentifier"] != bundle_id(args.variant):
         raise ValueError("Tracked ref lacks the selected app variant; refusing another identity")
     # Reuse the documented builder inside the same gated worker as Xcode.
-    run(["sh", "modules/fractal-fabric/build.sh"], cwd=app, env=env)
+    run(["sh", "modules/fractal-fabric/build.sh"], cwd=app,
+        env={**env, "FRACTAL_NIX_CACHE_ONLY": "1"})
     fabric_hash = framework_hash(repo)
     native_paths = ["apps/ios/app.json", "apps/ios/plugins", "apps/ios/modules",
                     "apps/ios/assets", "apps/ios/react-native.config.js"]

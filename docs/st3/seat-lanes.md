@@ -96,10 +96,11 @@ exporter stack or private metrics accumulator presented as exported telemetry.
 | `st.resource.release.duration` | `s` | Retirement request through retirement/uncertain observation |
 | `st.resource.hold.duration` | `s` | Persisted hold age supplied at authenticated resolution |
 
-Counts are SDK observable gauges over the latest host snapshot, including zeros; durations are SDK
-histograms. All have only `st.resource.lane` as a metric dimension, plus bounded
-`st.resource.outcome` on phase durations. Host identity belongs to exporter resource attributes.
-Unbounded execution identifiers remain exclusively on traces/logs. Call
+Counts are SDK observable gauges over the latest host snapshot, including zeros, partitioned by
+`st.resource.host` and `st.resource.lane`. `st.resource.queue > 0` together with
+`st.resource.occupancy = 0` exposes a zero-holder queue for liveness alerting. Durations are SDK
+histograms with `st.resource.lane`, bounded `st.resource.outcome` and phase wait
+`st.resource.blocked_by` dimensions. Unbounded execution identifiers remain exclusively on traces/logs. Call
 `hold_resolved(lane, persisted_age)` when a durable hold is resolved; a daemon restart must not
 reset that age or clear the hold. An unresolved hold contributes to `st.resource.holds`, not a
 fabricated completed hold-duration sample.
@@ -398,9 +399,17 @@ limit shrinks what `nproc` reports. From that room, admission takes:
 
 - the lane of each of the host's other laned seats that runs, or was admitted to start and is not yet
   seen running (for up to ten minutes): the lane caps it, so its size is firm;
-- what the seats outside lanes hold that the kernel cannot take back, the anonymous and kernel memory
-  of each seat scope in the user manager's `app.slice`. Nothing caps such a seat, so a reservation
-  could not bound it; page cache is left out, since pressure reclaims it;
+- unreclaimable host memory outside lanes: `max(0, MemTotal - MemAvailable -
+  reclaimable_arc - live_lane_usage)`. Eligible ARC is the lesser of `max(0, size - c_min)` and
+  the sum of `mru_evictable_data`, `mru_evictable_metadata`, `mfu_evictable_data` and
+  `mfu_evictable_metadata`. Credit applies only while memory PSI `full avg60 < 1%`; otherwise,
+  or with missing/malformed ARC or PSI counters, it is zero. This conservative bound deliberately
+  differs from treating every byte above `c_min` as reclaimable: a measured shape had 27.6 GiB
+  above minimum but only 7.3 GiB evictable. `live_lane_usage` is `anon + kernel` from hierarchical
+  `app-lanes.slice/memory.stat`, read once for seats and finite members. Services and other
+  unlaned consumers count regardless of cgroup placement; reclaimable page cache is not charged.
+  The same accountant serves seats, bursts and finite lanes; declared held footprints are
+  separately subtracted from room;
 - the room kept for one burst (below, "Bursts"): what a burst raises the host's smallest live laned
   seat by (one that runs or was admitted to start, since only such a seat's run asks for a burst),
   the seat starting among them. A burst raises a seat to the burst lane (8 cores/24G, `build` in
@@ -411,13 +420,19 @@ limit shrinks what `nproc` reports. From that room, admission takes:
   seats that start while no run builds would take the room every later burst needs, and each run
   would wait out its `--queue-limit`.
 
+Finite execution lanes keep that burst reserve only while a laned seat is live (running or admitted
+to start). A finite member cannot request a seat burst and does not seed the reserve itself.
+With no holders or granted bursts and no host hold, a finite FIFO head is admitted exactly when it
+fits room minus measured outside memory. Impossible finite footprints refuse with code `impossible`;
+wait attribution distinguishes holders, holds, outside bytes, PSI withholding ARC credit, reserve and FIFO.
+
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start
 claim), and its reason shows where admission reasons show (`fractal agents show`'s `ADMISSION` line, the
 list, the tree and `agents start`), naming the host's free room:
 
 ```
-lane 8 cores/30.0G does not fit: 12.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G, kept for a burst 16.0G)
+lane 8 cores/30.0G does not fit: 12.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, host outside lanes 2.0G, kept for a burst 16.0G)
 ```
 
 Seats wait in order: a smaller lane that would fit does not pass the first seat in line ("waits
@@ -426,8 +441,9 @@ ever give, or than it gives beside the burst reserve ("does not fit beside the â
 starts for a burst"), waits out of line and holds no one back. A seat leaves the line when it is no longer tried
 for a start: suspended, stopped, no longer owned, or not tried for six minutes (a crash loop, a
 workspace error). Room is held only for a seat that starts, after any envelope admission also lets it.
-A waiting seat is tried again every 30 seconds, since what seats outside lanes hold changes without a
-claim. A seat without a lane is not held.
+The existing admission observation path measures host outside memory every 30 seconds and wakes
+incremental fit evaluation when the observation changes; elapsed time alone never admits work.
+A seat without a lane is not held.
 
 To start a waiting seat now despite its fit, for the day a stale measurement holds a seat that must
 run: `fractal agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
@@ -465,7 +481,7 @@ for it as it waits for room, saying so, rather than answering: the run that aske
 
 The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
-beside the other lanes and what seats outside lanes hold, the room admission keeps from starts for a
+beside the other lanes and host memory outside lanes, the room admission keeps from starts for a
 burst included (`fractal doctor --performance` shows it on its `LANE BURSTS` line, as admission last judged
 it for a seat's start, naming that seat). Bursts wait in the order they asked, so a
 small one does not pass the first in line; one larger than the host can ever give is refused at

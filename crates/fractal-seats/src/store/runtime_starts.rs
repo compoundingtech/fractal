@@ -37,6 +37,129 @@ pub enum RuntimeStartAdmission {
     Superseded,
 }
 
+/// A shell's explicit first work claim can establish running authority, but only
+/// for its completed, still-current launch and a freshly checked process birth.
+/// The caller must run this inside the work action's writer savepoint.
+pub fn admit_starting_work_claim_tx(
+    store: &Store,
+    tx: &Transaction<'_>,
+    subject: &str,
+    incarnation: &str,
+    host: &str,
+    alive: impl Fn(u32, u64) -> Result<bool>,
+) -> Result<bool> {
+    let current: Option<String> = tx.query_row(
+        /* sqlite-large-value: allow-for-now lv-hc2a32f40789d owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */
+        &format!("{} LIMIT 1", newest_claims_of_kind_query("claims.id", "runtime.observed")),
+        params![subject, i64::MAX], |row| row.get(0),
+    ).optional()?;
+    let current = current.map(|id| claim_by_id_tx(tx, &id)).transpose()?.flatten();
+    if current.as_ref().is_some_and(|claim| claim.body["fields"]["status"] != "starting")
+        && work_incarnation_live(tx, subject, incarnation)?
+    {
+        return Ok(true);
+    }
+    // A worker's verified completion is sufficient: applying it is a planner
+    // task, and must not sit between a freshly spawned shell and its first claim.
+    let mut statement = tx.prepare(
+        "SELECT * FROM local_runtime_starts
+         WHERE subject=?1 AND finished=1 AND revoked_by IS NULL
+           AND json_extract(result,'$.incarnation')=?2
+           AND (applied=0 OR json_extract(result,'$.runtime_observation.receipt.id')=?3)"
+    )?;
+    let mut operations = statement.query_map(
+        params![subject, incarnation, current.as_ref().map(|claim| &claim.id)], read,
+    )?;
+    let Some(operation) = operations.next().transpose()? else { return Ok(false); };
+    if operations.next().is_some() { return Ok(false); }
+    let Some(result) = operation.result.as_ref() else { return Ok(false); };
+    let member = &operation.body["member"];
+    let selected = current_desired_row_tx(tx, subject)?;
+    if result["operation_id"] != operation.id || result["subject"] != subject
+        || result["phase"] != "completed" || !result["error"].is_null()
+        || result["verification"] != "operation-incarnation"
+        || result["incarnation"] != incarnation
+        || result["runtime_id"] != member["runtime_id"]
+        || result["terminal"] != member["terminal"]
+        || member["host"] != host || !member["driver"].is_null()
+        || operation.body["subject"]["subject"] != subject
+        || selected.as_ref().is_none_or(|row| {
+            Some(row.claim_id.as_str()) != operation.body["selected_token"].as_str()
+        })
+        || !recovery_intent_current(tx, store.origin(), &operation)?
+        || !mission_publication_current(store, tx, &operation)?
+        || (!operation.applied
+            && !runtime_start_requests_retained(tx, store.origin(), &operation.body)?)
+    {
+        return Ok(false);
+    }
+    let same_starting = current.as_ref().is_some_and(|claim| {
+        let fields = &claim.body["fields"];
+        claim.origin == store.origin() && fields["status"] == "starting"
+            && fields["incarnation_id"] == incarnation
+            && fields["runtime_id"] == member["runtime_id"]
+            && fields["terminal"] == member["terminal"]
+    });
+    // Before planner application there may be no runtime row at all, or just the
+    // predecessor. Only the unchanged pre-spawn observation may be superseded.
+    let unchanged_before_start = !operation.applied && result.get("runtime_before_start").is_some()
+        && current.as_ref().map(|claim| claim.id.as_str())
+            == result["runtime_before_start"].as_str();
+    if !same_starting && !unchanged_before_start { return Ok(false); }
+    let newer: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND id<>?2
+         AND (finished=0 OR applied=0 OR
+           CAST(json_extract(body,'$.start_request_position') AS INTEGER)>?3))",
+        params![subject, operation.id, operation.body["start_request_position"].as_i64().unwrap_or(0)],
+        |row| row.get(0),
+    )?;
+    if newer { return Ok(false); }
+    let decode_identity = |fields: &Value| {
+        fields["runtime_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+            .zip(fields["runtime_pid_start_token"].as_str().and_then(|token| token.parse::<u64>().ok()))
+    };
+    let mut identity = decode_identity(result);
+    // Already-applied results from earlier builds retain their process witness
+    // in the launch receipt rather than in the worker result.
+    if identity.is_none() && operation.applied
+        && let Some(receipts) = result["result_receipts"].as_array()
+    {
+        for receipt in receipts.iter().filter_map(Value::as_str) {
+            let Some(receipt) = retained_runtime_start_request(tx, store.origin(), receipt)? else { continue; };
+            let fields = &receipt.body["fields"];
+            if receipt.subject == subject && receipt.kind == "runtime.action.succeeded"
+                && fields["action"] == "start" && fields["operation"] == operation.id
+                && fields["runtime_id"] == member["runtime_id"]
+                && fields["incarnation_id"] == incarnation
+            {
+                identity = decode_identity(fields);
+            }
+        }
+    }
+    let Some((pid, token)) = identity else { return Ok(false); };
+    let mut fields = if same_starting {
+        current.as_ref().expect("starting observation").body["fields"].clone()
+    } else {
+        result["runtime_start_fields"].clone()
+    };
+    if fields["status"] != "starting" || fields["incarnation_id"] != incarnation
+        || fields["runtime_id"] != member["runtime_id"] || fields["terminal"] != member["terminal"]
+    {
+        return Ok(false);
+    }
+    // Fresh kernel liveness, inside the same writer savepoint as the claim.
+    if !alive(pid, token)? { return Ok(false); }
+    fields["status"] = Value::from("running");
+    let predecessors = latest_claim_id_tx(tx, subject)?.into_iter().collect::<Vec<_>>();
+    let evidence = current.as_ref().map(|claim| &claim.id).into_iter().collect::<Vec<_>>();
+    append_receipt_claim_tx(
+        tx, store.origin(), subject, "runtime.observed", None,
+        &json!({"fields":fields, "evidence":evidence}), &predecessors, None,
+        &format!("start-work-running:{}", operation.id),
+    )?;
+    Ok(true)
+}
+
 fn pin_evidence(tx: &Transaction<'_>, operation: &str, origin: &str, evidence: &str) -> Result<()> {
     if let Some(position) =
         evidence.strip_prefix(&format!("{LOCAL_OBSERVATION_ID_PREFIX}{origin}/"))
@@ -170,6 +293,11 @@ fn mission_publication_current(
         connection, owner.strip_prefix("mission-run/").unwrap_or(owner),
     ).optional()?;
     let Some(run) = run else { return Ok(false); };
+    // A successor can already name the selected publication while its predecessor
+    // still owns physical work. Only cleanup admission releases this phase fence.
+    if run.phase == "supersession-waiting" {
+        return Ok(false);
+    }
     Ok(!store.mission_run_supersession_pending_tx(connection, &run)?)
 }
 
@@ -1264,6 +1392,84 @@ mod tests {
         // The daemon-local span owner is gone: a later start of the same invocation identity
         // would begin a fresh trace instead of reusing the leaked entry.
         assert_ne!(store.start_invocation_trace(&invocation, agent, &[]).trace_id(), trace.trace_id());
+    }
+
+    #[test]
+    fn supersession_waiting_successor_cannot_launch_before_cleanup_admission() {
+        let store = Store::open_memory("node").unwrap();
+        let original = "version 2\nmission \"launch-wait\" state=\"ready\" { concurrent-runs; goal \"Original.\"; step \"work\" { goal \"Work.\"; } }\n";
+        publish(&store, original, "wait-original");
+        let source = store.create_mission_run(&fractal_missions::model::MissionRunRequest {
+            mission: "launch-wait".into(), revision: None, workspace: "/work/launch".into(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: "wait-source".into(),
+        }).unwrap();
+        publish(&store, &original.replace("Original.", "Revised."), "wait-revised");
+        store.supersede_mission_publications().unwrap();
+        let source = store.mission_run(&source.subject).unwrap().unwrap();
+        let successor = store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+        assert_eq!(successor.phase, "supersession-waiting");
+        let mut start = operation("wait-start", "agent/wait-successor", None);
+        start.body["subject"]["owner_run"] = Value::from(successor.subject.clone());
+        assert!(!mission_publication_current(&store, &store.readers.get(), &start).unwrap());
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Superseded);
+        assert!(!store.resume_superseding_mission_run(&successor.subject).unwrap());
+
+        store.set_mission_run_state(&source.subject, "cancelled", "terminal",
+            Some("predecessor work and cleanup confirmed finished")).unwrap();
+        // Terminal predecessor evidence alone is not successor admission.
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Superseded);
+        assert!(store.resume_superseding_mission_run(&successor.subject).unwrap());
+        assert!(mission_publication_current(&store, &store.readers.get(), &start).unwrap());
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+        assert!(store.dispatch_runtime_start(&start.id, 1).unwrap());
+        assert!(store.runtime_start_intent_current(&start.id).unwrap());
+    }
+
+    #[test]
+    fn supersession_waiting_fences_already_prepared_owned_and_legacy_gate_starts() {
+        for gate in [false, true] {
+            for boundary in ["dispatch", "physical-guard"] {
+                let store = Store::open_memory("node").unwrap();
+                publish(&store,
+                    "version 2\nmission \"prepared-wait\" state=\"ready\" { goal \"Wait safely.\"; step \"work\" { goal \"Work.\"; } }\n",
+                    "prepared-wait-original");
+                let run = store.create_mission_run(&fractal_missions::model::MissionRunRequest {
+                    mission: "prepared-wait".into(), revision: None, workspace: "/work/launch".into(),
+                    requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                    idempotency_key: "prepared-wait-source".into(),
+                }).unwrap();
+                let subject = if gate { "gate-operation/prepared-wait" } else { "agent/prepared-wait" };
+                let mut start = operation("prepared-wait-start", subject, None);
+                if gate {
+                    start.body["subject"]["kind"] = Value::from("gate");
+                    store.append_claim(&ClaimInput {
+                        subject: subject.into(), kind: "gate.requested".into(), actor: None,
+                        fields: BTreeMap::from([
+                            ("gate".into(), Value::from("prepared-wait")),
+                            ("owner".into(), Value::from(run.steps[0].subject.clone())),
+                            ("runner".into(), Value::from("exec")),
+                        ]),
+                        evidence: Vec::new(), expected_subject: None,
+                        idempotency_key: Some("prepared-wait-gate".into()),
+                    }).unwrap();
+                } else {
+                    start.body["subject"]["owner_run"] = Value::from(run.subject.clone());
+                }
+                assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+                if boundary == "physical-guard" {
+                    assert!(store.dispatch_runtime_start(&start.id, 1).unwrap());
+                }
+                // Interleave the authoritative phase change after the start's preparation.
+                // The selected publication is unchanged, so only the phase fence can stop it.
+                store.set_mission_run_state(&run.subject, "running", "supersession-waiting",
+                    Some("predecessor cleanup has not been admitted")).unwrap();
+                assert!(!store.runtime_start_intent_current(&start.id).unwrap());
+                if boundary == "dispatch" {
+                    assert!(!store.dispatch_runtime_start(&start.id, 1).unwrap());
+                }
+            }
+        }
     }
 
     #[test]

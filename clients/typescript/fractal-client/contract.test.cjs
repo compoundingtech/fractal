@@ -13,7 +13,7 @@ for (const name of ['Models.generated', 'Client.generated', 'errors', 'fetch-rec
     fs.writeFileSync(path.join(temporary, `${name}.js`), output);
 }
 const { FractalClient, ClientError, applyWindow } = require(path.join(temporary, 'Client.generated.js'));
-const { plainMessage, plainError } = require(path.join(temporary, 'errors.js'));
+const { plainMessage, plainError, appliedAnswer, notApplied, outcomeUnknown } = require(path.join(temporary, 'errors.js'));
 require(path.join(temporary, 'fetch-receiver.test.js'));
 fs.rmSync(temporary, { recursive: true, force: true });
 
@@ -304,6 +304,33 @@ test('phone commands preserve typed bodies, full ids, reactive wait and normal e
     assert(calls.every(([, init]) => init.headers.Authorization === 'Bearer phone-credential'));
 });
 
+test('series preserves required query values, cancellation and clipped zero-count buckets', async () => {
+    const wire = require('../../../docs/st3/client-v0/fixtures/series.json');
+    const groupedWire = require('../../../docs/st3/client-v0/fixtures/series-grouped.json');
+    const calls = [];
+    const controller = new AbortController();
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            return response(String(url).endsWith('/capabilities') ? capabilityFixture : String(url).includes('group_by=') ? groupedWire : wire);
+        },
+    });
+    assert.deepEqual(await client.series({ objective: 'objective/example', from: wire.value.from, to: wire.value.to, bucket_seconds: wire.value.bucket_seconds }, { signal: controller.signal }), wire);
+    assert.equal(calls[0][0], 'https://example.test/v1/client/capabilities');
+    const [url, init] = calls[1];
+    assert.equal(url, 'https://example.test/v1/client/series?objective=objective%2Fexample&from=1767225600000&to=1767225725000&bucket_seconds=60');
+    assert.equal(init.method, 'GET');
+    assert.equal(init.signal, controller.signal);
+    assert.equal(wire.value.buckets[1].count, 0);
+    assert.equal(wire.value.buckets.at(-1).end, wire.value.to);
+    assert.deepEqual(await client.series({ kind: ['event/example', 'event/other'], subject_prefix: 'agent/example/', group_by: 'category', from: groupedWire.value.from, to: groupedWire.value.to, bucket_seconds: 60 }), groupedWire);
+    const groupedURL = new URL(calls[2][0]);
+    assert.deepEqual(groupedURL.searchParams.getAll('kind'), ['event/example', 'event/other']);
+    assert.equal(groupedURL.searchParams.get('subject_prefix'), 'agent/example/');
+    assert.equal(groupedURL.searchParams.get('group_by'), 'category');
+});
+
 test('commands windows use existing snapshot and changes frames with resource discriminators', () => {
     const command = require('../../../docs/st3/client-v0/fixtures/device-command.json').value;
     const initial = { kind: 'snapshot', id: 'commands', collection: 'commands', snapshot, items: [command], order: [command.id], has_more: false };
@@ -324,8 +351,10 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     const readArguments = (id, options) => {
         switch (id) {
             case 'slo.history': return ['objective/example', {}, options];
+            case 'series.read': return [{ objective: 'objective/example', from: 0, to: 125000, bucket_seconds: 60 }, options];
             case 'attention-budget': return ['mission/example', undefined, undefined, options];
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
+            case 'auto-resolved.list': return [options];
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': case 'usage-hub.quota': return [options];
             case 'arrangements.list': case 'read-positions.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
@@ -352,6 +381,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
         }
     };
     const readMethods = {
+        'series.read': 'series',
         'capabilities.get': 'capabilities',
         'harness-questions.list': 'harnessQuestions',
         'harness-questions.get': 'harnessQuestion',
@@ -452,6 +482,32 @@ test('notesList reads the typed advisory current notes endpoint', async () => {
     assert.equal(calls[1][1].headers.Authorization, 'Bearer test-credential');
 });
 
+test('auto-resolved read and override preserve exact episode and retry identity', async () => {
+    const read = require('../../../docs/st3/client-v0/fixtures/auto-resolved.json');
+    const calls = [];
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(read);
+        },
+    });
+    assert.deepEqual(await client.autoResolvedList(), read);
+    const input = {
+        id: 'action/person-override:claim/example:ship',
+        idempotency_key: 'person-override:claim/example:ship',
+        fence: { snapshot_id: 'snapshot/example', subject_revisions: {} },
+        parameters: { target_id: 'step-run/example', episode: 'claim/example', answer: { id: 'ship' } },
+    };
+    await client.workOverride(input);
+    const sent = calls.filter(([url]) => !url.endsWith('/capabilities'));
+    assert.equal(sent[0][0], 'https://example.test/v1/client/auto-resolved');
+    assert.equal(sent[1][0], 'https://example.test/v1/client/actions');
+    assert.deepEqual(JSON.parse(sent[1][1].body), { api_version: 'st3.client.v0', type: 'work.override', ...input });
+});
+
 test('availability reads select a person and writes send the session person nothing but the change', async () => {
     const read = require('../../../docs/st3/client-v0/fixtures/person-availability.json');
     const written = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json');
@@ -482,6 +538,26 @@ test('availability reads select a person and writes send the session person noth
     assert.deepEqual(JSON.parse(sent[2][1].body), set);
     assert.deepEqual(JSON.parse(sent[3][1].body), report);
     assert.equal(sent[3][1].headers.Authorization, 'Bearer test-credential');
+});
+
+test('availabilityHistory sends its range and an older daemon is unsupported', async () => {
+    const fixture = require('../../../docs/st3/client-v0/fixtures/availability-history.json');
+    const requests = [];
+    let old = false;
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
+        const url = String(input);
+        requests.push(url);
+        if (new URL(url).pathname === '/v1/client/capabilities') return response(capabilityFixture);
+        return old ? new Response(null, { status: 404 }) : response(fixture);
+    }});
+    const range = { from: '2026-11-12T09:00:00Z', to: '2026-11-12T11:00:00Z', bucket_seconds: 3600 };
+    assert.deepEqual(await client.availabilityHistory({ ...range, person: 'person/ada' }), fixture);
+    old = true;
+    await assert.rejects(client.availabilityHistory(range), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/availability/history'), [
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600&person=person%2Fada',
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600',
+    ]);
 });
 
 test('notesSet sends only the text and expiry and a clear as null', async () => {
@@ -690,6 +766,53 @@ test('structured HTTP errors keep their complete server envelope', async () => {
         assert.equal(error.retryAfterMs, 3000);
         return true;
     });
+});
+
+test('applied outcome merges outer and details flags before legacy refusal shortcuts', () => {
+    const cases = [
+        [{}, {}, undefined],
+        [{ applied: 'none' }, {}, 'none'],
+        [{ applied: 'unknown' }, {}, 'unknown'],
+        [{}, { applied: 'none' }, 'none'],
+        [{}, { applied: 'unknown' }, 'unknown'],
+        [{ applied: 'none' }, { applied: 'none' }, 'none'],
+        [{ applied: 'unknown' }, { applied: 'none' }, 'unknown'],
+        [{ applied: 'none' }, { applied: 'unknown' }, 'unknown'],
+        [{ applied: 'unknown' }, { applied: 'unknown' }, 'unknown'],
+        ...[null, false, 0, '', 'future-state'].flatMap(value => [
+            [{ applied: value }, { applied: 'none' }, 'unknown'],
+            [{ applied: 'none' }, { applied: value }, 'unknown'],
+        ]),
+    ];
+    for (const code of ['stale-fence', 'rate-limited', 'internal']) {
+        for (const [outer, details, expected] of cases) {
+            const wire = { api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/outcome', code, message: 'm', retryable: false, ...outer, details };
+            const before = JSON.stringify(wire), error = new ClientError(wire, 409);
+            const label = JSON.stringify({ code, outer, details });
+            assert.equal(appliedAnswer(error), expected, label);
+            assert.equal(outcomeUnknown(error), expected === 'unknown', label);
+            assert.equal(notApplied(error), expected !== 'unknown' && (expected === 'none' || code !== 'internal'), label);
+            assert.equal(JSON.stringify(error.response), before, 'classification never rewrites the wire envelope');
+        }
+    }
+    assert.equal(outcomeUnknown(new TypeError('Network request failed')), true);
+    assert.equal(notApplied(new TypeError('Network request failed')), false);
+    assert.equal(appliedAnswer(new Error('not an API error')), undefined);
+});
+
+test('outer uncertainty survives real HTTP decoding and forbids a fresh request', async () => {
+    for (const applied of ['unknown', null, 'future-state']) for (const details of [{}, { applied: 'none' }]) {
+        const wire = { ...cursorGapFixture, code: 'stale-fence', applied, retryable: false, details };
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => Response.json(wire, { status: 409 }) });
+        await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+            assert.ok(error instanceof ClientError);
+            assert.deepEqual(error.response, wire);
+            assert.equal(appliedAnswer(error), 'unknown');
+            assert.equal(outcomeUnknown(error), true);
+            assert.equal(notApplied(error), false);
+            return true;
+        });
+    }
 });
 
 test('successful malformed JSON and failed body reads are not HTTP rejections', async () => {

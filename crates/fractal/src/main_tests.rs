@@ -1,4 +1,29 @@
 #[test]
+fn series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets() {
+    let cli = Cli::try_parse_from([
+        "fractal", "series", "--objective", "factory/work-throughput", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!((args.objective.as_deref(), args.from, args.to, args.bucket_seconds), (Some("factory/work-throughput"), 1000, 4000, 86_400));
+    let cli = Cli::try_parse_from([
+        "fractal", "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+        "--subject-prefix", "custom/acme/inbox/", "--group-by", "type", "--from", "1000", "--to", "4000",
+    ]).unwrap();
+    let Command::Series(args) = cli.command else { panic!("expected series"); };
+    assert_eq!(args.kind, ["custom.acme.arrived", "custom.acme.resolved"]);
+    assert_eq!(args.group_by.as_deref(), Some("type"));
+    for args in [
+        vec!["fractal", "series", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--group-by", "type", "--from", "1000", "--to", "4000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--from", "1000"],
+        vec!["fractal", "series", "--objective", "factory/work-throughput", "--to", "4000"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
 fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
     for (subcommand, transport) in [("add", "fabric"), ("remove", "fabric"), ("prefer", "tailscale")] {
         for actor in ["agent/example", "agent/other", "person/example"] {
@@ -544,6 +569,21 @@ fn omp_delivery_readiness_does_not_clear_the_reopened_human_block() {
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 
 #[test]
+fn active_channels_require_handoff_proof_not_an_idle_edge() {
+    for _ in 0..2 {
+        // A fresh channel cannot inherit readiness from a previous process or activity report.
+        let mut state = PiChannelResume::default();
+        assert!(!state.first_idle_seen);
+        state.accept_frame(r#"{"type":"ready","sessionId":"native-example"}"#);
+        state.accept_frame(r#"{"type":"state","state":"active"}"#);
+        assert!(!state.first_idle_seen);
+        state.accept_frame(r#"{"type":"delivery_ready"}"#);
+        assert!(state.first_idle_seen);
+        assert_eq!(state.pending.state.as_ref().unwrap().0, "working");
+    }
+}
+
+#[test]
 fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z")
         .unwrap()
@@ -738,7 +778,7 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
     let api = fractal_client::ClientError::Api(
         fractal_client::ErrorCode::StaleFence,
         "the client snapshot changed before the action was submitted".into(),
-        Box::new(fractal_client::ErrorEnvelope {
+        Box::new(fractal_client::ErrorEnvelope { applied: None,
             api_version: "st3.client.v0".into(),
             error_version: "st3.client.error.v0".into(),
             request_id: "request/test".into(),
@@ -1219,6 +1259,93 @@ fn missions_tree_fixture_renders_all_sections() {
             command: MissionViewCommand::Tree
         }
     ));
+}
+
+#[test]
+fn missions_runs_query_fixture_renders_summaries_and_truncation() {
+    let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hd8a0024f2dd3 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+        "../tests/fixtures/mission-runs-query.json"
+    )).expect("valid mission runs query fixture");
+    assert_eq!(
+        launch_cli::render_mission_runs_query(&fixture),
+        /* sqlite-large-value: allow-for-now lv-h0dd9e5195a5e owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/mission-runs-query.txt")
+    );
+    assert_eq!(
+        launch_cli::render_mission_runs_query(&json!({
+            "runs": [], "truncated": false
+        })),
+        "MISSION RUNS\n  none\n"
+    );
+}
+
+#[tokio::test]
+async fn missions_runs_query_json_preserves_the_wire_envelope_through_the_client_decoder() {
+    let envelope = json!({
+        "api_version": "fractal.client.v0",
+        "snapshot": {"host_id": "host/orchid", "store_index": 42},
+        "value": {"runs": [], "truncated": false}
+    });
+    let expected = envelope.clone();
+    let app = axum::Router::new().route(
+        "/v1/client/mission-runs",
+        axum::routing::get(move || {
+            let envelope = envelope.clone();
+            async move { axum::Json(envelope) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut output = Vec::new();
+    launch_cli::run_mission_runs_to(&client, "roll/", true, 100, true, &mut output).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), expected);
+    output.clear();
+    launch_cli::run_mission_runs_to(&client, "roll/", true, 100, false, &mut output).await.unwrap();
+    assert_eq!(String::from_utf8(output).unwrap(), "MISSION RUNS\n  none\n");
+    server.abort();
+}
+
+#[test]
+fn missions_runs_query_requires_prefix_and_bounds_limit() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "runs", "--mission-prefix", "mission/garden/",
+    ]).expect("bounded run query parses");
+    let Command::Missions {
+        command: MissionViewCommand::Runs { mission_prefix, active, limit },
+    } = cli.command else {
+        panic!("expected missions runs");
+    };
+    assert_eq!(mission_prefix, "mission/garden/");
+    assert!(!active);
+    assert_eq!(limit, 100);
+    assert_eq!(
+        launch_cli::mission_runs_path(&mission_prefix, active, limit),
+        "/v1/client/mission-runs?mission_prefix=mission%2Fgarden%2F&active=false&limit=100"
+    );
+
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "runs", "--mission-prefix", "mission/a &b/",
+        "--active", "--limit", "500", "--json",
+    ]).expect("active run query accepts maximum limit and JSON");
+    assert!(cli.json);
+    let Command::Missions {
+        command: MissionViewCommand::Runs { mission_prefix, active, limit },
+    } = cli.command else {
+        panic!("expected missions runs");
+    };
+    assert!(active);
+    assert_eq!(limit, 500);
+    assert_eq!(
+        launch_cli::mission_runs_path(&mission_prefix, active, limit),
+        "/v1/client/mission-runs?mission_prefix=mission%2Fa%20%26b%2F&active=true&limit=500"
+    );
+    assert!(Cli::try_parse_from(["fractal", "missions", "runs"]).is_err());
+    for limit in ["0", "501", "-1"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "missions", "runs", "--mission-prefix", "mission/garden/",
+            "--limit", limit,
+        ]).is_err(), "must reject limit {limit}");
+    }
 }
 
 #[test]
@@ -3587,6 +3714,12 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
             .is_some_and(|command| command.is_hide_set()),
         "the expert ST3 channel lifecycle must remain callable but hidden"
     );
+    assert!(
+        command
+            .find_subcommand("resource-payload")
+            .is_some_and(|command| command.is_hide_set()),
+        "the admitted shell payload entry point must remain callable but hidden"
+    );
 
     for legacy in [
         "claude",
@@ -3639,15 +3772,18 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
         ("claims", CLAIMS_SOURCE),
+        ("continuity", /* sqlite-large-value: allow-for-now lv-h3eca7c6c5a2f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("continuity_cli.rs")),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
         ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
+        ("effects", /* sqlite-large-value: allow-for-now lv-h42363df93217 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("effects_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
         ("hosts", /* sqlite-large-value: allow-for-now lv-h04ee6ce18457 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("hosts_cli.rs")),
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("resources", /* sqlite-large-value: allow-for-now lv-h588676c0bda2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("resources_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
         ("source", SOURCE_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
@@ -3702,11 +3838,19 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         "EvalArgs",
         "GraphArgs",
     ] {
-        assert!(
-            !cli_source.contains(&format!("struct {command_type}"))
-                && !cli_source.contains(&format!("enum {command_type}")),
-            "legacy CLI type {command_type} remains compiled"
-        );
+        for (name, source) in std::iter::once(("main", main_source))
+            .chain(command_files.iter().copied())
+        {
+            // Only the native finite-shell command owns this new ExecArgs type.
+            // The removed top-level exec handler/type stays forbidden everywhere else;
+            // every other legacy type and every legacy handler is still scanned here.
+            let native_exec_args = name == "resources" && command_type == "ExecArgs";
+            assert!(
+                (native_exec_args || !source.contains(&format!("struct {command_type}")))
+                    && !source.contains(&format!("enum {command_type}")),
+                "legacy CLI type {command_type} remains compiled in {name}"
+            );
+        }
     }
 
     let server_source = /* sqlite-large-value: allow-for-now lv-h62a14b16df0b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../fractal-api-core/src/api.rs");
@@ -5933,15 +6077,26 @@ fn native_driver_binds_the_local_pty_incarnation_instead_of_a_stale_graph_value(
         pid: Some(42),
         created_at: Some("2026-09-22T12:00:00.000Z".into()),
         display_name: None,
-        tags: BTreeMap::from([("st3.subject".into(), "agent/run/worker".into())]),
+        tags: BTreeMap::from([
+            ("st3.subject".into(), "agent/run/worker".into()),
+            ("st3.start-operation".into(), "exact-start".into()),
+        ]),
     }];
 
     assert_eq!(
-        pty_observation_incarnation("agent/run/worker", &observations).as_deref(),
+        pty_observation_incarnation("agent/run/worker", &observations, None).as_deref(),
         Some("42:2026-09-22T12:00:00.000Z")
     );
     assert_eq!(
-        pty_observation_incarnation("agent/run/other", &observations),
+        pty_observation_incarnation("agent/run/other", &observations, None),
+        None
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("exact-start")).as_deref(),
+        Some("42:2026-09-22T12:00:00.000Z")
+    );
+    assert_eq!(
+        pty_observation_incarnation("agent/run/worker", &observations, Some("predecessor")),
         None
     );
 }
@@ -10478,4 +10633,40 @@ fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
     assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
         "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
     assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
+}
+
+#[test]
+fn identity_rename_plan_and_local_proof_commands_are_symmetric() {
+    for family in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", family, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/operator", "--reason", "Clarify responsibility",
+            "--idempotency-key", "example-plan", "--plan", "--json",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename plan"),
+        };
+        assert!(args.plan);
+        assert_eq!(args.idempotency_key.as_deref(), Some("example-plan"));
+        for digest in [None, Some("sha256:example&exact")] {
+            let mut argv = vec![
+                "st", family, "rename-proof", "agent/example-old", "agent/example-new", "--json",
+            ];
+            if let Some(digest) = digest {
+                argv.extend(["--request-digest", digest]);
+            }
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let args = match cli.command {
+                Command::Agents { command: AgentsCommand::RenameProof(args) }
+                | Command::Missions { command: MissionViewCommand::RenameProof(args) } => args,
+                _ => panic!("expected local rename proof"),
+            };
+            assert_eq!(args.from, "agent/example-old");
+            assert_eq!(args.to, "agent/example-new");
+            assert_eq!(args.request_digest.as_deref(), digest);
+        }
+        assert!(Cli::try_parse_from(["st", family, "rename-proof", "agent/example-old"]).is_err());
+    }
 }

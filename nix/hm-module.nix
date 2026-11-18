@@ -7,7 +7,7 @@
 }:
 let
   inherit (lib) mkEnableOption mkIf mkOption types;
-  cfg = config.services.smalltalk;
+  cfg = config.services.fractal;
   externallyManaged = cfg.binary.path != null;
   # Copy fractal itself: a symlinkJoin-only executable resolves current_exe() back to the
   # original package, whose bin/pty would still win when seats prepend that directory.
@@ -210,7 +210,7 @@ in
 {
 
 
-  options.services.smalltalk = {
+  options.services.fractal = {
     enable = mkEnableOption "the Fractal user daemon";
     # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     fractalMigration.phase = mkOption {
@@ -316,7 +316,7 @@ in
     assertions = lib.optional staging {
       assertion = (cfg.stateDir == legacyState || lib.hasPrefix "${legacyState}/" cfg.stateDir)
         && !(builtins.any (part: part == "." || part == "..") (lib.splitString "/" cfg.stateDir));
-      message = "services.smalltalk.fractalMigration requires stateDir within the default st3 state root (without dot path components).";
+      message = "services.fractal.fractalMigration requires stateDir within the default st3 state root (without dot path components).";
     } ++ lib.optional staging {
       # Match HM's check-link-targets.sh literally: $targetPath == $forcedPath*.
       # This is a raw string prefix, not a path-component/ancestor comparison.
@@ -339,7 +339,7 @@ in
       message = "Fractal migration requires unforced legacy config and state ownership (including raw forced-path prefixes); remove forced old generations before cutover.";
     } ++ lib.optional completed {
       assertion = builtins.length (builtins.filter isConfigArg targetUpArgs) <= 1;
-      message = "services.smalltalk completed daemon arguments require at most one --config (including --config=PATH).";
+      message = "services.fractal completed daemon arguments require at most one --config (including --config=PATH).";
     };
     home.file = mkIf (staging && !completed && pkgs.stdenv.hostPlatform.isDarwin) {
       "Library/LaunchAgents/com.compoundingtech.fractal.plist".text =
@@ -363,7 +363,7 @@ in
         '' else ''
           for receipt in ${lib.escapeShellArgs [ receipt "${config.xdg.configHome}/fractal/.fractal-migration-completed" ]}; do
             if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-              echo 'Fractal host cutover has completed. Set services.smalltalk.fractalMigration.phase = "completed" before activating Home Manager.' >&2
+              echo 'Fractal host cutover has completed. Set services.fractal.fractalMigration.phase = "completed" before activating Home Manager.' >&2
               exit 1
             fi
           done

@@ -88,6 +88,7 @@ use crate::model::{
     SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
+pub mod effects;
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
@@ -97,6 +98,7 @@ use crate::store::local_commits;
 pub mod wire_names;
 pub mod seat_freshness;
 mod host_holds;
+mod resources;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -157,6 +159,7 @@ pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
 }
 mod availability;
 mod directive_notes;
+mod auto_resolved;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
@@ -196,6 +199,7 @@ mod native_delivery;
 pub mod replication;
 mod replication_replay;
 mod runs;
+mod continuity;
 mod agent_invocations;
 pub mod sessions;
 pub mod work;
@@ -510,7 +514,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "unknown-objective" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -653,6 +657,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/internal/resources", get(resources::list))
+        .route("/v1/internal/resources/exec", post(resources::submit))
+        .route("/v1/internal/resources/{id}", get(resources::show))
+        .route("/v1/internal/resources/{id}/wait", post(resources::wait))
+        .route("/v1/internal/resources/{id}/cancel", post(resources::cancel))
         .route(
             "/v1/deploy/verify-go",
             post(deploy::verify_go).layer(Extension(transport)),
@@ -665,7 +674,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
                 .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
         )
         .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
+        .route("/v1/client/auto-resolved", get(auto_resolved::read))
         .route("/v1/client/availability", get(availability::list).put(availability::set))
+        .route("/v1/client/availability/history", get(availability::history))
         .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
@@ -766,6 +777,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
+        .route("/v1/agents/rename-id/plan", post(agents::plan_agent_rename_id))
+        .route("/v1/missions/rename-id/plan", post(agents::plan_mission_rename_id))
+        .route("/v1/agents/rename-proof", get(agents::agent_rename_proof))
+        .route("/v1/missions/rename-proof", get(agents::mission_rename_proof))
         .route("/v1/agents/rename-id/proof/export", post(agents::export_agent_rename_proof))
         .route("/v1/missions/rename-id/proof/export", post(agents::export_mission_rename_proof))
         .route("/v1/fleet/anchor", get(fleet::fleet_anchor))
@@ -836,6 +851,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/usage", get(operations::get_usage))
         .route("/v1/slo", get(operations::get_slo))
         .route("/v1/slo/history", get(operations::get_slo_history))
+        .route("/v1/series", get(operations::get_series))
         .route("/v1/usage/messages", get(operations::get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(records::get_claim))
         .route("/v1/reviews", get(records::list_reviews))
@@ -864,6 +880,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(messages::message_delivery))
         .route("/v1/messages/by-key", get(messages::message_by_key))
+        .route("/v1/effects/by-key", get(effects::by_key))
+        .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
@@ -989,6 +1007,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/evals/{*run}", get(runs::get_eval))
         .route("/v1/mission-runs", get(runs::list_mission_runs))
         .route("/v1/mission-runs/tree", get(runs::list_mission_run_tree))
+        .route("/v1/mission-runs/continuity/preview", post(continuity::preview))
+        .route("/v1/mission-runs/continuity/recover", post(continuity::recover))
+        .route("/v1/mission-runs/continuity/startup-preview", get(continuity::startup_preview))
         .route("/v1/mission-overview", get(runs::mission_overview))
         .route("/v1/outcome-history", get(runs::outcome_history))
         .route("/v1/performance", get(runs::performance_report))
@@ -1186,6 +1207,11 @@ async fn response_envelope_unbounded(
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
+    let effect_resolution = request.method() == axum::http::Method::POST
+        && request.uri().path().starts_with("/v1/effects/")
+        && request.uri().path().ends_with("/resolve");
+    let continuity_recovery = request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/mission-runs/continuity/recover";
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -1287,6 +1313,8 @@ async fn response_envelope_unbounded(
     // must leave the async acceptor free to admit independent requests when SQLite is busy.
     // Bearers on native Unix routes must not evade the assistant route boundary.
     let (client_authentication, client_snapshot) = if client_request
+        || effect_resolution
+        || continuity_recovery
         || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
@@ -2084,6 +2112,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "peer-too-old"
         | "validation-failed"
+        | "unknown-objective"
+        | "invalid-series"
+        | "unsupported-objective-series"
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
@@ -8340,6 +8371,11 @@ pub async fn guard_bound_request(
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        // Resource handlers bind submission to native ownership and scope inspection/control
+        // to that same owner. No other internal route (or method) admits bound callers.
+        if resources::allows_bound_request(request.method(), request.uri().path()) {
+            return Ok(request);
+        }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
@@ -8507,7 +8543,15 @@ pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bo
     }
 }
 
-async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// Read-only supervisor diagnostics supplied by the daemon's process boundary.
+/// Reading health must never start a service-manager command.
+#[derive(Clone)]
+pub struct SupervisorHealth(pub Arc<dyn Fn() -> Option<Value> + Send + Sync>);
+
+async fn health(
+    State(state): State<AppState>,
+    supervisor: Option<Extension<SupervisorHealth>>,
+) -> Result<Json<Value>, ApiError> {
     let mut health = json!({
         "status": "ready",
         "node": state.node,
@@ -8517,7 +8561,11 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
         "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "capabilities": {"shell_resource_exec":1,"mission_resource_lane":2},
     });
+    if let Some(supervisor) = supervisor.and_then(|Extension(supervisor)| (supervisor.0)()) {
+        health["service_manager"] = supervisor;
+    }
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
     if let Some(index) = crate::store::messages_shard::stream_reads::stream_index(&state.store)
@@ -8525,7 +8573,21 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
     {
         health["messages_store_index"] = json!(index);
     }
+    apply_systemd_health(&mut health, fractal_runtime::systemd::health());
     Ok(Json(health))
+}
+
+fn apply_systemd_health(health: &mut Value, supervisor: fractal_runtime::systemd::Health) {
+    if let Some(reason) = supervisor.unresponsive {
+        health["status"] = json!("degraded");
+        health["supervisor"] = json!({
+            "status": "unresponsive",
+            "reason": "systemd-unresponsive",
+            "since_unix_ms": reason.since.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis(),
+            "message": reason.message,
+        });
+    }
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {
@@ -11955,6 +12017,13 @@ fn accept_message_receipt_authorized(
         }
         _ => None,
     };
+    #[cfg(feature = "test-support")]
+    if let Some((record, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &record.operation_id, "after-intent").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after durable intent")));
+    }
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
     let subject = format!("message/{id}");
     let previous = state
@@ -12203,6 +12272,13 @@ fn accept_message_receipt_authorized(
                 "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
             ))
         })?;
+    }
+    #[cfg(feature = "test-support")]
+    if let Some((effect, true, _)) = effect.as_ref()
+        && crate::reconcile::program::interrupt_message_for_test(
+            &state.store, &state.state_dir, &effect.operation_id, "after-accept").map_err(ApiError::internal)?
+    {
+        return Err(ApiError::bad(FractalError::new("test-program-interrupted", "program host interrupted after provider acceptance")));
     }
     if let Some((effect, _, caller)) = effect.as_ref() {
         state.store.confirm_message_effect(effect, &record, caller).map_err(ApiError::bad)?;
@@ -12898,7 +12974,13 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
-    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, WorkResponseOptions::default()).await
+}
+
+#[derive(Default)]
+struct WorkResponseOptions {
+    lease_view: bool,
+    starting_claim: bool,
 }
 
 /// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
@@ -12910,8 +12992,9 @@ async fn work_action_response_viewing(
     request: WorkRequest,
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
-    lease_view: bool,
+    options: WorkResponseOptions,
 ) -> Result<Json<StepRunView>, ApiError> {
+    let WorkResponseOptions { lease_view, starting_claim } = options;
     let actor = request
         .actor
         .as_deref()
@@ -12959,7 +13042,7 @@ async fn work_action_response_viewing(
     }
     // The claim's own incarnation is judged, not the seat's newest runtime record: another
     // host can record the end of its own old runtime for a seat that has moved (#4743).
-    if !state
+    if !starting_claim && !state
         .store
         .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
@@ -12971,11 +13054,28 @@ async fn work_action_response_viewing(
     }
     let quiet_renewal = action == "renew";
     let store = state.store.clone();
+    let starting_host = starting_claim.then(|| state.node.clone());
     let response = blocking_action(move || {
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
+            store.work_action_admitting(&subject, &action, &request,
+                crate::store::missions::WorkActionOptions {
+                    extend_ms, handoff: None, enrich_renewal: !lease_view,
+                }, |tx| {
+                if let Some(host) = starting_host.as_deref() {
+                    let incarnation = request.incarnation.as_deref().expect("explicit claim fence");
+                    let admitted = crate::store::runtime_starts::admit_starting_work_claim_tx(
+                        &store, tx, &actor, incarnation, host,
+                        fractal_runtime::process_generation_alive,
+                    ).map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
+                    if !admitted {
+                        return Err(FractalError::new("inactive-work-incarnation",
+                            format!("`{incarnation}` is not the current live incarnation of `{actor}`")));
+                    }
+                }
+                Ok(())
+            })?
         };
         if !lease_view {
             work_response::enrich_under(&store, &mut response)?;

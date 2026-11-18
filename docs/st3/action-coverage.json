@@ -9,6 +9,11 @@
   ],
   "typed_actions": [
     {
+      "action": "work.override",
+      "tests": ["crates/fractal/tests/client_v0_contract.rs::auto_resolved_read_and_override_round_trip"],
+      "behavior": "Person-scoped deadline resolutions and exact-episode overrides; same action replay is idempotent, other people are forbidden and closed windows refused."
+    },
+    {
       "action": "harness.answer",
       "tests": [
         "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::accepted_receipts_survive_reopen_without_an_adapter_or_duplicate_writes",
@@ -483,6 +488,41 @@
   ],
   "cli": [
     {
+      "command": "st missions run continuity preview",
+      "description": "Read original superseded-run evidence and its hash without writing",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Real Unix CLI/API preview remains stable across reopen and records no new claims."
+    },
+    {
+      "command": "st missions run continuity startup-preview",
+      "description": "Read owner-local startup supersession candidates without dispatching work",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Real Unix CLI/API startup preview is read-only before and after reopen."
+    },
+    {
+      "command": "st missions run continuity recover",
+      "description": "Recover original completed evidence by reference using an exact preview hash and explicit actor",
+      "tests": ["crates/fractal/tests/action_coverage.rs::cli_continuity_previews_and_hash_bound_recovery_survive_restart"],
+      "behavior": "Stale hashes write nothing; accepted recovery creates a linked successor whose carried references survive reopen without fabricated work submissions."
+    },
+    {
+      "command": "st effects status",
+      "description": "Read durable native-effect state by its full idempotency key without sending",
+      "tests": [
+        "crates/fractal-api-core/src/api/effects_tests.rs::effect_by_key_reports_effective_state_and_conventional_not_found"
+      ],
+      "verification": "Real daemon keyed effect reads, including resolved outcomes and not-found"
+    },
+    {
+      "command": "st effects resolve",
+      "description": "Explicitly confirm or abandon an unresolved effect with authenticated person authority and evidence",
+      "tests": [
+        "crates/fractal/src/effects_cli.rs::resolution_requires_explicit_outcome_and_confirmation_evidence",
+        "crates/fractal-api-core/src/api/effects_tests.rs::effect_routes_authenticate_person_authority_and_return_standard_receipts"
+      ],
+      "verification": "CLI outcome and evidence parsing; real daemon person authorization and durable resolution"
+    },
+    {
       "command": "st harness-questions list",
       "description": "Read one explicit page of metadata-only native harness questions",
       "tests": [
@@ -671,11 +711,11 @@
     },
     {
       "command": "st agents rename-id",
-      "description": "Change a seat's canonical ID while preserving its immutable identity and harness",
+      "description": "Preview or change a seat's canonical ID while preserving its immutable identity and harness",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+      "verification": "real CLI over private Unix socket; PLAN writes no claims; disk store reopened before idempotent replay"
     },
     {
       "command": "st agents rename-id proof export",
@@ -692,6 +732,14 @@
         "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
       ],
       "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
+    },
+    {
+      "command": "st agents rename-proof",
+      "description": "Read selected native agent rename evidence bound to the planned request digest",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; digest and exact request match PLAN before and after daemon restart without writes"
     },
     {
       "command": "st agents repos",
@@ -1565,6 +1613,52 @@
       "verification": "real Clap parsing plus API and store authority, revision and history regressions"
     },
     {
+      "command": "st resources exec",
+      "description": "Admit a finite shell payload and forward its actual outcome after custody retirement",
+      "tests": [
+        "crates/fractal/src/resources_cli.rs::exec_requires_resources_and_preserves_payload_argv",
+        "crates/fractal/src/resources_cli.rs::platform_refusal_precedes_daemon_contact_and_capacity_acquisition",
+        "crates/fractal/src/resources_cli.rs::payload_exit_code_is_passed_through_and_result_is_durable",
+        "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard",
+        "crates/fractal-api-core/src/api/resources.rs::shell_wait_subscribes_before_reading_and_exports_no_launch_credentials"
+      ],
+      "verification": "real Clap parsing and payload execution; router/native-owner isolation and wait credential-redaction regressions"
+    },
+    {
+      "command": "st resources ls",
+      "description": "List native memberships, holds, shell executions and host accounting",
+      "tests": [
+        "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard"
+      ],
+      "verification": "HTTP router through the native transport guard; owner-filtered resource inventory"
+    },
+    {
+      "command": "st resources show",
+      "description": "Inspect a shell execution's admission blockers, custody and actual outcome",
+      "tests": [
+        "crates/fractal-api-core/src/api/resources.rs::bound_resource_routes_enforce_native_ownership_through_transport_guard"
+      ],
+      "verification": "HTTP router through the native transport guard; exact execution ownership and credential redaction"
+    },
+    {
+      "command": "st resources hold",
+      "description": "Place a native execution-host admission hold without reserving capacity",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart",
+        "crates/fractal-api-core/src/api/resources.rs::native_hold_release_wakes_a_queued_shell_without_polling"
+      ],
+      "verification": "delegated hosts CLI hold implementation over a real Unix socket and disk restart; native shell admission hold regression"
+    },
+    {
+      "command": "st resources release",
+      "description": "Resolve an owned native host hold at its observed revision",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart",
+        "crates/fractal-api-core/src/api/resources.rs::native_hold_release_wakes_a_queued_shell_without_polling"
+      ],
+      "verification": "delegated hosts CLI release implementation over a real Unix socket and disk restart; native shell admission wake regression"
+    },
+    {
       "command": "st lanes approve",
       "description": "Approve an entry as the lane's approver",
       "tests": [
@@ -1838,11 +1932,11 @@
     },
     {
       "command": "st missions rename-id",
-      "description": "Change a mission's canonical ID while preserving its immutable identity and revision history",
+      "description": "Preview or change a mission's canonical ID while preserving its immutable identity and revision history",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened before idempotent replay"
+      "verification": "real CLI over private Unix socket; PLAN writes no claims; disk store reopened before idempotent replay"
     },
     {
       "command": "st missions rename-id proof export",
@@ -1859,6 +1953,14 @@
         "crates/fractal/tests/fleet.rs::rename_proofs_export_over_cli_and_verify_without_daemon_or_config"
       ],
       "verification": "real CLI after daemon shutdown with invalid config, instance and endpoint; successful verdict and stale-revision exit"
+    },
+    {
+      "command": "st missions rename-proof",
+      "description": "Read selected native mission rename evidence bound to the planned request digest",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_identity_renames_preserve_storage_subjects_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; digest and exact request match PLAN before and after daemon restart without writes"
     },
     {
       "command": "st missions report-to",
@@ -1891,6 +1993,15 @@
         "crates/fractal/src/main_tests.rs::mission_retry_command_creates_distinct_runs_through_the_api"
       ],
       "verification": "native command dispatcher over a private Unix socket; repeated invocations create distinct linked runs"
+    },
+    {
+      "command": "st missions runs",
+      "description": "Read bounded run and step summaries for a mission ID prefix, optionally limited to active runs",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::missions_runs_query_requires_prefix_and_bounds_limit",
+        "crates/fractal/src/main_tests.rs::missions_runs_query_fixture_renders_summaries_and_truncation"
+      ],
+      "verification": "CLI parsing and encoded read-only query path; fixture-based human summary, empty result, and truncation rendering"
     },
     {
       "command": "st missions show",
@@ -2403,7 +2514,7 @@
     },
     {
       "command": "st service permissions",
-      "description": "Explain the one-time macOS permissions for service-owned work",
+      "description": "Explain the macOS protected-folder boundary for agent work",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_service_install_status_restart_reset_uninstall_use_isolated_manager"
       ],
@@ -2440,6 +2551,15 @@
         "crates/fractal/tests/action_coverage.rs::cli_service_install_status_restart_reset_uninstall_use_isolated_manager"
       ],
       "verification": "shared API restart case"
+    },
+    {
+      "command": "st series",
+      "description": "Read bucketed counts for a declared objective or explicit claim selection, optionally grouped by a field",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::series_requires_one_selection_and_explicit_bounds_and_defaults_to_daily_buckets",
+        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI JSON reads over private Unix socket; disk store reopened between reads"
     },
     {
       "command": "st sets ls",
@@ -3264,6 +3384,20 @@
         "crates/fractal/tests/action_coverage.rs::attention_controls_survive_stale_fences_and_restarts"
       ],
       "verification": "l reducer emits attention.snooze (3h, or null on a row already put off) and hides nothing itself; rows follow st's snoozed_until against the adapt clock; real daemon transport and restart"
+    },
+    {
+      "effect": "Override",
+      "tests": [
+        "crates/fractal-tui/src/ui/mod.rs::o_on_an_auto_resolved_ask_sends_the_chosen_answer_instead_of_the_default",
+        "crates/fractal-tui/src/ui/mod.rs::an_override_on_its_way_offers_no_second_one_until_st_answers",
+        "crates/fractal-tui/src/ui/mod.rs::an_answer_that_requests_changes_goes_only_with_the_changes_in_words",
+        "crates/fractal-tui/src/ui/mod.rs::o_is_refused_where_st_takes_no_other_answer",
+        "crates/fractal-tui/src/ui/mod.rs::a_closed_alert_whose_ask_resolved_by_itself_offers_the_override",
+        "crates/fractal-tui/src/ui/mod.rs::an_override_request_names_the_episode_and_answer",
+        "crates/fractal-tui/src/ui/live.rs::an_override_reaches_st_and_the_ask_leaves_the_auto_resolved_list",
+        "crates/fractal/tests/client_v0_contract.rs::auto_resolved_read_and_override_round_trip"
+      ],
+      "verification": "o reducer emits work.override with the episode, the chosen non-default answer and, for request changes, the words; one per episode until st answers; no action once the window closed; real daemon transport refuses another person and drops the ask from auto-resolved.list"
     },
     {
       "effect": "Dismiss",

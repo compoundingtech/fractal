@@ -7,10 +7,11 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
-    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
+    AutoResolvedAsks,
+    AvailabilitySet, AvailabilityHistory, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
-    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, Series, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
     MissionDeclaration, SubjectSourceMap, SourceBlob,
     GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,
@@ -352,10 +353,13 @@ export class FractalClient {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         // These projections have no missing-item 404, including an old router's empty response.
-        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
-        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
+        const route = path.split('?')[0];
+        const unsupported = path.startsWith('/v1/client/agent-related-runs/') ? 'agent-related-runs.get'
+            : route === '/v1/client/schedules' ? 'schedules.list'
+            : route === '/v1/client/availability/history' ? 'availability.history' : undefined;
+        if (response.status === 404 && unsupported) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${unsupported}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
@@ -716,7 +720,9 @@ export class FractalClient {
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
+    async autoResolvedList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AutoResolvedAsks>> { return this.get('/v1/client/auto-resolved', undefined, requestOptions); }
     async availabilityList(person?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailabilities>> { return this.get('/v1/client/availability' + query({ person }), undefined, requestOptions); }
+    async availabilityHistory(options: { from: string; to: string; bucket_seconds: number; person?: string }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AvailabilityHistory>> { return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }
@@ -735,6 +741,7 @@ export class FractalClient {
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
     async sloList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloList>> { return this.get('/v1/client/slo', undefined, requestOptions); }
     async sloHistory(id: string, options: { since_ms?: number; until_ms?: number; steps?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloHistory>> { return this.get('/v1/client/slo/history' + query({ id, ...options }), undefined, requestOptions); }
+    async series(options: { objective?: string; kind?: string[]; subject_prefix?: string; group_by?: string; from: number; to: number; bucket_seconds: number }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Series>> { const { kind, ...single } = options; const suffix = query(single) + (kind ?? []).map(value => '&kind=' + encodeURIComponent(value)).join(''); return this.get('/v1/client/series' + suffix, undefined, requestOptions); }
     async usagePeriod(options: { since_ms?: number; until_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsagePeriod>> { return this.get('/v1/client/usage' + query(options), undefined, requestOptions); }
     async usageHubQuota(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsageHubQuota>> { return this.get('/v1/client/usage/quota', undefined, requestOptions) }
     async githubPluginPullRequest(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubPullRequestRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`, undefined, requestOptions); }
@@ -871,6 +878,7 @@ export class FractalClient {
     async workComplete(input: Omit<ActionOf<'work.complete'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.complete' } as ActionOf<'work.complete'>, requestOptions); }
     async workDone(input: Omit<ActionOf<'work.done'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.done' } as ActionOf<'work.done'>, requestOptions); }
     async workFail(input: Omit<ActionOf<'work.fail'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.fail' } as ActionOf<'work.fail'>, requestOptions); }
+    async workOverride(input: Omit<ActionOf<'work.override'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.override' } as ActionOf<'work.override'>, requestOptions); }
     async workProgress(input: Omit<ActionOf<'work.progress'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.progress' } as ActionOf<'work.progress'>, requestOptions); }
     async workPublishMission(input: Omit<ActionOf<'work.publish-mission'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.publish-mission' } as ActionOf<'work.publish-mission'>, requestOptions); }
     async workRelease(input: Omit<ActionOf<'work.release'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.release' } as ActionOf<'work.release'>, requestOptions); }

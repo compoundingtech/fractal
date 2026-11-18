@@ -15,6 +15,63 @@ fn fixture(name: &str) -> Vec<u8> {
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
 }
+
+#[test]
+fn series_fixture_preserves_zero_and_clipped_buckets() {
+    let raw: serde_json::Value = decode("series.json");
+    let series: Envelope<Series> = decode("series.json");
+    assert!(series.value.group_by.is_none());
+    assert_eq!(series.value.bucket_seconds, 60);
+    assert_eq!(series.value.buckets.iter().map(|bucket| bucket.count).collect::<Vec<_>>(), vec![2, 0, 1]);
+    assert_eq!(series.value.buckets.last().unwrap().end, series.value.to);
+    assert_eq!(serde_json::to_value(&series.value).unwrap(), raw["value"]);
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/Series"
+    })).unwrap();
+    assert!(validator.is_valid(&raw["value"]));
+    for (pointer, invalid_value) in [
+        ("/bucket_seconds", serde_json::json!(0)),
+        ("/buckets/0/count", serde_json::json!(-1)),
+        ("/buckets/0/start", serde_json::json!(-1)),
+        ("/buckets/0/end", serde_json::json!(-1)),
+    ] {
+        let mut invalid = raw["value"].clone();
+        *invalid.pointer_mut(pointer).unwrap() = invalid_value;
+        assert!(!validator.is_valid(&invalid), "{pointer}");
+    }
+    for field in ["from", "to", "bucket_seconds", "buckets"] {
+        let mut invalid = raw["value"].clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&invalid), "{field}");
+        assert!(serde_json::from_value::<Series>(invalid).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn series_grouped_fixture_preserves_json_values() {
+    let raw: serde_json::Value = decode("series-grouped.json");
+    let series: Envelope<Series> = decode("series-grouped.json");
+    assert_eq!(series.value.group_by.as_deref(), Some("category"));
+    let groups = series.value.buckets[0].groups.as_ref().unwrap();
+    assert_eq!(groups.len(), 6);
+    assert!(groups[0].value.is_null());
+    assert!(groups[1].value.is_string());
+    assert!(groups[2].value.is_number());
+    assert!(groups[3].value.is_boolean());
+    assert!(groups[4].value.is_array());
+    assert!(groups[5].value.is_object());
+    assert!(series.value.buckets[1].groups.as_ref().unwrap().is_empty());
+    assert_eq!(serde_json::to_value(&series.value).unwrap(), raw["value"]);
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/Series"
+    })).unwrap();
+    assert!(validator.is_valid(&raw["value"]));
+}
+
 #[test]
 fn availability_fixtures_decode_coarse_and_full_views_and_encode_a_status_clear_as_null() {
     let read: Envelope<PersonAvailabilities> = decode("person-availability.json");
@@ -48,6 +105,28 @@ fn availability_words_a_newer_daemon_adds_read_as_unknown() {
     assert_eq!(future.presence, Some(AvailabilityPresence::Unknown));
     assert_eq!((future.interruptions, future.deadline_clock), (AvailabilityInterruptions::Unknown, AvailabilityDeadlineClock::Unknown));
     assert_eq!((AvailabilityDeadlineClock::HoldAll.as_str(), AvailabilityStatus::Unknown.to_string()), ("hold-all", "unknown".to_owned()));
+}
+
+#[test]
+fn availability_history_fixture_round_trips_and_every_axis_covers_its_bucket() {
+    let read: Envelope<AvailabilityHistory> = decode("availability-history.json");
+    let wire = serde_json::from_slice::<serde_json::Value>(&fixture("availability-history.json")).unwrap();
+    assert_eq!(serde_json::to_value(&read.value).unwrap(), wire["value"]);
+    let [first, last] = &read.value.buckets[..] else { panic!("two buckets") };
+    assert_eq!((first.status_source.r#override, last.status_source.r#override), (0, 1_200_000));
+    assert_eq!((last.covered_ms, last.deadline_clock.hold_routine), (1_800_000, 1_200_000));
+    for bucket in &read.value.buckets {
+        let presence = bucket.presence.unwrap();
+        for total in [
+            bucket.status.available + bucket.status.away,
+            bucket.status_source.r#override + bucket.status_source.presence + bucket.status_source.unreported,
+            presence.present + presence.idle + presence.locked + presence.unreported,
+            bucket.interruptions.all + bucket.interruptions.urgent + bucket.interruptions.none,
+            bucket.deadline_clock.run + bucket.deadline_clock.hold_routine + bucket.deadline_clock.hold_all,
+        ] {
+            assert_eq!(total, bucket.covered_ms, "{bucket:?}");
+        }
+    }
 }
 
 #[test]

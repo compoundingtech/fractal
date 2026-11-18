@@ -5,8 +5,8 @@ use serde_json::json;
 
 const G: u64 = 1 << 30;
 
-fn two_gib_outside() -> Option<u64> {
-    Some(2 * G)
+fn two_gib_outside() -> Option<fractal_runtime::host::HostMemoryObservation> {
+    Some(fractal_runtime::host::HostMemoryObservation { outside_bytes: 2 * G, psi_blocked: false })
 }
 
 fn observe(store: &Store, subject: &str, status: &str) {
@@ -101,7 +101,7 @@ mission "orchid" state="ready" {
     let build = step(&store, &run, "build");
     assert_eq!(build.status, "blocked");
     assert_eq!(build.blocked_reason.as_deref(), Some(format!(
-        "step lane 2 cores/16.0G for {builder} does not fit: 12.0G free of the 54.0G this host gives lanes (other lanes hold 40.0G, seats outside lanes 2.0G)").as_str()));
+        "step lane 2 cores/16.0G for {builder} does not fit: 12.0G free of the 54.0G this host gives lanes (other lanes hold 40.0G, host outside lanes 2.0G)").as_str()));
     let huge = step(&store, &run, "huge");
     assert_eq!(huge.blocked_reason.as_deref(), Some(format!(
         "step lane 2 cores/60.0G for {builder} can never fit on this host, which gives lanes 14 cores/54.0G").as_str()));

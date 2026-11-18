@@ -1,18 +1,18 @@
-// A message carries no subject revisions: Fractal asks only that the snapshot be this host's and not
-// ahead of its store, so the newest snapshot a window frame already brought is as good as a fresh
-// read and saves a round trip on every send. Only when Fractal says a try applied nothing (a stale
-// fence, a restarted host) is a fresh snapshot read.
+// Fractal accepts a snapshot from this host at any nonfuture store position. Subject revisions
+// remain exact: using an already received snapshot removes a capabilities round trip, never the
+// revision check. A retry after a refusal reads a fresh snapshot on the original connection.
 export type SendFence = { snapshot_id: string; subject_revisions: Record<string, string> };
 
-/** The fence for each try of one send: the held snapshot for the first, a fresh read after that. */
-export function sendFences(held: string | undefined, fresh: () => Promise<SendFence>): () => Promise<SendFence> {
+/** The first try uses the held snapshot; later tries read fresh and keep the viewed revisions. */
+export function sendFences(held: string | undefined, fresh: () => Promise<SendFence>, revisions: Record<string, string> = {}): () => Promise<SendFence> {
   let first = held || undefined;
+  const subjectRevisions = { ...revisions };
   return async () => {
     if (first) {
       const snapshot_id = first;
       first = undefined;
-      return { snapshot_id, subject_revisions: {} };
+      return { snapshot_id, subject_revisions: { ...subjectRevisions } };
     }
-    return fresh();
+    return { ...(await fresh()), subject_revisions: { ...subjectRevisions } };
   };
 }

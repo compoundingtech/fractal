@@ -1,3 +1,4 @@
+import { markdownCodeFence } from './assistant-ui/composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
@@ -24,7 +25,7 @@ function ComposerCopyFeedback({ scheme, width, variant, nested = false }: { sche
   return <Root aria-label={nested ? `${scheme} ${width}` : undefined} data-scheme={scheme} data-revision={revision} {...stylex.props(styles.root, styles.width(width), ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
     <div {...stylex.props(styles.toolbar)}><Button onPress={() => setRevision(value => value + 1)}>Rerender snapshot</Button><Button onPress={() => setFailure(value => !value)}>Toggle copy failure</Button></div>
     <EmbraceRuntimeProvider options={options}><EmbraceComposer variant={variant} history={['Review the composer focus treatment.']} /></EmbraceRuntimeProvider>
-    <Markdown text={'```typescript\n' + source + '```'} />
+    <Markdown text={markdownCodeFence(source.replace(/\n$/, ''), 'typescript')} />
     <section aria-label={nested ? `Answer action ${scheme} ${width}` : 'Answer action'}><p>{answer}</p><CopyAnswerButton text={answer} onCopy={async () => { if (failure) throw new Error('Host copy rejected'); await navigator.clipboard.writeText(answer) }} /></section>
     <span data-testid="focus-reference" {...stylex.props(styles.reference)} />
     <span data-testid="copy-glyph" hidden><Icon name="copy" size={14} /></span>

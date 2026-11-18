@@ -14,9 +14,9 @@ A mission run has one stable subject. Each immutable run generation binds that r
 
 `fractal missions retry RUN [--same-revision] [--reason REASON] --as ACTOR` creates a new run from a failed, terminal source. A person or the owning agent must have ordinary run-start authority. The trusted API is `POST /v1/mission-runs/{run}/retry`, with `actor`, `same_revision` (default `false`), optional `reason`, and a stable `idempotency_key`. Repeating the same idempotency key must not create another run.
 
-By default the new run selects the latest published revision of the source mission. `--same-revision` selects the source's current revision, including an explicitly revised generation. Both modes preserve the source's exact resolved inputs and workspace. Incompatible latest-revision inputs refuse with the source revision, selected revision, and reason; there is no fallback to the source revision and no substitution of new input defaults.
+The latest published revision is selected by default; `--same-revision` selects the source's current revision. Both preserve resolved inputs and the original semantic requester while authenticating the retry author. Proven launching declarations supply the current workspace; explicit and historical unbound workspaces remain explicit. Incompatible inputs refuse with both revisions and the reason, without a fallback revision or new input defaults.
 
-All steps and the program start from the top under new run and generation identities. No successful work or program journal is carried from the source. Steps must be idempotent with respect to effects already present in the workspace or external systems; retry does not roll them back.
+Matching completed steps and bound person answers carry by reference to authentic source evidence. Changed contracts and their dependents restart; unfinished programs restart without adopting journals. Existing external effects are not rolled back and must remain idempotent.
 
 The source's status, generation, and execution history are immutable. Append-only `mission-run.retry-linked` claims link source and retry on both subjects, with `source`, `retry`, and optional `reason`; they do not rewrite source state. Run views and `missions show` expose `retry_of` on the new run and `retried_by` on the source. Ordinary starts omit `retry_of`; an empty `retried_by` may be omitted from JSON.
 
@@ -26,9 +26,9 @@ For a mission without a revision policy, publishing a new mission revision autom
 
 Native `work revise` and targeted launch revision proposals publish their candidate with the explicit run-revision operation atomically. Automatic publication supersession therefore cannot cancel the source between publication and its authorized explicit revision or proposal. Direct and proposal responses retain their durable idempotency correlation.
 
-The pinned source's existing revision policies take precedence. Mission- or step-level `revisions="human-only"` prevents automatic supersession; publication cannot strip that protection. The existing proposal, exact preview, reviewer authorization, and all-reviewer approval path remains. Successful approved cutover admits a **new linked run at the exact approved revision**, not a new generation of the source; it uses the same admission-first and cleanup barriers described below.
+The pinned source's revision policy and authentic evidence take precedence. Mission- or step-level `revisions="human-only"`, completed work, or person responses prevent automatic supersession; publication cannot strip that protection. The existing proposal, exact preview, reviewer authorization, and all-reviewer approval path remains. Approved cutover admits a new linked run at the exact approved revision, using the same admission-first and cleanup barriers below.
 
-With `revision-cutover="when-idle"`, publication does not immediately cancel active work. At reconciliation, the existing `revision-draining` phase holds new step admission while current claimed, working, or verifying work, including descendant work, finishes; holders can still finish their work. The next idle boundary preflights the latest eligible selected revision before cancellation. An explicit draining proposal takes precedence. A refusal releases that hold, keeps the source active, and exposes the incompatibility instead of abandoning the wait silently.
+With `revision-cutover="when-idle"`, reconciliation holds new admission in `revision-draining` while claimed, working, or verifying work drains. This timing policy does not authorize discarding completed evidence: completion or a person response releases an automatic drain back to normal for explicit review. An explicit draining proposal takes precedence; a refused cutover leaves the source active with its incompatibility exposed.
 
 A different publication receipt for an unchanged definition revision does not by itself expire a post-publication pin or reopen the same refusal episode. A genuinely different target can be preflighted again; after an intervening incompatible revision, restoring compatible code can recover the run.
 
@@ -36,9 +36,9 @@ An owner also recovers pending selected-head work at startup. If a newer head wa
 
 Publication maintenance pages one selected mission head and at most 32 source runs per writer transaction. Its durable local keyset cursor advances past refusals and pins as well as replacements, and a changed partially processed head restarts that head's cursor. Capacity admission uses indexed active-run facts and the strictest pinned revision's limit, not a scan and parse of every active definition for each candidate. The evaluator checks an unprocessed source before dispatch; work claims, step activation, program credential issuance, and runtime admission/dispatch/spawn guards independently fence a publication arriving after that check. Mechanical gates also resolve their legacy request ownership. A recorded incompatibility releases this publication fence so the deliberately retained source can continue.
 
-Preflight the replacement before cancelling its source: exact resolved input declarations and kinds, capacity, original starter authority, workspace, and interpolation must admit an ordinary start against the target revision. A refusal leaves the source active, without a replacement or cancellation, and records a durable visible `supersession_fault` naming the source revision, target revision, and incompatibility. Other candidates remain independent.
+Preflight the replacement before cancelling its source: resolved inputs and kinds, capacity, original starter authority, current launching-declaration workspace, and interpolation must admit an ordinary start against the target revision. Schedule and subscription launchers retain `{subject,suffix}` provenance in `mission-run.created.workspace_declaration`; supersession re-resolves that declaration's current workspace and preserves the occurrence suffix. Explicit API/CLI workspaces and old runs without provenance remain explicit. Missing, stopped, or rebound launch declarations refuse instead of using a stale workspace. Refusal leaves the source active and records `supersession_fault` with both revisions and the incompatibility.
 
-On success, append bidirectional `supersedes` / `superseded_by` lineage and ordinarily cancel the source atomically with creating a fresh replacement in `supersession-waiting`. The source uses ordinary finalization and cleanup. Terminal state alone does not admit the replacement: every superseded predecessor and descendant, in every generation, must also have no running or unconfirmed owned runtime. Current and historical runtime ownership and mechanical gate runners count; observations are folded per incarnation, so a stale stop cannot hide a newer live process. An expired cleanup deadline does not waive this fence. Unreachable or unconfirmed runtimes keep the replacement waiting with a visible `cleanup-runtime-quiescence` or `supersession-runtime-quiescence` fault until observation proves recovery. It retains exact inputs and workspace and original starter attribution and authority; a root replacement is a new root, while a child replacement preserves its parent, root, and default-selector relationship. Runtime dependencies and child results follow the supersession-successor chain, rather than failing a parent because the historical source was cancelled.
+Successful cutover appends bidirectional lineage and atomically creates a replacement in `supersession-waiting` before ordinary source cancellation. Admission waits for every predecessor and descendant generation to become terminal with no running or unconfirmed owned runtime. Current and historical runtime ownership, mechanical runners, and exact incarnations count; stale stop observations and elapsed deadlines never waive custody. Unknown runtimes expose `cleanup-runtime-quiescence` or `supersession-runtime-quiescence` until proof arrives. Inputs and starter attribution remain bound; workspace follows its launching declaration when provenance exists. Root replacements are new roots, while children preserve parent, root, and default selector. Dependencies follow the successor chain instead of treating historical cancellation as failure.
 
 Supersession lineage is execution state, not presentation-only metadata. Full evaluation and reconciliation views hydrate canonical lineage before applying cleanup and finalizer fences. A cheap run header alone is not proof that the run has no predecessor or successor. Ordinary cleanup without supersession retains its existing completion semantics; the stronger historical-incarnation admission fence belongs to supersession.
 
@@ -50,7 +50,9 @@ The host's acknowledgement waits for actual worker termination, including native
 
 Worker and effect-group fencing is scoped to the waiting run, its superseded predecessors, and descendants of every generation in that lineage. Unrelated member-local cancellations do not block its admission or finalizers. A liveness failure stays immediately visible even when its native worker has not exited; the related replacement still waits for that actual exit.
 
-Every superseding step and program restarts from the top under new run and generation identities. No successful steps or journals are adopted, and prior effects are not rolled back: effects must be idempotent. A declared schedule is the exception for its occurrence history: the replacement's same-named schedule does not replay a tick any predecessor already reached (see [Recurring schedules](#recurring-schedules)). Unreviewed direct run revision remains a separate generation-adoption operation; approved proposal cutover uses a fresh linked run. Run views, native/public JSON list/detail/history, and `missions show` retain retry lineage and expose optional non-null `supersedes`, `superseded_by`, and `supersession_fault`, omitting absent string fields. No new data-DSL grammar or revision-policy knob is introduced.
+Completed steps carry through `step-run.carried` references only when step and transitive dependency contracts, resolved inputs, workspace, requester, and authority still match. Bound person answers retain original evidence, not new person-answer claims; changed ask contracts, heads, authority, effects, or withdrawn answers refuse reuse. Historical unbound answers require explicit person confirmation in recovery. Unfinished programs restart under new identities; journals and unresolved effects are never fabricated. Completed declaration transfer requires unchanged resolved identities and launch configuration plus confirmed runtime quiescence; waiting successors cannot launch before cleanup admission. Run views and `missions show` retain lineage and expose optional `supersedes`, `superseded_by`, and `supersession_fault`.
+
+`fractal missions run continuity startup-preview` is read-only. For an already-superseded source, `fractal missions run continuity preview RUN` lists original evidence, adoption eligibility, current workspace, and a snapshot hash. `recover RUN --preview-hash HASH --as ACTOR` validates that snapshot and creates a fresh linked recovery behind the ordinary cleanup fence; changed snapshots refuse. `--confirm-legacy-evidence EVIDENCE` requires the authentic person to confirm a listed historical step source or original run-level gate request once. Recovery references genuine completed work and answers; it does not synthesize either.
 
 
 ## First readiness under load
@@ -262,6 +264,8 @@ Mission goal order is preserved. Each mission must have one, two, or three goals
 A mission can repeat constraints, baselines, and gates. Gate and baseline names must be unique within that mission. A mission has at most one `produces` block.
 
 A mission can repeat `input`. Each input name is unique and uses `kind="text"` or `kind="resource"`.
+An input name is nonempty, at most 160 bytes, and contains neither `/` nor whitespace.
+A full subject can be an input reference such as `${input.vrs-review}`; its name uses the same validation as the input declaration.
 
 The input set and kinds cannot change across revisions of an active run. Input values remain immutable across all run generations.
 
@@ -1170,9 +1174,7 @@ complete it. The response resumes the same origin attempt with a new readiness e
 seat's ready-work wake tells the requester. Without `--step`, the ask creates an independent
 person-ask run owned by the agent, even while it holds claimed work. `--new-run NAME` optionally
 names that run. Independent asks consume no agent capacity, never release unrelated claims,
-and send the requester one message from `daemon/runtime` with the answer. They survive idle
-turns, re-declarations and the end of the agent's owning work while the agent remains declared.
-Only an answer, deadline resolution, withdrawal, or removal of the agent ends them.
+and send the requester one message from `daemon/runtime` with the answer.
 A requester withdraws with `fractal work cancel-ask STEP --as AGENT --summary TEXT`.
 For an ask attached to a native Data-DSL step, withdrawal fails the waiting step with
 `ask cancelled by ACTOR`; ordinary retry, run failure and `finally` handling apply.
@@ -2443,7 +2445,7 @@ An unreviewed direct revision retains the legacy successor-generation behavior: 
 completed normal work carries forward, and failed steps start their next attempts.
 An approved proposal instead starts a fresh linked run at the exact approved revision, including
 when its source is failed and terminal. The source's generation and terminal history remain
-unchanged; no completed work or journal carries to that replacement.
+unchanged; compatible completed evidence carries by reference, never by copying a journal or person answer.
 
 ### Immutable generations
 
