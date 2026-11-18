@@ -1701,12 +1701,14 @@ pub fn request_latency_snapshot() -> Vec<Value> {
 
 /// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
-    request_latency().lock().unwrap().targets_only(Instant::now())
+    let snapshot = request_latency().lock().unwrap().targets_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
-    request_latency().lock().unwrap().windows(Instant::now())
+    let snapshot = request_latency().lock().unwrap().windows_snapshot(Instant::now());
+    snapshot.finish()
 }
 
 /// Note what keeps this minute of the member's CPU from being idle.
@@ -1765,6 +1767,11 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .cpu_minutes()
                 .settle(check, busy);
+        }
+        match tokio::task::spawn_blocking(crate::slo::checkpoint_budgets).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("fractal: native SLO accounting checkpoint failed: {error:#}"),
+            Err(error) => eprintln!("fractal: native SLO accounting checkpoint task failed: {error}"),
         }
         let now = client_now_ms() as u64;
         tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
@@ -11700,7 +11707,8 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         rows.insert(budgets, crate::objectives::divergence(open));
     }
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
-    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
+    let declared = crate::declared_objectives::rows(store, now, &rows)?;
+    drop(rows.splice(budgets..budgets, declared));
     Ok(rows)
 }
 
