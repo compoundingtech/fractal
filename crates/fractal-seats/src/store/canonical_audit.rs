@@ -212,6 +212,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "resource_lane_policies_v1",
         "resource_memberships_v1",
         "shell_resources_v1",
+        // Settled teardown receipts belong only to this host's runtime cleanup.
+        "local_runtime_cleanup_settled",
         // Person attention controls: order-free earliest-seen and newest-snooze registers
         // refolded from replicated claims on open, repair and replay; the claims carry the
         // shared digest coverage.

@@ -21,6 +21,11 @@ subjects, claim fields or wire types, and do not change `STORAGE_VERSION` or
 `LOCAL_STORAGE_SCHEMA`, so registry and local-storage schema digests are unchanged.
 They remain outside `SHARED_TABLES` and the shared projection digest inventory.
 
+`local_runtime_cleanup_settled` is host-local exact-incarnation cleanup authority,
+not a replicated projection. Its receipts survive projection reconstruction and
+remain outside shared logical rows and projection digests. Constructors install
+its empty schema before returning the store, without making run admission decisions.
+
 `local_push_registrations` is member-local secret authority, not a shared projection or a
 rebuildable cache. Its token and registration metadata come from an authenticated phone;
 pairing claims constrain ownership and lifetime but cannot reconstruct the token. Rows
