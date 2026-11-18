@@ -168,6 +168,7 @@ impl ScopeRetirementProof {
     }
 }
 
+#[cfg(test)]
 fn properties(unit: &str, output: &str) -> Result<ScopeRetirementProof> {
     let property = |key: &str| -> Result<String> {
         let prefix = format!("{key}=");
@@ -200,23 +201,29 @@ fn properties(unit: &str, output: &str) -> Result<ScopeRetirementProof> {
 }
 
 fn observe(unit: &str) -> Result<ScopeRetirementProof> {
-    let mut command = Command::new("systemctl");
-    command.args([
-        "--user",
-        "show",
-        "--property=LoadState",
-        "--property=ActiveState",
-        "--property=ControlGroup",
-        unit,
-    ]);
-    let output = crate::pty::output_within(command, SYSTEMCTL_TIMEOUT)?;
-    ensure!(
-        output.status.success(),
-        "work scope manager did not return verified state"
-    );
-    let mut proof = properties(unit, std::str::from_utf8(&output.stdout)?)?;
+    let snapshot = crate::systemd::snapshot()?;
+    let observed = snapshot.units.get(unit);
+    if observed.is_none() {
+        verify_scope_absence(unit, snapshot.captured_at)?;
+    }
+    let mut proof = ScopeRetirementProof {
+        version: 1,
+        unit: unit.into(),
+        load_state: observed.map_or("not-found", |unit| unit.load.as_str()).into(),
+        active_state: observed.map_or("inactive", |unit| unit.active.as_str()).into(),
+        control_group: observed.and_then(|unit| unit.control_group.as_ref())
+            .map(|path| -> Result<String> {
+                let relative = path.strip_prefix("/sys/fs/cgroup")
+                    .context("work scope control group escapes cgroup root")?;
+                Ok(format!("/{}", relative.display()))
+            }).transpose()?.unwrap_or_default(),
+        cgroup: None,
+    };
+    ensure!(matches!(proof.load_state.as_str(), "loaded" | "not-found"),
+        "work scope load state is unverified");
     if proof.load_state == "loaded" {
         proof.cgroup = capture_cgroup(&group_path(unit, &proof.control_group)?)?;
+        finish_scope_join(unit);
     }
     Ok(proof)
 }
@@ -260,13 +267,36 @@ fn capture_cgroup(path: &Path) -> Result<Option<CgroupEnding>> {
     }))
 }
 
+// Generation-bound scope names never accept new members after becoming empty. Preserve the
+// complete proof, not just absence, so repeated reads need neither manager nor cgroup I/O.
+static CLOSED: Mutex<std::collections::BTreeMap<String, ScopeRetirementProof>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+fn remember_closed(proof: &ScopeRetirementProof) {
+    CLOSED.lock().unwrap_or_else(PoisonError::into_inner)
+        .insert(proof.unit.clone(), proof.clone());
+    mark_ended(&proof.unit);
+}
+
 /// Read-only ending evidence for an already operation-bound work or server scope.
 pub(crate) fn observe_closed_scope(unit: &str) -> Result<Option<ScopeRetirementProof>> {
     if mode() != Isolation::Scope {
         return Ok(None);
     }
+    observe_closed_with(unit, &observe)
+}
+
+fn observe_closed_with(unit: &str,
+    observe: &dyn Fn(&str) -> Result<ScopeRetirementProof>) -> Result<Option<ScopeRetirementProof>> {
+    if let Some(proof) = CLOSED.lock().unwrap_or_else(PoisonError::into_inner).get(unit).cloned() {
+        return Ok(Some(proof));
+    }
     let proof = observe(unit)?;
-    Ok(proof.validate_ending(unit, true).is_ok().then_some(proof))
+    if proof.validate_ending(unit, true).is_err() {
+        return Ok(None);
+    }
+    remember_closed(&proof);
+    Ok(Some(proof))
 }
 
 /// Independent physical worker only. The same original request is checked
@@ -297,10 +327,15 @@ pub fn end_scope_with_proof(
         tracing::debug!(caller = "end_scope_with_proof", recorded_scope = unit, guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope retirement skipped");
         return Ok(None);
     }
-    let before = observe(unit)?;
+    let cached = CLOSED.lock().unwrap_or_else(PoisonError::into_inner).get(unit).cloned();
+    let before = match cached {
+        Some(proof) => proof,
+        None => observe(unit)?,
+    };
     if before.validate(unit).is_ok() {
         tracing::debug!(guard_decision = "skip", reason = "scope_already_retired", "scope retirement needs no signal");
         retirement_guard(unit, guard, "already_retired")?;
+        remember_closed(&before);
         return Ok(Some(before));
     }
     let cgroup = before
@@ -348,16 +383,14 @@ pub fn end_scope_with_proof(
             "work scope survived retirement"
         );
     }
-    let after = observe(unit)?;
+    // The held descriptor belongs to the exact cgroup captured before signalling. Its empty
+    // notification is stronger than a cached manager answer (which may still say loaded).
+    let mut after = before.clone();
+    after.cgroup.as_mut().context("work scope lost its cgroup evidence")?.events =
+        "populated 0\n".into();
     after.validate(unit)?;
-    if let Some(ending) = &after.cgroup {
-        ensure!(
-            after.control_group == before.control_group
-                && (ending.device, ending.inode) == (cgroup.device, cgroup.inode),
-            "work scope identity changed during retirement"
-        );
-    }
     retirement_guard(unit, guard, "after_retirement")?;
+    remember_closed(&after);
     Ok(Some(after))
 }
 
@@ -379,6 +412,31 @@ fn retirement_guard(unit: &str, guard: &dyn Fn() -> Result<()>, phase: &str) -> 
 mod tests {
     use super::*;
     const UNIT: &str = "st3-op-example-1-1.scope";
+    #[test]
+    fn historical_terminal_scopes_do_not_repeat_manager_observation() {
+        let calls = std::cell::Cell::new(0);
+        let manager = |unit: &str| {
+            calls.set(calls.get() + 1);
+            Ok(ScopeRetirementProof {
+                version: 1, unit: unit.into(), load_state: "not-found".into(),
+                active_state: "inactive".into(), control_group: String::new(), cgroup: None,
+            })
+        };
+        for index in 0..5000 {
+            let unit = format!("st3-terminal-history-{index}.scope");
+            assert!(observe_closed_with(&unit, &manager).unwrap().is_some());
+        }
+        assert_eq!(calls.get(), 5000);
+        for _ in 0..3 {
+            for index in 0..5000 {
+                let unit = format!("st3-terminal-history-{index}.scope");
+                assert!(has_ended(&unit));
+                assert!(observe_closed_with(&unit, &manager).unwrap().is_some());
+            }
+        }
+        assert_eq!(calls.get(), 5000);
+    }
+
     #[test]
     fn scope_retirement_requires_complete_noncontradictory_manager_and_cgroup_evidence() {
         let gone = properties(

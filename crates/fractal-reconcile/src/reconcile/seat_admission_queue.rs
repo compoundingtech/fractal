@@ -102,7 +102,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(LaneFit::Waits);
         }
         let held = self.held_lanes(&subject.subject, now)?;
-        let outside = (host.outside)().unwrap_or(0);
+        smallclaims::touched::note_read(|| "host-lane-memory".into());
+        let outside = (host.outside)().map_or(0, |observation| observation.outside_bytes);
         let free = room.memory.saturating_sub(held).saturating_sub(outside).saturating_sub(reserve.kept);
         let head = status.lane_head(now);
         if lane.memory <= free && head.as_deref().is_none_or(|head| head == subject.subject) {
@@ -110,7 +111,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let kept = if reserve.full == 0 { String::new() } else { format!(", kept for a burst {}", show_memory(reserve.kept)) };
         let room_now = format!(
-            "{} free of the {} this host gives lanes (other lanes hold {}, seats outside lanes {}{kept})",
+            "{} free of the {} this host gives lanes (other lanes hold {}, host outside lanes {}{kept})",
             show_memory(free), show_memory(room.memory), show_memory(held), show_memory(outside));
         let reason = match head.filter(|head| *head != subject.subject && lane.memory <= free) {
             Some(head) => format!("lane {} waits behind {head}, first in line for room: {room_now}", show_lane(lane)),
@@ -119,8 +120,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if status.lane_wait(&subject.subject, reason, true, now) {
             self.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
         }
-        // What seats outside lanes hold and a start that never ran change without a claim: try
-        // again soon.
+        // Host memory observations wake fit; an admitted start not yet running still has an expiry.
         smallclaims::touched::note_due(now_ms() + LANE_RETRY_MS);
         Ok(LaneFit::Waits)
     }
@@ -146,25 +146,47 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .chain(state.lane_found.iter().map(|(subject, lane)| (subject.clone(), lane.memory)))
                 .collect::<BTreeMap<_, _>>()
         };
-        let (mut smallest, mut burst_raise) = (lane.memory, 0);
+        self.burst_reserve_for(candidate, Some(lane), burst_lane, granted)
+    }
+
+    /// Finite executions cannot ask for a seat burst; only actual live seats seed their reserve.
+    pub(super) fn finite_burst_reserve(&self, candidate: &str) -> Result<BurstReserve> {
+        let Some(host) = self.seat_admission.lanes else { return Ok(BurstReserve { full: 0, kept: 0 }) };
+        let Some(burst_lane) = host.burst_lane
+            .filter(|burst| burst.cores <= host.room.cores && burst.memory <= host.room.memory)
+        else { return Ok(BurstReserve { full: 0, kept: 0 }) };
+        let state = self.seat_admission.status.state();
+        let granted = state.lane_bursts.iter().filter(|burst| burst.granted)
+            .map(|burst| (burst.subject.clone(), burst.capacity.memory))
+            .chain(state.lane_found.iter().map(|(subject, lane)| (subject.clone(), lane.memory)))
+            .collect();
+        drop(state);
+        self.burst_reserve_for(candidate, None, burst_lane, granted)
+    }
+
+    fn burst_reserve_for(&self, candidate: &str, starting: Option<fractal_runtime::Capacity>,
+        burst_lane: fractal_runtime::Capacity, granted: BTreeMap<String, u64>) -> Result<BurstReserve>
+    {
+        let (mut smallest, mut burst_raise) = (starting.map(|lane| lane.memory), 0);
         for desired in self.store.desired_subjects()? {
             let Some(base) = desired.member.as_ref().filter(|member| member.host == self.host).and_then(|member| member.capacity)
             else { continue };
             if desired.kind != "agent" || desired.subject == candidate {
                 continue;
             }
+            smallclaims::touched::note_read(|| desired.subject.clone());
             let live = self.store.latest_observation(&desired.subject, "runtime.observed")?
                 .is_some_and(|claim| claim.body["fields"]["status"] == "running")
                 || self.seat_admission.status.state().lane_starts.contains_key(&desired.subject);
             if !live {
                 continue;
             }
-            smallest = smallest.min(base.memory);
+            smallest = Some(smallest.map_or(base.memory, |smallest| smallest.min(base.memory)));
             if let Some(asked) = granted.get(&desired.subject) {
                 burst_raise = burst_raise.max(asked.saturating_sub(base.memory));
             }
         }
-        let full = burst_lane.memory.saturating_sub(smallest);
+        let full = smallest.map_or(0, |smallest| burst_lane.memory.saturating_sub(smallest));
         Ok(BurstReserve { full, kept: full.saturating_sub(burst_raise) })
     }
 
@@ -234,6 +256,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let waits = self.seat_admission.status.state().lane_waits.clone();
         let finite = self.store.resource_memberships_for_host(&self.host)?;
+        for record in finite.iter().filter(|record| record.state == "queued") {
+            self.seat_admission.status.lane_wait_class(&record.request.id,
+                record.reason.clone(), true, now, record.request.class);
+        }
         let mut gone = BTreeSet::new();
         for wait in waits {
             if let Some(record) = finite.iter().find(|record| record.request.id == wait.subject) {

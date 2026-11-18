@@ -61,6 +61,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case workComplete = "work.complete"
     case workDone = "work.done"
     case workFail = "work.fail"
+    case workOverride = "work.override"
     case workProgress = "work.progress"
     case workPublishMission = "work.publish-mission"
     case workRelease = "work.release"
@@ -72,7 +73,9 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case harnessQuestionsList = "harness-questions.list"
     case harnessQuestionsGet = "harness-questions.get"
     case notesList = "notes.list"
+    case autoResolvedList = "auto-resolved.list"
     case availabilityList = "availability.list"
+    case availabilityHistory = "availability.history"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
     case privateNotesGet = "private-notes.get"
@@ -92,6 +95,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case mailBacklogSummary = "mail-backlog.summary"
     case sloList = "slo.list"
     case sloHistory = "slo.history"
+    case seriesRead = "series.read"
     case usagePeriod = "usage.period"
     case usageHubQuota = "usage-hub.quota"
     case githubPluginPullRequest = "github-plugin.pull-request"
@@ -174,7 +178,9 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .harnessQuestionsList: "/v1/client/harness-questions",
     .harnessQuestionsGet: "/v1/client/harness-questions/{id}",
     .notesList: "/v1/client/notes",
+    .autoResolvedList: "/v1/client/auto-resolved",
     .availabilityList: "/v1/client/availability",
+    .availabilityHistory: "/v1/client/availability/history",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
     .privateNotesGet: "/v1/client/private-notes/{uri}",
@@ -194,6 +200,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .sloList: "/v1/client/slo",
     .sloHistory: "/v1/client/slo/history",
+    .seriesRead: "/v1/client/series",
     .usagePeriod: "/v1/client/usage",
     .usageHubQuota: "/v1/client/usage/quota",
     .githubPluginPullRequest: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}",

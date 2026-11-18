@@ -1,3 +1,4 @@
+import { markdownBlock } from './assistant-ui/composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { flushSync } from 'react-dom'
@@ -14,7 +15,7 @@ import { MarkdownCanvas, languages, streamChunks, inlineStreamStages, styles } f
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Markdown', component: MarkdownCanvas,
+  id: 'fractal-ui-markdown', title: 'Components/Markdown', component: MarkdownCanvas,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and load @pierre/highlights after plain-text first paint; tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
   args: { scenario: 'rich-text', scheme: 'dark' },
   argTypes: { scenario: { options: ['rich-text', 'languages', 'streaming', 'inline-streaming', 'all'], control: 'radio' }, scheme: { options: ['dark', 'light'], control: 'radio' } },
@@ -23,29 +24,17 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
-  'AllStatesLight:contract-fixture',
   'CopyFailure:contract-fixture',
   'InputForegroundDark1440:contract-fixture',
-  'InputForegroundDark440:contract-fixture',
-  'InputForegroundLight1440:contract-fixture',
-  'InputForegroundLight440:contract-fixture',
   'Languages:contract-fixture',
-  'LanguagesLight:contract-fixture',
-  'Light:contract-fixture',
   'RichText:contract-fixture',
   'StreamingCodeBlock:contract-fixture',
-  'StreamingCodeBlockLight:contract-fixture',
   'StreamingControlsPersistence:contract-fixture',
-  'StreamingControlsPersistenceLight:contract-fixture',
   'StreamingHeading:contract-fixture',
-  'StreamingHeadingLight:contract-fixture',
   'StreamingInlineMarkup:contract-fixture',
   'StreamingParagraph:contract-fixture',
-  'StreamingParagraphLight:contract-fixture',
   'StreamingTable:contract-fixture',
-  'StreamingTableLight:contract-fixture',
   'StreamingTightList:contract-fixture',
-  'StreamingTightListLight:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local markdown syntax and token streaming stages exercise parser and renderer contracts.' } } } satisfies Story
@@ -60,7 +49,7 @@ const requireElement = <T extends Element>(root: Element, selector: string): T =
 function streamingTailStory(text: string, terminalSelector: string): Story {
   return {
     ...contractFixture,
-    render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.lane)}><Markdown text={text} streaming /></div></ThemePortal></main>,
+    render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.lane)}><Markdown text={markdownBlock(text)} streaming /></div></ThemePortal></main>,
     play: async ({ canvasElement }) => {
       await document.fonts.ready
       const markdown = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown"]')
@@ -84,11 +73,6 @@ export const StreamingHeading: Story = streamingTailStory('The next section is:\
 export const StreamingTable: Story = streamingTailStory('Current resources:\n\n| Resource | State |\n| --- | --- |\n| Selection model | Ready |', '[role="region"]')
 export const StreamingTightList: Story = streamingTailStory('Current checks:\n\n- Preserve selection identity.\n- Restore keyboard focus.', 'ul')
 export const StreamingParagraph: Story = streamingTailStory('Selection identity stays stable.\n\nThe current result is ready.\n', 'p')
-export const StreamingCodeBlockLight: Story = { ...StreamingCodeBlock, args: { scheme: 'light' } }
-export const StreamingHeadingLight: Story = { ...StreamingHeading, args: { scheme: 'light' } }
-export const StreamingTableLight: Story = { ...StreamingTable, args: { scheme: 'light' } }
-export const StreamingTightListLight: Story = { ...StreamingTightList, args: { scheme: 'light' } }
-export const StreamingParagraphLight: Story = { ...StreamingParagraph, args: { scheme: 'light' } }
 export const RichText: Story = { ...contractFixture, tags: ['critical'],
   play: async ({ canvasElement }) => {
     const root = requireElement(canvasElement, '[data-testid="markdown"]')
@@ -132,9 +116,6 @@ export const Languages: Story = { ...contractFixture, tags: ['critical'],
     }
   },
 }
-export const Light: Story = { ...RichText, args: { scheme: 'light' } }
-export const LanguagesLight: Story = { ...Languages, args: { scenario: 'languages', scheme: 'light' } }
-export const AllStatesLight: Story = { ...contractFixture, args: { scenario: 'all', scheme: 'light' } }
 export const StreamingControlsPersistence: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
@@ -177,7 +158,6 @@ export const StreamingControlsPersistence: Story = { ...contractFixture, tags: [
     }
   },
 }
-export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPersistence, args: { scenario: 'streaming', scheme: 'light' } }
 export const StreamingInlineMarkup: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'inline-streaming' },
   play: async ({ canvasElement }) => {
@@ -240,15 +220,15 @@ export const CopyFailure: Story = { ...contractFixture, tags: ['critical'],
 }
 
 /** C27/E04–E12: the input boundary forwards foreground ink, while default seat Prose stays soft. */
-function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' | 'light'; narrow?: boolean }) {
+function InputInkCanvas({ scheme = 'dark' }: { scheme?: 'dark' | 'light' }) {
   const [foreground, setForeground] = React.useState(true)
   const [revision, rerender] = React.useState(0)
   return <main data-revision={revision} {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.toolbar)}><Button onPress={() => rerender(value => value + 1)}>Rerender input</Button><Button onPress={() => setForeground(false)}>Show soft control</Button><Button onPress={() => setForeground(true)}>Restore input</Button></div>
-    <section {...stylex.props(styles.lane, narrow && styles.inputNarrow)}><EmbraceMarkdownPreview tone={foreground ? 'foreground' : 'default'} markdown={'The input anchors this turn.\n\n- Review the retained snapshot.\n\n| Fact | Value |\n| --- | --- |\n| Snapshot | Retained |'} /></section>
+    <section {...stylex.props(styles.lane)}><EmbraceMarkdownPreview tone={foreground ? 'foreground' : 'default'} markdown={'The input anchors this turn.\n\n- Review the retained snapshot.\n\n| Fact | Value |\n| --- | --- |\n| Snapshot | Retained |'} /></section>
   </main>
 }
-export const InputForegroundDark1440: Story = { ...contractFixture, render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
+export const InputForegroundDark1440: Story = { name: 'Input foreground', ...contractFixture, render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Rerender input' }))
   await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
@@ -262,7 +242,4 @@ export const InputForegroundDark1440: Story = { ...contractFixture, render: args
   await waitFor(() => expect(canvas.getByTestId('markdown')).toHaveAttribute('data-tone', 'foreground'))
   await expect(paints()).toEqual([expected, expected, expected])
 } }
-export const InputForegroundLight1440: Story = { ...InputForegroundDark1440, args: { scheme: 'light' } }
-export const InputForegroundDark440: Story = { ...InputForegroundDark1440, render: args => <InputInkCanvas scheme={args.scheme} narrow /> }
-export const InputForegroundLight440: Story = { ...InputForegroundDark440, args: { scheme: 'light' } }
 

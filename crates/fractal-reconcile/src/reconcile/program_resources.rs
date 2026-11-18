@@ -14,6 +14,10 @@ struct Acquire {
     capacity: Option<fractal_runtime::Capacity>,
     coverage: Coverage,
     admission_timeout: Option<String>,
+    #[serde(default)]
+    class: fractal_runtime::RequestClass,
+    disk: Option<fractal_runtime::DiskRequest>,
+    io: Option<fractal_runtime::IoClass>,
 }
 fn one() -> u32 { 1 }
 
@@ -91,6 +95,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn ensure_resource_authority(&self) -> Result<()> {
         let initialized = self.resource_authority.get_or_init(|| {
             (|| -> Result<()> {
+                // Preserve released shell outcomes before generic predecessor recovery can
+                // remove their cgroups or turn their memberships into admission refusals.
+                self.prepare_shell_resource_recovery()?;
                 self.store.start_resource_authority(&self.host, &uuid::Uuid::now_v7().to_string())?;
                 self.runtime.recover_resource_lanes(&self.store, &self.host, u64::try_from(now_ms()).unwrap_or(u64::MAX))?;
                 Ok(())
@@ -214,13 +221,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let lane = LaneRequest {
                     id: request.idempotency_key(), name: options.name, host: options.host,
                     max_members: options.max_members, capacity: options.capacity, coverage: options.coverage,
+                    class: options.class, disk: options.disk, io: options.io,
                     admission_timeout_ms: options.admission_timeout.as_deref()
                         .map(|duration| crate::declaration_syntax::parse_duration(duration, true)).transpose()?,
                     owner: Owner { run: run.subject.clone(), step: request.step.clone(), attempt: request.attempt,
                         invocation: Some(format!("program:{}", request.key)) },
                 };
-                let fit = self.resource_lane_fit(&lane.id, lane.capacity)?;
+                let fit = self.resource_lane_fit(&lane)?;
                 let admission = self.store.request_resource_membership(&lane, fit, now)?;
+                if !matches!(&admission, Admission::Queued { .. }) {
+                    self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != lane.id);
+                }
                 if cancelled {
                     self.store.withdraw_resource_membership(&lane.id, &lane.owner, now)?;
                     let record = self.store.resource_membership_record(&lane.id, &lane.owner)?;
@@ -406,6 +417,11 @@ impl<R: RuntimeControl> Reconciler<R> {
 mod tests {
     use super::*;
     use crate::store::resource_membership::Fit;
+
+    fn fit() -> Fit {
+        Fit { room: Some(fractal_runtime::Capacity { cores: 32, memory: 128 << 30 }), ..Fit::default() }
+    }
+
     #[test]
     fn retry_retires_queued_and_admitted_attempts_before_readmission() {
         for retry in ["automatic", "operator", "operator-reopen"] {
@@ -429,7 +445,9 @@ mission "retry-lane" state="ready" {{
                 reconciler.ensure_resource_authority().unwrap();
                 let old = LaneRequest {
                     id: "failed-attempt".into(), name: "heavy-gate".into(), host: "node".into(),
-                    max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+                    max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
+                    coverage: Coverage::Logical, admission_timeout_ms: None,
+                    class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
                     owner: Owner { run: run.subject.clone(), step: view.subject.clone(), attempt: view.attempt,
                         invocation: Some("program:heavy-gate".into()) },
                 };
@@ -437,10 +455,10 @@ mission "retry-lane" state="ready" {{
                 blocker.id = "other-run".into();
                 blocker.owner.run = "mission-run/other".into();
                 if queued {
-                    assert!(matches!(store.request_resource_membership(&blocker, Fit::default(), 1).unwrap(),
+                    assert!(matches!(store.request_resource_membership(&blocker, fit(), 1).unwrap(),
                         Admission::Admitted(_)));
                 }
-                let admission = store.request_resource_membership(&old, Fit::default(), 2).unwrap();
+                let admission = store.request_resource_membership(&old, fit(), 2).unwrap();
                 assert_eq!(matches!(admission, Admission::Queued { .. }), queued);
                 store.set_step_state(&view.subject, "failed", Some("transient failure")).unwrap();
                 let retried = if retry == "automatic" {
@@ -465,9 +483,9 @@ mission "retry-lane" state="ready" {{
                 new.id = "retry-attempt".into();
                 new.owner.step = next.subject.clone();
                 new.owner.attempt = next.attempt;
-                assert!(matches!(store.request_resource_membership(&new, Fit::default(), 3).unwrap(),
+                assert!(matches!(store.request_resource_membership(&new, fit(), 3).unwrap(),
                     Admission::Admitted(_)), "{retry}: max-members=1 must admit after retirement");
-                assert!(matches!(store.request_resource_membership(&old, Fit::default(), 4).unwrap(),
+                assert!(matches!(store.request_resource_membership(&old, fit(), 4).unwrap(),
                     Admission::Refused { .. }), "failed attempt must never rejoin the queue");
                 let live = store.resource_memberships_for_host("node").unwrap().into_iter()
                     .filter(|record| matches!(record.state.as_str(), "admitted" | "launched" | "retiring" | "uncertain"))
@@ -505,11 +523,13 @@ mission "retry-child" state="ready" {{
         reconciler.ensure_resource_authority().unwrap();
         let old = LaneRequest {
             id: "parent-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
-            capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: parent.subject.clone(), step: parent.steps[0].subject.clone(), attempt: 1,
                 invocation: Some("program:scope".into()) },
         };
-        let Admission::Admitted(grant) = store.request_resource_membership(&old, Fit::default(), 1).unwrap()
+        let Admission::Admitted(grant) = store.request_resource_membership(&old, fit(), 1).unwrap()
             else { panic!("parent must admit"); };
         let child_subject = store.mission_run_subject_for_idempotency_key("retry-child");
         store.attach_resource_child(&grant, &old.owner, &child_subject).unwrap();
@@ -537,12 +557,12 @@ mission "retry-child" state="ready" {{
         let mut next = old.clone();
         next.id = "next-scope".into();
         next.owner.attempt = retried.steps[0].attempt;
-        assert!(matches!(store.request_resource_membership(&next, Fit::default(), 2).unwrap(),
+        assert!(matches!(store.request_resource_membership(&next, fit(), 2).unwrap(),
             Admission::Queued { .. }));
         store.set_mission_run_state(&child.subject, "cancelled", "terminal", Some("process exited")).unwrap();
         assert!(reconciler.retire_previous_step_resources(&retried.subject, &retried.steps[0]).unwrap());
         assert_eq!(store.resource_membership_for_grant(&grant).unwrap().state, "retired");
-        assert!(matches!(store.request_resource_membership(&next, Fit::default(), 3).unwrap(),
+        assert!(matches!(store.request_resource_membership(&next, fit(), 3).unwrap(),
             Admission::Admitted(_)));
     }
 
@@ -584,11 +604,13 @@ mission "window-child" state="ready" {{
             reconciler.ensure_resource_authority().unwrap();
             let old = LaneRequest {
                 id: "uncertain-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
-                capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+                capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
+                coverage: Coverage::Logical, admission_timeout_ms: None,
+                class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
                 owner: Owner { run: run.subject.clone(), step: subject.clone(), attempt: 1,
                     invocation: Some("program:scope".into()) },
             };
-            let Admission::Admitted(grant) = store.request_resource_membership(&old, Fit::default(), START as u64).unwrap()
+            let Admission::Admitted(grant) = store.request_resource_membership(&old, fit(), START as u64).unwrap()
                 else { panic!("first attempt must admit"); };
             let child = if retire_before_dispatch {
                 let child = store.mission_run_subject_for_idempotency_key("window-child");
@@ -725,11 +747,13 @@ mission "resource-child" state="ready" {
         reconciler.ensure_resource_authority().unwrap();
         let lane = LaneRequest {
             id: "scope-holder".into(), name: "child-scope".into(), host: "node".into(),
-            max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: "mission-run/parent".into(), step: "step-run/parent/work".into(),
                 attempt: 1, invocation: None },
         };
-        let Admission::Admitted(grant) = store.request_resource_membership(&lane, Fit::default(), 1).unwrap() else {
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit(), 1).unwrap() else {
             panic!("scope must acquire custody");
         };
         let child = store.mission_run_subject_for_idempotency_key("scope-child");
@@ -748,7 +772,7 @@ mission "resource-child" state="ready" {
         assert_eq!(pending.retired_at, None);
         let mut waiter = lane.clone();
         waiter.id = "scope-waiter".into();
-        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 2).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&waiter, fit(), 2).unwrap(), Admission::Queued { .. }));
         reconciler.incremental.observe(&store).unwrap();
         reconciler.incremental.evaluated("scope-release", reads, None);
         assert!(!reconciler.incremental.needs("scope-release", now_ms()));
@@ -758,7 +782,7 @@ mission "resource-child" state="ready" {
         assert!(reconciler.incremental.needs("scope-release", now_ms()), "terminal child must wake pending release");
         assert!(reconciler.retire_program_membership(&pending).unwrap());
         assert_eq!(store.resource_membership_for_grant(&grant).unwrap().state, "retired");
-        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 3).unwrap(), Admission::Admitted(_)));
+        assert!(matches!(store.request_resource_membership(&waiter, fit(), 3).unwrap(), Admission::Admitted(_)));
     }
 
     #[test]
@@ -768,11 +792,13 @@ mission "resource-child" state="ready" {
         store.start_resource_authority("node", "epoch").unwrap();
         let lane = LaneRequest {
             id: "unknown-scope".into(), name: "child-scope".into(), host: "node".into(),
-            max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            max_members: 1, capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: "mission-run/parent".into(), step: "step-run/parent/work".into(),
                 attempt: 1, invocation: None },
         };
-        let Admission::Admitted(grant) = store.request_resource_membership(&lane, Fit::default(), 1).unwrap() else {
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit(), 1).unwrap() else {
             panic!("scope must acquire custody");
         };
         store.attach_resource_child(&grant, &lane.owner, "mission-run/missing-child").unwrap();
@@ -785,6 +811,6 @@ mission "resource-child" state="ready" {
         assert_eq!(uncertain.retired_at, None);
         let mut waiter = lane;
         waiter.id = "blocked-scope".into();
-        assert!(matches!(store.request_resource_membership(&waiter, Fit::default(), 2).unwrap(), Admission::Queued { .. }));
+        assert!(matches!(store.request_resource_membership(&waiter, fit(), 2).unwrap(), Admission::Queued { .. }));
     }
 }

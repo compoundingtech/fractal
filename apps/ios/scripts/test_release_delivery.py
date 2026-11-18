@@ -4,6 +4,7 @@ Run with: python3 -m unittest discover -s apps/ios/scripts -p 'test_release_deli
 No Apple tools, network access, or device are needed.
 """
 
+import copy
 import fcntl
 import json
 import os
@@ -19,7 +20,8 @@ import time
 import unittest
 
 from release_delivery import (DAILY_BUILD_ENV, FABRIC_FRAMEWORK, build_environment,
-                              bundle_id, framework_hash, ios_env, variant_state)
+                              bundle_id, framework_hash, ios_env, policy_digest, revoked_policy_digests,
+                              validate_update_policy, variant_state)
 
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
@@ -58,10 +60,18 @@ if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
 if name == "nix":
-    assert args == ["run", "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
+    if args[0] == "build":
+        assert args == ["build", "--max-jobs", "0", "--option", "builders", "",
+                        "--option", "external-builders", "[]", "--no-link",
+                        "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo"], args
+        sys.exit(control.get("toolchain_exit", 0))
+    assert args == ["run", "--max-jobs", "0", "--option", "builders", "",
+                    "--option", "external-builders", "[]",
+                    "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
                     "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
                     "--lock-sync", "off"], args
     if control.get("member_exit"):
+        print("member apply failed", file=sys.stderr)
         sys.exit(control["member_exit"])
     publisher = Path.cwd() / "repos/effect-utils/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs"
     publisher.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +88,7 @@ if name == "node":
     sys.exit(0)
 if name == "fabric-build":
     assert os.environ["FRACTAL_FABRIC"] == os.environ["ST3_FABRIC"] == "1"
+    assert os.environ["FRACTAL_NIX_CACHE_ONLY"] == "1"
     framework = Path.cwd() / "modules/fractal-fabric/ios/build/FractalFabricRust.xcframework"
     if control.get("missing_framework"):
         import shutil
@@ -214,6 +225,67 @@ raise AssertionError((name, args))
 
 
 class IosEnvironmentTests(unittest.TestCase):
+    def test_fabric_cache_only_is_opted_in_and_manual_builds_still_realize(self):
+        script = SCRIPT.parents[1] / "modules/fractal-fabric/build.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$@\" > \"$NIX_ARGUMENTS\"\n"
+                           "exit 1\n")
+            nix.chmod(0o755)
+            arguments = root / "arguments"
+            for cache_only in ("1", ""):
+                with self.subTest(cache_only=cache_only):
+                    result = subprocess.run(
+                        ["sh", str(script)], capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_ARGUMENTS": str(arguments), "FRACTAL_NIX_CACHE_ONLY": cache_only})
+                    self.assertEqual(result.returncode, 1)
+                    actual = arguments.read_text().splitlines()
+                    if cache_only:
+                        self.assertEqual(actual[:9],
+                                         ["build", "--max-jobs", "0", "--option", "builders", "",
+                                          "--option", "external-builders", "[]"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build it locally or remotely", result.stderr)
+                    else:
+                        self.assertEqual(actual[:3], ["build", "--no-link", "--print-out-paths"])
+                        self.assertEqual(len(actual), 4)
+                        self.assertNotIn("binary cache", result.stderr)
+
+    def test_workspace_cache_miss_and_apply_failure_have_distinct_messages(self):
+        script = SCRIPT.parents[3] / "scripts/prepare-pnpm-source-inputs.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "flake.lock").write_text(json.dumps({
+                "nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}}))
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$1\" >> \"$NIX_COMMANDS\"\n"
+                           "if [ \"$1\" = build ]; then exit \"$REALIZE_EXIT\"; fi\n"
+                           "echo 'member apply failed' >&2\n"
+                           "exit 42\n")
+            nix.chmod(0o755)
+            commands = root / "commands"
+            for realize_exit in ("7", "0"):
+                with self.subTest(realize_exit=realize_exit):
+                    commands.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [sys.executable, str(script), "apply", "--cache-only"],
+                        cwd=root, capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_COMMANDS": str(commands), "REALIZE_EXIT": realize_exit})
+                    self.assertNotEqual(result.returncode, 0)
+                    if realize_exit != "0":
+                        self.assertEqual(commands.read_text().splitlines(), ["build"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build", result.stderr)
+                    else:
+                        self.assertEqual(commands.read_text().splitlines(), ["build", "run"])
+                        self.assertIn("member apply failed", result.stderr)
+                        self.assertNotIn("binary cache", result.stderr)
+
     def test_normal_identity_and_state_are_unchanged(self):
         state = Path("/lane")
         self.assertEqual(bundle_id("normal"), BUNDLE_ID)
@@ -1748,6 +1820,18 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state().get("pending"), None)
         events = [json.loads(line) for line in (self.state / "outcomes.jsonl").read_text().splitlines()]
         self.assertEqual(events[-1]["reason"], "source_inputs_preparation_failed")
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("member apply failed", log.read_text())
+        self.assertNotIn("binary cache", log.read_text())
+
+    def test_workspace_toolchain_cache_miss_never_applies_or_builds(self):
+        self.configure(toolchain_exit=7)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual([entry["args"][0] for entry in self.commands("nix")], ["build"])
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("closure is not available in the binary cache", log.read_text())
 
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
@@ -1982,6 +2066,127 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.commands("xcodebuild")), 1)
         self.assertEqual(len(self.device_commands("install")), 1)
         self.assertEqual(len(self.device_commands("launch")), 1)
+
+
+class UpdatePolicySchemaTests(unittest.TestCase):
+    """Pure staged format checks: no files, tools, native asks or device access."""
+
+    def setUp(self):
+        self.script_sha = "a" * 64
+        self.policy = {"enabled": True, "policy_revision": 1,
+                       "updater_sha256": self.script_sha, "lock": "/state/policy/delivery.lock",
+                       "deny_file": "/state/policy/revoked-policies", "lanes": []}
+        for name in ("iphone", "ipad"):
+            self.policy["lanes"].append({
+                "id": name, "device": "TEST-" + name.upper(), "state": "/state/" + name,
+                "repo": "/source", "ref": "origin/main", "team": "TESTTEAM",
+                "developer_dir": "/toolchain/Developer", "expected_origin": "https://example.invalid/app",
+                "trusted_commit": "b" * 40, "bundle": BUNDLE_ID,
+                "certificate_sha256": "c" * 64, "profile_uuid": "fixture-profile",
+                "entitlements": {"get-task-allow": True}, "distribution": "development",
+                "effects": ["install", "launch", "recover"], "max_deferral": 2400, "build_backoff": 900})
+
+    def envelope(self, policy=None):
+        policy = self.policy if policy is None else policy
+        return {"version": 1, "policy": policy,
+                "approval": {"decision": "step-run/fixture/ask", "sha256": policy_digest(policy)}}
+
+    def test_valid_normal_policy_does_not_modify_input(self):
+        envelope = self.envelope()
+        before = copy.deepcopy(envelope)
+        self.assertEqual(validate_update_policy(envelope, self.script_sha), self.policy)
+        self.assertEqual(envelope, before)
+
+    def test_canonical_digest_ignores_key_order_and_rejects_non_json_numbers(self):
+        self.assertEqual(policy_digest({"z": 1, "a": "é"}), policy_digest({"a": "é", "z": 1}))
+        self.assertNotEqual(policy_digest({"flag": True}), policy_digest({"flag": 1}))
+        with self.assertRaises(ValueError):
+            policy_digest({"number": float("nan")})
+
+    def test_revived_policy_needs_explicit_new_revision_and_exact_approval(self):
+        old = self.envelope()
+        revoked = revoked_policy_digests(old["approval"]["sha256"] + "\n")
+        again = copy.deepcopy(old)
+        again["approval"]["decision"] = "step-run/another-fixture/ask"
+        self.assertIn(again["approval"]["sha256"], revoked)
+        revised = copy.deepcopy(self.policy)
+        revised["policy_revision"] = 2
+        # Reusing the old decision's digest is not an approval of the revised body.
+        again["policy"] = revised
+        with self.assertRaises(ValueError):
+            validate_update_policy(again, self.script_sha)
+        fresh = self.envelope(revised)
+        fresh["approval"]["decision"] = "step-run/fresh-policy/ask"
+        self.assertNotIn(fresh["approval"]["sha256"], revoked)
+        self.assertEqual(validate_update_policy(fresh, self.script_sha)["policy_revision"], 2)
+
+    def test_missing_default_unknown_and_wrong_approval_refuse(self):
+        valid = self.envelope()
+        for mutate in (
+            lambda value: value.pop("approval"),
+            lambda value: value.update(version=True),
+            lambda value: value.update(version=2),
+            lambda value: value.update(extra="unknown"),
+            lambda value: value["approval"].update(decision=""),
+            lambda value: value["approval"].update(sha256="0" * 64),
+            lambda value: value["approval"].update(default="accept"),
+        ):
+            with self.subTest(mutate=mutate):
+                value = copy.deepcopy(valid)
+                mutate(value)
+                with self.assertRaises(ValueError):
+                    validate_update_policy(value, self.script_sha)
+
+    def test_changed_or_disabled_body_and_unbound_script_refuse(self):
+        for key, invalid in (("enabled", False), ("policy_revision", 0), ("policy_revision", True),
+                             ("lock", "relative"), ("deny_file", "relative"),
+                             ("updater_sha256", "d" * 64)):
+            with self.subTest(key=key, invalid=invalid):
+                value = copy.deepcopy(self.policy)
+                value[key] = invalid
+                with self.assertRaises(ValueError):
+                    validate_update_policy(self.envelope(value), self.script_sha)
+        changed = self.envelope()
+        changed["policy"]["lanes"][0]["max_deferral"] = 1200
+        with self.assertRaises(ValueError):
+            validate_update_policy(changed, self.script_sha)
+
+    def test_each_lane_binding_and_permission_shape_refuses_invalid_values(self):
+        mutations = (("bundle", BUNDLE_ID + ".test"), ("distribution", "enterprise"),
+                     ("effects", ["install", "launch"]), ("entitlements", {"get-task-allow": False}),
+                     ("certificate_sha256", "short"), ("profile_uuid", ""), ("team", ""),
+                     ("trusted_commit", "short"), ("state", "relative"), ("repo", "relative"),
+                     ("developer_dir", "relative"), ("state", "/state/ipad/../iphone"), ("max_deferral", -1), ("build_backoff", True))
+        for key, invalid in mutations:
+            with self.subTest(key=key):
+                value = copy.deepcopy(self.policy)
+                value["lanes"][0][key] = invalid
+                with self.assertRaises(ValueError):
+                    validate_update_policy(self.envelope(value), self.script_sha)
+
+    def test_two_named_lanes_with_distinct_lexical_bindings_are_required(self):
+        for mutate in (
+            lambda value: value["lanes"].pop(),
+            lambda value: value["lanes"][0].update(id="ipad"),
+            lambda value: value["lanes"][0].update(device="test-ipad"),
+            lambda value: value["lanes"][0].update(state="/state/ipad"),
+            lambda value: value["lanes"][0].update(unknown="field"),
+        ):
+            with self.subTest(mutate=mutate):
+                value = copy.deepcopy(self.policy)
+                mutate(value)
+                with self.assertRaises(ValueError):
+                    validate_update_policy(self.envelope(value), self.script_sha)
+
+    def test_deny_contents_are_empty_or_full_lowercase_digests(self):
+        first, second = "a" * 64, "b" * 64
+        self.assertEqual(revoked_policy_digests(""), frozenset())
+        self.assertEqual(revoked_policy_digests(first), frozenset([first]))
+        self.assertEqual(revoked_policy_digests(first + "\n" + second + "\n"), frozenset([first, second]))
+        for invalid in (None, "\n", first + "\n\n", first + "\r\n", first.upper(), "short", "unknown"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    revoked_policy_digests(invalid)
 
 
 if __name__ == "__main__":

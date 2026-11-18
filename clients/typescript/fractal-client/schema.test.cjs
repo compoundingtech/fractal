@@ -42,6 +42,23 @@ test('full and read entrypoints share validators and strict unknown-case trackin
     assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
 });
 
+test('human-gate attention read schema accepts the source step-run Id, never its bare path', async () => {
+    const read = await import('./ReadSchema.generated.ts');
+    const decode = read.decodeUnknownSync(read.Attention, 'strict');
+    const step = 'step-run/example-generation/approve';
+    const wire = {
+        id: 'attention/example-gate', kind: 'attention', attention_kind: 'human-gate',
+        source_id: step, step_run_id: step, person_id: 'person/alex',
+        revision: 'request-1', updated_at: '2026-11-14T00:00:00Z',
+        requested_at: '2026-11-14T00:00:00Z', title: 'Approve', detail: 'Ready?',
+        priority: 'normal', state: 'open', actions: ['review.approve'],
+    };
+    const gate = decode(wire);
+    assert.equal(gate.step_run_id, gate.source_id);
+    assert.equal(read.decodeUnknownSync(read.Id, 'strict')(gate.step_run_id), step);
+    assert.throws(() => decode({ ...wire, step_run_id: 'approve' }));
+});
+
 test('mission supersession lineage is optional nonnullable and preserves retry lineage', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = {
@@ -605,6 +622,19 @@ test('availability decodes the coarse view, the full view and a status clear', a
     const reportResult = Rich.decodeUnknownSync(Rich.PresenceReportResult, 'strict');
     const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json').value;
     assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(reportResult(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
+});
+
+test('availability history decodes milliseconds per axis and presence only for the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const history = Rich.decodeUnknownSync(Rich.AvailabilityHistory, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/availability-history.json').value;
+    const result = Schema.encodeSync(Rich.AvailabilityHistory)(history(wire));
+    assert.equal(result.buckets[1].deadline_clock['hold-routine'], 1200000);
+    assert.equal(result.buckets[1].status_source.override, 1200000);
+    const coarse = { ...wire, buckets: wire.buckets.map(bucket => ({ ...bucket, presence: null })) };
+    assert.equal(Schema.encodeSync(Rich.AvailabilityHistory)(history(coarse)).buckets[0].presence, null);
+    const { presence, ...missing } = wire.buckets[0];
+    assert.throws(() => history({ ...wire, buckets: [missing] }));
 });
 
 test('a note write requires text, clears with null and never names the person', async () => {

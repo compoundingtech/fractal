@@ -1,6 +1,325 @@
     #![cfg_attr(not(test), allow(unused, dead_code))]
     mod agent_review_loop_branches;
 
+mod native_effect_convergence {
+    use super::*;
+    use crate::model::EffectOwner;
+    use crate::store::effects::{EffectAdmission, EffectRecord, native_message_key};
+    use serde_json::json;
+
+    const FLEET: &str = "example-effect-convergence";
+    const WORKER: &str = "agent/example/worker";
+    const INCARNATION: &str = "example-worker-one";
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        store: Arc<Store>,
+        reconciler: Reconciler<FakeRuntime>,
+        run: MissionRunView,
+        owner: EffectOwner,
+        origin: String,
+    }
+
+    impl Fixture {
+        fn new(origin: &str) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open(&root.path().join("graph.db"), origin).unwrap());
+            store.bind_fleet(FLEET).unwrap();
+            apply_source(&store, r#"version 2
+agent "example/worker" { workspace "/tmp"; harness "claude" {} }
+agent "example/reader" { workspace "/tmp"; harness "claude" {} }
+mission "example/report" state="ready" {
+  goal "Report exactly once."
+  step "report" { assigned-to "agent/example/worker" }
+}"#, "example-publish");
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "example/report".into(), revision: None, workspace: "/tmp".into(),
+                requester: Some("person/example".into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "example-run".into(),
+            }).unwrap();
+            let step = &run.steps[0].subject;
+            store.set_step_state(step, "ready", None).unwrap();
+            let claimed = store.work_action(step, "claim", &crate::model::WorkRequest {
+                wait_ms: None, actor: Some(WORKER.into()), incarnation: Some(INCARNATION.into()),
+                summary: None, reason: None, evidence: vec![], idempotency_key: "example-claim".into(),
+            }).unwrap();
+            let owner = EffectOwner {
+                mission: run.mission.clone(), key: "report-ready".into(), step: step.clone(),
+                attempt: claimed.attempt, incarnation: INCARNATION.into(),
+            };
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+                origin.into(), Arc::new(Notify::new()));
+            let fixture = Self { root, store, reconciler, run, owner, origin: origin.into() };
+            fixture.runtime("running", INCARNATION);
+            fixture
+        }
+
+        fn runtime(&self, status: &str, incarnation: &str) {
+            self.store.append_claim(&ClaimInput {
+                subject: WORKER.into(), kind: "runtime.observed".into(), actor: None,
+                fields: BTreeMap::from([("status".into(), json!(status)),
+                    ("incarnation_id".into(), json!(incarnation))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+
+        fn admit(&self) -> EffectRecord {
+            match self.store.admit_message_effect(&self.owner, WORKER, WORKER,
+                "example-payload-digest", "agent/example/reader").unwrap()
+            {
+                EffectAdmission::Originate(effect) => effect,
+                other => panic!("expected local first origination, got {other:?}"),
+            }
+        }
+
+        fn commit_message(&self) -> crate::model::ClaimRecord {
+            self.commit_message_at("message/example-report")
+        }
+
+        fn commit_message_at(&self, subject: &str) -> crate::model::ClaimRecord {
+            self.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "message.sent".into(),
+                actor: Some(WORKER.into()),
+                fields: BTreeMap::from([("from".into(), json!(WORKER)),
+                    ("to".into(), json!("agent/example/reader")),
+                    ("status".into(), json!("sent")),
+                    ("content".into(), json!("The example report is ready."))]),
+                evidence: vec![], expected_subject: None,
+                idempotency_key: Some(native_message_key(&self.owner).unwrap()),
+            }).unwrap()
+        }
+
+        fn converge(&self) {
+            self.reconciler.reconcile_effects().unwrap();
+        }
+
+        fn restart(self) -> Self {
+            let Self { root, store, reconciler, run, owner, origin } = self;
+            drop(reconciler);
+            drop(store);
+            let store = Arc::new(Store::open(&root.path().join("graph.db"), &origin).unwrap());
+            let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+                origin.clone(), Arc::new(Notify::new()));
+            Self { root, store, reconciler, run, owner, origin }
+        }
+
+        fn assert_one_episode(&self, effect: &EffectRecord) {
+            assert_eq!(self.store.claims_for(&effect.effect_id, Some("effect.unresolved")).unwrap().len(), 1);
+            let failures = self.store.claims_for(&self.run.subject, Some("operational.failure")).unwrap();
+            assert_eq!(failures.iter().filter(|claim|
+                claim.body["fields"]["condition"] == "effect-unresolved").count(), 1);
+            let attention = self.store.attention_snapshot(Some("person/example"), now_ms()).unwrap();
+            assert_eq!(attention.iter().filter(|item| item.kind == "effect-unresolved").count(), 1);
+            let faults = self.store.fault_snapshot(now_ms()).unwrap();
+            assert_eq!(faults.iter().filter(|fault| fault.item.kind == "effect-unresolved"
+                && fault.item.person == WORKER).count(), 1);
+        }
+    }
+
+    #[test]
+    fn unrelated_wakes_do_not_read_completed_effect_history() {
+        let mut fixture = Fixture::new("example-origin");
+        let mut completed = Vec::new();
+        for index in 0..16 {
+            fixture.owner.key = format!("report-ready-{index}");
+            let effect = fixture.admit();
+            let message = fixture.commit_message_at(&format!("message/example-report-{index}"));
+            fixture.store.confirm_message_effect(&effect, &message, WORKER).unwrap();
+            completed.push(effect.effect_id);
+        }
+        let ((), bootstrap) = smallclaims::touched::record(|| fixture.converge());
+        assert!(bootstrap.contains("effect-history"));
+        assert!(completed.iter().all(|effect| bootstrap.contains(effect)));
+        for index in 0..3 {
+            fixture.store.append_claim(&ClaimInput {
+                subject: format!("resource/unrelated-{index}"), kind: "resource.observed".into(), actor: None,
+                fields: BTreeMap::from([("kind".into(), json!("vcs.repository"))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+            assert!(!reads.contains("effect-history"));
+            assert!(completed.iter().all(|effect| !reads.contains(effect)), "{reads:?}");
+        }
+    }
+
+    #[test]
+    fn live_effect_records_lease_deadline_and_due_wake_rechecks_only_that_effect() {
+        let fixture = Fixture::new("example-origin");
+        let effect = fixture.admit();
+        fixture.converge();
+        let due = fixture.reconciler.incremental.due_of(&effect.effect_id).unwrap();
+        let step = fixture.store.step_run(&effect.bound_step_run).unwrap().unwrap();
+        assert_eq!(Some(due), step.claim_expires_at_unix_ms);
+        assert_eq!(fixture.reconciler.incremental.next_due("effect/"), Some(due));
+        // Drive the scheduler's due boundary without sleeping or changing any graph
+        // input. The real lease is still live, so readback must re-arm it, not send.
+        let reads = fixture.reconciler.incremental.reads_of(&effect.effect_id);
+        fixture.reconciler.incremental.evaluated(&effect.effect_id, reads, Some(0));
+        let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+        assert!(reads.contains(&effect.effect_id));
+        assert!(!reads.contains("effect-history"));
+        assert_eq!(fixture.reconciler.incremental.due_of(&effect.effect_id), Some(due));
+        assert_eq!(fixture.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "intended");
+        assert!(fixture.store.latest_claim("message/example-report", Some("message.sent")).unwrap().is_none());
+    }
+
+    #[test]
+    fn effects_created_after_bootstrap_and_changed_runtime_raise_one_episode() {
+        let fixture = Fixture::new("example-origin");
+        fixture.converge();
+        let effect = fixture.admit();
+        fixture.converge();
+        assert!(fixture.reconciler.incremental.reads_of(&effect.effect_id).contains(WORKER));
+        fixture.runtime("stopped", INCARNATION);
+        fixture.converge();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+        assert!(!reads.contains("effect-history"));
+        assert!(!reads.contains(&effect.effect_id));
+    }
+
+    #[test]
+    fn unresolved_episode_arriving_after_bootstrap_is_discovered_once() {
+        let fixture = Fixture::new("example-origin");
+        fixture.converge();
+        let effect = fixture.admit();
+        fixture.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+    }
+
+    #[test]
+    fn dead_lease_without_receipt_parks_once_across_restart_and_lease_churn() {
+        let fixture = Fixture::new("example-origin");
+        let effect = fixture.admit();
+        fixture.store.effect_in_flight(&effect).unwrap();
+        fixture.runtime("stopped", INCARNATION);
+        fixture.converge();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        let fixture = fixture.restart();
+        fixture.runtime("running", "example-worker-replacement");
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+        fixture.reconciler.unresolved_effect_run_fence(&run).unwrap();
+        let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+        assert_eq!(run.status, "blocked");
+        assert_ne!(run.phase, "cleanup-completed");
+        assert_eq!(run.steps[0].effects.len(), 1);
+        assert_eq!(run.steps[0].effects[0].state, "unresolved");
+        assert!(run.steps[0].effects[0].provider_ref.is_none());
+        let wire = serde_json::to_value(&run).unwrap();
+        assert!(wire["steps"][0]["effects"][0].get("provider_ref").is_none());
+        assert!(fixture.store.latest_claim("message/example-report", Some("message.sent")).unwrap().is_none());
+        let variables = BTreeMap::new();
+        let product = crate::model::ProductSpec {
+            subject: effect.effect_id.clone(),
+            fields: BTreeMap::from([("delivered".into(), json!(true))]),
+        };
+        assert!(!fixture.reconciler.products_hold_with_variables(&[product], &variables).unwrap());
+    }
+
+    #[test]
+    fn dead_lease_recovers_committed_message_by_key_and_publishes_delivery_product() {
+        let fixture = Fixture::new("example-origin");
+        let effect = fixture.admit();
+        fixture.store.effect_in_flight(&effect).unwrap();
+        let message = fixture.commit_message();
+        fixture.runtime("stopped", INCARNATION);
+        fixture.converge();
+        fixture.converge();
+        let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+        let visible = &run.steps[0].effects[0];
+        assert_eq!(visible.effect_id, effect.effect_id);
+        assert_eq!(visible.state, "confirmed");
+        assert_eq!(visible.provider_ref.as_deref(), Some(message.subject.as_str()));
+        assert_eq!(fixture.store.claims_for(&message.subject, Some("message.sent")).unwrap().len(), 1);
+        assert!(fixture.store.claims_for(&effect.effect_id, Some("effect.unresolved")).unwrap().is_empty());
+        let product = crate::model::ProductSpec {
+            subject: effect.effect_id,
+            fields: BTreeMap::from([("delivered".into(), json!(true)),
+                ("provider_ref".into(), json!(message.subject))]),
+        };
+        assert!(fixture.reconciler.products_hold_with_variables(&[product], &BTreeMap::new()).unwrap());
+    }
+
+    #[test]
+    fn human_resolution_clears_attention_and_exposes_confirmed_or_abandoned_without_nulls() {
+        for outcome in ["confirmed", "abandoned"] {
+            let fixture = Fixture::new("example-origin");
+            let effect = fixture.admit();
+            fixture.store.effect_in_flight(&effect).unwrap();
+            fixture.runtime("stopped", INCARNATION);
+            fixture.converge();
+            fixture.assert_one_episode(&effect);
+            fixture.store.resolve_effect_authorized(&effect.effect_id,
+                "person/example", "person/example", crate::store::effects::EffectResolution {
+                    outcome, provider_ref: (outcome == "confirmed").then_some("message/example-manually-observed"),
+                    evidence: &["claim/example-human-observation".into()], key: "example-resolution",
+                }).unwrap();
+            fixture.converge();
+            let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
+            assert_eq!(run.steps[0].effects[0].state, outcome);
+            let fields = fixture.reconciler.subject_value(&effect.effect_id).unwrap().unwrap();
+            assert_eq!(fields["fields"]["delivered"], outcome == "confirmed");
+            let product = crate::model::ProductSpec {
+                subject: effect.effect_id.clone(),
+                fields: BTreeMap::from([("delivered".into(), json!(true))]),
+            };
+            assert!(fixture.reconciler.products_hold_with_variables(&[product], &BTreeMap::new()).unwrap(),
+                "human abandonment waives the hold without inventing delivery");
+            if outcome == "abandoned" {
+                assert!(serde_json::to_value(&run.steps[0].effects[0]).unwrap().get("provider_ref").is_none());
+            }
+            assert!(fixture.store.attention_snapshot(Some("person/example"), now_ms()).unwrap()
+                .iter().all(|item| item.kind != "effect-unresolved"));
+            assert!(fixture.store.fault_snapshot(now_ms()).unwrap()
+                .iter().all(|fault| fault.item.kind != "effect-unresolved"));
+        }
+    }
+
+    #[test]
+    fn late_distinct_writer_conflict_parks_previously_confirmed_effect() {
+        let first = Fixture::new("example-first");
+        let second = Fixture::new("example-second");
+        let effect = first.admit();
+        let other = second.admit();
+        assert_eq!(effect.effect_id, other.effect_id);
+        first.store.effect_in_flight(&effect).unwrap();
+        let message = first.commit_message();
+        first.store.confirm_message_effect(&effect, &message, WORKER).unwrap();
+        first.store.set_step_state(&first.owner.step, "completed", None).unwrap();
+        first.store.set_mission_run_state(&first.run.id, "completed", "terminal", None).unwrap();
+        // Register the completed effect before replication: late operation changes,
+        // not a fresh full-history bootstrap, must invalidate this success.
+        first.converge();
+        for _ in 0..100 {
+            let exchange = second.store.export_replication_exchange(FLEET,
+                &first.store.replication_inventory().unwrap()).unwrap();
+            if exchange.envelopes.is_empty() { break; }
+            first.store.receive_replication_exchange(&second.origin, FLEET, &exchange).unwrap();
+            let admission = first.store.validate_replication_backlog().unwrap();
+            assert_eq!((admission.invalid, admission.unknown), (0, 0));
+            first.store.apply_replication_repairs().unwrap();
+            first.store.project_replication_backlog().unwrap();
+        }
+        first.converge();
+        first.converge();
+        first.assert_one_episode(&effect);
+        let run = first.store.mission_run(&first.run.id).unwrap().unwrap();
+        assert_eq!(run.status, "blocked", "late ambiguity must invalidate a previous success");
+        assert_eq!(run.phase, "normal");
+        assert_eq!(first.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "unresolved");
+        assert_eq!(first.store.claims_for(&message.subject, Some("message.sent")).unwrap().len(), 1);
+        let actual = first.reconciler.subject_value(&effect.effect_id).unwrap().unwrap();
+        assert_eq!(actual["fields"]["delivered"], false);
+    }
+}
+
     #[test]
     fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
         for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
@@ -341,6 +660,53 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn custom_shell_worker_receipt_precedes_reconcile_application() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store,
+            "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"sleep 600\"; }",
+            "worker-process-provenance");
+        let subject = store.desired_subject_with_writer("agent/node.worker").unwrap().unwrap().0;
+        let member = subject.member.as_ref().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("worker-current".into()),
+        });
+        let pid = std::process::id();
+        let token = fractal_runtime::process_start_token(pid).unwrap();
+        runtime.process_identities.lock().unwrap().insert(
+            (member.runtime_id.clone(), "worker-current".into()), (pid, token),
+        );
+        let reconciler = Reconciler::new(
+            store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.wait_for_test_starts.store(false, Ordering::Release);
+        reconciler.perform_start(&subject, member, "worker receipt before planner").unwrap();
+        // Join only the launch worker, never the completion-application planner.
+        let (live, changed) = &*reconciler.start_jobs.live;
+        let mut live = live.lock().unwrap();
+        while !live.is_empty() {
+            live = changed.wait(live).unwrap();
+        }
+        drop(live);
+        let operation = store.runtime_start_for(&subject.subject).unwrap().unwrap();
+        assert!(operation.finished);
+        assert!(!operation.applied);
+        assert!(!operation.receipted);
+        let result = operation.result.unwrap();
+        assert_eq!(result["operation_id"], operation.id);
+        assert_eq!(result["incarnation"], "worker-current");
+        assert_eq!(result["verification"], "operation-incarnation");
+        assert_eq!(result["runtime_pid"], pid);
+        assert_eq!(result["runtime_pid_start_token"], token.to_string());
+        assert_eq!(result["runtime_start_fields"]["status"], "starting");
+        assert!(result["runtime_before_start"].is_null());
+        assert!(store.latest_claim(&subject.subject, Some("runtime.observed")).unwrap().is_none());
+        assert!(store.latest_observation(&subject.subject, "runtime.action.succeeded").unwrap().is_none());
+    }
+
 
     #[test]
     fn claude_login_screen_recognizes_only_explicit_auth_prompts() {
@@ -702,6 +1068,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     /// The exec a hook waits for, and what happens right after that exec is next observed.
     type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
 
+    type ResourceRecoveryHook = Box<dyn Fn(&Store) + Send>;
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
@@ -711,6 +1079,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
+        resource_exit_watches: Mutex<HashMap<String, Arc<dyn Fn() + Send + Sync>>>,
+        resource_exit_publication: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        before_resource_recovery: Mutex<Option<ResourceRecoveryHook>>,
         exit_evidence: Mutex<HashMap<(String, String), fractal_runtime::PtyExitEvidence>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,
@@ -1101,7 +1472,229 @@ mission "retained-reason" state="ready" {
         assert!(runtime.removes.lock().unwrap().is_empty());
     }
 
+    fn released_shell_fixture(expire_owner: bool) -> (
+        tempfile::TempDir, Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>,
+    ) {
+        use crate::store::resource_membership::{Admission, Coverage, Fit, LaneRequest, Owner};
+        use crate::store::shell_resources::{Command, PayloadResult};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        reconciler.driver_state_dir = root.path().join("drivers");
+        reconciler.ensure_resource_authority().unwrap();
+        let owner = if expire_owner {
+            let blob = store.put_blob(b"export default {}").unwrap();
+            apply_source(&store, &format!(r#"version 2
+mission "shell-owner" state="ready" {{
+  goal "Retain shell outcome when its owner ends."
+  step "work" {{ program "/unused.mjs" sha256="{blob}" }}
+}}"#), "shell-owner-source");
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "shell-owner".into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "shell-owner-run".into(),
+            }).unwrap();
+            Owner { run: run.subject.clone(), step: run.steps[0].subject.clone(),
+                attempt: run.steps[0].attempt, invocation: None }
+        } else {
+            Owner { run: "shell:outcome".into(), step: "shell:outcome".into(), attempt: 1, invocation: None }
+        };
+        let lane = LaneRequest {
+            id: "shell:outcome".into(), name: "checks".into(), host: "node".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
+            coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Check, disk: None, io: None, owner,
+        };
+        let now = u64::try_from(now_ms()).unwrap();
+        let mut execution = store.submit_shell_resource(Command {
+            id: "outcome".into(), lane: lane.clone(), argv: vec!["true".into()],
+            cwd: root.path().display().to_string(), environment: BTreeMap::new(), timeout_ms: None, parent: None,
+        }, now).unwrap();
+        let fit = Fit { room: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }), ..Fit::default() };
+        let Admission::Admitted(grant) = store.request_resource_membership(&lane, fit, now).unwrap() else {
+            panic!("fixture was not admitted");
+        };
+        store.prepare_resource_membership(&grant, "outcome").unwrap();
+        let generation: fractal_runtime::ExecGeneration = serde_json::from_value(serde_json::json!({
+            "schema":"st.runtime.exec-generation.v1", "pid":1, "createdAtUnixMs":now,
+            "startToken":1, "generationId":"outcome-generation", "payloadReleasedAtUnixMs":now,
+        })).unwrap();
+        store.launch_resource_membership(&grant, "outcome", &generation, now).unwrap();
+        execution.state = "admitted".into();
+        execution.started_at = Some(now);
+        store.update_shell_resource(&execution).unwrap();
+        runtime.execs.lock().unwrap().insert("outcome".into(), RuntimeObservation {
+            runtime_id: "outcome".into(), terminal: false, status: "exited".into(),
+            exit_code: Some(37), incarnation_id: Some("outcome-generation".into()),
+        });
+        let path = reconciler.shell_result_path("outcome");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(&PayloadResult {
+            head_start: Some("abc123".into()), head_end: Some("def456".into()),
+            clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
+            wall_duration_ms: 1234, memory_peak_bytes: None,
+        }).unwrap()).unwrap();
+        if expire_owner {
+            store.set_step_state(&lane.owner.step, "failed", Some("owner ended while shell was live")).unwrap();
+        }
+        (root, store, runtime, reconciler)
+    }
+
+    fn assert_one_shell_outcome(store: &Store, state: &str) {
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, state);
+        assert_eq!(execution.exit_code, Some(37));
+        assert_eq!(execution.result.as_ref().unwrap().wall_duration_ms, 1234);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert_eq!(page.claims[0].body["fields"]["exit_code"], 37);
+        assert_eq!(page.claims[0].body["fields"]["wall_duration_ms"], 1234);
+    }
+
+    #[test]
+    fn shell_recovery_reads_synced_helper_result_before_predecessor_retirement() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        assert!(store.shell_resource("outcome").unwrap().result.is_none());
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = _root.path().join("drivers");
+        // The fake native recovery boundary refuses to retire any released shell lacking
+        // a persisted observation; the real Store and receipt transaction are unchanged.
+        recovered.reconcile_shell_resources().unwrap();
+        recovered.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "completed");
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ended_shell_owner_finalizes_refusal_with_payload_observations_exactly_once() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(true);
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_eq!(store.shell_resource("outcome").unwrap().state, "failing");
+        assert!(store.shell_resource("outcome").unwrap().cancellation_started_at.is_some());
+        assert_eq!(*runtime.stops.lock().unwrap(), vec!["outcome".to_owned()]);
+        tokio::task::yield_now().await;
+        reconciler.reconcile_shell_resources().unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        assert_one_shell_outcome(&store, "refused");
+        assert!(store.shell_resource("outcome").unwrap().reason.contains("owner"));
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn running_shell_recovery_awaits_payload_publication_before_generic_retirement() {
+        use crate::store::shell_resources::PayloadResult;
+        let (root, store, runtime, reconciler) = released_shell_fixture(false);
+        let path = reconciler.shell_result_path("outcome");
+        fs::remove_file(&path).unwrap();
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        // Publication occurs on another thread only after SIGTERM. Its exit notification
+        // follows the atomic publication, matching the real helper/native wait boundary.
+        *runtime.resource_exit_publication.lock().unwrap() = Some(Box::new(move || {
+            let temporary = path.with_extension("pending");
+            fs::write(&temporary, serde_json::to_vec(&PayloadResult {
+                head_start: Some("abc123".into()), head_end: Some("def456".into()),
+                clean_start: Some(true), clean_end: Some(false),
+                exit_code: None, exit_signal: Some(9), wall_duration_ms: 2345, memory_peak_bytes: None,
+            }).unwrap()).unwrap();
+            fs::rename(temporary, path).unwrap();
+        }));
+        *runtime.before_resource_recovery.lock().unwrap() = Some(Box::new(|store| {
+            let execution = store.shell_resource("outcome").unwrap();
+            let result = execution.result.unwrap();
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.exit_signal, Some(9));
+            assert_eq!(result.wall_duration_ms, 2345);
+        }));
+        drop(reconciler);
+        let mut recovered = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        recovered.driver_state_dir = root.path().join("drivers");
+        recovered.reconcile_shell_resources().unwrap();
+        recovered.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, "completed");
+        assert_eq!(execution.exit_code, None); // The observer's exit code 37 is not the payload's.
+        assert_eq!(execution.exit_signal, Some(9));
+        assert_eq!(execution.result.unwrap().wall_duration_ms, 2345);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert_eq!(page.claims[0].body["fields"]["exit_signal"], 9);
+        assert_eq!(page.claims[0].body["fields"]["wall_duration_ms"], 2345);
+        assert!(page.claims[0].body["fields"].get("exit_code").is_none());
+    }
+
+    #[test]
+    fn recovered_observer_exit_without_payload_publication_leaves_payload_status_unknown() {
+        let (_root, store, runtime, reconciler) = released_shell_fixture(false);
+        fs::remove_file(reconciler.shell_result_path("outcome")).unwrap();
+        runtime.execs.lock().unwrap().get_mut("outcome").unwrap().status = "running".into();
+        // The fake observer exits on TERM without publishing a payload result.
+        reconciler.prepare_shell_resource_recovery().unwrap();
+        reconciler.reconcile_shell_resources().unwrap();
+        let execution = store.shell_resource("outcome").unwrap();
+        assert_eq!(execution.state, "completed");
+        assert_eq!(execution.exit_code, None);
+        assert_eq!(execution.exit_signal, None);
+        let result = execution.result.unwrap();
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.exit_signal, None);
+        let page = store.claims_page_matching(crate::store::ClaimsFilter {
+            kind: Some("resource.exec-receipt"), ..crate::store::ClaimsFilter::default()
+        }, None, 0, None, false, 100).unwrap();
+        assert_eq!(page.claims.len(), 1);
+        assert!(page.claims[0].body["fields"].get("exit_code").is_none());
+        assert!(page.claims[0].body["fields"].get("exit_signal").is_none());
+    }
+
     impl RuntimeControl for FakeRuntime {
+        fn recover_resource_lanes(&self, store: &Store, host: &str, _now: u64) -> Result<usize> {
+            if let Some(before) = self.before_resource_recovery.lock().unwrap().take() { before(store); }
+            for execution in store.shell_resources(host, true)? {
+                if execution.started_at.is_some() {
+                    anyhow::ensure!(execution.result.is_some(), "recovery retired a shell before preserving its observations");
+                }
+            }
+            Ok(0)
+        }
+        fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+            Ok(true)
+        }
+        fn watch_resource_exec(&self, id: &str, generation: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+            let execs = self.execs.lock().unwrap();
+            let observation = execs.get(id).context("fake shell missing")?;
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
+            if observation.status == "exited" { wake(); }
+            else { self.resource_exit_watches.lock().unwrap().insert(id.into(), wake); }
+            Ok(())
+        }
+        fn resource_exec_output(&self, _id: &str, _generation: &str) -> Result<(String, String)> {
+            Ok((String::new(), String::new()))
+        }
+        fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
+            Ok(None)
+        }
+        fn cancel_resource_exec(&self, id: &str, generation: &str) -> Result<()> {
+            let mut execs = self.execs.lock().unwrap();
+            let observation = execs.get_mut(id).context("fake shell missing")?;
+            anyhow::ensure!(observation.incarnation_id.as_deref() == Some(generation), "fake shell generation changed");
+            observation.status = "exited".into();
+            self.stops.lock().unwrap().push(id.into());
+            drop(execs);
+            let wake = self.resource_exit_watches.lock().unwrap().remove(id);
+            if let Some(publish) = self.resource_exit_publication.lock().unwrap().take() {
+                std::thread::spawn(move || {
+                    publish();
+                    if let Some(wake) = wake { wake(); }
+                });
+            } else if let Some(wake) = wake { wake(); }
+            Ok(())
+        }
         fn exit_evidence(&self, runtime_id: &str, incarnation: &str) -> Result<Option<fractal_runtime::PtyExitEvidence>> {
             Ok(self.exit_evidence.lock().unwrap()
                 .get(&(runtime_id.into(), incarnation.into())).cloned())
@@ -4965,6 +5558,29 @@ mission "self-assigned" state="ready" {
             Arc::new(Notify::new()),
         );
         let owner = "step-run/golden.approval";
+        let golden = r#"{"attempt":1,"decisions":["approved","rejected"],"mission_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mode":"approve","owner":"step-run/golden.approval","question":"Is the candidate ready?","review_targets":["resource/candidate"],"reviewer":"person/alex","step_definition":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
+        let mut expected: BTreeMap<String, Value> = serde_json::from_str(golden).unwrap();
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(serde_json::to_vec(&expected).unwrap())),
+            "b7ddd150865ffde5e4501c8d861399b013cb43a4d602505ae28aaa4c597e6af6",
+            "historical unbound human request fields retain their canonical encoding"
+        );
+        // The native producer binds pinned mission contracts, authority, inputs and workspace.
+        // Do not copy those digests into a second test-only binding implementation.
+        let (binding, previous) = store.human_gate_continuity(&run, owner, &expected).unwrap();
+        assert!(previous.is_none());
+        assert_eq!(binding["version"], 1);
+        assert_eq!(binding["step"], "$run");
+        assert_eq!(binding["person"], "person/alex");
+        assert_eq!(binding["asker"], "daemon/runtime");
+        assert_eq!(binding["question"], "Is the candidate ready?");
+        assert_eq!(binding["request"], serde_json::json!({
+            "kind": "human-gate", "mode": "approve",
+            "decisions": ["approved", "rejected"], "review_targets": ["resource/candidate"],
+        }));
+        expected.insert("continuity".into(), binding);
+        let digest = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&expected).unwrap()));
+        let operation = format!("gate-operation/step-run.golden.approval/{}", &digest[..24]);
         let evaluate = || {
             reconciler
                 .evaluate_mission_human_gate(
@@ -4982,21 +5598,23 @@ mission "self-assigned" state="ready" {
         };
         assert!(matches!(evaluate(), GateOutcome::Pending));
         let request = store.gate_request_for_owner(owner).unwrap().unwrap();
-        let operation = "gate-operation/step-run.golden.approval/b7ddd150865ffde5e4501c8d";
+        // Emission must hash the complete bound request, not the historical unbound golden.
         assert_eq!(request.subject, operation);
         assert_eq!(request.actor, None);
         let mut fields = request.body["fields"].as_object().unwrap().clone();
         assert_eq!(
             fields.remove("operation"),
-            Some(Value::String(operation.into()))
+            Some(Value::String(operation))
         );
-        let golden = r#"{"attempt":1,"decisions":["approved","rejected"],"mission_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mode":"approve","owner":"step-run/golden.approval","question":"Is the candidate ready?","review_targets":["resource/candidate"],"reviewer":"person/alex","step_definition":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#;
         let fields: BTreeMap<_, _> = fields.into_iter().collect();
-        assert_eq!(serde_json::to_string(&fields).unwrap(), golden);
-        assert_eq!(
-            hex::encode(sha2::Sha256::digest(serde_json::to_vec(&fields).unwrap())),
-            "b7ddd150865ffde5e4501c8d861399b013cb43a4d602505ae28aaa4c597e6af6"
-        );
+        assert_eq!(fields, expected);
+        // The operation hashes the producer's ordered binding before append; claim
+        // storage recursively canonicalizes object keys, including that nested binding.
+        // Assert each representation against its own authoritative encoder.
+        let canonical = smallclaims::hash::canonical_json_text(
+            &serde_json::to_value(&expected).unwrap(),
+        ).unwrap();
+        assert_eq!(serde_json::to_string(&fields).unwrap(), canonical);
         assert!(matches!(evaluate(), GateOutcome::Pending));
         assert_eq!(
             store.gate_request_for_owner(owner).unwrap().unwrap().id,
@@ -29665,7 +30283,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn inherited_nested_work_keeps_one_parent_alert() {
-        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { retry: None, executions: None, subject: subject.into(),
+        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { retry: None, executions: None, effects: Vec::new(), subject: subject.into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: path.into(),
@@ -29836,7 +30454,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn busy_agent_keeps_cross_run_work_queued_without_wake_deadline() {
-        let mut first = StepRunView { retry: None, executions: None, subject: "step-run/older/work".into(),
+        let mut first = StepRunView { retry: None, executions: None, effects: Vec::new(), subject: "step-run/older/work".into(),
         run: "mission-run/older".into(),
         generation: "run-generation/older".into(),
         step: "work".into(),
@@ -30346,7 +30964,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
 
     #[test]
     fn only_the_assignee_host_arms_a_work_wake_deadline() {
-        let step = StepRunView { retry: None, executions: None, subject: "step-run/run-1/work".into(),
+        let step = StepRunView { retry: None, executions: None, effects: Vec::new(), subject: "step-run/run-1/work".into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: "work".into(),

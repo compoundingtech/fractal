@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve keyed message-body reads while checking scoped naming degradation.",
+  "replay": {"status": "none", "detail": "Canonical reducers and explicit repair semantics are unchanged."},
+  "schema": {"status": "none", "detail": "Reuse the existing primary-keyed meta table for at most 64 derived failure-scope entries."},
+  "rules": {"status": "changed", "detail": "Naming reads check the keyed health row and exact keyed scope membership instead of scanning the diagnostic JSON array. The message-body query-plan guard remains unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire contract changes; the unreleased scoped projection stores its derived names transactionally alongside the diagnostic row."},
+  "manual": {"status": "none", "detail": "Existing planned-window replay guidance is unchanged."},
+  "recovery": {"status": "changed", "detail": "Scope refresh replaces keyed names transactionally; successful bounded or explicit repair removes them."},
+  "downtime": {"status": "none", "detail": "No schema migration or index build is added."}
+}

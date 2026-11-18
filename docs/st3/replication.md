@@ -90,7 +90,11 @@ On Linux and macOS worker-only routes (`/v1/internal/replication/*`, `/v1/intern
 `/v1/internal/seat-freshness/reads`, `/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
 Unix connector's kernel-observed process generation with the replication worker.
 Services use the supervisor-observed worker; foreground operation uses the explicitly
-enrolled process. An unrelated unbound process is not a worker.
+enrolled process. An unrelated unbound process is not a worker. The daemon pins the
+observed worker's process generation once the supervisor (`launchctl`/`systemctl`) still
+names that PID after the capture, and asks again only once that generation stops
+validating: a supervisor replaces its worker only after the old process ends, so
+requests do not spawn service-manager commands.
 
 The optional top-level daemon TOML key `worker_ingress_generation_check` accepts
 exactly `"observe"` or `"enforce"`; omission means `"observe"`. Unknown values fail
@@ -205,6 +209,21 @@ writer, replica sequence, batch identity and immutable position, with claim iden
 tie break. Arrival order belongs to local cursors, caches and operational overlays. Equal claims
 must produce equal shared rows and selected source identities through incremental admission,
 restart replay and checkpoint trimming.
+
+An operation ID with different request digests never requests a whole-log replay during
+replication projection. Its registry row is reduced deterministically (minimum request
+digest, then the smallest retained claim ID for that digest, with checkpoint fallback).
+This registry choice does not suppress graph facts: graph projections still fold all
+admitted claims in canonical order, exactly as replay does.
+
+Event-only conflicts update the registry without rebuilding the graph. Affected desired,
+document, mission, run-tree and planning-session histories may refold under the writer only
+up to `OPERATION_CONFLICT_REFOLD_CLAIMS` (4096 claims). Above that bound, or without an
+affected-subject reducer, the previous projection remains and `projection_health` records
+a typed degraded entry. Receipt does not automatically repair these entries: large-history
+repair must commit separate pages rather than hold one writer transaction. Existing
+projection-failure detail and replication/store health retain the operation ID, current
+and previous claim IDs and conflict count. Writer-hold rows report fold `processed`/`total`.
 
 The digest covers everything that is synced: authenticated claim and blob identity, and every
 shared logical projection and its shared columns. Each shared table or claim-derived source has

@@ -28,6 +28,66 @@ const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_continuity_previews_and_hash_bound_recovery_survive_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    let definition = "version 2\nmission \"example/continuity\" state=\"ready\" {\n\
+        goal \"Original goal.\"\nstep \"prepare\" { agentless; }\n}\n";
+    daemon.apply(definition, "continuity-original");
+    let source = daemon.start("example/continuity", "continuity-source");
+    daemon.apply(&definition.replace("Original goal.", "Updated goal."), "continuity-updated");
+    daemon.store().supersede_mission_publications().unwrap();
+    let source = daemon.store().mission_run(&source.subject).unwrap().unwrap();
+    let target = source.superseded_by.as_ref().expect("new publication supersedes pending work");
+    // Model original evidence received after cutover: the successor has not adopted it.
+    let original = &source.steps[0].subject;
+    daemon.store().set_step_state(original, "completed", None).unwrap();
+    let before = daemon.store().index().unwrap();
+    let preview = cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "preview", &source.subject,
+    ]).await);
+    assert_eq!(preview["source_run"], source.subject);
+    assert_eq!(preview["target_run"], *target);
+    assert_eq!(preview["original_work"][0]["source_step_run"], *original);
+    assert_eq!(preview["original_work"][0]["eligibility"], "eligible");
+    let startup = cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "startup-preview",
+    ]).await);
+    assert!(startup["runs"].is_array());
+    assert_eq!(daemon.store().index().unwrap(), before, "both previews are read-only");
+    daemon.restart().await;
+    assert_eq!(cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "preview", &source.subject,
+    ]).await), preview);
+    assert_eq!(cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "startup-preview",
+    ]).await), startup);
+    let before = daemon.store().index().unwrap();
+    assert!(!daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "recover", &source.subject,
+        "--preview-hash", "stale", "--as", PERSON,
+    ]).await.status.success());
+    assert_eq!(daemon.store().index().unwrap(), before, "stale recovery writes nothing");
+    let recovered = cli_value(daemon.cli(PERSON, &[
+        "missions", "run", "continuity", "recover", &source.subject,
+        "--preview-hash", preview["preview_hash"].as_str().unwrap(), "--as", PERSON,
+    ]).await);
+    let recovered = recovered["recovered_run"].as_str().unwrap().to_owned();
+    assert_ne!(recovered, *target);
+    daemon.restart().await;
+    let run = daemon.store().mission_run(&recovered).unwrap().unwrap();
+    assert_eq!(run.steps[0].status, "completed");
+    let evidence = daemon.store().claims_for(&run.steps[0].subject, Some("step-run.carried")).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].body["fields"]["source_step_run"], *original);
+    for kind in ["work.submitted", "work.person-done", "gate.result"] {
+        assert!(daemon.store().claims_for(&run.steps[0].subject, Some(kind)).unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -920,6 +980,7 @@ async fn dispatch(
         "work.ask" => work_ask, "work.cancel-ask" => work_cancel_ask,
         "work.claim" => work_claim, "work.complete" => work_complete,
         "work.done" => work_done, "work.fail" => work_fail, "work.progress" => work_progress,
+        "work.override" => work_override,
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
         "work.renew" => work_renew, "work.retry" => work_retry,
     }
@@ -3177,6 +3238,12 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["slo", "ls"],
         vec!["slo", "explain", "cpu"],
         vec!["slo", "chart", "cpu", "--over", "1h", "--width", "20"],
+        vec!["series", "--kind", "custom.acme.arrived", "--from", "1000", "--to", "4000"],
+        vec![
+            "series", "--kind", "custom.acme.arrived", "--kind", "custom.acme.resolved",
+            "--subject-prefix", "custom/acme/inbox/", "--group-by", "type",
+            "--from", "1000", "--to", "4000", "--bucket-seconds", "1",
+        ],
         vec!["terminals", "ls"],
         vec!["machines"],
         vec!["launch", "ls"],
@@ -3234,6 +3301,20 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 assert_eq!(response["value"]["mission"], "mission/example/inspect");
                 assert_eq!(response["value"]["person"], PERSON);
                 assert_eq!(response["value"]["inclusive"], 0);
+            }
+            if command.first() == Some(&"series") {
+                let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(response["from"], 1000);
+                assert_eq!(response["to"], 4000);
+                let grouped = command.contains(&"--group-by");
+                assert_eq!(response["bucket_seconds"], if grouped { 1 } else { 86_400 });
+                let buckets = response["buckets"].as_array().unwrap();
+                assert_eq!(buckets.len(), if grouped { 3 } else { 1 });
+                assert!(buckets.iter().all(|bucket| bucket["count"] == 0));
+                if grouped {
+                    assert_eq!(response["group_by"], "type");
+                    assert!(buckets.iter().all(|bucket| bucket["groups"] == json!([])));
+                }
             }
         }
         daemon.restart().await;
@@ -3387,17 +3468,37 @@ async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
             family, "rename-id", from, to, "--as", "person/robin",
             "--reason", "Clarify responsibility", "--idempotency-key", &key,
         ];
+        let before_plan = daemon.store().index().unwrap();
+        let mut plan_arguments = arguments.to_vec();
+        plan_arguments.push("--plan");
+        let plan = cli_value(daemon.cli("person/robin", &plan_arguments).await);
+        assert_eq!(plan["admissible"], true);
+        assert_eq!(plan["request"]["from"], from);
+        assert_eq!(plan["request"]["to"], to);
+        assert_eq!(daemon.store().index().unwrap(), before_plan);
+        let digest = plan["request_digest"].as_str().unwrap();
         let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(receipt["identity"], from);
         assert_eq!(receipt["canonical_id"], to);
         assert_eq!(receipt["applied"], "renamed");
         let claims = daemon.store().claims_for(from, None).unwrap();
         assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let proof_arguments = [family, "rename-proof", from, to, "--request-digest", digest];
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["request_digest"], digest);
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["claim"]["body"]["fields"]["request"], plan["request"]);
         let index = daemon.store().index().unwrap();
         daemon.restart().await;
         let replay = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(replay["claim_id"], receipt["claim_id"]);
         assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+        let proof = cli_value(daemon.cli("person/robin", &proof_arguments).await);
+        assert_eq!(proof["availability"], "selected");
+        assert_eq!(proof["claim_id"], receipt["claim_id"]);
+        assert_eq!(proof["request_digest"], digest);
         assert_eq!(daemon.store().index().unwrap(), index);
     }
 }
@@ -4829,7 +4930,7 @@ async fn cli_service_install_status_restart_reset_uninstall_use_isolated_manager
     let manager = root.path().join("bin/systemctl");
     std::fs::write(&manager, r#"#!/bin/sh
 exec python3 - "$@" <<'PY'
-import os, pathlib, signal, subprocess, sys, time
+import json, os, pathlib, signal, subprocess, sys, time
 root = pathlib.Path(os.environ['ST3_COVERAGE_ROOT'])
 args = sys.argv[1:]
 with (root / 'manager.log').open('a') as log: log.write(' '.join(args) + '\n')
@@ -4850,12 +4951,15 @@ def start():
     log = (root / 'daemon.log').open('ab')
     child = subprocess.Popen([os.environ['ST3_COVERAGE_BINARY'], 'up', '--config', str(root / 'config/st3/config.toml'), '--pty-binary', str(root / 'bin/pty')], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(child.pid))
-if 'show' in args:
-    unit = next((arg for arg in args if arg.endswith('.service')), '')
-    if not (root / 'config/systemd/user' / unit).is_file():
-        print('LoadState=not-found\nActiveState=inactive\nSubState=dead')
-        sys.exit(4)
-    print('LoadState=loaded\nActiveState=active\nSubState=running')
+if 'list-units' in args:
+    print(json.dumps([{'unit':file.name, 'load':'loaded', 'active':'active', 'sub':'running'}
+        for file in (root / 'config/systemd/user').glob('*.service')]))
+elif 'show' in args:
+    for unit in (arg for arg in args if arg.endswith('.service')):
+        if not (root / 'config/systemd/user' / unit).is_file():
+            print(f'Id={unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n')
+            sys.exit(4)
+        print(f'Id={unit}\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=0\nControlGroup=\n')
 elif 'st3-replication.service' in args and not (root / 'config/systemd/user/st3-replication.service').exists():
     print('Failed to stop st3-replication.service: Unit not loaded.', file=sys.stderr)
     sys.exit(5)
@@ -4905,6 +5009,7 @@ PY
             .env("XDG_STATE_HOME", root.path().join("state"))
             .env("XDG_DATA_HOME", root.path().join("data"))
             .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .env("SYSTEMD_UNIT_PATH", root.path().join("config/systemd/user"))
             .env("ST3_COVERAGE_ROOT", root.path())
             .env("ST3_COVERAGE_BINARY", test_bin!("fractal-fixture"))
             .args(args);
@@ -4929,6 +5034,15 @@ PY
         }
         if action == "reset" {
             std::fs::write(config.state_dir.join("must-be-erased"), "old state").unwrap();
+        }
+        if action == "uninstall" {
+            // The daemon disable invalidates its initial snapshot. The absent
+            // optional worker's failed disable must await fresh admission,
+            // rather than aborting before removing the installed daemon.
+            let worker = root.path().join("config/systemd/user/st3-replication.service");
+            if worker.exists() {
+                std::fs::remove_file(worker).unwrap();
+            }
         }
         let output = run(args).await;
         assert!(

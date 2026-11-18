@@ -71,7 +71,7 @@ mod managed_declaration_tests {
     use super::*;
 
     fn api_error(code: ClientErrorCode) -> GeneratedClientError {
-        let envelope = fractal_client::ErrorEnvelope {
+        let envelope = fractal_client::ErrorEnvelope { applied: None,
             api_version: "st3.client.v0".into(),
             error_version: "st3.client.error.v0".into(),
             request_id: "test".into(),
@@ -2007,7 +2007,7 @@ async fn run_pi_channel(
                 let mut report: Value = serde_json::from_str(&native_delivery_report(&transport, None))?;
                 report["ready"] = json!(state.first_idle_seen && state.failed_handoffs.is_empty());
                 if !state.first_idle_seen {
-                    report["reason"] = json!("the channel has not received the provider's initial idle proof");
+                    report["reason"] = json!("the channel has not received the provider's handoff readiness proof");
                 } else if !state.failed_handoffs.is_empty() {
                     report["reason"] = json!("the provider rejected a native handoff; the channel keeps retrying");
                 }
