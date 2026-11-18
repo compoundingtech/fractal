@@ -88,7 +88,7 @@ pub fn evaluate_at(
         // Only this runtime's seat suffix, selected declaration, and its indexed step subjects.
         // Stream duplicate reports but fold only semantic changes: heartbeat timestamps and
         // transition counters cannot make N repeated quiet reports trigger N harness folds.
-        let mut statement = connection.prepare_cached(&canonical_sql(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6af3a204dd01 owner=fractal_store::residency TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT claims.store_index, claims.accepted_at_unix_ms, claims.kind,
                     CASE WHEN kind='harness.observed' THEN json_array(
                         json_extract(body,'$.fields.state'),json_extract(body,'$.fields.driver'),
@@ -241,7 +241,7 @@ fn refusal_at(connection: &Connection, subject: &str, cut: u64, after: Option<u6
     if !matches!(harness.state.as_str(), "idle" | "ready") {
         return Ok(Some("harness-busy"));
     }
-    let latest: Option<String> = connection.prepare_cached(&canonical_sql(
+    let latest: Option<String> = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9dc8df36b4a2 owner=fractal_store::residency TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT json_object('background_jobs',json_extract(body,'$.fields.background_jobs'),
             'quiescent',json_type(body,'$.fields.quiescent'),
             'blocking',json_extract(body,'$.fields.blocking'),
@@ -249,7 +249,7 @@ fn refusal_at(connection: &Connection, subject: &str, cut: u64, after: Option<u6
          FROM claims WHERE subject=?1 AND kind='harness.observed'
          AND store_index<=?2 AND json_extract(body,'$.fields.incarnation_id')=?3
          ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-    ))?.query_row(params![subject, cut, incarnation], |row| row.get(0)).optional()?;
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h71dc350f789b owner=fractal_store::residency TODO=trace-statement-and-value-representation */ params![subject, cut, incarnation], |row| row.get(0)).optional()?;
     let Some(latest) = latest else { return Ok(Some("harness-unobserved")); };
     let report: Value = serde_json::from_str(&latest)?;
     let fields = report.get("fields").unwrap_or(&report);
@@ -261,22 +261,22 @@ fn refusal_at(connection: &Connection, subject: &str, cut: u64, after: Option<u6
     if fields["quiescent"] != "true" || !fields["blocking"].as_array().is_some_and(Vec::is_empty) {
         return Ok(Some("native-not-quiet"));
     }
-    let readiness: Option<String> = connection.prepare_cached(&canonical_sql(
+    let readiness: Option<String> = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3c04c7174fbc owner=fractal_store::residency TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT json_extract(body,'$.fields.code') FROM claims WHERE subject=?1
          AND store_index<=?2 AND kind='harness.diagnostic'
          AND json_extract(body,'$.fields.incarnation_id')=?3
          AND json_extract(body,'$.fields.code') IN ('omp-channel-ready','omp-channel-unready')
          ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-    ))?.query_row(params![subject, cut, incarnation], |row| row.get(0)).optional()?;
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-hbfaf663e1973 owner=fractal_store::residency TODO=trace-statement-and-value-representation */ params![subject, cut, incarnation], |row| row.get(0)).optional()?;
     if fields["transport"] != "omp-channel" || readiness.as_deref() != Some("omp-channel-ready") {
         return Ok(Some("channel-unready"));
     }
-    let binding: Option<(Option<String>, Option<String>)> = connection.prepare_cached(&canonical_sql(
+    let binding: Option<(Option<String>, Option<String>)> = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7b1756b2a4ba owner=fractal_store::residency TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT json_extract(body,'$.fields.harness'),json_extract(body,'$.fields.session_id')
          FROM claims WHERE subject=?1 AND kind='harness.session-file'
          AND store_index<=?2 AND json_extract(body,'$.fields.incarnation_id')=?3
          ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-    ))?.query_row(params![subject, cut, incarnation], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    ))?.query_row(/* sqlite-large-value: allow-for-now lv-h22c40f569516 owner=fractal_store::residency TODO=trace-statement-and-value-representation */ params![subject, cut, incarnation], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
     if binding.as_ref().is_none_or(|(harness, session)| {
         harness.as_deref() != Some("omp") || session.as_deref().is_none_or(str::is_empty)
     }) {
@@ -294,7 +294,7 @@ fn refusal_at(connection: &Connection, subject: &str, cut: u64, after: Option<u6
 }
 
 fn claimed_work_at(connection: &Connection, subject: &str, cut: u64, steps: &[String], as_of: u128) -> Result<bool> {
-    let mut history = connection.prepare_cached(&canonical_sql(
+    let mut history = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1f92ed1a5e88 owner=fractal_store::residency TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT json_extract(body,'$.fields.status'),
                 json_type(body,'$.fields.claimant') IS NOT NULL,
                 json_extract(body,'$.fields.claimant'),
