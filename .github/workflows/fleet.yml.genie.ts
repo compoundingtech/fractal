@@ -536,7 +536,7 @@ fi`,
         {
           name: 'Record effective bundled SQLite derivation environment',
           run: `nix derivation show .#packages.x86_64-linux.default .#packages.x86_64-linux.fractal-chatgpt .#packages.x86_64-linux.fractal-fabric-adapter |
-  jq 'to_entries | map({derivation: .key, env: (.value.env | {pname, dontCargoUseSystemLibs, LIBSQLITE3_SYS_USE_PKG_CONFIG, buildInputs})})'`,
+  jq '.derivations | to_entries | map({derivation: .key, env: (.value.env | {pname, dontCargoUseSystemLibs, LIBSQLITE3_SYS_USE_PKG_CONFIG, buildInputs})})'`,
         },
         {
           name: 'Build bundled SQLite packages, including fractal-migrate',
