@@ -92,11 +92,11 @@ describe('graph lowering golden parity', () => {
       return completed(key)
     } })
     const compiled = lower(diamond(), bindings)
-    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success' })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
     expect(entered).toEqual(['inspect', 'code', 'docs', 'finish'])
     expect(host.recorded.map((entry) => entry.key).sort()).toEqual(['code', 'docs', 'finish', 'inspect'])
     const replay = fakeHost({ payload: {}, journal: journalOf(host.recorded) })
-    expect(yield* start(compiled, replay)).toEqual({ _tag: 'Success' })
+    expect(yield* start(compiled, replay)).toEqual({ _tag: 'Success', value: null })
     expect(replay.recorded).toEqual([])
   }))
 
@@ -108,7 +108,7 @@ describe('graph lowering golden parity', () => {
       expect(request.request).toMatchObject({ version: 1, type: 'decision', answers: [ { id: 'approve', outcome: 'accept' }, { id: 'reject', outcome: 'decline' } ] })
       return { _tag: 'Success', value: { resolved_by: 'person/owner', answer: { type: 'decision', outcome: 'accept', id: 'approve' } } }
     }, child: async ({ key }) => { events.push(key); return completed(key) } })
-    expect(yield* start(lower(renewal(), bindings), host)).toEqual({ _tag: 'Success' })
+    expect(yield* start(lower(renewal(), bindings), host)).toEqual({ _tag: 'Success', value: null })
     expect(events).toEqual(['approve', 'renew'])
     expect(host.recorded.map((entry) => entry.key)).toEqual(['approve', 'renew'])
     for (const answer of [
@@ -130,9 +130,9 @@ describe('graph lowering golden parity', () => {
         'resource/mission-run/child/review/evidence': { kind: 'custom.example.evidence', present: true },
       } } }
     } })
-    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success' })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
     expect(host.recorded.map((entry) => entry.key)).toEqual(['review', 'review/product', 'check'])
-    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded) }))).toEqual({ _tag: 'Success' })
+    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded) }))).toEqual({ _tag: 'Success', value: null })
     const noGo = journalOf(host.recorded.slice(0, 1)).map(([key, exit]) => [key, exit._tag === 'Success' ? { ...exit, value: { ...(exit.value as object), products: {
       'resource/mission-run/child/review/abc/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'NO-GO' },
       'resource/mission-run/child/review/evidence': { kind: 'custom.example.evidence', present: true },
@@ -152,10 +152,10 @@ describe('graph lowering golden parity', () => {
       commands.push({ argv, options })
       return { code: 0, signal: null, stdout: '', stderr: '' }
     } })
-    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success' })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
     expect(commands).toEqual([{ argv: ['sh', '-c', 'test "$HEAD" = "abc"'], options: { cwd: '/work', env: { HEAD: 'abc' } } }])
     expect(host.recorded.map((entry) => entry.key)).toEqual(['verify', 'verify/gate/0'])
-    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded), spawn: async () => { throw new Error('must not replay command') } }))).toEqual({ _tag: 'Success' })
+    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded), spawn: async () => { throw new Error('must not replay command') } }))).toEqual({ _tag: 'Success', value: null })
     const failed = fakeHost({ payload: { head: 'abc' }, child: async ({ key }) => completed(key), spawn: async () => ({ code: 1, signal: null, stdout: '', stderr: '' }) })
     expect(yield* start(compiled, failed)).toMatchObject({ _tag: 'Failure', error: { _tag: 'GraphGateFailed', step: 'verify', gate: 'exact-head' } })
     expect(failed.recorded.at(-1)).toMatchObject({ key: 'verify/gate/0', status: 'failed' })
@@ -190,7 +190,7 @@ describe('typed compile refusals', () => {
       expect(input).toEqual({ goal: 'requested change', instructions: 'Implement requested change.' })
       return completed(key)
     } })
-    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success' })
+    expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
   }))
 
   it('uses explicit source-reference resolution and refuses a missing resolver', () => {
