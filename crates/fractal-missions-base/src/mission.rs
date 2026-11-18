@@ -3793,7 +3793,7 @@ mod tests {
     fn inline_escalation_rejects_invalid_policies_and_duplicate_blocks() {
         let policy = r#"policy "p" state="claimed" clock="since-progress" { stage "1m" notify="agent/example/manager"; }"#;
         for body in [
-            format!("{policy} {policy}"),
+            format!("{policy}\n{policy}"),
             policy.replace("since-progress", "activation-age"),
             policy.replace("claimed", "unknown"),
             policy.replace("stage \"1m\" notify=\"agent/example/manager\";", ""),
