@@ -43,8 +43,12 @@ Focused certainty and pure client tests use the existing workspace Vitest depend
 `CI=1 node_modules/.bin/vitest run --config clients/typescript/fractal-client/vitest.config.ts`
 from the repository root.
 
-The pure outbox core is exported separately from immediate delivery. It provides no
-storage adapter, startup worker, signing service, or server reconciliation endpoint:
+The pure outbox core is exported from `@fractal/client/outbox`, and packet preparation
+from `@fractal/client/prepared-packet`. Web and native consumers must import their
+values and types from these subpaths, not `@fractal/client`: the root intentionally
+does not re-export write-path helpers, keeping them outside the SDK's eager read graph.
+These modules provide no storage adapter, startup worker, signing service, or server
+reconciliation endpoint:
 
 - `OutboxRepository<TPacket>` binds `commit`, revision-based `compareAndSwap`,
   `list`, and `read` permanently to an original principal/deployment/member scope.

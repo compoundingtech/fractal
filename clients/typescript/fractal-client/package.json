@@ -18,6 +18,8 @@
     "./schema/read": "./ReadSchema.generated.ts",
     "./markdown": "./markdown-text.ts",
     "./fabric": "./fabric.mjs",
+    "./outbox": "./outbox.ts",
+    "./prepared-packet": "./preparedPacket.ts",
     "./test-support": "./testSupport.ts"
   },
   "peerDependencies": {

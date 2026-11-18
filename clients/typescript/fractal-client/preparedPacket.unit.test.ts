@@ -8,13 +8,13 @@ import {
     prepareMessageSendPacket,
     prepareThreadReplyPacket,
     prepareThreadStartPacket,
-} from './preparedPacket.ts';
+} from '@fractal/client/prepared-packet';
 import type {
     PreparedMessageSendPacket,
     PreparedPacket,
     PreparedThreadReplyPacket,
     PreparedThreadStartPacket,
-} from './preparedPacket.ts';
+} from '@fractal/client/prepared-packet';
 
 const fence = {
     snapshot_id: 'snapshot/original',
