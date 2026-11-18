@@ -613,7 +613,7 @@ objective "delivery/ready-to-merged" {
       allowance: 0.05, horizon: '30d', minCoverage: 0.9, minSamples: 1,
       fast: { burnRate: 14.4, long: '1h', short: '5m' },
       slow: { burnRate: 6, long: '6h', short: '30m' },
-    }
+    } as const
     for (const measurement of ['only', 'targeted'] as const) {
       expect(() => render({
         name: 'delivery/merged', about: 'Merge count',
