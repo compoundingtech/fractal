@@ -11245,6 +11245,11 @@ pub fn request_suspend(
     {
         return Ok(prior);
     }
+    if let Some(prior) = state.store.suspension_manual_request(&subject, &key)
+        .map_err(ApiError::internal)?
+    {
+        return Ok(prior);
+    }
     if crate::rollout::status(&state.store, &subject)
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
@@ -11267,11 +11272,6 @@ pub fn request_suspend(
         let manual_key = crate::suspension::suspend_manual_key(
             suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id),
         );
-        if let Some(prior) = state.store.operation_claim(&manual_key).map_err(ApiError::internal)?
-            && crate::suspension::field(&prior, "request_key") == Some(key.as_str())
-        {
-            return Ok(prior);
-        }
         if suspension.cause() == "idle" && suspension.phase == "suspended" {
             check_suspension_fence(
                 fence.as_ref(), suspension.incarnation_id.as_deref(), &token,
