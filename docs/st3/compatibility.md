@@ -42,10 +42,10 @@ Client-v0 exposes both strings as optional fields.
 
 These are readers for [idle residency](https://github.com/compoundingtech/fractal/pull/6720):
 no automatic idle or in-place writer is activated here. All active members must gain these
-readers before those writers are enabled. Older daemons ignore conversion receipts and have
-only manual suspension behavior; that is not proof of safety after automatic wake is enabled.
-The focused replication/reopen fixtures prove metadata preservation, not a deployed-version
-restart matrix. Writer activation additionally requires candidate → oldest deployed → candidate
+readers before those writers are enabled. Older registries quarantine claims carrying new
+fields as authenticated raw records, not visible holds; upgraded readers retry admission without
+rewriting them. The old-registry → reopen fixture proves preservation and re-admission, not a
+deployed-binary restart matrix. Writer activation additionally requires candidate → oldest deployed → candidate
 evidence. Downgrade is not promised; rollback is policy-off roll-forward.
 
 ### Updating the deployed-main baseline

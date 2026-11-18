@@ -11289,7 +11289,7 @@ pub fn request_suspend(
                         ("request_key".into(), json!(key)),
                         ("operation_id".into(), json!(suspension.operation_id)),
                     ]),
-                    evidence: vec![token, suspension.suspend_operation_id.clone().unwrap_or(suspension.operation_id.clone())],
+                    evidence: vec![token, suspension.suspend_operation_id.clone().unwrap_or_else(|| suspension.operation_id.clone())],
                     expected_subject: None,
                     idempotency_key: Some(manual_key),
                 },
