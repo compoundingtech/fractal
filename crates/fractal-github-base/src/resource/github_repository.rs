@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::github_http::GithubAuth;
 use super::{
     GITHUB_AUTH_REMEDY, GithubListing, ObservationRequest, ProviderObservation, github_cache_for,
-    github_client, github_graphql_with_cache_eligibility, github_json, github_listing,
+    github_client, github_graphql_nodes, github_graphql_with_cache_eligibility, github_json, github_listing,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -496,6 +496,12 @@ fn resolved_item(
     let mut facts = serde_json::Map::from_iter([("number".into(), json!(identity.number))]);
     insert(&mut facts, "node_id", node.get("id"));
     insert(&mut facts, "url", node.get("url"));
+    if node.get("deleted").and_then(Value::as_bool) == Some(true) {
+        facts.insert("state".into(), json!("closed"));
+        facts.insert("state_reason".into(), json!("deleted"));
+        facts.insert("deleted".into(), json!(true));
+        return facts;
+    }
     let state = lowercase(node.get("state"));
     facts.insert(
         "state".into(),
@@ -1690,7 +1696,7 @@ async fn observe_poll(
             let seen = cursor.already_seen(&format!("identity/{id}"), digest);
             // Cache snapshots can predate a closure or reopen just listed through REST.
             // Remember an incompatible snapshot so it cannot undo that change on the next poll.
-            if items
+            if node.get("deleted").and_then(Value::as_bool) != Some(true) && (items
                 .get(&identity.number)
                 .and_then(|item| item.facts.get("state"))
                 .is_some_and(|listed| facts.get("state") != Some(listed))
@@ -1703,7 +1709,7 @@ async fn observe_poll(
                             .and_then(|item| item.facts.get("updated_at"))
                             .and_then(Value::as_str),
                     )
-                    .is_some_and(|(detail, listed)| detail < listed)
+                    .is_some_and(|(detail, listed)| detail < listed))
             {
                 continue;
             }
@@ -2031,9 +2037,11 @@ async fn open_pull_requests(
                 Some(false) => (&issue_token, RESOLVED_ISSUES),
                 None => (&read_token, RESOLVED_ITEMS),
             };
-            let (resolved_data, request_cacheable) = github_graphql_with_cache_eligibility(client, api_base, auth, query, json!({"ids": ids})).await?;
+            let (resolved_data, request_cacheable, missing) = github_graphql_nodes(client, api_base, auth, query, json!({"ids": ids})).await?;
             cacheable &= request_cacheable;
             resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
+            // Only path-validated NOT_FOUND errors become terminal identity outcomes.
+            resolved.extend(missing.into_iter().map(|id| json!({"id": id, "deleted": true})));
         }
         identities_read = identities.len().min(identities_read + 100).min(1000);
         if !emit_pulls {
@@ -3162,6 +3170,58 @@ mod tests {
                 .iter()
                 .any(|request| request.starts_with("POST"))
         );
+    }
+
+    #[tokio::test]
+    async fn node_not_found_is_terminal_without_losing_live_nodes() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([
+            issue(1, "2026-09-10T00:00:00Z", json!({"node_id": "I_gone"})),
+            issue(2, "2026-09-10T00:00:00Z", json!({"node_id": "I_live"}))
+        ]));
+        *github.graphql.lock() = json!({
+            "data": {"nodes": [null, {"id": "I_live", "state": "OPEN", "number": 2}]},
+            "errors": [{"type": "NOT_FOUND", "path": ["nodes", 0], "message": "missing"}]
+        }).to_string();
+        let first = observe_at(request(&["issues"], None, None), &base, Some(&GithubAuth::test("test")))
+            .await.unwrap();
+        let observed = items(&first.facts, "issues");
+        let gone = observed.iter().find(|item| item["number"] == 1).unwrap();
+        assert_eq!(gone["state"], "closed");
+        assert_eq!(gone["state_reason"], "deleted");
+        assert_eq!(gone["deleted"], true);
+        assert!(observed.iter().any(|item| item["number"] == 2 && item["state"] == "open"));
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert!(!cursor.identities.contains_key("I_gone"));
+        assert!(cursor.identities.contains_key("I_live"));
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([]));
+        github.resolved_nodes(json!([{"id": "I_live", "state": "OPEN", "number": 2}]));
+        github.graphql_requests.lock().clear();
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        observe_at(request(&["issues"], first.cursor.as_deref(), None), &base, Some(&GithubAuth::test("test")))
+            .await.unwrap();
+        let requests = github.graphql_requests.lock();
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|request| request["variables"]["ids"] == json!(["I_live"])));
+    }
+
+    #[tokio::test]
+    async fn node_not_found_does_not_hide_other_errors_or_repository_failures() {
+        for error in [
+            json!({"type": "FORBIDDEN", "path": ["nodes", 0]}),
+            json!({"type": "RATE_LIMITED", "path": ["nodes", 0]}),
+            json!({"type": "NOT_FOUND", "path": ["repository"]}),
+            json!({"type": "NOT_FOUND", "path": ["nodes", 4]}),
+        ] {
+            let (github, base) = FakeGithub::start().await;
+            *github.graphql.lock() = json!({"data": {"nodes": [null]}, "errors": [
+                {"type": "NOT_FOUND", "path": ["nodes", 0]}, error
+            ]}).to_string();
+            let result = github_graphql_nodes(&github_client(), &base,
+                &GithubAuth::test("test"), RESOLVED_ITEMS, json!({"ids": ["I_gone"]})).await;
+            assert!(result.is_err());
+        }
     }
 
     #[tokio::test]

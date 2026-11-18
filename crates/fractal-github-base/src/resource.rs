@@ -947,7 +947,22 @@ pub(crate) async fn github_graphql_with_cache_eligibility(
     variables: Value,
 ) -> Result<(Value, bool)> {
     let key = format!("GraphQL {} {api_base} {query} {variables}", token.cache_principal());
-    github_poll::read(key, github_graphql_read(client, api_base, token, query, variables)).await
+    github_poll::read(key, async {
+        let (data, cacheable, _) = github_graphql_read(client, api_base, token, query, variables, false).await?;
+        Ok((data, cacheable))
+    }).await
+}
+
+/// Only identity resolution may accept missing nodes. Keep this policy out of repository reads.
+async fn github_graphql_nodes(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &GithubAuth,
+    query: &str,
+    variables: Value,
+) -> Result<(Value, bool, Vec<String>)> {
+    let key = format!("GraphQL nodes {} {api_base} {query} {variables}", token.cache_principal());
+    github_poll::read(key, github_graphql_read(client, api_base, token, query, variables, true)).await
 }
 
 async fn github_graphql_read(
@@ -956,7 +971,8 @@ async fn github_graphql_read(
     token: &GithubAuth,
     query: &str,
     variables: Value,
-) -> Result<(Value, bool)> {
+    allow_missing_nodes: bool,
+) -> Result<(Value, bool, Vec<String>)> {
     let request = client
         .post(format!("{api_base}/graphql"))
         .header("Accept", "application/vnd.github+json")
@@ -966,11 +982,36 @@ async fn github_graphql_read(
     let cacheable = crate::github_http::read_response_cacheable(&response);
     let headers = response.headers().clone();
     let body = response.json::<Value>().await?;
+    let mut missing = Vec::new();
     if let Some(errors) = body
         .get("errors")
         .and_then(Value::as_array)
         .filter(|errors| !errors.is_empty())
     {
+        if allow_missing_nodes && errors.iter().all(|error| {
+            if error["type"] != "NOT_FOUND" {
+                return false;
+            }
+            let Some(path) = error["path"].as_array() else { return false };
+            if path.len() != 2 || path[0] != "nodes" {
+                return false;
+            }
+            let Some(index) = path[1].as_u64().and_then(|index| usize::try_from(index).ok()) else {
+                return false;
+            };
+            let node = body.pointer("/data/nodes").and_then(Value::as_array).and_then(|nodes| nodes.get(index));
+            let id = variables["ids"].as_array().and_then(|ids| ids.get(index)).and_then(Value::as_str);
+            match (node, id) {
+                (Some(Value::Null), Some(id)) => {
+                    missing.push(id.to_owned());
+                    true
+                }
+                _ => false,
+            }
+        }) {
+            let data = body.get("data").cloned().context("the GitHub GraphQL response has no data")?;
+            return Ok((data, cacheable, missing));
+        }
         if errors
             .iter()
             .any(|error| error.get("type").and_then(Value::as_str) == Some("RATE_LIMITED"))
@@ -1003,7 +1044,7 @@ async fn github_graphql_read(
         .filter(|data| !data.is_null())
         .cloned()
         .context("the GitHub GraphQL response has no data")?;
-    Ok((data, cacheable))
+    Ok((data, cacheable, missing))
 }
 
 pub use crate::github_http::GITHUB_AUTH_REMEDY;

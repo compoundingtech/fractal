@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Retire missing tracked GitHub nodes without failing healthy item observations",
+  "replay": {"status": "none", "detail": "Existing observations remain unchanged."},
+  "schema": {"status": "none", "detail": "No database or cursor schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "changed", "detail": "A NOT_FOUND error at an exact tracked nodes index with a null result records state=closed, state_reason=deleted and deleted=true for that item and removes its identity from the polling cursor. Other nodes are retained. Other errors and repository-wide NOT_FOUND still fail the observation."},
+  "downtime": {"status": "none", "detail": "No migration or downtime required."},
+  "manual": {"status": "none", "detail": "Missing identities retire automatically on their next detail read."},
+  "recovery": {"status": "none", "detail": "Binary rollback requires no migration."}
+}
