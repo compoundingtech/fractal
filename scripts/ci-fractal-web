@@ -182,6 +182,7 @@ exclusive_lanes() {
   if first_shard; then
     # Replay covers the app even when no kit inputs changed; never duplicate it across kit shards.
     lane "App replay browser e2e" node apps/fractal-web/scripts/replay-e2e.mjs
+    lane "App durable outbox crash e2e" node --test --test-concurrency=1 --test-timeout=180000 apps/fractal-web/scripts/outbox-crash.browser-test.mjs
     lane "SDK frame CPU budgets" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.perf.config.ts
   fi
   if [ "${KIT_INPUTS:-true}" = true ]; then

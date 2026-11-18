@@ -703,6 +703,33 @@ tombstones last another thirty days. Explicit dismissal preserves uncertainty in
 it does not cancel an action. Quota exhaustion refuses new acceptance without evicting old work.
 The storage adapter itself performs no upload, signing, dispatch or retry.
 
+The real-browser outbox crash proof is
+`apps/fractal-web/scripts/outbox-crash.browser-test.mjs`. It follows the app replay
+e2e infrastructure: a Vite development server, Playwright, actual browser IndexedDB
+and the production sender/recovery modules. Hosted web CI runs it serially on shard 0
+after the lightweight streams, independently of the kit-input decision. Run it with
+`node --test --test-concurrency=1 --test-timeout=180000 apps/fractal-web/scripts/outbox-crash.browser-test.mjs`;
+the existing `PLAYWRIGHT_MODULE` and optional `CHROMIUM_PATH` overrides select an
+already installed browser without downloading one.
+
+The harness closes the page at deterministic fixture-only transaction or HTTP
+boundaries, then opens a new page in the same browser context. Chat and thread Start
+prove that prepared packet bytes, keys and fingerprints survive, never-dispatched
+attempts need explicit recipient revalidation, and two tabs consume only one dispatch
+permit. Browser producers are unsigned: nonce/signature absence is asserted unchanged,
+not represented as a signature-generation test. Network-level action POST counts
+distinguish a committed permit before fetch from an actual request on the wire.
+
+The HTTP peer is a schema-checked canonical protocol fixture, not a real daemon.
+The storage transactions, page-owner loss, sender, receipt validation and recovery UI
+are real browser code; server-side effects and daemon restart are not proved here.
+After a request leaves, or a valid receipt arrives before the local outcome commits,
+startup must retain unknown without another POST. The missing original-member
+correlated outcome-read capability means the receipt-before-local-commit case cannot
+reconcile to delivered: this is an expected limitation, not a passing reconciliation
+test. Page close does not simulate browser eviction, site-data clearing, power loss,
+or an operating-system process kill.
+
 Only `grants.messageSend` authorizes the composer. An absent send port shows Unknown, and
 non-retryable refusals disable new submissions with their classified human-readable reason. Retryable send failures
 belong only to the failed row; they neither disable the next draft nor replace its footer help.

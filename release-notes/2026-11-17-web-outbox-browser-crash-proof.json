@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Exercise durable browser outbox crash boundaries in hosted web CI",
+  "replay": {"status": "none", "detail": "The browser harness asserts that unresolved dispatched attempts never produce another action POST after page-owner loss. No production replay behavior changes."},
+  "schema": {"status": "none", "detail": "No browser or server storage schema changes. The fixture HTTP peer uses canonical schema-checked protocol envelopes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Production behavior is unchanged. The test-only Vite entry exercises real chat and thread Start senders, browser IndexedDB, receipt validation and recovery UI."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator action or browser installation is required for deployed clients."},
+  "recovery": {"status": "none", "detail": "Crash tests verify exact prepared-packet persistence, unknown delivery after permit consumption or network activity, explicit revalidation of pending attempts, and single dispatch across two tabs. Receipt-before-local-commit remains unknown because no original-member correlated outcome-read capability is available. The HTTP peer is a protocol fixture, not proof of real daemon effects or restart; page close does not prove operating-system crash or power-loss durability."}
+}
