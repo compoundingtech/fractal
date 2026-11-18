@@ -822,6 +822,7 @@ async fn drive_st2_native_loop(
     task: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
     let settle = loop_state.settle;
+    paths.delivery_gate.bind_incarnation(&incarnation);
     let NativePaths {
         session_dir,
         agent_dir,
@@ -1630,6 +1631,33 @@ async fn publish_harness_state(
     Ok(())
 }
 
+fn activate_channel_input_acceptance(
+    catalog: &Path, subject: &str, state: &mut PiChannelResume,
+) -> Result<()> {
+    let seat = hex::encode(Sha256::digest(subject.as_bytes()));
+    let incarnation = hex::encode(Sha256::digest(state.incarnation.as_bytes()));
+    let dir = catalog.join(".st3-input-acceptance").join(seat).join(incarnation);
+    fs::create_dir_all(&dir)?;
+    if let Some(previous) = &state.pending.input_source_dir {
+        if previous != &dir {
+            for (message, timestamp) in fractal_drivers::native_channel::input_attempts(previous)? {
+                fractal_drivers::native_channel::record_input_attempt(&dir, &message, timestamp)?;
+            }
+            for (message, timestamp) in fractal_drivers::native_channel::input_acceptances(previous)? {
+                fractal_drivers::native_channel::record_input_acceptance(&dir, &message, timestamp)?;
+            }
+        }
+    } else {
+        for message in &state.delivered {
+            fractal_drivers::native_channel::record_input_attempt(&dir, message, None)?;
+        }
+    }
+    state.pending.input_acceptances =
+        fractal_drivers::native_channel::input_acceptances(&dir)?;
+    state.pending.input_source_dir = Some(dir);
+    Ok(())
+}
+
 fn activate_channel_todo_observations(
     catalog: &Path, subject: &str, state: &mut PiChannelResume,
 ) -> Result<NativeObservations> {
@@ -1750,6 +1778,7 @@ async fn run_pi_channel(
     } else {
         None
     };
+    activate_channel_input_acceptance(catalog, subject, &mut state)?;
     let mut last_warning = PiChannelWarnings::default();
     let mut todo_observations = None;
     if driver == "omp" && observer.is_none() {
@@ -2081,7 +2110,7 @@ async fn run_pi_channel(
                             continue;
                         }
                     };
-                    let frame = pi_family_message_frame(&message, &body, identity, &attachments);
+                    let frame = pi_family_message_frame(&message, &body, identity, &incarnation, &attachments);
                     if let Some(text) = frame["content"].as_str()
                         && let Err(error) = publish_native_invocation_input(
                             client, subject, &incarnation, &message, text,
@@ -2089,6 +2118,7 @@ async fn run_pi_channel(
                     {
                         warn_pi_channel(subject, &error, &mut last_warning);
                     }
+                    state.record_input_attempt(&message.subject)?;
                     stdout.write_all(serde_json::to_string(&frame)?.as_bytes()).await?;
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;

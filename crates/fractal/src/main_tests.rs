@@ -613,6 +613,99 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
 }
 
 #[test]
+fn pi_family_acceptance_storage_is_independent_of_optional_todo_observation() {
+    for mode in ["pi", "omp-observed", "omp-todo"] {
+        let root = tempfile::tempdir().unwrap();
+        let subject = format!("agent/{mode}");
+        let mut state = PiChannelResume {
+            incarnation: "runtime-a".into(),
+            ..Default::default()
+        };
+        activate_channel_input_acceptance(root.path(), &subject, &mut state).unwrap();
+        let source = state.pending.input_source_dir.clone().unwrap();
+        if mode == "omp-todo" {
+            state.todo_outbox = Some(prepare_channel_todo_outbox(root.path(), &subject, "runtime-a").unwrap());
+        }
+        // Both Pi and observed OMP run without the optional todo observer; stopping it must
+        // also leave the mandatory pre-frame and acceptance ingress paths fully functional.
+        state.todo_outbox = None;
+        state.record_input_attempt("message/first").unwrap();
+        let mut observer = None;
+        accept_managed_channel_frame(&mut state, &mut observer, &json!({
+            "type":"delivered", "meta":{"messageId":"message/first","inputIncarnation":"runtime-a"},
+            "acceptedAtUnixMs":123,
+        }).to_string(), &subject).unwrap();
+        assert_eq!(state.pending.input_acceptances["message/first"], 123, "{mode}");
+        assert_eq!(fractal_drivers::native_channel::input_acceptances(&source).unwrap()["message/first"], 123);
+        prepare_channel_todo_outbox(root.path(), &subject, "runtime-b").unwrap();
+        assert!(source.join("input-attempts.json").is_file(), "todo cleanup removed {mode} acceptance evidence");
+        let mut replacement = PiChannelResume { incarnation:"runtime-b".into(), ..Default::default() };
+        activate_channel_input_acceptance(root.path(), &subject, &mut replacement).unwrap();
+        assert_ne!(replacement.pending.input_source_dir.as_ref(), Some(&source));
+        assert!(source.join("input-acceptances.json").is_file(), "restart removed old source evidence");
+    }
+}
+
+#[test]
+fn native_input_acceptance_uses_source_clock_and_replays_durable_first_timestamp() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = PiChannelResume {
+        incarnation: "runtime-a".into(),
+        pending: PiFamilyReports {
+            input_source_dir: Some(root.path().into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut observer = None;
+    // Historical delivered/read frames have no native clock, so cannot become certificates.
+    accept_managed_channel_frame(&mut state, &mut observer,
+        r#"{"type":"delivered","meta":{"messageId":"message/example"}}"#, "agent/example").unwrap();
+    assert!(state.pending.input_acceptances.is_empty());
+    for timestamp in [123, 999] {
+        let frame = json!({"type":"delivered","meta":{"messageId":"message/example","inputIncarnation":"runtime-a"},
+            "acceptedAtUnixMs":timestamp}).to_string();
+        accept_managed_channel_frame(&mut state, &mut observer, &frame, "agent/example").unwrap();
+    }
+    let stale = json!({"type":"delivered","meta":{"messageId":"message/old","inputIncarnation":"runtime-b"},
+        "acceptedAtUnixMs":100}).to_string();
+    accept_managed_channel_frame(&mut state, &mut observer, &stale, "agent/example").unwrap();
+    assert!(!state.pending.input_acceptances.contains_key("message/old"));
+    assert_eq!(state.pending.input_acceptances["message/example"], 123);
+    let recovered = fractal_drivers::native_channel::input_acceptances(root.path()).unwrap();
+    assert_eq!(recovered["message/example"], 123);
+    let resumed: PiChannelResume =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(resumed.pending.input_acceptances, recovered);
+}
+
+#[tokio::test]
+async fn native_acceptance_outage_retains_certificate_before_any_source_frontier_ack() {
+    let root = tempfile::tempdir().unwrap();
+    fractal_drivers::native_channel::record_input_attempt(
+        root.path(), "message/example", Some(100)).unwrap();
+    fractal_drivers::native_channel::record_input_acceptance(
+        root.path(), "message/example", 123).unwrap();
+    let fence = fractal_daemon::mailbox::Fence::new("agent/example", "runtime-a", "delivery");
+    let mut reports = PiFamilyReports {
+        fence: Some(fence),
+        input_source_dir: Some(root.path().into()),
+        input_source_ready: true,
+        input_acceptances: fractal_drivers::native_channel::input_acceptances(root.path()).unwrap(),
+        acknowledgements: BTreeSet::from(["message/example".into()]),
+        ..Default::default()
+    };
+    let client = Client::new(Endpoint::Unix(root.path().join("absent-daemon.sock")));
+    assert!(reports.publish(&client, "agent/example", "pi", "runtime-a", "native").await.is_err());
+    assert_eq!(reports.input_acceptances["message/example"], 123);
+    assert!(reports.acknowledgements.contains("message/example"),
+        "read/delivered cannot prune native proof before the acceptance POST is acknowledged");
+    let restored: PiFamilyReports =
+        serde_json::from_value(serde_json::to_value(reports).unwrap()).unwrap();
+    assert_eq!(restored.input_acceptances["message/example"], 123);
+}
+
+#[test]
 fn harness_todo_graph_channel_rehydrates_and_spools_only_current_binding() {
     let root = tempfile::tempdir().unwrap();
     fractal_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
@@ -1884,7 +1977,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         status_from: None,
         attachments: Vec::new(),
     };
-    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", &[]);
+    let omp = pi_family_message_frame(&message, "FACT QUARTZ", "run-1/wake.omp-2", "runtime-1", &[]);
     assert_eq!(omp["deliverAs"], "steer");
     assert_eq!(
         omp["content"],
@@ -2468,8 +2561,9 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
                     runtime_id: "worker",
                 }
             };
-            // Replay requires no backward staging or invented consumption receipt.
-            mailbox.pump(&client, &agent_dir, receipts).await.unwrap();
+            // Replay requires no backward staging or invented consumption receipt. The
+            // absent daemon cannot ACK a completeness frontier, but queued mail still replays.
+            assert!(mailbox.pump(&client, &agent_dir, receipts).await.is_err());
             let queued = fractal_drivers::push_mailbox::messages(
                 &agent_dir,
                 &agent_dir.join("resources/inbox"),

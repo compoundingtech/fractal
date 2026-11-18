@@ -26,6 +26,7 @@ pub mod backup;
 pub mod ask_digest_clock;
 pub mod conversation_delivery;
 pub mod external_sessions;
+pub mod gate_admission_receipts;
 pub mod recorder_receipts;
 pub mod replication_worker_build;
 pub mod launch_contract;
