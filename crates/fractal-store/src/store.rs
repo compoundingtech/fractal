@@ -20,6 +20,7 @@ pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
+pub mod idle_residency;
 pub mod launch_freeze;
 pub mod resource_membership;
 pub mod shell_resources;
@@ -879,6 +880,9 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
+CREATE INDEX IF NOT EXISTS claims_idle_action_index
+ON claims(subject, store_index)
+WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.cause')='idle';
 CREATE INDEX IF NOT EXISTS claims_suspend_manual_request_index
 ON claims(subject, json_extract(body, '$.fields.request_key'))
 WHERE kind='runtime.action.succeeded' AND json_extract(body,'$.fields.operation_status')='manual';

@@ -402,6 +402,37 @@ impl Seat {
 }
 
 #[test]
+fn idle_resume_completion_requires_incarnation_channel_readiness() {
+    let seat = Seat::new_with_owned_publication(false);
+    let (suspend, token, member) = seat.finish_suspend();
+    let request = seat.suspension_claim("runtime.action.requested",
+        json!({"action":"resume"}), vec![token, suspend], None);
+    seat.suspension_claim("runtime.action.succeeded",
+        json!({"action":"resume","operation_status":"verifying"}),
+        vec![request.id.clone()], Some(crate::suspension::resume_started_key(&request.id)));
+    let mut suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    suspension.cause = Some("idle".into());
+    let mut observation = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    observation.status = "running".into();
+    let reconciler = Reconciler::new(seat.store.clone(), seat.runtime.clone(),
+        "amber".into(), Arc::new(Notify::new()));
+    let desired = seat.desired();
+    reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
+    assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_none());
+    // A ready receipt from another incarnation is not the resumed driver's channel.
+    seat.append("harness.diagnostic", json!({
+        "driver":"omp", "code":"omp-channel-ready", "incarnation_id":"other", "reason":"confirmed"
+    }));
+    reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
+    assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_none());
+    seat.append("harness.diagnostic", json!({
+        "driver":"omp", "code":"omp-channel-ready", "incarnation_id":"original-1", "reason":"confirmed"
+    }));
+    reconciler.reconcile_suspension(&desired, &member, Some(&observation), None, &suspension).unwrap();
+    assert!(seat.store.operation_claim(&crate::suspension::resume_completed_key(&request.id)).unwrap().is_some());
+}
+
+#[test]
 fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
     let mut seat = Seat::new_with_owned_publication(false);
     seat.busy(false);
@@ -416,10 +447,18 @@ fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
         "path":transcript
     }));
     let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
-    seat.suspension_claim("runtime.action.requested", json!({
+    let request = seat.suspension_claim("runtime.action.requested", json!({
         "action":"suspend", "cause":"idle", "incarnation_id":"original-1"
     }), vec![token], None);
     let state = seat.root.path().join("state");
+    // Admission has its own owner/fleet tests. Start this filesystem recovery test at the
+    // irreversible boundary, after a real in-place capture, rather than forge admission.
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    assert_eq!(crate::seat_snapshot::capture(&state, SUBJECT, member, &suspension).unwrap(), "in-place");
+    seat.suspension_claim("runtime.action.succeeded", json!({
+        "action":"suspend", "operation_status":"snapshotting", "mode":"in-place",
+        "harness":"omp", "native_session_id":"native-one", "source_host":"amber"
+    }), vec![request.id.clone()], Some(crate::suspension::suspend_snapshot_key(&request.id)));
     for expected_phase in ["snapshotting", "suspended"] {
         let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
         let mut reconciler = Reconciler::new(
@@ -427,7 +466,9 @@ fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
         );
         reconciler.driver_state_dir = state.join("drivers");
         let observation = seat.runtime.observation.lock().unwrap().clone();
-        if suspension.phase == "snapshotting" {
+        if suspension.phase == "snapshotting"
+            && observation.as_ref().is_none_or(|observation| observation.status != "running")
+        {
             let bytes = std::fs::read(&transcript).unwrap();
             std::fs::remove_file(&transcript).unwrap();
             let error = reconciler.reconcile_suspension(
