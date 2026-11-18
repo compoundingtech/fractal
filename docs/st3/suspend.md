@@ -19,8 +19,8 @@ declaration.
 
 The suspension block in `agents show` includes its cause (`manual` or `idle`) and snapshot mode
 (`git` or `in-place`). Missing metadata in historical records means `manual` and `git`; unfamiliar
-values stay visible rather than being reclassified. This release only adds readers: ordinary
-suspend still captures Git, and no daemon automatically writes idle suspensions.
+values stay visible rather than being reclassified. Ordinary manual suspend still requires a
+Git snapshot; no daemon automatically writes idle suspensions in this prerequisite.
 
 An explicit suspend of an already idle-suspended seat converts the hold to manual, preserving
 the original suspend operation, snapshot and native session. Repeating the same request is
@@ -60,6 +60,20 @@ written what a resume reads. Suspend captures a Git snapshot commit, records the
 stops the runtime, and freezes portable transcript files after the process ends. It leaves the seat `suspended`. A suspended seat
 stays declared. Its restart policy does not restart it, `fractal agents restart` refuses it, and mail
 sent to it waits until it resumes.
+
+Idle-cause OMP operations may instead capture `in-place` when Git refuses with
+`workspace-not-git`, `workspace-unborn`, `workspace-not-root`, or
+`workspace-submodule-unsupported`. The workspace stays untouched on its source host.
+The snapshot receipt records the mode before stopping; after the stop fence, the owner freezes
+the native transcript without a Git bundle. Same-host resume validates the frozen transcript's
+digest, native session header and absolute workspace path, then launches that exact session.
+Missing or mismatched content fails rather than selecting a fresh conversation. Retrying after
+a daemon restart reuses the captured mode and checked native inventory.
+
+An in-place suspension is pinned to its source host: `resume --host` elsewhere refuses with
+`snapshot-in-place` before changing placement. Converting the suspension to manual retains
+this restriction. All active members must have the cause/mode readers before idle writers
+are enabled; this change does not enable them.
 
 An incarnation-bearing report is accepted only while the latest runtime observation records
 that incarnation as running. The writer checks this authority before replaying or deduplicating

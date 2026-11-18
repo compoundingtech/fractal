@@ -402,6 +402,48 @@ impl Seat {
 }
 
 #[test]
+fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
+    let mut seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    let desired = seat.desired();
+    let member = desired.member.as_ref().unwrap();
+    let transcript = seat.root.path().join("native-one.jsonl");
+    std::fs::write(&transcript, format!("{}\n", json!({
+        "type":"session", "id":"native-one", "cwd":member.workspace
+    }))).unwrap();
+    seat.append("harness.session-file", json!({
+        "harness":"omp", "session_id":"native-one", "incarnation_id":"original-1",
+        "path":transcript
+    }));
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"original-1"
+    }), vec![token], None);
+    let state = seat.root.path().join("state");
+    for expected_phase in ["snapshotting", "suspended"] {
+        let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+        let mut reconciler = Reconciler::new(
+            seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+        );
+        reconciler.driver_state_dir = state.join("drivers");
+        let observation = seat.runtime.observation.lock().unwrap().clone();
+        reconciler.reconcile_suspension(
+            &desired, member, observation.as_ref(), None, &suspension,
+        ).unwrap();
+        drop(reconciler);
+        seat.reopen();
+        let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+        assert_eq!(suspension.phase, expected_phase);
+        assert_eq!(suspension.mode(), "in-place");
+        assert_eq!(suspension.native_session_id.as_deref(), Some("native-one"));
+    }
+    assert_eq!(seat.runtime.stops.lock().unwrap().len(), 1);
+    assert!(transcript.is_file());
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    assert!(crate::seat_snapshot::directory(&state, &suspension.operation_id).join("payload.tar").is_file());
+}
+
+#[test]
 fn rollout_drains_then_resumes_once_across_disk_reopens() {
     let mut seat = Seat::new();
     let original = seat.runtime.launch_contract(&seat.store, &seat.desired(), seat.desired().member.as_ref().unwrap()).unwrap();
