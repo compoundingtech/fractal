@@ -402,6 +402,94 @@ impl Seat {
 }
 
 #[test]
+fn idle_in_place_stop_and_seal_recover_after_store_reopen() {
+    let mut seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    let desired = seat.desired();
+    let member = desired.member.as_ref().unwrap();
+    let transcript = seat.root.path().join("native-one.jsonl");
+    std::fs::write(&transcript, format!("{}\n", json!({
+        "type":"session", "id":"native-one", "cwd":member.workspace
+    }))).unwrap();
+    seat.append("harness.session-file", json!({
+        "harness":"omp", "session_id":"native-one", "incarnation_id":"original-1",
+        "path":transcript
+    }));
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"original-1"
+    }), vec![token], None);
+    let state = seat.root.path().join("state");
+    for expected_phase in ["snapshotting", "suspended"] {
+        let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+        let mut reconciler = Reconciler::new(
+            seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+        );
+        reconciler.driver_state_dir = state.join("drivers");
+        let observation = seat.runtime.observation.lock().unwrap().clone();
+        if suspension.phase == "snapshotting" {
+            let bytes = std::fs::read(&transcript).unwrap();
+            std::fs::remove_file(&transcript).unwrap();
+            let error = reconciler.reconcile_suspension(
+                &desired, member, observation.as_ref(), None, &suspension,
+            ).unwrap_err();
+            assert_eq!(crate::seat_snapshot::code(&error), "transcript-missing");
+            let retained = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+            assert!(retained.holds_seat());
+            assert_eq!(retained.phase, "snapshotting");
+            assert!(seat.runtime.starts.lock().unwrap().is_empty());
+            std::fs::write(&transcript, bytes).unwrap();
+        }
+        reconciler.reconcile_suspension(
+            &desired, member, observation.as_ref(), None, &suspension,
+        ).unwrap();
+        drop(reconciler);
+        seat.reopen();
+        let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+        assert_eq!(suspension.phase, expected_phase);
+        assert_eq!(suspension.mode(), "in-place");
+        assert_eq!(suspension.native_session_id.as_deref(), Some("native-one"));
+    }
+    assert_eq!(seat.runtime.stops.lock().unwrap().len(), 1);
+    assert!(transcript.is_file());
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    assert!(crate::seat_snapshot::directory(&state, &suspension.operation_id).join("payload.tar").is_file());
+}
+
+#[test]
+fn manual_git_snapshot_receipt_omits_mode_for_older_members() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    for args in [
+        vec!["init", "-q"],
+        vec!["-c", "core.hooksPath=", "-c", "commit.gpgsign=false",
+            "-c", "user.name=Snapshot fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-qm", "Initial"],
+    ] {
+        assert!(std::process::Command::new("git").args(args)
+            .current_dir(seat.root.path()).status().unwrap().success());
+    }
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    let request = seat.suspension_claim("runtime.action.requested", json!({
+        "action":"suspend", "incarnation_id":"original-1"
+    }), vec![token], None);
+    let desired = seat.desired();
+    let member = desired.member.as_ref().unwrap();
+    let mut reconciler = Reconciler::new(
+        seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+    );
+    // Keep snapshot output outside the workspace it captures.
+    let state = tempfile::tempdir().unwrap();
+    reconciler.driver_state_dir = state.path().join("drivers");
+    let suspension = crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap();
+    let observation = seat.runtime.observation.lock().unwrap().clone();
+    reconciler.reconcile_suspension(&desired, member, observation.as_ref(), None, &suspension).unwrap();
+    let receipt = seat.store.operation_claim(&crate::suspension::suspend_snapshot_key(&request.id)).unwrap().unwrap();
+    assert!(receipt.body["fields"].get("mode").is_none());
+    assert_eq!(crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap().mode(), "git");
+}
+
+#[test]
 fn rollout_drains_then_resumes_once_across_disk_reopens() {
     let mut seat = Seat::new();
     let original = seat.runtime.launch_contract(&seat.store, &seat.desired(), seat.desired().member.as_ref().unwrap()).unwrap();
