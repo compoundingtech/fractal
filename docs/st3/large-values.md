@@ -98,6 +98,27 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Person cancellation projection repair (PR #6672)
+
+The `fractal_store::store` maintainer owns `lv-h7f69e83e8327`, the literal
+one-time migration marker in `meta`, and the existing `lv-hc9b442dfc294`
+predecessor existence reader. The latter binds an existing claim identity and
+reads only a boolean; it does not materialize a body. `flow-h1f241b496964`
+now includes suppression of local projection timestamp normalization for
+causally derived cancellation effects. This preserves claim admission and
+does not create a new payload representation. Reference conversion must retain
+exact predecessor lookup and canonical replay/local timestamp agreement.
+
+The `fractal_seats::store::person_work` maintainer owns fixture-only
+`lv-h1be5f67a49da`, `lv-h29fc8987584d`, `lv-h4477e8df1206`,
+`lv-h7cb24bb2ce91`, `lv-h7f6f0e52476e` and `lv-h84685552bc74`.
+These delete the literal migration marker, set the historical step status by
+existing subject identity, or install aborting triggers proving reopen does
+not repeat repair or alter retained claims. They retain existing inline
+subject/meta values rather than introduce new variable payloads. Encoded key
+sizes remain unproven; future reference/keyed reclamation work must preserve
+these exact fixture assertions and the production one-time marker semantics.
+
 ### Historical runtime cleanup receipts (PR #6690)
 
 The `fractal_store::store::runtime_cleanup` maintainer owns `lv-haba524422e8c`,
