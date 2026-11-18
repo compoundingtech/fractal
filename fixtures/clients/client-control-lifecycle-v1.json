@@ -1,0 +1,313 @@
+{
+  "version": 1,
+  "rules": [
+    "A bound grant item_id must be present and equal on every lifecycle row.",
+    "Started sequence must be strictly greater than the last observed sequence for that grant_id.",
+    "Ended and revoked are final; a subsequent started row never reactivates that grant_id.",
+    "Lifecycle only controls indicator/termination; each command still requires its own DeviceCommand.control_grant policy.",
+    "No active nonterminal lifecycle for command.grant_id means refuse without navigation or signing."
+  ],
+  "resources": [
+    {
+      "id": "client-control-grant-lifecycle/golden",
+      "kind": "client-control-grant-lifecycle",
+      "revision": "1",
+      "updated_at": "2026-11-10T12:00:00Z",
+      "grant_id": "client-control-grant/golden",
+      "item_id": "step-run/ask-golden/ask",
+      "run_id": "mission-run/golden",
+      "device": "device/test-tui",
+      "session": "client-session/test-tui",
+      "state": "started",
+      "reason": "granted",
+      "sequence": 1
+    },
+    {
+      "id": "client-control-grant-lifecycle/golden",
+      "kind": "client-control-grant-lifecycle",
+      "revision": "2",
+      "updated_at": "2026-11-10T12:00:00Z",
+      "grant_id": "client-control-grant/golden",
+      "item_id": "step-run/ask-golden/ask",
+      "run_id": "mission-run/golden",
+      "device": "device/test-tui",
+      "session": "client-session/test-tui",
+      "state": "ended",
+      "reason": "run-ended",
+      "sequence": 2
+    },
+    {
+      "id": "client-control-grant-lifecycle/golden",
+      "kind": "client-control-grant-lifecycle",
+      "revision": "3",
+      "updated_at": "2026-11-10T12:00:00Z",
+      "grant_id": "client-control-grant/golden",
+      "item_id": "step-run/ask-golden/ask",
+      "run_id": "mission-run/golden",
+      "device": "device/test-tui",
+      "session": "client-session/test-tui",
+      "state": "revoked",
+      "reason": "revoked",
+      "sequence": 3
+    }
+  ],
+  "frames": [
+    {
+      "kind": "snapshot",
+      "id": "commands",
+      "collection": "commands",
+      "snapshot": {
+        "id": "snapshot/golden",
+        "host_id": "host/fixture",
+        "store_index": 1,
+        "projection_version": "client-projection.v0",
+        "created_at": "2026-11-10T12:00:00Z"
+      },
+      "order": [
+        "client-control-grant-lifecycle/golden"
+      ],
+      "has_more": false,
+      "items": [
+        {
+          "id": "client-control-grant-lifecycle/golden",
+          "kind": "client-control-grant-lifecycle",
+          "revision": "1",
+          "updated_at": "2026-11-10T12:00:00Z",
+          "grant_id": "client-control-grant/golden",
+          "item_id": "step-run/ask-golden/ask",
+          "run_id": "mission-run/golden",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "state": "started",
+          "reason": "granted",
+          "sequence": 1
+        }
+      ]
+    },
+    {
+      "kind": "changes",
+      "id": "commands",
+      "collection": "commands",
+      "snapshot": {
+        "id": "snapshot/golden",
+        "host_id": "host/fixture",
+        "store_index": 2,
+        "projection_version": "client-projection.v0",
+        "created_at": "2026-11-10T12:00:00Z"
+      },
+      "order": [
+        "client-control-grant-lifecycle/golden"
+      ],
+      "has_more": false,
+      "upserts": [
+        {
+          "id": "client-control-grant-lifecycle/golden",
+          "kind": "client-control-grant-lifecycle",
+          "revision": "2",
+          "updated_at": "2026-11-10T12:00:00Z",
+          "grant_id": "client-control-grant/golden",
+          "item_id": "step-run/ask-golden/ask",
+          "run_id": "mission-run/golden",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "state": "ended",
+          "reason": "run-ended",
+          "sequence": 2
+        }
+      ],
+      "removes": []
+    },
+    {
+      "kind": "changes",
+      "id": "commands",
+      "collection": "commands",
+      "snapshot": {
+        "id": "snapshot/golden",
+        "host_id": "host/fixture",
+        "store_index": 3,
+        "projection_version": "client-projection.v0",
+        "created_at": "2026-11-10T12:00:00Z"
+      },
+      "order": [
+        "client-control-grant-lifecycle/golden"
+      ],
+      "has_more": false,
+      "upserts": [
+        {
+          "id": "client-control-grant-lifecycle/golden",
+          "kind": "client-control-grant-lifecycle",
+          "revision": "3",
+          "updated_at": "2026-11-10T12:00:00Z",
+          "grant_id": "client-control-grant/golden",
+          "item_id": "step-run/ask-golden/ask",
+          "run_id": "mission-run/golden",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "state": "revoked",
+          "reason": "revoked",
+          "sequence": 3
+        }
+      ],
+      "removes": []
+    }
+  ],
+  "traces": [
+    {
+      "grant_id": "client-control-grant/golden",
+      "item_id": "step-run/ask-golden/ask",
+      "steps": [
+        {
+          "command_grant_id": "client-control-grant/golden",
+          "expected": "refuse-no-active-lifecycle"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "1",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "item_id": "step-run/ask-golden/ask",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "started",
+            "reason": "granted",
+            "sequence": 1
+          },
+          "expected": "activate"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "1",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "item_id": "step-run/ask-golden/ask",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "started",
+            "reason": "granted",
+            "sequence": 1
+          },
+          "expected": "ignore-stale-started"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "0",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "item_id": "step-run/ask-golden/ask",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "started",
+            "reason": "granted",
+            "sequence": 0
+          },
+          "expected": "refuse-invalid-frame"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "2",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "item_id": "step-run/other/ask",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "started",
+            "reason": "granted",
+            "sequence": 2
+          },
+          "expected": "ignore-item-mismatch"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "2",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "started",
+            "reason": "granted",
+            "sequence": 2
+          },
+          "expected": "ignore-item-mismatch"
+        },
+        {
+          "command_grant_id": "client-control-grant/golden",
+          "expected": "allow-lifecycle-gate-only"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "2",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "item_id": "step-run/ask-golden/ask",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "ended",
+            "reason": "run-ended",
+            "sequence": 2
+          },
+          "expected": "terminate"
+        },
+        {
+          "command_grant_id": "client-control-grant/golden",
+          "expected": "refuse-terminal-lifecycle"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "4",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "item_id": "step-run/ask-golden/ask",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "started",
+            "reason": "granted",
+            "sequence": 4
+          },
+          "expected": "ignore-final-grant"
+        },
+        {
+          "resource": {
+            "id": "client-control-grant-lifecycle/golden",
+            "kind": "client-control-grant-lifecycle",
+            "revision": "3",
+            "updated_at": "2026-11-10T12:00:00Z",
+            "grant_id": "client-control-grant/golden",
+            "item_id": "step-run/ask-golden/ask",
+            "run_id": "mission-run/golden",
+            "device": "device/test-tui",
+            "session": "client-session/test-tui",
+            "state": "revoked",
+            "reason": "revoked",
+            "sequence": 3
+          },
+          "expected": "remain-terminal"
+        },
+        {
+          "command_grant_id": "client-control-grant/golden",
+          "expected": "refuse-terminal-lifecycle"
+        }
+      ]
+    }
+  ]
+}

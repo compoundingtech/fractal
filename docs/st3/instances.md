@@ -25,6 +25,30 @@ A name is 1 to 24 lowercase letters, digits and single hyphens. The flag works b
 subcommand and wins over the environment variable. Inside an instance, a different name is an
 error, so a seat of one instance cannot start another by accident.
 
+## Client-control fixture: permanently local-only
+
+The reserved `client-control-fixture` instance is a fixture-data boundary, not a
+second fleet member. Its network policy cannot be switched off in configuration.
+It refuses fleet commands before service or membership changes, never starts a
+replication worker, and never constructs a peer relay. Stale fleet membership,
+peer listeners, shared secrets or configured peers make daemon startup fail closed.
+This also applies when an explicit state directory points beneath the reserved
+instance's `.st-instance` or `.fractal-instance` directory without an instance flag.
+
+The daemon refuses fleet admission, replication export/receive (including shards),
+and peer-forwarding requests before processing their bodies or changing the store.
+The typed refusal codes are `local-only-fleet-join-refused`,
+`local-only-replication-refused` and `local-only-peer-relay-refused`.
+`GET /v1/health` reports `network_policy.mode: "local-only"` and
+`fleet_join`, `replication` and `peer_relay` all `false`. These are enforced
+restrictions, not merely a report that no peers happen to be configured.
+
+Paired clients may still reach the fixture's client socket. Local-only does not
+authorize setup, enrollment, grants, Fabric exposure or any live instance changes;
+those require their own consent and scope. Other instance names and the default
+daemon retain their existing fleet behavior.
+
+
 ## Directory discovery
 
 The daemon, CLI, standalone client and TUI share one resolver for product config

@@ -521,7 +521,7 @@ impl PersonWorkStore for Store {
             let origin_subject = origin.subject.clone();
             let identity = serde_json::to_string(&(&origin.generation, &origin_subject, origin.attempt, &input.idempotency_key)).map_err(internal)?;
             let hash = hex::encode(Sha256::digest(identity.as_bytes()));
-            let subject = format!("step-run/{}/ask-{}", generation_id_from_subject(&origin.generation), &hash[..32]);
+            let subject = fractal_store::store::person_work::attached_ask_subject(generation_id_from_subject(&origin.generation), &hash[..32]);
             if let Some(existing) = request(tx, &subject).map_err(internal)? {
                 if existing.actor.as_deref() != Some(input.actor.as_str())
                     || existing.body["fields"]["person"] != input.person
@@ -1248,8 +1248,8 @@ impl PersonWorkStore for Store {
                 serde_json::to_string(&(&input.actor, name, &input.idempotency_key))
             }.map_err(internal)?;
             let hash = hex::encode(Sha256::digest(key.as_bytes()));
-            let generation = format!("ask-{}", &hash[..32]);
-            let subject = format!("step-run/{generation}/ask");
+            let generation = fractal_store::store::person_work::independent_ask_generation(&hash[..32]);
+            let subject = fractal_store::store::person_work::independent_ask_subject(&hash[..32]);
             if let Some(existing) = request(tx, &subject).map_err(internal)? {
                 if existing.body["fields"]["person"] != input.person || existing.body["fields"]["title"] != input.title || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured

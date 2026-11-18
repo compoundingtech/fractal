@@ -13,6 +13,8 @@ use crate::model::PlannerSpec;
 
 pub mod changes;
 mod client;
+mod local_only;
+pub use local_only::{CLIENT_CONTROL_FIXTURE, LocalOnlyRefusal, NetworkOperation, NetworkPolicy};
 
 /// The per-host switch for seat lanes.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1100,6 +1102,7 @@ impl Config {
         let Some(file) = FleetFile::load(&self.state_dir)? else {
             return Ok(());
         };
+        self.network_policy().require(NetworkOperation::FleetJoin)?;
         if let Some(configured) = &self.fleet_id {
             anyhow::ensure!(
                 *configured == file.fleet_id,
@@ -1126,6 +1129,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.network_policy().validate_config(self)?;
         if let Some(usage_limits) = &self.usage_limits {
             usage_limits.validate()?;
         }
