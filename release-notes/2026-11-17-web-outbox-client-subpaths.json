@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Import browser outbox helpers through dedicated client subpaths",
+  "replay": {"status": "none", "detail": "Import boundary migration only; delivery, retry and replay behavior are unchanged."},
+  "schema": {"status": "none", "detail": "No browser or server schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Browser adapters and tests use the client's outbox and prepared-packet subpaths instead of removed root re-exports; no wire protocol or deployed client behavior changes."},
+  "downtime": {"status": "none", "detail": "No service interruption or restart is required."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes are required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery behavior changes."}
+}

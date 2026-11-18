@@ -1,4 +1,6 @@
-import { actionReceiptCheck, appliedAnswer, observeOutbox, type ActionReceiptExpectation, type FractalClient, type OutboxObservation, type OutboxRecord, type PreparedPacket } from '@fractal/client'
+import { actionReceiptCheck, appliedAnswer, type ActionReceiptExpectation, type FractalClient } from '@fractal/client'
+import { observeOutbox, type OutboxObservation, type OutboxRecord } from '@fractal/client/outbox'
+import type { PreparedPacket } from '@fractal/client/prepared-packet'
 import type { ActionResult } from '@fractal/client/schema'
 import type { IndexedDbOutbox } from './indexedDb.ts'
 import { sameScope } from './repository.ts'

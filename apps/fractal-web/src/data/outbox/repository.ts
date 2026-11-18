@@ -1,4 +1,5 @@
-import type { OutboxRecord, OutboxScope, PreparedPacket } from '@fractal/client'
+import type { OutboxRecord, OutboxScope } from '@fractal/client/outbox'
+import type { PreparedPacket } from '@fractal/client/prepared-packet'
 import { Schema } from 'effect'
 
 export const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))

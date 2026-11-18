@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto'
 import { createHash } from 'node:crypto'
-import { FractalClient, outboxDeploymentId } from '@fractal/client'
+import { FractalClient } from '@fractal/client'
+import { outboxDeploymentId } from '@fractal/client/outbox'
 import * as Native from '@fractal/client/schema'
 import { Effect } from 'effect'
 import { IDBDatabase, IDBFactory, IDBObjectStore } from 'fake-indexeddb'

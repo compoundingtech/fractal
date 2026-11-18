@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto'
-import { createOutboxRecord, observeOutbox, prepareMessageSendPacket, prepareOutboxRecord, type OutboxRecord, type OutboxScope, type PreparedPacket } from '@fractal/client'
+import { createOutboxRecord, observeOutbox, prepareOutboxRecord, type OutboxRecord, type OutboxScope } from '@fractal/client/outbox'
+import { prepareMessageSendPacket, type PreparedPacket } from '@fractal/client/prepared-packet'
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
 import { Effect, Schema } from 'effect'
 import { afterEach, describe, expect, it, vi } from 'vitest'

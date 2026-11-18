@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto'
-import { ClientError, FractalClient, createOutboxRecord, outboxDeploymentId } from '@fractal/client'
+import { ClientError, FractalClient } from '@fractal/client'
+import { createOutboxRecord, outboxDeploymentId } from '@fractal/client/outbox'
 import * as Native from '@fractal/client/schema'
 import { Effect } from 'effect'
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'

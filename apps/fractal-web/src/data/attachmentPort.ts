@@ -1,8 +1,6 @@
-import {
-  ClientError, appliedAnswer, actionReceiptCheck, createOutboxRecord, expectedPreparedPacketIdentities,
-  prepareMessageSendPacket, prepareOutboxRecord,
-  type Capabilities, type EnvelopeOf, type FractalClient, type OutboxRecord, type PreparedPacket, type PreparedMessageSendPacket, type OutboxIntent,
-} from '@fractal/client'
+import { ClientError, appliedAnswer, actionReceiptCheck, type Capabilities, type EnvelopeOf, type FractalClient } from '@fractal/client'
+import { createOutboxRecord, prepareOutboxRecord, type OutboxRecord, type OutboxIntent } from '@fractal/client/outbox'
+import { expectedPreparedPacketIdentities, prepareMessageSendPacket, type PreparedPacket, type PreparedMessageSendPacket } from '@fractal/client/prepared-packet'
 import type { ActionResult } from '@fractal/client/schema'
 import * as Native from '@fractal/client/schema/read'
 import { Effect, Schema } from 'effect'

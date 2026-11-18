@@ -1,4 +1,5 @@
-import { isAllowedOutboxTransition, markOutboxDispatched, restoreOutboxRecord, type OutboxEntry, type OutboxPreparingRecord, type OutboxReceipt, type OutboxRecord, type OutboxRepository, type OutboxScope, type PreparedPacket } from '@fractal/client'
+import { isAllowedOutboxTransition, markOutboxDispatched, restoreOutboxRecord, type OutboxEntry, type OutboxPreparingRecord, type OutboxReceipt, type OutboxRecord, type OutboxRepository, type OutboxScope } from '@fractal/client/outbox'
+import type { PreparedPacket } from '@fractal/client/prepared-packet'
 import { Effect, Schema } from 'effect'
 import { loadAttachmentSchema } from '../lazySdk.ts'
 import { Count, OutboxConflict, OutboxStorageError, ScopeSchema, retentionAction, sameScope, terminal, type OutboxError, type QuarantinedAttempt, type SpoolInput } from './repository.ts'

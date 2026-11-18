@@ -1,5 +1,7 @@
 import 'fake-indexeddb/auto'
-import { createOutboxRecord, FractalClient, outboxDeploymentId, prepareMessageSendPacket, prepareOutboxRecord, type Capabilities, type EnvelopeOf } from '@fractal/client'
+import { FractalClient, type Capabilities, type EnvelopeOf } from '@fractal/client'
+import { createOutboxRecord, outboxDeploymentId, prepareOutboxRecord } from '@fractal/client/outbox'
+import { prepareMessageSendPacket } from '@fractal/client/prepared-packet'
 import * as Native from '@fractal/client/schema/read'
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, describe, expect, it } from 'vitest'

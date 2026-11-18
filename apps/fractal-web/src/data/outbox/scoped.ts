@@ -1,4 +1,5 @@
-import { outboxDeploymentId, restoreOutboxEntries, type Capabilities, type EnvelopeOf, type FractalClient, type OutboxScope } from '@fractal/client'
+import type { Capabilities, EnvelopeOf, FractalClient } from '@fractal/client'
+import { outboxDeploymentId, restoreOutboxEntries, type OutboxScope } from '@fractal/client/outbox'
 import * as Native from '@fractal/client/schema/read'
 import { Effect } from 'effect'
 import type { ChatOutbox } from '../attachmentPort.ts'

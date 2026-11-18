@@ -1,4 +1,6 @@
-import { actionReceiptCheck, appliedAnswer, createOutboxRecord, expectedPreparedPacketIdentities, prepareOutboxRecord, prepareThreadReplyPacket, prepareThreadStartPacket, type Capabilities, type EnvelopeOf, type FractalClient, type PreparedPacket, type PreparedThreadReplyPacket, type PreparedThreadStartPacket, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
+import { actionReceiptCheck, appliedAnswer, type Capabilities, type EnvelopeOf, type FractalClient, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
+import { createOutboxRecord, prepareOutboxRecord } from '@fractal/client/outbox'
+import { expectedPreparedPacketIdentities, prepareThreadReplyPacket, prepareThreadStartPacket, type PreparedPacket, type PreparedThreadReplyPacket, type PreparedThreadStartPacket } from '@fractal/client/prepared-packet'
 import * as Native from '@fractal/client/schema/read'
 import { Effect, Schema } from 'effect'
 import type * as ThreadSchema from '@fractal/client/schema'
