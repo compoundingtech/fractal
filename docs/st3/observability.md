@@ -926,13 +926,13 @@ Residency's exact 40-series footprint is subtracted in code from HTTP's former
 No residency instrument is constructed by the daemon yet. Its observable
 callbacks read only a published in-memory summary, never SQLite or host sensors.
 
-**DQ1 activation gate:** the existing code has no fleet-independent 2,000-series
-bound. Even the fixed subtotal, HTTP reservation and the worked 64-agent
-delivery/mailbox allocation consume `202+1,500+13×64=2,534` potential series
-before origin/task/fleet axes or population. This is source-derived capacity
-evidence, not a runtime measurement. Before activation, the decision owner must
-approve a revised budget or a lossless dimension policy: never truncate agents,
-silently use SDK overflow, or discard counts to meet a budget.
+**DQ1 decision:** residency's exact 40-series carve-out from HTTP satisfies its
+allocation requirement; it does not add headroom. The existing code has no
+fleet-independent 2,000-series bound: fixed axes, the existing reservation and
+64 local agents permit `202+1,500+13×64=2,534` potential series before other axes.
+This source-derived capacity gap predates residency and is tracked separately
+in [#6751](https://github.com/compoundingtech/fractal/issues/6751); it does not
+block residency activation. Never silently truncate agents, labels or counts.
 
 ### Inert residency host sensors
 
