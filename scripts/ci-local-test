@@ -13,6 +13,7 @@ import subprocess
 import time
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 RECORD = '''#!/usr/bin/env bash
@@ -77,6 +78,12 @@ class CiLocal(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # Fixture commits/pushes must not inherit the developer's signing hook or
+        # credentials. The Git guard recognizes local receivers under TMPDIR.
+        environment = mock.patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': '/dev/null',
+                                                  'GIT_CONFIG_SYSTEM': '/dev/null', 'TMPDIR': self.tmp.name})
+        environment.start()
+        self.addCleanup(environment.stop)
         root = Path(self.tmp.name)
         self.work = root / 'work'
         (self.work / 'scripts').mkdir(parents=True)
