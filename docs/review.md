@@ -8,17 +8,17 @@ conversation, and so that two reviewers given the same head reach the same verdi
 A change goes from idea to main in this order, and each agent does all of it for its own change:
 
 1. **Idea and development.** The author works on a branch and merges `main` into it (never rebases, never force-pushes).
-2. **Signed checks.** `scripts/fractal-test --all --push origin` runs every check on the head and signs what it ran. No push goes out
-   with a check unsigned; a check that fails or flakes is fixed first.
-3. **Signed review.** The review below runs on the signed head and produces a structured verdict, which is signed like a check.
-4. **Merge queue.** A head with every check signed and a signed review that is `GO` at **low** or **medium** risk is put in the
+2. **Hosted checks.** For this repository, PR proof is the hosted CI run at the exact head. Agents do not run
+   `scripts/fractal-test` or `scripts/st-test` locally for PR proof; a check that fails or flakes is fixed first.
+3. **Signed review.** The review below runs on that exact head and produces a structured verdict, which is signed like a check.
+4. **Merge queue.** A head with passing hosted checks at that exact head and a signed review that is `GO` at **low** or **medium** risk is put in the
    merge queue by its own author, following the queue rules below. A **medium** change that touches a risky area (see "Factory
    read" below) is read by Factory first and is not queued by its author alone.
 
 There is **no central intake, curator or watcher** in this flow: nobody reads, approves or queues a change on its author's behalf.
 Each agent runs the review on its own change and queues its own change.
 
-The review is a reading. It does not run the tests (the signed checks did), it does not judge whether the product should do
+The review is a reading. It does not run the tests (hosted CI did), it does not judge whether the product should do
 the thing, and it does not decide questions that only a person can answer. It answers: *does this exact head do what it says, is
 it safe to put in front of everyone, and what could go wrong that the checks cannot see.*
 
@@ -71,10 +71,8 @@ All at one exact head:
 1. **Identity.** The verdict names the full head and base. A verdict is never reused for another head except by a delta read,
    which includes a head that is only a merge of `main` with an empty `git show --remerge-diff`.
 2. **It merges cleanly.** `git merge-tree --write-tree origin/main <head>` succeeds. Whether a clean merge still breaks something
-   that changed on `main` is judged by the checks signed on the merge (see "Behind main"), not guessed by the reviewer.
-3. **Every check is signed at this head** (`scripts/fractal-test --status`; or the merge of this head with `main`, where the protected
-   files moved), and none is red; the required checks on GitHub agree. A skipped check is a pass only where its signed note says
-   why it was skipped.
+   that changed on `main` is judged by hosted CI at the exact head (see "Behind main"), not guessed by the reviewer.
+3. **Hosted CI passes at this exact head**, and no check is red; local signed checks are not the PR proof for this repository.
 4. **No flake.** A crate with a test that passed only on a retry is not signed in its own per-crate record, so on every path
    that check is left for CI and item 3 fails. The whole-tree gate note still signs a retried pass and records the tests as
    `flaky_tests`: a signed note with `flaky_tests` other than none is a finding to be dispositioned (the test is fixed, or the
@@ -215,11 +213,11 @@ files and lines actually read.
 
 ## Behind main
 
-- A head that merges cleanly is **not refreshed** just because `main` moved: a stable head keeps its signed checks and its
+- A head that merges cleanly is **not refreshed** just because `main` moved: a stable head keeps its exact-head hosted checks and its
   review. A refresh is made when the head conflicts or goes dirty.
 - A refresh is a **plain merge of `main`** into the branch, then a delta read of the merge. Textual conflicts are resolved by
-  keeping both sides' intent; generated files are regenerated, never hand-merged; the touched tests run; then the checks sign
-  again and one fast-forward push goes out.
+  keeping both sides' intent; generated files are regenerated, never hand-merged; one fast-forward push goes out, and hosted CI
+  must pass at the new exact head.
 - A conflict that needs a **semantic decision** (two different pins of one dependency, two incompatible changes to one rule) is
   not resolved by the refresher. The merge is abandoned, nothing is pushed, and the exact decision is given to the owner.
 
@@ -239,7 +237,7 @@ files and lines actually read.
 
 ## What the review does not do
 
-- It does not run the tests or the build; the signed checks did.
+- It does not run the tests or the build; hosted CI did.
 - It does not judge whether the product should do the thing; that is the owner's call.
 - It does not wave a contract change through: a public or client contract change is flagged and scored (breaking is high,
   additive or negotiated is medium), like any other risk.

@@ -4,8 +4,8 @@
   scripts/nix-typescript-client-deps-hash [--system x86_64-linux] [--flake .]
 
 The frozen pnpm installation behind `checks.<system>.typescript-client` is a fixed-output derivation.
-The JSON pin records its output hash and the effect-utils narHash it was measured with. This reads
-the selected flake's actual input identity, sets a placeholder, builds only the installation (the
+The JSON pin records its output hash and semantic installationInputHash. This reads
+the selected flake's actual input fingerprint, sets a placeholder, builds only the installation (the
 check wrapper is Linux-only), and writes both measured values. It needs network and a builder for
 the selected system. The original file is restored if evaluation or the build fails.
 """
@@ -32,12 +32,12 @@ def main(argv, nix=('nix', '--extra-experimental-features', 'nix-command flakes'
     previous = json.loads(before)
     target = f'{args.flake}#checks.{args.system}.typescript-client.installation'
     try:
-        identity = subprocess.run([*nix, 'eval', '--raw', f'{target}.effectUtilsNarHash'],
+        identity = subprocess.run([*nix, 'eval', '--raw', f'{target}.installationInputHash'],
                                   capture_output=True, text=True)
         if identity.returncode:
             print(identity.stderr[-2000:], file=sys.stderr)
             return 1
-        pin = {'hash': PLACEHOLDER, 'effectUtilsNarHash': identity.stdout.strip()}
+        pin = {'hash': PLACEHOLDER, 'installationInputHash': identity.stdout.strip()}
         hash_file.write_text(json.dumps(pin, indent=2) + '\n')
         built = subprocess.run([*nix, 'build', target, '--no-link', '-L'],
                                capture_output=True, text=True)
@@ -52,7 +52,7 @@ def main(argv, nix=('nix', '--extra-experimental-features', 'nix-command flakes'
         raise
     pin['hash'] = found.group(1)
     hash_file.write_text(json.dumps(pin, indent=2) + '\n')
-    print(f'nix/typescript-client-deps.hash: {pin["hash"]} (effect-utils {pin["effectUtilsNarHash"]})' + (' (unchanged)' if previous == pin else ''))
+    print(f'nix/typescript-client-deps.hash: {pin["hash"]} (inputs {pin["installationInputHash"]})' + (' (unchanged)' if previous == pin else ''))
     return 0
 
 

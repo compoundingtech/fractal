@@ -355,6 +355,16 @@ weekly budget. Render just these on a Mac with:
   records it.
 
 
+## Panel surface
+
+The window-style `MenuBarExtra` supplies the native glass. One
+`windowBackgroundColor` underlay at the `TrayPanel` root covers both columns,
+adapts to light and dark appearance, and leaves the system glass edge intact.
+`PanelMetrics.surfaceTintOpacity` controls its weight (0.45 retains 55% of
+the backdrop contrast). Reduce Transparency omits this tint and leaves the
+system's opaque accessibility surface alone. Groups and tiles do not add
+another glass layer.
+
 ## Scroll and refresh performance Mac gate
 
 `PanelScroll` and `PanelForm` preserve their compact ideal height, bounded by the

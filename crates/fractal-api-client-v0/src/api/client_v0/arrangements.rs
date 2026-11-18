@@ -975,6 +975,146 @@ mod tests {
         state.store.apply_internal(&declaration, &format!("declare-{member}")).unwrap();
     }
 
+    fn captured_core_page(
+        state: &AppState,
+        cursor: Option<&fractal_api_core::api::client_v0::membership_paging::Cursor>,
+    ) -> Result<fractal_api_core::api::client_v0::membership_paging::Page, ApiError> {
+        let after = cursor.map(|cursor| (
+            cursor.after.bucket.as_str(), cursor.after.key.as_str(), cursor.after.member.as_str()));
+        let (snapshot, captured) = state.store.read_snapshot(|index| {
+            Ok((client_snapshot_at(state, index), state.store.ordered_membership_page(SUBJECT, after, 2)?))
+        }).unwrap();
+        fractal_api_core::api::client_v0::membership_paging::assemble(captured, &snapshot,
+            state.store.ordered_membership_lifetime(), "person/ada", SUBJECT, 1, cursor)
+    }
+
+    #[tokio::test]
+    async fn core_continuations_reject_each_committed_relevant_edit() {
+        use fractal_api_core::api::client_v0::membership_paging::{Cursor, CHANGED};
+        const FOLDER: &str = "019a0000-0000-7000-8000-000000000010";
+        for case in ["place", "remove", "reorder", "effective-bucket", "retirement"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), &format!("core-continuation-{case}"));
+            let session = ClientSession::local(Some("person/ada")).unwrap();
+            create_v2(&state, &session).await;
+            for member in ["resource/a", "resource/b", "resource/c"] {
+                declare_resource_member(&state, member);
+            }
+            let declaration = crate::graph::parse_internal_intent(
+                "version 2\nagent \"ada/outside\" { workspace \"/tmp\"; command \"true\"; }\n",
+                &state.store.origin).unwrap();
+            state.store.apply_internal(&declaration, "declare-outside").unwrap();
+            edit(&state, &session, &request(&state, "folder", json!([
+                {"op":"folder.create","id":FOLDER,"name":"Folder","parent":null,"key":"a0"}
+            ]))).await.unwrap();
+            let bucket = (case == "effective-bucket").then_some(FOLDER);
+            edit_memberships(&state, &session, &membership_request(&state, "initial", json!([
+                {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+                {"op":"place","member":"resource/b","bucket":null,"key":"a1"},
+                {"op":"place","member":"agent/ada/outside","bucket":bucket,"key":"a2"}
+            ]))).await.unwrap();
+            let first = captured_core_page(&state, None).unwrap();
+            assert_eq!(first.value.items[0]["member"], "resource/a");
+            let before = first.membership.unwrap();
+            let cursor = Cursor::decode(first.value.page.next_cursor.as_ref().unwrap(),
+                "person/ada", SUBJECT, 1).unwrap();
+            match case {
+                "effective-bucket" => {
+                    edit(&state, &session, &request(&state, "change", json!([
+                        {"op":"folder.delete","id":FOLDER}
+                    ]))).await.unwrap();
+                }
+                "retirement" => {
+                    let stop = crate::graph::parse_internal_intent(
+                        "version 2\nstop \"agent/ada/outside\"\n", &state.store.origin).unwrap();
+                    state.store.apply_internal(&stop, "stop-outside").unwrap();
+                    let token = state.store.selected_desired_token("agent/ada/outside").unwrap().unwrap();
+                    state.store.retire_agent("agent/ada/outside", "person/ada", "Finished",
+                        &token, None, "retire-outside", &[]).unwrap();
+                }
+                _ => {
+                    let operation = match case {
+                        "place" => json!({"op":"place","member":"resource/c","bucket":null,"key":"a3"}),
+                        "remove" => json!({"op":"remove","member":"agent/ada/outside"}),
+                        "reorder" => json!({"op":"place","member":"agent/ada/outside","bucket":null,"key":"a3"}),
+                        _ => unreachable!(),
+                    };
+                    edit_memberships(&state, &session, &membership_request(&state, "change",
+                        json!([operation]))).await.unwrap();
+                }
+            }
+            let current = captured_core_page(&state, None).unwrap();
+            assert_eq!(current.value.items[0]["member"], first.value.items[0]["member"],
+                "{case} must change a member beyond the held prefix");
+            if matches!(case, "reorder" | "effective-bucket") {
+                assert_eq!(current.membership.unwrap().live_count, before.live_count);
+            }
+            assert_eq!(captured_core_page(&state, Some(&cursor)).unwrap_err().code, CHANGED, "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn core_membership_page_joins_metadata_snapshot_across_barrier_commit() {
+        use fractal_api_core::api::client_v0::membership_paging::{Cursor, CHANGED};
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "core-page-barrier");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        create_v2(&state, &session).await;
+        for member in ["resource/a", "resource/b", "resource/c"] {
+            declare_resource_member(&state, member);
+        }
+        edit_memberships(&state, &session, &membership_request(&state, "initial", json!([
+            {"op":"place","member":"resource/a","bucket":null,"key":"a0"},
+            {"op":"place","member":"resource/b","bucket":null,"key":"a1"}
+        ]))).await.unwrap();
+        let first = captured_core_page(&state, None).unwrap();
+        let metadata = first.membership.unwrap();
+        let cursor = Cursor::decode(first.value.page.next_cursor.as_ref().unwrap(),
+            "person/ada", SUBJECT, 1).unwrap();
+        declare_resource_member(&state, "resource/unrelated");
+        let terminal = captured_core_page(&state, Some(&cursor)).unwrap();
+        assert_eq!(terminal.membership.as_ref(), Some(&metadata));
+        assert_eq!(terminal.value.items[0]["member"], "resource/b");
+        assert!(!terminal.value.page.has_more);
+        assert!(terminal.value.page.next_cursor.is_none());
+        std::thread::scope(|scope| {
+            let (start, started) = std::sync::mpsc::sync_channel(0);
+            let (done, committed) = std::sync::mpsc::sync_channel(0);
+            let writer = &state;
+            scope.spawn(move || {
+                started.recv().unwrap();
+                let input = ClaimInput {
+                    subject: SUBJECT.into(), kind: "ordered-membership.edited".into(),
+                    actor: Some("person/ada".into()),
+                    fields: serde_json::from_value(json!({"owner":"person/ada","operations":[
+                        {"op":"place","member":"resource/c","bucket":null,"key":"a2"}
+                    ]})).unwrap(),
+                    evidence: vec![], expected_subject: None, idempotency_key: None,
+                };
+                writer.store.edit_ordered_memberships(&input, &BTreeMap::new()).unwrap();
+                done.send(()).unwrap();
+            });
+            state.store.read_snapshot(|index| {
+                let before = state.store.ordered_membership_state(SUBJECT)?;
+                start.send(()).unwrap();
+                committed.recv().unwrap();
+                let pinned = state.store.ordered_membership_page(SUBJECT, None, 3)?;
+                assert_eq!(pinned.store_index, index);
+                assert_eq!(pinned.state, before);
+                assert_eq!(pinned.items.len() as u64, before.live_count);
+                assert_eq!(pinned.items[0]["member"], "resource/a");
+                let continuation = captured_core_page(&state, Some(&cursor)).unwrap();
+                assert_eq!(continuation.membership.as_ref(), Some(&metadata));
+                assert_eq!(continuation.value.items, terminal.value.items);
+                Ok(())
+            }).unwrap();
+        });
+        let current = state.store.ordered_membership_page(SUBJECT, None, 3).unwrap();
+        assert_eq!(current.state.live_count, 3);
+        assert_eq!(current.items.len(), 3);
+        assert_eq!(captured_core_page(&state, Some(&cursor)).unwrap_err().code, CHANGED);
+    }
+
     #[tokio::test]
     async fn membership_http_pages_use_live_keyset_order_and_expire_changed_snapshots() {
         let root = tempfile::tempdir().unwrap();
