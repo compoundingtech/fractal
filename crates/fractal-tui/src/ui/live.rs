@@ -2932,8 +2932,24 @@ async fn perform_steadily(
     perform(client, person, model, effect, sent).await
 }
 
+#[derive(Debug)]
+struct MessageSnapshotRecoveryExhausted;
+
+impl std::fmt::Display for MessageSnapshotRecoveryExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the message snapshot recovery exhausted its single retry")
+    }
+}
+
+impl std::error::Error for MessageSnapshotRecoveryExhausted {}
+
 /// Only explicit nonapplication proof permits rebuilding a refused request.
 fn not_applied(error: &anyhow::Error, _effect: &Effect) -> bool {
+    // send_message owns the one snapshot refresh for this intent. Re-entering
+    // perform would reset that budget even though the refusal proves nonapplication.
+    if error.is::<MessageSnapshotRecoveryExhausted>() {
+        return false;
+    }
     error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<ClientError>())
@@ -3516,6 +3532,9 @@ async fn send_message(
                         snapshot = client.capabilities().await?.snapshot.id;
                         continue;
                     }
+                    if attempt == 1 {
+                        return Err(anyhow::Error::new(error).context(MessageSnapshotRecoveryExhausted));
+                    }
                 }
                 return Err(error.into());
             }
@@ -3779,6 +3798,60 @@ mod tests {
             .downcast_ref::<ClientError>()
             .unwrap()
             .outcome_unknown());
+    }
+
+    #[tokio::test]
+    async fn a_message_snapshot_refresh_is_bounded_across_the_whole_live_intent() {
+        use axum::{http::StatusCode, routing};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/st3/client-v0/fixtures/capabilities.json"
+        )).unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let counted = posts.clone();
+        let router = axum::Router::new()
+            .route("/v1/client/capabilities", routing::get(move || {
+                std::future::ready(axum::Json(capabilities.clone()))
+            }))
+            .route("/v1/client/actions", routing::post(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::future::ready((StatusCode::CONFLICT, axum::Json(serde_json::json!({
+                    "api_version": "st3.client.v0",
+                    "error_version": "st3.client.error.v0",
+                    "request_id": "request/stale",
+                    "code": "stale-fence",
+                    "message": "the snapshot is stale",
+                    "retryable": true,
+                    "applied": "none",
+                    "details": {"applied": "none"},
+                }))))
+            }));
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let sent = Mutex::new(None);
+        let effect = Effect::Send {
+            agent: "agent/example/worker".into(),
+            text: "One intent, one refresh".into(),
+            in_reply_to: None,
+            tags: vec![],
+            images: vec![],
+        };
+        let error = perform_steadily(
+            &client, "person/avery", &Model::default(), effect.clone(), Some(&sent),
+        ).await.unwrap_err();
+        assert_eq!(posts.load(Ordering::SeqCst), 2, "the outer retry loop must not reset the refresh budget");
+        assert!(error.is::<MessageSnapshotRecoveryExhausted>());
+        assert!(!not_applied(&error, &effect), "the exhausted intent cannot retry");
+        assert!(matches!(
+            error.downcast_ref::<ClientError>(),
+            Some(ClientError::Api(fractal_client::ErrorCode::StaleFence, ..))
+        ), "preserve the actual refusal for display");
+        assert!(sent.lock().unwrap().is_none(), "both attempts were definitively unapplied");
+        server.abort();
     }
 
     /// Unknown delivery must not re-enter message_send, even after the session changes.

@@ -1975,7 +1975,8 @@ I/O and never automatically resend an unknown attempt. The TUI shows delivery as
 unknown and blocks another dispatch of that original, including after a session or
 daemon change. A live resource summary alone is not its completed action receipt.
 Only explicit `applied: "none"` proof permits a fresh submission; for a stale
-snapshot the TUI reads a fresh snapshot before trying once more.
+snapshot the TUI reads a fresh snapshot before trying once more. That one-refresh
+budget belongs to the whole intent: the outer live retry loop cannot reset it.
 At most sixteen send workers remain pending in a daemon. Concurrent exact retries
 wait for the held key within the same confirmation deadline and consume no additional
 worker capacity while waiting. Healthy retries return the original durable receipt;
