@@ -12,7 +12,7 @@ pub struct Weights {
 /// runnable siblings, so unused service remains work-conserving rather than a fixed partition.
 pub fn weights(class: RequestClass) -> Weights {
     match class {
-        RequestClass::Landing => Weights { cpu: 1000, io: 1000 },
+        RequestClass::Recovery | RequestClass::Landing => Weights { cpu: 1000, io: 1000 },
         RequestClass::Check => Weights { cpu: 100, io: 100 },
         RequestClass::Agent => Weights { cpu: 10, io: 10 },
     }

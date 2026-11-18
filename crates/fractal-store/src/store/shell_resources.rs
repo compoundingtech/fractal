@@ -68,12 +68,15 @@ pub struct Execution {
     pub submission_digest: Option<String>,
     #[serde(default)]
     pub refusal_code: Option<resource_membership::RefusalCode>,
+    #[serde(default)]
+    pub learning_decision: Option<resource_profile_learner::RecordOutcome>,
 }
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // Transitional debt: command/result bodies and indexed text keys have no byte-size proof.
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9574bb92e055 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
     scrub_historical_environments(connection)?;
+    resource_profile_learner::create_schema(connection)?;
     Ok(())
 }
 
@@ -125,7 +128,7 @@ impl Store {
         let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
-            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None };
+            root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None, learning_decision: None };
         // One row per command does not bound its serialized argv/result bytes.
         let inserted = self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
@@ -178,6 +181,7 @@ impl Store {
         if next.root_exec_id.is_empty() { next.root_exec_id.clone_from(&next.command.id); }
         if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") && next.command.parent.is_none() {
             next.receipt_subject = Some(resource_exec_receipts::subject(&self.origin, &next));
+            next.learning_decision = resource_profile_learner::evidence::record_execution(&transaction, &next)?;
         }
         if next == previous { return Ok(false); }
         next.revision += 1;
@@ -253,7 +257,7 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PayloadResult {
     pub head_start: Option<String>,
@@ -264,6 +268,8 @@ pub struct PayloadResult {
     pub exit_signal: Option<i32>,
     pub wall_duration_ms: u64,
     pub memory_peak_bytes: Option<u64>,
+    #[serde(default, flatten)]
+    pub evidence: resource_profile_learner::evidence::Evidence,
 }
 
 #[cfg(test)]

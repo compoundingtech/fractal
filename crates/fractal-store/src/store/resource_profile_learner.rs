@@ -6,32 +6,21 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 
-pub mod psi;
-pub mod cgroup;
 pub mod disk;
+pub mod cgroup;
+pub mod evidence;
 
 pub const MIN_SAMPLES: usize = 20;
 pub const WINDOW_SAMPLES: usize = 256;
 
+pub use fractal_runtime::resource_readiness::HostReadiness;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct HostReadiness {
-    pub nix_per_build_cgroups: bool,
-    pub io_accounting: bool,
-    pub disk_measurement: bool,
-}
-
-impl HostReadiness {
-    pub fn permits_below_seed(self) -> bool {
-        self.nix_per_build_cgroups && self.io_accounting && self.disk_measurement
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Coverage {
     Full,
     ClientOnly,
+    #[default]
     Unknown,
 }
 
@@ -45,7 +34,7 @@ pub struct MemoryEvents {
     pub oom_group_kill: u64,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EndReason {
     Natural,
@@ -53,6 +42,7 @@ pub enum EndReason {
     TimedOut,
     MaxHold,
     Signalled,
+    #[default]
     Unknown,
 }
 

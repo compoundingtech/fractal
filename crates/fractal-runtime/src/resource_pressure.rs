@@ -251,6 +251,37 @@ impl Reader {
     }
 }
 
+/// Driven by the existing host reconciliation deadline; never starts a worker or admits by time.
+pub struct Observer {
+    policy: Policy,
+    brake: Brake,
+    reader: Reader,
+    origin: std::time::Instant,
+    sampled_at: Option<u64>,
+}
+
+impl Observer {
+    pub fn new(policy: Policy) -> Result<Self> {
+        Ok(Self {
+            brake: Brake::new(policy.clone())?, policy, reader: Reader::default(),
+            origin: std::time::Instant::now(), sampled_at: None,
+        })
+    }
+
+    pub fn observe(&mut self, policy: &Policy) -> Result<Decision> {
+        if &self.policy != policy { *self = Self::new(policy.clone())?; }
+        let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if self.sampled_at.is_none_or(|at| now.saturating_sub(at) >= 5000) {
+            self.sampled_at = Some(now);
+            return Ok(match self.reader.read(&self.policy, now) {
+                Ok(readings) => self.brake.observe(readings, now),
+                Err(_) => { self.reader.readings.clear(); self.brake.observe(&[], now) },
+            });
+        }
+        Ok(self.brake.observe(&self.reader.readings, now))
+    }
+}
+
 #[cfg(test)]
-#[path = "psi_tests.rs"]
+#[path = "resource_pressure_tests.rs"]
 mod tests;
