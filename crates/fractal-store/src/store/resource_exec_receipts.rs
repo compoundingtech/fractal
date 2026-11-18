@@ -26,6 +26,7 @@ pub fn subject(origin: &str, execution: &Execution) -> String {
     let head = execution.result.as_ref().and_then(|result| result.head_start.as_deref())
         .or(execution.head_start.as_deref()).unwrap_or_default();
     let class = match execution.command.lane.class {
+        RequestClass::Recovery => "recovery",
         RequestClass::Landing => "landing", RequestClass::Check => "check", RequestClass::Agent => "agent",
     };
     format!("{}{}/{}/{}", head_prefix(head), hex::encode(origin), class, hex::encode(&execution.command.id))
@@ -52,6 +53,11 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
         ("disk_reserved_bytes", json!(request.disk.as_ref().map_or(0, |disk| disk.bytes))),
         ("queue_wait_ms", json!(execution.queue_wait_ms)),
         ("wall_duration_ms", json!(result.map_or(0, |result| result.wall_duration_ms))),
+        ("learningDecision", json!(execution.learning_decision)),
+        ("preRetirementPopulated", json!(result.and_then(|result| result.evidence.pre_retirement_populated))),
+        ("learningCoverage", json!(result.map(|result| result.evidence.learning_coverage))),
+        ("memoryEvents", json!(result.and_then(|result| result.evidence.memory_events))),
+        ("ioStat", json!(result.and_then(|result| result.evidence.io_stat.as_ref()))),
     ] { fields.insert(name.into(), value); }
     // Absent observations stay absent. In particular a logical execution never
     // turns an unavailable cgroup peak into a measured zero.
@@ -113,6 +119,7 @@ mod tests {
             head_start: Some("abc123".into()), head_end: Some("abc123".into()),
             clean_start: Some(true), clean_end: Some(false), exit_code: Some(37), exit_signal: None,
             wall_duration_ms: 1234, memory_peak_bytes: None,
+            ..PayloadResult::default()
         });
         execution
     }
