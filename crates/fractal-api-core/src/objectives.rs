@@ -802,6 +802,61 @@ mod tests {
     }
 
     #[test]
+    fn measured_latency_mix_needs_the_missing_accounting_and_slow_windows() {
+        let policy = crate::slo::shipped().iter().find(|objective| objective.name == "person-read").unwrap().budget.as_ref().unwrap();
+        let diagnostic = p99("person-read", "Reads", "requests", Some(300.0), &windows(5213, 5242.879, 1837));
+        let mut evidence = retained_budget(0, 0);
+        for window in evidence["windows"].as_object_mut().unwrap().values_mut() {
+            window["coverage"] = json!(0.0);
+        }
+        for (name, total, bad) in [("1h", 5213, 1837), ("5m", 477, 185)] {
+            evidence["windows"][name]["eligible"] = json!(total);
+            evidence["windows"][name]["bad"] = json!(bad);
+            evidence["windows"][name]["samples"] = json!(total);
+            evidence["windows"][name]["coverage"] = json!(1.0);
+        }
+        // Eligible hour/five-minute evidence alone cannot prove either 30d accounting or
+        // the six-hour/thirty-minute pair. A 7x burn is below the fast 14.4x threshold.
+        let partial = native_budget(diagnostic.clone(), policy, &evidence, 0);
+        assert_eq!(partial["status"], "no-data");
+        assert!(partial["remaining_percent"].is_null());
+        assert!(partial["explain"].as_str().unwrap().contains("Fast pair 7.05×/7.76×"));
+        assert!(partial["explain"].as_str().unwrap().contains("slow pair unknown/unknown"));
+
+        // This is a sustained-load scenario, not reconstructed history: if independent
+        // covered slow windows have the same >30% slow mix, the slow pair burns.
+        for name in ["6h", "30m"] {
+            evidence["windows"][name]["eligible"] = json!(5213);
+            evidence["windows"][name]["bad"] = json!(1837);
+            evidence["windows"][name]["samples"] = json!(5213);
+            evidence["windows"][name]["coverage"] = json!(1.0);
+        }
+        let sustained = native_budget(diagnostic, policy, &evidence, 0);
+        assert_eq!(sustained["status"], "burning");
+        assert!(sustained["remaining_percent"].is_null());
+    }
+
+    #[test]
+    fn transaction_write_below_one_percent_keeps_the_max_miss_diagnostic() {
+        // A representative 0.45% slow mix, under complete retained coverage. The max is
+        // still a miss; neither the diagnostic miss nor its magnitude empties the ratio.
+        let mut write = windows(210097, 139.263, 944);
+        for name in WINDOWS {
+            write[name]["max_ms"] = json!(19074.382);
+        }
+        write["budget"] = retained_budget(210097, 944);
+        let report = json!({"targets": [{"name": "transaction", "about": "Transactions", "max_ms": 300,
+            "read": windows(0, 0.0, 0), "write": write, "writer_hold": windows(0, 0.0, 0)}]});
+        let rows = rows(&report, &[], 0, 0);
+        let row = by_id(&rows, "transaction/write");
+        assert_eq!(row["status"], "met");
+        assert!(row["remaining_percent"].as_f64().unwrap() > 55.0);
+        assert!(row["remaining_percent"].as_f64().unwrap() < 55.1);
+        assert!(row["target"].as_str().unwrap().contains("≤ 1.0% bad events; diagnostic max ≤ 300 ms"));
+        assert!(row["explain"].as_str().unwrap().contains("19074 ms"));
+    }
+
+    #[test]
     fn cpu_database_and_a_phone_share_read_against_their_own_allowances() {
         let report = json!({"targets": [
             {"name": "cpu", "about": "Member CPU", "max_cores": 1.0, "idle_max_cores": 0.5, "idle_min_minutes": 10,
