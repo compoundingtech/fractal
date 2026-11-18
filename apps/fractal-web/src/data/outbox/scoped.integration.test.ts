@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { FractalClient, type Capabilities, type EnvelopeOf } from '@fractal/client'
-import { createOutboxRecord, outboxDeploymentId, prepareOutboxRecord } from '@fractal/client/outbox'
+import { createOutboxRecord, observeOutbox, outboxDeploymentId, prepareOutboxRecord, restoreOutboxRecord } from '@fractal/client/outbox'
 import { prepareMessageSendPacket } from '@fractal/client/prepared-packet'
 import * as Native from '@fractal/client/schema/read'
 import { IDBFactory } from 'fake-indexeddb'
@@ -52,7 +52,166 @@ const storedRows = async (factory: IDBFactory, store = attemptsStore): Promise<u
   } finally { db.close() }
 }
 
+it('does not open storage when disposed during startup identity discovery', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const factory = new IDBFactory()
+  let opens = 0
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl: async () => {
+    await gate
+    return Response.json(base)
+  } })
+  const owner = createScopedChatOutbox(client, { indexedDB: { open: (name, version) => {
+    opens++
+    return factory.open(name, version)
+  } } })
+  owners.push(owner)
+  const startup = owner.initialize()
+  owner.close()
+  release()
+  await expect(startup).rejects.toMatchObject({ _tag: 'OutboxIdentityUnavailable' })
+  expect(opens).toBe(0)
+})
+
+
+it('cross-checks a cached identity before first recovery without changing foreign dispatched storage', async () => {
+  const factory = new IDBFactory()
+  const original = setup(factory)
+  await original.owner.initialize(base)
+  const repo = await original.owner.repository()
+  if (repo === undefined) throw new TypeError('Expected protected repository')
+  const intent = createOutboxRecord('attempt/stale-startup', { text: 'Original content', attachments: [] })
+  const ready = prepareOutboxRecord(intent, prepareMessageSendPacket({
+    id: 'action/stale-startup', idempotency_key: intent.id, fence: { snapshot_id: base.snapshot.id, subject_revisions: {} },
+    parameters: { to: 'agent/example', content: intent.intent.text, tags: [], attachments: [] },
+  }))
+  if (ready === undefined) throw new TypeError('Expected ready packet')
+  await repo.commit(intent)
+  await repo.compareAndSwap(intent.revision, ready)
+  const dispatched = await repo.acquireDispatchPermit(intent.id, ready.revision)
+  const reopened = setup(factory)
+  reopened.owner.observe(base)
+  reopened.respond({ ...base, value: { ...base.value, issuer_key: 'issuer-key/changed' } })
+  await expect(reopened.owner.repository()).rejects.toMatchObject({ _tag: 'OutboxIdentityUnavailable' })
+  expect(await repo.read(intent.id)).toEqual(dispatched)
+  expect(await reopened.owner.recovery.list()).toContainEqual({
+    id: intent.id, status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'],
+  })
+  expect(await repo.read(intent.id)).toEqual(dispatched)
+  expect(reopened.calls.every(path => path === '/v1/client/capabilities')).toBe(true)
+})
 describe('verified browser outbox scope', () => {
+  it.each(['preparing', 'ready', 'dispatched'] as const)('opens and recovers %s storage before startup resolves without posting', async phase => {
+    const factory = new IDBFactory()
+    const original = setup(factory)
+    await original.owner.initialize(base)
+    const repo = await original.owner.repository()
+    if (repo === undefined) throw new TypeError('Expected protected repository')
+    const initial = createOutboxRecord('attempt/startup', { text: 'saved before restart', attachments: [] })
+    await repo.commit(initial)
+    const packet = prepareMessageSendPacket({ id: 'action/startup', idempotency_key: 'startup-packet-key', fence: { snapshot_id: base.snapshot.id, subject_revisions: {} }, parameters: { to: 'agent/example', content: initial.intent.text, tags: [], attachments: [] } })
+    const ready = prepareOutboxRecord(initial, packet, ['message/startup'])
+    if (ready === undefined) throw new TypeError('Expected ready record')
+    if (phase !== 'preparing') await repo.compareAndSwap(initial.revision, ready)
+    const saved = phase === 'dispatched' ? await repo.acquireDispatchPermit(initial.id, ready.revision) : phase === 'ready' ? ready : initial
+    original.owner.close()
+
+    const reloaded = setup(factory)
+    let opened = false
+    const owner = createScopedChatOutbox(reloaded.client, {
+      indexedDB: { open: (name, version) => {
+        const request = factory.open(name, version)
+        request.addEventListener('success', () => { opened = true }, { once: true })
+        return request
+      } },
+    })
+    owners.push(owner)
+    await owner.initialize()
+    expect(opened).toBe(true)
+    const restored = await owner.repository()
+    expect(await restored?.read(initial.id)).toEqual(restoreOutboxRecord(saved))
+    expect(reloaded.calls).toEqual(['/v1/client/capabilities'])
+  })
+
+  it('shares startup with repository access and never recovers its own live dispatch again', async () => {
+    const factory = new IDBFactory()
+    const { client, calls } = setup(factory)
+    const persistence = Promise.withResolvers<boolean>()
+    const persisting = Promise.withResolvers<void>()
+    let opens = 0
+    let persists = 0
+    const owner = createScopedChatOutbox(client, {
+      indexedDB: { open: (name, version) => { opens++; return factory.open(name, version) } },
+      storage: { persist: () => { persists++; persisting.resolve(); return persistence.promise } },
+    })
+    owners.push(owner)
+    const first = owner.initialize(base)
+    const second = owner.initialize(base)
+    let exposed = false
+    const repository = owner.repository().then(repo => { exposed = true; return repo })
+    await persisting.promise
+    expect(exposed).toBe(false)
+    expect(opens).toBe(0)
+    persistence.resolve(true)
+    await Promise.all([first, second])
+    const repo = await repository
+    if (repo === undefined) throw new TypeError('Expected protected repository')
+    expect(opens).toBe(1)
+    expect(persists).toBe(1)
+    const initial = createOutboxRecord('attempt/live', { text: 'live dispatch', attachments: [] })
+    const packet = prepareMessageSendPacket({ id: 'action/live', idempotency_key: 'live-packet-key-long', fence: { snapshot_id: base.snapshot.id, subject_revisions: {} }, parameters: { to: 'agent/example', content: initial.intent.text, tags: [], attachments: [] } })
+    const ready = prepareOutboxRecord(initial, packet, ['message/live'])
+    if (ready === undefined) throw new TypeError('Expected ready record')
+    await repo.commit(initial)
+    await repo.compareAndSwap(initial.revision, ready)
+    const dispatched = await repo.acquireDispatchPermit(initial.id, ready.revision)
+    await Promise.all([owner.initialize(base), owner.initialize()])
+    await owner.recovery.list()
+    expect(await repo.read(initial.id)).toEqual(dispatched)
+    expect(opens).toBe(2) // The recovery catalog is separate from the scoped connection.
+    expect(persists).toBe(1)
+
+    const other = setup(factory)
+    await other.owner.initialize(base)
+    const unknown = await repo.read(initial.id)
+    expect(unknown).toMatchObject({ state: 'unknown', ambiguous: true, revision: dispatched.revision + 1 })
+    const observation = { kind: 'observed', identity: 'message/live', source: 'timeline' } as const
+    expect(await repo.compareAndSwapWritable(dispatched.revision, observeOutbox(dispatched, observation)))
+      .toMatchObject({ _tag: 'revision-conflict' })
+    if (unknown === undefined) throw new TypeError('Expected retained unknown record')
+    expect(await repo.compareAndSwapWritable(unknown.revision, observeOutbox(unknown, observation)))
+      .toMatchObject({ _tag: 'written', record: { state: 'delivered', ambiguous: true } })
+    expect(calls.every(path => path === '/v1/client/capabilities')).toBe(true)
+    expect(other.calls).toEqual([])
+  })
+
+  it('retains corrupt startup entries as discard-only rather than failing initialization', async () => {
+    const factory = new IDBFactory()
+    const original = setup(factory)
+    await original.owner.initialize(base)
+    const repo = await original.owner.repository()
+    if (repo === undefined) throw new TypeError('Expected protected repository')
+    const db = await openStoredDatabase(factory)
+    try {
+      const finished = Promise.withResolvers<void>()
+      const tx = db.transaction(attemptsStore, 'readwrite')
+      tx.objectStore(attemptsStore).put({ localAttemptId: 'attempt/corrupt-startup', scope: repo.scope, schemaVersion: 999 })
+      tx.oncomplete = () => finished.resolve()
+      tx.onabort = () => finished.reject(tx.error)
+      await finished.promise
+    } finally { db.close() }
+    original.owner.close()
+    const before = await storedRows(factory)
+    const reloaded = setup(factory)
+    await reloaded.owner.initialize(base)
+    expect(await reloaded.owner.recovery.list()).toEqual([
+      { id: 'attempt/corrupt-startup', status: 'storage damaged; delivery unknown', actions: ['discard'] },
+    ])
+    expect(await storedRows(factory)).toEqual(before)
+    await expect((await reloaded.owner.repository())?.read('attempt/corrupt-startup')).rejects.toMatchObject({ code: 'quarantined' })
+    expect(reloaded.calls).toEqual(['/v1/client/capabilities'])
+  })
+
   it('reports a real blocked database upgrade as unavailable, never a corrupt recovery entry', async () => {
     const { client } = setup()
     const factory = new IDBFactory()
@@ -107,12 +266,14 @@ describe('verified browser outbox scope', () => {
     })
     owners.push(owner)
     owner.observe(base)
+    await expect(owner.initialize(base)).rejects.toMatchObject({ _tag: 'OutboxStorageError', code: 'disabled' })
     await expect(owner.recovery.list()).rejects.toMatchObject({ _tag: 'OutboxStorageError', code: 'disabled' })
   })
 
   it('uses the cached generated issuer pair without another discovery and persists a protected record', async () => {
     const { owner, calls } = setup()
     owner.observe(base)
+    await owner.initialize(base)
     const repo = await owner.repository()
     expect(calls).toEqual([])
     expect(owner.protection()).toBe('durable')
@@ -132,18 +293,23 @@ describe('verified browser outbox scope', () => {
   })
 
   it.each(['absent', 'issuer-only', 'key-only'] as const)('selects explicit unprotected mode for a successful %s issuer answer', async kind => {
-    const { owner } = setup()
+    const { client } = setup()
+    const owner = createScopedChatOutbox(client, {
+      indexedDB: { open: () => { throw new TypeError('Unprotected initialization must not open IndexedDB') } },
+    })
+    owners.push(owner)
     const { issuer: _issuer, issuer_key: _key, ...value } = base.value
-    owner.observe({ ...base, value: { ...value, ...(kind === 'issuer-only' ? { issuer: base.value.issuer } : {}), ...(kind === 'key-only' ? { issuer_key: base.value.issuer_key } : {}) } })
+    await owner.initialize({ ...base, value: { ...value, ...(kind === 'issuer-only' ? { issuer: base.value.issuer } : {}), ...(kind === 'key-only' ? { issuer_key: base.value.issuer_key } : {}) } })
     expect(await owner.repository()).toBeUndefined()
     expect(owner.protection()).toBe('unprotected')
   })
 
   it('separates different issuer pairs without making another scope\'s records readable', async () => {
-    const { owner } = setup()
+    const { owner, respond } = setup()
     owner.observe(base)
     const first = await owner.repository()
     await first?.commit(createOutboxRecord('attempt/original', { text: 'original', attachments: [] }))
+    respond({ ...base, value: { ...base.value, issuer_key: 'issuer-key/b' } })
     owner.observe({ ...base, value: { ...base.value, issuer_key: 'issuer-key/b' } })
     const second = await owner.repository()
     expect(second?.scope).not.toEqual(first?.scope)
@@ -237,6 +403,7 @@ describe('verified browser outbox scope', () => {
     discarder.owner.observe(changed)
     await discarder.owner.recovery.discard(initial.id)
     expect(await discarder.owner.recovery.list()).toEqual([])
+    discarder.respond(base)
     discarder.owner.observe(base)
     const retained = await discarder.owner.repository()
     expect(await retained?.read(initial.id)).toEqual(saved)

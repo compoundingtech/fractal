@@ -22,6 +22,7 @@ export const scopeFromCapabilities = (response: EnvelopeOf<Capabilities>): Outbo
   decodedScope(Native.decodeUnknownSync(Native.Capabilities)(response.value), response.snapshot.host_id)
 
 export interface ScopedChatOutbox extends ChatOutbox {
+  readonly initialize: (response?: EnvelopeOf<Capabilities>) => Promise<void>
   readonly observe: (response: EnvelopeOf<Capabilities>) => typeof Native.Capabilities.Type
   readonly recovery: OutboxRecoveryPort
   readonly protection: () => 'durable' | 'unprotected'
@@ -36,9 +37,12 @@ export const createScopedChatOutbox = (
   type Identity = { readonly scope: OutboxScope | undefined; readonly response: EnvelopeOf<Capabilities> }
   let cached: Identity | undefined
   let discovering: Promise<Identity> | undefined
+  let closed = false
   const connections = new Map<string, Promise<IndexedDbOutbox>>()
+  const initialized = new Map<string, Promise<IndexedDbOutbox>>()
   let catalog: Promise<IndexedDbOutboxScopes> | undefined
   const persistedScopes = (): Promise<IndexedDbOutboxScopes> => {
+    if (closed) return Promise.reject(new OutboxIdentityUnavailable())
     if (catalog === undefined) {
       const opening = Effect.runPromise(openIndexedDbOutboxScopes(options))
       catalog = opening
@@ -64,6 +68,7 @@ export const createScopedChatOutbox = (
     return discovering
   }
   const connectionFor = (scope: OutboxScope): Promise<IndexedDbOutbox> => {
+    if (closed) return Promise.reject(new OutboxIdentityUnavailable())
     const key = JSON.stringify([scope.principalId, scope.deploymentId, scope.memberId])
     let connection = connections.get(key)
     if (connection === undefined) {
@@ -73,15 +78,49 @@ export const createScopedChatOutbox = (
     }
     return connection
   }
+  // Recovery belongs to this connection's startup, not capability refresh or list polling.
+  // Foreign scopes may be opened for inspection without acquiring this send barrier.
+  const initializeConnection = (scope: OutboxScope, currentIdentity?: Identity): Promise<IndexedDbOutbox> => {
+    const key = JSON.stringify([scope.principalId, scope.deploymentId, scope.memberId])
+    let initialization = initialized.get(key)
+    if (initialization === undefined) {
+      initialization = (async () => {
+        const repo = await connectionFor(scope)
+        const current = currentIdentity ?? await discover()
+        if (current.scope === undefined || !sameScope(scope, current.scope)
+          || cached?.scope === undefined || !sameScope(scope, cached.scope)) throw new OutboxIdentityUnavailable()
+        await repo.recover()
+        // Validate persisted envelopes without treating discard-only corruption as unavailability.
+        await repo.list()
+        return repo
+      })()
+      initialized.set(key, initialization)
+      void initialization.catch(() => { if (initialized.get(key) === initialization) initialized.delete(key) })
+    }
+    return initialization
+  }
+  const initialize: ScopedChatOutbox['initialize'] = async (response) => {
+    let identity: Identity
+    if (response === undefined) identity = await discover()
+    else {
+      try {
+        const capabilities = observe(response)
+        identity = { scope: decodedScope(capabilities, response.snapshot.host_id), response }
+      } catch { throw new OutboxIdentityUnavailable() }
+    }
+    // A successful answer without an issuer explicitly opts out of durable protection.
+    if (identity.scope !== undefined) await initializeConnection(identity.scope, identity)
+  }
   const repository: ScopedChatOutbox['repository'] = async (onDiscovery) => {
     const needsDiscovery = cached === undefined
     const identity = cached ?? await discover()
+    const repo = identity.scope === undefined ? undefined : await initializeConnection(identity.scope, needsDiscovery ? identity : undefined)
     // Share only this operation's discovery, never stale cached grants.
     if (needsDiscovery) onDiscovery?.(identity.response)
-    return identity.scope === undefined ? undefined : connectionFor(identity.scope)
+    return repo
   }
   return {
-    observe, repository,
+    initialize, observe, repository,
     protection: () => cached?.scope === undefined ? 'unprotected' : 'durable',
     recovery: {
       list: async () => {
@@ -94,9 +133,8 @@ export const createScopedChatOutbox = (
           if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, status: entry.status, actions: entry.actions })
         }
         for (const scope of persisted.scopes) {
-          const repo = await connectionFor(scope)
           const matches = current.scope !== undefined && sameScope(scope, current.scope)
-          if (matches) await repo.recover()
+          const repo = await (matches ? initializeConnection(scope, current) : connectionFor(scope))
           for (const entry of restoreOutboxEntries(await repo.list())) {
             if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, status: entry.status, actions: entry.actions })
             else items.set(entry.record.id, {
@@ -120,6 +158,7 @@ export const createScopedChatOutbox = (
       },
     },
     close: () => {
+      closed = true
       for (const connection of connections.values()) void connection.then(repo => repo.close(), () => undefined)
       void catalog?.then(scopes => scopes.close(), () => undefined)
     },

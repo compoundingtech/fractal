@@ -24,6 +24,7 @@ export type ThreadOutboxOutcome =
 export interface ThreadOutboxSendOptions {
   /** The caller retains an explicit-not-applied attempt, even before repository discovery. */
   readonly retry?: boolean
+  /** Required before any restored never-dispatched intent or explicit-none retry can send. */
   readonly revalidate?: () => Promise<void>
   readonly expectedActor?: string | undefined
 }
@@ -173,10 +174,10 @@ export const createThreadOutboxSender = (client: FractalClient, outbox: ChatOutb
         intent = Schema.decodeUnknownSync(intentSchema)(new TextDecoder().decode(bytes))
       }
       if (intent.type !== input.type) throw new Error('The saved action has a different thread action type.')
-      if (retryPacket !== undefined || (restored && intent.type === 'thread.start')) {
+      if (retryPacket !== undefined || restored) {
         if (options?.revalidate === undefined) throw new Error(retryPacket !== undefined
           ? 'Revalidate the original thread target before retrying.'
-          : 'Revalidate the saved Start recipient before sending.')
+          : 'Revalidate the saved thread target before sending.')
         await options.revalidate()
         discovered = undefined
       }

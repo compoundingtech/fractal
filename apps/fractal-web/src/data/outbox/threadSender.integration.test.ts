@@ -201,16 +201,108 @@ describe('durable thread delivery', () => {
     expect(calls.filter(call => call.path.endsWith('/actions'))).toHaveLength(1)
   })
 
-  it('requires visible recipient revalidation only on restored never-dispatched Start', async () => {
-    const repo = await open()
-    await repo.accept(createOutboxRecord(start.key, { text: start.parameters.content, attachments: [] }), [], new TextEncoder().encode(JSON.stringify(start)))
+  describe.each([start, reply])('restored never-dispatched $type', input => {
+    it.each(['preparing', 'ready'] as const)('keeps %s pending until original-target revalidation and dispatches once across owners', async phase => {
+      const factory = new IDBFactory()
+      const repo = await open(factory)
+      const { client, calls } = transport()
+      if (phase === 'preparing') {
+        await repo.accept(createOutboxRecord(input.key, { text: input.parameters.content, attachments: [] }), [], new TextEncoder().encode(JSON.stringify(input)))
+      } else {
+        const permit = vi.spyOn(repo, 'acquireDispatchPermit').mockRejectedValueOnce(new Error('Stopped before permit'))
+        expect(await bind(client, repo).send(input)).toEqual({ how: 'unconfirmed' })
+        permit.mockRestore()
+      }
+      const before = await repo.read(input.key)
+      const packet = await repo.readPacketBytes(input.key)
+      expect(before).toMatchObject({ state: 'pending', phase, mayHaveDispatched: false })
+      const first = createScopedChatOutbox(client, { indexedDB: factory })
+      const second = createScopedChatOutbox(client, { indexedDB: factory })
+      try {
+        await Promise.all([first.initialize(), second.initialize()])
+        expect(await repo.read(input.key)).toEqual(before)
+        expect(calls.filter(call => call.path.endsWith('/actions'))).toEqual([])
+        const firstSender = createThreadOutboxSender(client, first)
+        const secondSender = createThreadOutboxSender(client, second)
+        expect(await firstSender.send(input)).toMatchObject({ how: 'failed' })
+        expect(await repo.read(input.key)).toEqual(before)
+        expect(await repo.readPacketBytes(input.key)).toEqual(packet)
+        expect(calls.filter(call => call.path.endsWith('/actions'))).toEqual([])
+        const entered = Promise.withResolvers<void>()
+        let validations = 0
+        const revalidate = vi.fn(async () => {
+          expect(await repo.read(input.key)).toEqual(before)
+          if (++validations === 2) entered.resolve()
+          await entered.promise
+        })
+        const changed: ThreadOutboxInput = input.type === 'thread.start'
+          ? { ...input, parameters: { ...input.parameters, content: 'Do not replace the saved intent' } }
+          : { ...input, parameters: { ...input.parameters, content: 'Do not replace the saved intent' } }
+        const outcomes = await Promise.all([
+          firstSender.send(changed, { revalidate }),
+          secondSender.send(changed, { revalidate }),
+        ])
+        expect(outcomes.some(outcome => outcome.how === 'sent')).toBe(true)
+        expect(revalidate).toHaveBeenCalledTimes(2)
+        const actions = calls.filter(call => call.path.endsWith('/actions'))
+        expect(actions).toHaveLength(1)
+        expect(JSON.parse(actions[0]!.body).parameters).toEqual(input.parameters)
+        if (phase === 'ready') expect(new TextEncoder().encode(actions[0]!.body)).toEqual(packet)
+        expect(await repo.read(input.key)).toMatchObject({ state: 'delivered' })
+      } finally { first.close(); second.close() }
+    })
+  })
+
+  it.each([start, reply])('initializes a dispatched $type as unknown without replaying', async input => {
+    const factory = new IDBFactory()
+    const repo = await open(factory)
     const { client, calls } = transport()
-    const sender = bind(client, repo)
-    expect(await sender.send(start)).toMatchObject({ how: 'failed' })
-    expect(calls.filter(call => call.path.endsWith('/actions'))).toEqual([])
-    const hook = vi.fn(async () => { expect(await repo.read(start.key)).toMatchObject({ mayHaveDispatched: false }) })
-    expect(await sender.send(start, { revalidate: hook })).toEqual({ how: 'sent' })
-    expect(hook).toHaveBeenCalledTimes(1)
+    const acquire = repo.acquireDispatchPermit
+    const permit = vi.spyOn(repo, 'acquireDispatchPermit').mockImplementation(async (id, revision) => {
+      await acquire(id, revision)
+      throw new Error('Stopped after permit commit')
+    })
+    expect(await bind(client, repo).send(input)).toEqual({ how: 'unconfirmed' })
+    permit.mockRestore()
+    expect(await repo.read(input.key)).toMatchObject({ state: 'pending', mayHaveDispatched: true })
+    const owner = createScopedChatOutbox(client, { indexedDB: factory })
+    try {
+      await owner.initialize()
+      expect(await repo.read(input.key)).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
+      const revalidate = vi.fn(async () => {})
+      expect(await createThreadOutboxSender(client, owner).send(input, { revalidate })).toEqual({ how: 'unconfirmed' })
+      expect(revalidate).not.toHaveBeenCalled()
+      expect(calls.filter(call => call.path.endsWith('/actions'))).toEqual([])
+    } finally { owner.close() }
+  })
+
+  it.each([start, reply])('initializes explicit-none $type and permits exactly one fresh retry child', async input => {
+    const factory = new IDBFactory()
+    const repo = await open(factory)
+    const bodies: string[] = []
+    const { client } = transport(body => {
+      bodies.push(body)
+      return bodies.length === 1 ? Response.json(refusals['recipient-retired'], { status: 409 }) : Response.json(receipt(body))
+    })
+    expect(await bind(client, repo).send(input)).toMatchObject({ how: 'not-applied' })
+    const before = await repo.read(input.key)
+    const owner = createScopedChatOutbox(client, { indexedDB: factory })
+    try {
+      await owner.initialize()
+      expect(await repo.read(input.key)).toEqual(before)
+      expect(bodies).toHaveLength(1)
+      const sender = createThreadOutboxSender(client, owner)
+      expect(await sender.send(input)).toMatchObject({ how: 'retry-refused' })
+      const revalidate = vi.fn(async () => {})
+      expect(await sender.send(input, { revalidate })).toEqual({ how: 'sent' })
+      expect(await sender.send(input, { revalidate })).toEqual({ how: 'sent' })
+      expect(revalidate).toHaveBeenCalledTimes(1)
+      expect(bodies).toHaveLength(2)
+      expect(JSON.parse(bodies[1]!).idempotency_key).toBe(`${input.key}/retry`)
+      expect(JSON.parse(bodies[1]!).parameters).toEqual(input.parameters)
+      expect(await repo.read(`${input.key}/retry`)).toMatchObject({ state: 'delivered' })
+      expect(await repo.read(`${input.key}/retry/retry`)).toBeUndefined()
+    } finally { owner.close() }
   })
 
   it('refuses a switched scope before dispatch and does not retain switched-scope outcomes', async () => {
