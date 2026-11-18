@@ -1251,6 +1251,8 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         .unwrap()
         .unwrap();
     assert_eq!(suspension.phase, "quiescing");
+    assert_eq!(suspension.cause(), "manual");
+    assert_eq!(suspension.mode(), "git");
     assert!(suspension.holds_seat());
     let (_, body) = ask("/v1/agents/suspend", "again").await;
     assert_eq!(body["code"], "already-suspended");
@@ -1277,6 +1279,68 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         })).await;
         assert_eq!(snapshot["code"], "stale-fence", "{snapshot}");
     }
+}
+
+#[tokio::test]
+async fn suspension_idle_to_manual_keeps_the_snapshot_and_is_idempotent() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let source = format!(
+        "version 2\nagent \"test/seat\" {{ host \"node\"; workspace {:?}; harness \"omp\" {{}} }}",
+        root.path().display().to_string(),
+    );
+    let request = apply_request(&state, &source, "person/test", "declare");
+    let (status, body) = json_request(app.clone(), "/v1/intent/apply", serde_json::to_value(request).unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let subject = "agent/test/seat";
+    let token = state.store.selected_desired_token(subject).unwrap().unwrap();
+    let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some("person/test".into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence,
+            expected_subject: None, idempotency_key: key,
+        }).unwrap()
+    };
+    let suspend = append("runtime.action.requested", json!({
+        "action":"suspend", "cause":"idle", "incarnation_id":"incumbent"
+    }), vec![token.clone()], None);
+    append("runtime.action.succeeded", json!({
+        "action":"suspend", "harness":"omp", "native_session_id":"native", "mode":"in-place"
+    }), vec![suspend.id.clone()], Some(crate::suspension::suspend_snapshot_key(&suspend.id)));
+    append("runtime.action.succeeded", json!({"action":"suspend"}),
+        vec![suspend.id.clone()], Some(crate::suspension::suspend_completed_key(&suspend.id)));
+    let before = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    let boundary = state.store.index().unwrap();
+    let error = request_suspend(&state, serde_json::from_value(json!({
+        "subject":subject, "actor":"person/test", "idempotency_key":"stale"
+    })).unwrap(), Some(SuspensionFence {
+        desired: token.clone(), incarnation: Some("successor".into()),
+    })).unwrap_err();
+    assert_eq!(error.code, "stale-fence");
+    assert_eq!(crate::suspension::current(&state.store, subject).unwrap().unwrap().cause(), "idle");
+    let payload = json!({"subject":subject, "actor":"person/test", "idempotency_key":"make-manual"});
+    let (status, converted) = json_request(app.clone(), "/v1/agents/suspend", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{converted}");
+    let (status, replay) = json_request(app.clone(), "/v1/agents/suspend", payload).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(converted["id"], replay["id"]);
+    assert_eq!(converted["body"]["fields"]["operation_id"], before.operation_id);
+    let after = crate::suspension::current(&state.store, subject).unwrap().unwrap();
+    assert_eq!(after.cause(), "manual");
+    assert!(after.holds_seat());
+    assert_eq!(after.operation_id, before.operation_id);
+    assert_eq!(after.native_session_id, before.native_session_id);
+    assert_eq!(after.mode(), "in-place");
+    assert_eq!(after.suspended_at_unix_ms, before.suspended_at_unix_ms);
+    assert_eq!(crate::suspension::current_at(&state.store, subject, Some(boundary)).unwrap().unwrap().cause(), "idle");
+    let path = root.path().join("reopened.sqlite3");
+    state.store.copy_store_to(&path).unwrap();
+    let reopened = Store::open(&path, "node").unwrap();
+    assert_eq!(crate::suspension::current(&reopened, subject).unwrap().unwrap(), after);
+    let shown = client_suspension(&after);
+    assert_eq!(shown["cause"], "manual");
+    assert_eq!(shown["mode"], "in-place");
 }
 
 #[tokio::test]

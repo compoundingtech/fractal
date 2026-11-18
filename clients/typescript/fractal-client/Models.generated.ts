@@ -444,10 +444,12 @@ export type AgentSuspendParameters = {
 export type AgentSuspension = {
   action: "suspend" | "resume";
   blocking: Array<string>;
+  cause?: string | null;
   code?: string | null;
   harness?: string | null;
   host?: string | null;
   incarnation_id?: string | null;
+  mode?: string | null;
   native_session_id?: string | null;
   operation_id: string;
   phase: 

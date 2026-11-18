@@ -32,6 +32,22 @@ keeps its current build while new CLI invocations use the installed build. Follo
 the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
 alone as a daemon upgrade.
 
+### Suspension metadata reader boundary
+
+Suspension requests may carry `cause`; snapshot receipts may carry `mode`. Missing or null
+values mean `manual` and `git`. Readers retain unfamiliar strings and replication retains
+unrecognized claim fields unchanged. A keyed `runtime.action.succeeded` manual-conversion
+receipt changes only the cause of its original suspend lineage, not its snapshot or session.
+Client-v0 exposes both strings as optional fields.
+
+These are readers for [idle residency](https://github.com/compoundingtech/fractal/pull/6720):
+no automatic idle or in-place writer is activated here. All active members must gain these
+readers before those writers are enabled. Older daemons ignore conversion receipts and have
+only manual suspension behavior; that is not proof of safety after automatic wake is enabled.
+The focused replication/reopen fixtures prove metadata preservation, not a deployed-version
+restart matrix. Writer activation additionally requires candidate → oldest deployed → candidate
+evidence. Downgrade is not promised; rollback is policy-off roll-forward.
+
 ### Updating the deployed-main baseline
 
 The fleet deploys exact green main commits, not release branches or stable tags.

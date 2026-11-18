@@ -17,6 +17,16 @@ wait. A client uses the fenced client-v0 actions `agent.suspend` and `agent.resu
 fenced on the running incarnation and the selected declaration; resume is fenced on the
 declaration.
 
+The suspension block in `agents show` includes its cause (`manual` or `idle`) and snapshot mode
+(`git` or `in-place`). Missing metadata in historical records means `manual` and `git`; unfamiliar
+values stay visible rather than being reclassified. This release only adds readers: ordinary
+suspend still captures Git, and no daemon automatically writes idle suspensions.
+
+An explicit suspend of an already idle-suspended seat converts the hold to manual, preserving
+the original suspend operation, snapshot and native session. Repeating the same request is
+idempotent. A manual hold must not be automatically woken. This is a reader-first prerequisite
+for [idle residency](https://github.com/compoundingtech/fractal/pull/6720), not its activation.
+
 ## When a seat can suspend
 
 Suspend first checks the declaration's native session arguments. An authored selector such as

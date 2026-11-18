@@ -3738,6 +3738,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     json!({
         "action": suspension.action,
         "phase": suspension.phase,
+        "cause": suspension.cause(),
+        "mode": suspension.mode(),
         "operation_id": suspension.operation_id,
         "harness": suspension.harness,
         "native_session_id": suspension.native_session_id,
@@ -11262,6 +11264,41 @@ pub fn request_suspend(
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
         && suspension.holds_seat()
     {
+        let manual_key = crate::suspension::suspend_manual_key(
+            suspension.suspend_operation_id.as_deref().unwrap_or(&suspension.operation_id),
+        );
+        if let Some(prior) = state.store.operation_claim(&manual_key).map_err(ApiError::internal)?
+            && crate::suspension::field(&prior, "request_key") == Some(key.as_str())
+        {
+            return Ok(prior);
+        }
+        if suspension.cause() == "idle" && suspension.phase == "suspended" {
+            check_suspension_fence(
+                fence.as_ref(), suspension.incarnation_id.as_deref(), &token,
+            )?;
+            let (claim, _) = state.store.append_source_gated(
+                &subject,
+                &ClaimInput {
+                    subject: subject.clone(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: Some(actor),
+                    fields: BTreeMap::from([
+                        ("action".into(), json!("suspend")),
+                        ("operation_status".into(), json!("manual")),
+                        ("cause".into(), json!("manual")),
+                        ("request_key".into(), json!(key)),
+                        ("operation_id".into(), json!(suspension.operation_id)),
+                    ]),
+                    evidence: vec![token, suspension.suspend_operation_id.clone().unwrap_or(suspension.operation_id.clone())],
+                    expected_subject: None,
+                    idempotency_key: Some(manual_key),
+                },
+                crate::store::owned_sets::Verb::Suspend,
+                force_reason,
+            ).map_err(ApiError::bad)?;
+            signal_changed(state);
+            return Ok(claim);
+        }
         return Err(ApiError::bad(
             FractalError::new(
                 "already-suspended",
