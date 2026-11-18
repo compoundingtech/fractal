@@ -14323,6 +14323,26 @@ mission "differential" state="ready" {
     }
 
     #[tokio::test]
+    async fn idle_suspend_declaration_read_exposes_the_typed_opt_out() {
+        for policy in ["never", "member"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let source = format!("version 2\nagent \"example/root\" {{ command \"true\"; idle-suspend \"{policy}\"; }}");
+            let intent = crate::graph::parse_intent(&source, "terminal-test").unwrap();
+            let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
+            state.store.apply_as(&intent, &expected, "idle-policy-read", Some("person/example")).unwrap();
+            let value = agent_declaration(State(state),
+                Extension(ClientSession::local(Some("person/example")).unwrap()),
+                AxumPath("example/root".into()), Query(AgentDeclarationQuery {
+                    revision: None, show_env_values: false,
+                })).await.unwrap().0;
+            assert_eq!(value["idle_suspend"], policy);
+            let decoded: fractal_client::AgentDeclaration = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.idle_suspend.as_deref(), Some(policy));
+        }
+    }
+
+    #[tokio::test]
     async fn agent_declarations_require_sensitive_scope_and_select_exact_revision() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());

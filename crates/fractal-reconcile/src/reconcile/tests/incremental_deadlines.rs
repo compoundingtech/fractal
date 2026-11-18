@@ -1522,3 +1522,80 @@ fn an_unneeded_evaluation_that_arms_an_earlier_timer_is_a_correction() {
         })
         .unwrap();
 }
+
+fn residency_claim(store: &Store, kind: &str, fields: Value) {
+    store.append_claim(&ClaimInput {
+        subject: "agent/garden".into(), kind: kind.into(), actor: Some("agent/garden".into()),
+        fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+        expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+fn residency_report(store: &Store, quiet: bool) {
+    residency_claim(store, "harness.observed", serde_json::json!({
+        "driver":"omp","transport":"omp-channel","incarnation_id":"one",
+        "state":if quiet {"idle"} else {"working"}, "background_jobs":0,
+        "quiescent":quiet, "blocking":if quiet {vec![]} else {vec!["turn-in-flight"]},
+        "ask":"none","blocked_on":"none","input_buffer":"unknown"
+    }));
+}
+
+#[test]
+fn idle_residency_arms_the_exact_stable_epoch_deadline_and_rearms_after_a_blocker() {
+    let _clock = Clock::at(START);
+    let (store, runtime, reconciler, _) = stopping();
+    let intent = parse_intent(
+        "version 2\nagent \"garden\" { workspace \".\"; command \"true\"; idle-suspend \"member\" }",
+        "node",
+    ).unwrap();
+    store.apply(&intent, &BTreeMap::new(), "residency-fixture").unwrap();
+    residency_claim(&store, "runtime.observed", serde_json::json!({"status":"running","incarnation_id":"one"}));
+    residency_claim(&store, "harness.session-file", serde_json::json!({
+        "harness":"omp","session_id":"native-one","incarnation_id":"one","agent":"agent/garden"
+    }));
+    residency_claim(&store, "harness.diagnostic", serde_json::json!({
+        "code":"omp-channel-ready","driver":"omp","incarnation_id":"one","reason":"confirmed"
+    }));
+    residency_report(&store, true);
+    reconciler.set_idle_residency(IdleResidencySettings { after_ms: Some(5_000) });
+    let first = crate::residency::evaluate_at(&store, "agent/garden", None, Some(5_000)).unwrap()
+        .not_before(Some(START), Some(5_000));
+    let due = first.due_at_unix_ms.unwrap();
+    let (_, armed) = smallclaims::touched::record_due(|| {
+        reconciler.evaluate_idle_residency("agent/garden", START).unwrap();
+    });
+    assert_eq!(armed, Some(due));
+    smallclaims::store::set_thread_clock(Some(START + 100));
+    residency_report(&store, true);
+    let (_, repeated) = smallclaims::touched::record_due(|| {
+        reconciler.evaluate_idle_residency("agent/garden", START + 100).unwrap();
+    });
+    assert_eq!(repeated, Some(due));
+    residency_report(&store, false);
+    let (_, blocked) = smallclaims::touched::record_due(|| {
+        reconciler.evaluate_idle_residency("agent/garden", START + 100).unwrap();
+    });
+    assert_eq!(blocked, None);
+    smallclaims::store::set_thread_clock(Some(START + 200));
+    residency_report(&store, true);
+    let next = crate::residency::evaluate_at(&store, "agent/garden", None, Some(5_000)).unwrap();
+    let next_due = next.eligible_since_unix_ms.unwrap() + 5_000;
+    let (_, rearmed) = smallclaims::touched::record_due(|| {
+        reconciler.evaluate_idle_residency("agent/garden", START + 200).unwrap();
+    });
+    assert_eq!(rearmed, Some(next_due));
+    assert!(next_due > due);
+    let (_, reached) = smallclaims::touched::record_due(|| {
+        reconciler.evaluate_idle_residency("agent/garden", next_due).unwrap();
+    });
+    assert_eq!(reached, None, "a reached diagnostic deadline does not spin");
+    assert!(runtime.kills.lock().unwrap().is_empty());
+    assert!(store.claims_for("agent/garden", Some("runtime.action.requested")).unwrap().is_empty());
+    smallclaims::store::set_thread_clock(Some(START + 10_000));
+    let restarted = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+    restarted.set_idle_residency(IdleResidencySettings { after_ms: Some(5_000) });
+    let (_, after_restart) = smallclaims::touched::record_due(|| {
+        restarted.evaluate_idle_residency("agent/garden", START + 10_000).unwrap();
+    });
+    assert_eq!(after_restart, Some(START + 15_000), "restart starts a full local grace interval");
+}

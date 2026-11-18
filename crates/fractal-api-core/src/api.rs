@@ -3951,6 +3951,7 @@ fn client_agent_cards_presented(
     queues: &CardQueues<'_>,
     selected: Option<&BTreeSet<String>>,
 ) -> anyhow::Result<Vec<Value>> {
+    let idle_residency_policy = crate::config::idle_residency_policy();
     let agent_subjects = status
         .subjects
         .iter()
@@ -4200,6 +4201,15 @@ fn client_agent_cards_presented(
             } else {
                 None
             };
+            let residency = crate::residency::evaluate_at(
+                store,
+                &subject.subject,
+                Some(snapshot_index),
+                idle_residency_policy.settings.after_ms,
+            )?.not_before(
+                idle_residency_policy.enabled_at_unix_ms,
+                idle_residency_policy.settings.after_ms,
+            );
             // A suspended seat has no process by design: it is neither stopped nor failed.
             let state = match suspension.as_ref().map(|item| item.phase.as_str()) {
                 Some("suspended") if fault.is_none() => "suspended",
@@ -4347,6 +4357,12 @@ fn client_agent_cards_presented(
                 ),
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
+                "residency": {
+                    "policy": residency.policy,
+                    "eligible_since": residency.eligible_since_unix_ms.map(client_timestamp),
+                    "due_at": residency.due_at_unix_ms.map(client_timestamp),
+                    "refusal_reason": residency.refusal_reason,
+                },
                 "handoff": handoff,
                 "stopping": stopping,
                 "rollout": if card_reads.may_have_rollout(&subject.subject) {
