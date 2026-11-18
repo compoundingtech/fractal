@@ -2321,7 +2321,7 @@ const loopReferences = (input: LoopInput): readonly RunReference[] => [
 
 const assembleMission = <const TMission extends string>(
   input: MissionInput<TMission>,
-  resolveAgent: (value: unknown) => unknown = (value) => value,
+  resolveAgent: (value: unknown, step: string) => unknown = (value) => value,
 ): typeof MissionSchema.Type => {
   const phases: readonly (readonly object[])[] = [
     input.steps,
@@ -2439,8 +2439,8 @@ const assembleMission = <const TMission extends string>(
               isInputHandle(value) === true ? { name: value.name, kind: value.kind } : value,
             ),
           }),
-      reportTo: resolveAgent(input.reportTo),
-      ...(input.assignedTo === undefined ? {} : { assignedTo: resolveAgent(input.assignedTo) }),
+      reportTo: resolveAgent(input.reportTo, input.id),
+      ...(input.assignedTo === undefined ? {} : { assignedTo: resolveAgent(input.assignedTo, input.id) }),
       steps: input.steps.map((s) => {
         const wire = isStepHandle(s) === true
           ? stepData.get(s)!.wire
@@ -2448,7 +2448,7 @@ const assembleMission = <const TMission extends string>(
             ? authoredLoopWire(s)
             : authoredStepWire(s)
         return 'assignedTo' in wire && wire.assignedTo !== undefined
-          ? { ...wire, assignedTo: resolveAgent(wire.assignedTo) }
+          ? { ...wire, assignedTo: resolveAgent(wire.assignedTo, wire.id) }
           : wire
       }),
       ...(input.finally === undefined
@@ -2496,7 +2496,7 @@ const wireFinalSteps = (
 /** Validates authoring references and materializes plain wire data before serialization. */
 export const missionWire = <const TMission extends string>(
   input: MissionInput<TMission>,
-  resolveAgent?: (value: unknown) => unknown,
+  resolveAgent?: (value: unknown, step: string) => unknown,
 ): typeof MissionSchema.Encoded => {
   const m = assembleMission(input, resolveAgent)
   return {

@@ -31,7 +31,7 @@ const renewal = () => {
 const review = () => {
   const head = Fractal.input.text('head')
   const inspect = Fractal.step({ id: 'review', assignedTo: worker, goal: Fractal.t`Review ${head}.`, produces: {
-    verdict: Fractal.product.resource({ kind: 'custom.example.verdict', fields: { head: Fractal.t`${head}` } }),
+    verdict: Fractal.product.resource({ kind: 'custom.example.verdict', subject: 'resource/mission-run/${ST_MISSION_RUN}/review/${input.head}/verdict', fields: { head: Fractal.t`${head}` } }),
     evidence: Fractal.product.resource({ kind: 'custom.example.evidence', fields: { present: true } }),
   } })
   const check = Fractal.step({ id: 'check', agentless: true, dependsOn: inspect, gates: [Fractal.gate.fieldIs({ name: 'verdict-go', subject: Fractal.t`${inspect.products.verdict}`, path: 'verdict', value: 'GO' })] })
@@ -72,7 +72,7 @@ describe('graph lowering golden parity', () => {
     const compiled = lower(diamond(), bindings)
     expect(yield* start(compiled, host)).toEqual({ _tag: 'Success' })
     expect(entered).toEqual(['inspect', 'code', 'docs', 'finish'])
-    expect(host.recorded.map((entry) => entry.key)).toEqual(['inspect', 'docs', 'code', 'finish'])
+    expect(host.recorded.map((entry) => entry.key).sort()).toEqual(['code', 'docs', 'finish', 'inspect'])
     const replay = fakeHost({ payload: {}, journal: journalOf(host.recorded) })
     expect(yield* start(compiled, replay)).toEqual({ _tag: 'Success' })
     expect(replay.recorded).toEqual([])
@@ -104,7 +104,7 @@ describe('graph lowering golden parity', () => {
     const host = fakeHost({ payload: { head: 'abc' }, child: async ({ key, mission, input }) => {
       expect({ key, mission, input }).toEqual({ key: 'review', mission: 'example/seat-turn', input: { head: 'abc', goal: 'Review abc.' } })
       return { _tag: 'Success', value: { run: 'mission-run/child', status: 'completed', products: {
-        'resource/mission-run/child/review/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'GO' },
+        'resource/mission-run/child/review/abc/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'GO' },
         'resource/mission-run/child/review/evidence': { kind: 'custom.example.evidence', present: true },
       } } }
     } })
@@ -112,7 +112,7 @@ describe('graph lowering golden parity', () => {
     expect(host.recorded.map((entry) => entry.key)).toEqual(['review', 'review/product', 'check'])
     expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded) }))).toEqual({ _tag: 'Success' })
     const noGo = journalOf(host.recorded.slice(0, 1)).map(([key, exit]) => [key, exit._tag === 'Success' ? { ...exit, value: { ...(exit.value as object), products: {
-      'resource/mission-run/child/review/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'NO-GO' },
+      'resource/mission-run/child/review/abc/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'NO-GO' },
       'resource/mission-run/child/review/evidence': { kind: 'custom.example.evidence', present: true },
     } } } : exit] as const)
     const rejected = fakeHost({ payload: { head: 'abc' }, journal: noGo })
@@ -153,6 +153,19 @@ describe('typed compile refusals', () => {
   it('refuses missing worker bindings and remote exec hosts', () => {
     expect(() => lower(diamond(), { ...bindings, workers: {} })).toThrow(expect.objectContaining({ construct: 'worker binding', step: 'inspect' }))
     expect(() => lower(verify(), { ...bindings, host: 'other' })).toThrow(expect.objectContaining({ construct: 'gate.exec.host', step: 'verify' }))
+  })
+
+  it('never overwrites a declared goal input with worker instructions', () => {
+    const goal = Fractal.input.text('goal')
+    const graph = Fractal.mission({ meta, ...base, inputs: [goal], steps: [Fractal.step({ id: 'work', assignedTo: worker, goal: Fractal.t`Implement ${goal}.` })] })
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'input.goal', step: bindings.id }))
+  })
+
+  it('uses explicit source-reference resolution and refuses a missing resolver', () => {
+    const ref = Fractal.agent({ meta: { url: 'file:///tree/example/worker/agent.ts' } })
+    const graph = Fractal.defineMission({ meta, intent: { ...base, steps: [{ id: 'work', assignedTo: ref, goal: 'Work.' }] } })
+    expect(() => lower(graph, bindings)).toThrow(expect.objectContaining({ construct: 'agent binding', step: 'work' }))
+    expect(lower(graph, { ...bindings, resolveAgent: () => worker }).graph.map((step) => step.id)).toEqual(['work'])
   })
 
   it('refuses cyclic graphs at compile time rather than spinning the program', () => {

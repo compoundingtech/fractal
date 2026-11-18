@@ -41,6 +41,7 @@ export const lower = (
 ) => {
   if (typeof graph.intent === 'function') refuse(options.id, 'context factory', 'Resolve the mission factory before lowering')
   const intent = graph.intent as MissionIntent
+  if ('id' in intent && intent.id !== options.id) refuse(options.id, 'mission id', 'The bound id must equal the graph mission id')
   // Inspect authoring-only constructs before the graph schema can erase or reject them.
   const inspect = (value: unknown, step: string): void => {
     if (typeof value !== 'object' || value === null) return
@@ -56,7 +57,11 @@ export const lower = (
     }
   }
   inspect(intent, options.id)
-  const wire = missionWire({ ...intent, id: options.id } as MissionInput<string>, options.resolveAgent)
+  const wire = missionWire({ ...intent, id: options.id } as MissionInput<string>, (value, step) => {
+    if (typeof value !== 'object' || value === null || !('_tag' in value) || value._tag !== 'SubjectRef') return value
+    if (options.resolveAgent === undefined) refuse(step, 'agent binding', 'Imported agent references need the authoring tree resolver')
+    return options.resolveAgent(value)
+  })
   const mission = Schema.decodeUnknownSync(MissionSchema)(wire)
   for (const key of ['finally', 'completion', 'gates', 'constraints', 'lanes', 'reportStalls', 'reportCompleted', 'observers', 'subscriptions'] as const) {
     if (mission[key] !== undefined) refuse(options.id, key)
@@ -118,14 +123,22 @@ export const lower = (
       if (gate.kind === 'field' && !steps.some((producer) => predecessors.has(producer.id) && producer.produces?.some((product) => product.subject === gate.subject))) refuse(step.id, 'gate.fieldIs dependsOn', 'The product producer must be this step or a dependency ancestor')
     }
   }
-  for (const input of mission.inputs ?? []) if (input.kind !== 'text') refuse(options.id, `input.${input.kind}`)
+  for (const input of mission.inputs ?? []) {
+    if (input.kind !== 'text') refuse(options.id, `input.${input.kind}`)
+    if (input.name === 'goal' && steps.some((step) => step.worker !== undefined)) refuse(options.id, 'input.goal', 'Worker bindings reserve goal for the expanded step goal')
+  }
   const input = Schema.Struct(Object.fromEntries((mission.inputs ?? []).map((field) => [field.name, Schema.String])))
   const plan = steps.map((step) => ({ id: step.id, dependsOn: (step.dependsOn ?? []).map((dependency) => dependency.step), gates: step.gates ?? [] }))
   const program = Native.mission({
     meta: { url: graph.url }, id: options.id, goal: mission.goal.join('\n'), reportTo: mission.reportTo,
-    input, budget: mission.budget, concurrentRuns: mission.concurrentRuns, authority: mission.authority,
-    resources: mission.resources, docs: mission.docs, stalledAfter: mission.stalledAfter,
-    timeout: mission.timeout,
+    input,
+    ...(mission.budget === undefined ? {} : { budget: mission.budget }),
+    ...(mission.concurrentRuns === undefined ? {} : { concurrentRuns: mission.concurrentRuns }),
+    ...(mission.authority === undefined ? {} : { authority: mission.authority }),
+    ...(mission.resources === undefined ? {} : { resources: mission.resources }),
+    ...(mission.docs === undefined ? {} : { docs: mission.docs }),
+    ...(mission.stalledAfter === undefined ? {} : { stalledAfter: mission.stalledAfter }),
+    ...(mission.timeout === undefined ? {} : { timeout: mission.timeout }),
   }, (values) => Effect.gen(function* () {
     const env = yield* Native.env
     const products = new Map<string, Readonly<Record<string, unknown>>>()
@@ -134,7 +147,7 @@ export const lower = (
       const fail = (gate: string, reason: string) => Effect.fail(new GraphGateFailed({ step: step.id, gate, reason }))
       const declaredProducts = step.produces ?? []
       if (step.worker !== undefined) {
-        const paths = declaredProducts.map((product) => product.subject.slice('resource/mission-run/${ST_MISSION_RUN}/'.length))
+        const paths = declaredProducts.map((product) => expand(product.subject.slice('resource/mission-run/${ST_MISSION_RUN}/'.length)))
         const worker = Native.Worker.layer({ mission: step.worker, input: { ...values, goal: expand((step.goal ?? []).join('\n')) }, ...(paths.length === 0 ? {} : { product: paths }) })
         if (paths.length === 0) yield* Native.step({ id: step.id }).pipe(Effect.provide(worker))
         else {

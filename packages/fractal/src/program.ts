@@ -195,6 +195,7 @@ export function mission(
 /**
  * The child mission a worker turn runs, and its product's path below the child run
  * (`review/verdict` names `resource/mission-run/CHILD/review/verdict`), whose value is the step's.
+ * An array of product paths decodes a record keyed by those paths instead of a single value.
  */
 export class Worker extends Context.Service<
   Worker,

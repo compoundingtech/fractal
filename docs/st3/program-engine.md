@@ -682,7 +682,8 @@ export default Fractal.lower(graph, {
 
 Bindings are explicit: `workers` maps an assigned agent id to a published child mission,
 not to an automatically invented worker protocol. Worker children receive the declared
-text inputs plus the expanded step `goal`. A tree using imported agent references supplies
+text inputs plus the expanded step `goal`. A text input named `goal` is refused when
+there are worker steps, rather than overwritten. A tree using imported agent references supplies
 `resolveAgent` using its existing reference resolver. Resolve context factories before
 calling `lower`. Missing worker bindings are compile refusals.
 
