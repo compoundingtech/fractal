@@ -292,7 +292,9 @@ version 21 atomically; it does not build a history-sized index. Older binaries
 refuse the version before interpreting BLOB references as inline text. Writers
 emit references immediately. One boundary still reads old inline text while the
 existing paced maintenance job converts at most 64 rows per writer loan, with
-durable primary-key cursors. Authorization bootstrap finishes before compaction;
+durable primary-key cursors and a 10 ms cooperative budget checked between rows.
+A single SQLite operation, row decode, or commit can exceed that budget; no
+statement is aborted. Authorization bootstrap finishes before compaction;
 the complete legacy authorization model continues serving until its existing
 activation gate passes. Reference compaction does not require projection replay,
 change signed bytes, reorder candidate pagination, or expire nonce evidence.

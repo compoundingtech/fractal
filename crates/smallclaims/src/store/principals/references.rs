@@ -5,6 +5,7 @@ use super::*;
 use sha2::{Digest as _, Sha256};
 
 const PAGE: usize = 64;
+const PAGE_TIME: std::time::Duration = std::time::Duration::from_millis(10);
 
 pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
     let installed: bool = connection.query_row(
@@ -191,11 +192,13 @@ fn checkpoint(
     Ok(())
 }
 
-/// Convert at most PAGE rows. Caller owns one immediate writer transaction, including
-/// this checkpoint. New writers emit references, so inserts behind the cursor are safe.
-/// Sources move in primary-key order; a converted BLOB may be visited a second time
-/// after its TEXT position, but no text row is skipped and every loan stays bounded.
+/// Convert at most PAGE rows, yielding between rows after the 10 ms work budget.
+/// A single SQLite operation/row and durable commit can exceed that cooperative budget;
+/// no statement is aborted and no page loses progress. Caller owns the transaction.
+/// Sources move in primary-key order; converted BLOBs may be visited once more, but
+/// no inline row is skipped. New writers emit references, including behind the cursor.
 pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
+    let started = std::time::Instant::now();
     let (phase, claim, signature, writer): (String, String, SqlValue, String) = connection.query_row(
         "SELECT phase,claim_id,signature,writer FROM claim_signature_reference_migration WHERE id=1",
         [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -206,8 +209,12 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                 "SELECT claim_id,signature FROM claim_signature_candidates WHERE (claim_id,signature)>(?1,?2) ORDER BY claim_id,signature LIMIT ?3",
             )?.query_map(params![claim, signature, PAGE as i64], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            for (claim, text) in &rows {
+            for (index, (claim, text)) in rows.iter().enumerate() {
                 encode(connection, claim, text)?;
+                if started.elapsed() >= PAGE_TIME {
+                    checkpoint(connection, &phase, claim, SqlValue::Text(text.clone()), "")?;
+                    return Ok(index + 1);
+                }
             }
             if let Some((claim, text)) = rows.last() {
                 checkpoint(connection, &phase, claim, SqlValue::Text(text.clone()), "")?;
@@ -221,7 +228,7 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                 "SELECT claim_id,signature,writer FROM claim_signature_sources WHERE (claim_id,signature,writer)>(?1,?2,?3) ORDER BY claim_id,signature,writer LIMIT ?4",
             )?.query_map(params![claim, signature, writer, PAGE as i64], |row| Ok((row.get::<_,String>(0)?, row.get::<_,SqlValue>(1)?, row.get::<_,String>(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            for (claim, value, writer) in &rows {
+            for (index, (claim, value, writer)) in rows.iter().enumerate() {
                 if let SqlValue::Text(text) = value {
                     let reference = encode_candidate(connection, claim, text)?;
                     // Explicit deletion (rather than REPLACE/UPDATE OR IGNORE) fires the
@@ -230,6 +237,10 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                     connection.execute(/* sqlite-large-value: allow-for-now lv-h8fd02babb402 owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_sources(claim_id,signature,writer) VALUES(?1,?2,?3)", params![claim,reference,writer])?;
                 } else {
                     resolve(connection, claim, value.clone())?;
+                }
+                if started.elapsed() >= PAGE_TIME {
+                    checkpoint(connection, &phase, claim, value.clone(), writer)?;
+                    return Ok(index + 1);
                 }
             }
             if let Some((claim, signature, writer)) = rows.last() {
@@ -244,12 +255,16 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                 "SELECT claim_id,signature FROM claim_signatures WHERE claim_id>?1 ORDER BY claim_id LIMIT ?2",
             )?.query_map(params![claim, PAGE as i64], |row| Ok((row.get::<_,String>(0)?, row.get::<_,SqlValue>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            for (claim, value) in &rows {
+            for (index, (claim, value)) in rows.iter().enumerate() {
                 if let SqlValue::Text(text) = value {
                     let reference = encode(connection, claim, text)?;
                     connection.execute(/* sqlite-large-value: allow-for-now lv-he69c6f6df90a owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signatures SET signature=?2 WHERE claim_id=?1", params![claim,reference])?;
                 } else {
                     resolve(connection, claim, value.clone())?;
+                }
+                if started.elapsed() >= PAGE_TIME {
+                    checkpoint(connection, &phase, claim, SqlValue::Text(String::new()), "")?;
+                    return Ok(index + 1);
                 }
             }
             if let Some((claim, _)) = rows.last() {
@@ -264,7 +279,7 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                 "SELECT claim_id,last_signature,best_signature FROM claim_signature_judging WHERE claim_id>?1 ORDER BY claim_id LIMIT ?2",
             )?.query_map(params![claim, PAGE as i64], |row| Ok((row.get::<_,String>(0)?, row.get::<_,SqlValue>(1)?, row.get::<_,SqlValue>(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            for (claim, last, best) in &rows {
+            for (index, (claim, last, best)) in rows.iter().enumerate() {
                 let convert = |value: &SqlValue| -> Result<SqlValue> {
                     match value {
                         SqlValue::Text(text) if !text.is_empty() => {
@@ -281,6 +296,10 @@ pub(super) fn advance_page(connection: &Connection) -> Result<usize> {
                     }
                 };
                 connection.execute(/* sqlite-large-value: allow-for-now lv-haaea4dc6f39b owner=smallclaims::store::principals::references TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?2,best_signature=?3 WHERE claim_id=?1", params![claim,convert(last)?,convert(best)?])?;
+                if started.elapsed() >= PAGE_TIME {
+                    checkpoint(connection, &phase, claim, SqlValue::Text(String::new()), "")?;
+                    return Ok(index + 1);
+                }
             }
             if let Some((claim, _, _)) = rows.last() {
                 checkpoint(connection, &phase, claim, SqlValue::Text(String::new()), "")?;
@@ -347,10 +366,11 @@ mod tests {
             .unwrap();
         connection.execute("INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,best_signature,complete,dirty) VALUES('claim-0000',1,'roots','content',?1,?1,1,0)", [text]).unwrap();
         initialize_schema(&connection).unwrap();
-        assert_eq!(advance(&connection), PAGE);
+        let first_page = advance(&connection);
+        assert!((1..=PAGE).contains(&first_page));
         // Reopening the boundary is idempotent and does not reset the durable page cursor.
         initialize_schema(&connection).unwrap();
-        assert_eq!(advance(&connection), 3);
+        assert!(advance(&connection) <= PAGE);
         while pending(&connection).unwrap() {
             assert!(advance(&connection) <= PAGE);
         }

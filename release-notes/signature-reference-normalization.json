@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "changed",
-    "detail": "After authorization bootstrap completes, the upgrade performs online reference migration in batches of at most 64 rows per advance, with persistent cursors for candidates, sources, facade and judging stages, rather than a whole-store conversion transaction or history-sized index build. Reference migration progress is reported separately from authorization readiness. Migration and dictionary writes add local work; row bounds are not encoded-byte or elapsed-time bounds. No migration duration, startup bound or latency improvement is claimed."
+    "detail": "After authorization bootstrap completes, the upgrade performs online reference migration in batches of at most 64 rows per advance, yielding between rows after a 10 ms cooperative work budget, with persistent cursors for candidates, sources, facade and judging stages. No whole-store conversion transaction or history-sized index build runs. Reference progress is separate from authorization readiness. Individual SQLite operations, row decoding and durable commit can exceed the cooperative budget; no statement is aborted. No measured migration duration or latency improvement is claimed."
   },
   "manual": {
     "status": "none",
