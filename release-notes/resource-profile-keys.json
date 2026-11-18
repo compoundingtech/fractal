@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Adds --profile, positive --max-members, root-only --receipt-file, stable --exec-id, --require-parent, --inherit-parent, resources cancel, authenticated resources member-scope --exec-id, offline resources in-member --owner-uid, Effect profile/diskPath and KDL profile/disk-path. New shell execution semantics require resource_profile_keys>=1. Raw no-key callers remain supported; unknown keys require complete raw declarations until caller cutover."
+    "detail": "Adds --profile, positive --max-members, root-only --receipt-file, owner-scoped --request-id, --as selectors, --require-parent, --inherit-parent, request cancellation with seven-day tombstones, authenticated resources member-scope --exec-id, offline resources in-member --owner-uid, Effect profile/diskPath and KDL profile/disk-path. FRACTAL_RESOURCE_MEMBER_EXEC_ID identifies the current generation separately from the root receipt identity. New shell execution semantics require resource_profile_keys>=1. Raw no-key callers remain supported; unknown keys require complete raw declarations until caller cutover."
   },
   "downtime": {
     "status": "none",
