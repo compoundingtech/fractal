@@ -581,7 +581,7 @@ fn end_requested(slice: &str) -> Result<()> {
 }
 
 fn stop_slice(slice: &str) -> Result<()> {
-    let snapshot = crate::systemd::snapshot()?;
+    let snapshot = crate::systemd::snapshot_after_admission()?;
     // A complete loaded-only snapshot proves an absent slice has nothing left to end.
     if !snapshot.units.contains_key(slice) {
         return Ok(());
