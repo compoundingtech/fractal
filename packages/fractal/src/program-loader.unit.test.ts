@@ -9,6 +9,8 @@ import { NodeFileSystem } from '@effect/platform-node'
 import { describe, expect, it } from '@effect/vitest'
 import { Effect } from 'effect'
 
+import landingProgram from '../fixtures/programs/factory/land-program/mission.ts'
+
 import { emit, mission, type MissionInput } from './mod.ts'
 import { bundleProgram } from './program-bundler.ts'
 import { loadSubjectTree, programMission } from './tree.ts'
@@ -128,6 +130,34 @@ const refusal = (root: string, bundleDir: string | undefined) =>
 const scratch = () => mkdtempSync(join(tmpdir(), 'fractal-bundles-'))
 
 describe('program missions', () => {
+  it.effect('preserves program mission budgets and refuses retired authoring fields', () =>
+    Effect.gen(function* () {
+      const file = join(programs, 'factory/land-program/mission.ts')
+      const budget = {
+        scheduling: { priority: 'background', lane: 'build' },
+        resources: { cpuSeconds: 300, tokenBudget: 100000, memoryMax: '8G', diskMax: '20G' },
+      } as const
+      const options = { root: programs, file, bundleDir: scratch() }
+      const rendered = yield* programMission({
+        ...options,
+        definition: { ...landingProgram, intent: { ...landingProgram.intent, budget } },
+      })
+      expect(rendered.kdl).toContain(
+        '  declared-priority "background"\n  declared-lane "build"\n  declared-budgets {\n' +
+          '    cpu-seconds 300\n    token-budget 100000\n    memory-max "8G"\n    disk-max "20G"\n  }',
+      )
+      for (const field of ['declaredPriority', 'declaredLane', 'declaredBudgets']) {
+        const refused = yield* programMission({
+          ...options,
+          definition: {
+            ...landingProgram,
+            intent: { ...landingProgram.intent, [field]: undefined },
+          },
+        }).pipe(Effect.flip)
+        expect(String(refused.cause)).toContain('Use budget.scheduling or budget.resources')
+      }
+    }).pipe(Effect.provide(NodeFileSystem.layer)),
+  )
   it.effect(
     'render to a pinned bundle and the KDL that runs it',
     () =>

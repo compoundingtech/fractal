@@ -350,6 +350,11 @@ const programDeclaration = Effect.fnUntraced(function* ({
     state: 'ready',
     reportTo: intent.reportTo,
     goal: intent.goal,
+    ...('budget' in intent ? { budget: intent.budget } : {}),
+    ...('declaredPriority' in intent ? { declaredPriority: intent.declaredPriority } : {}),
+    ...('declaredLane' in intent ? { declaredLane: intent.declaredLane } : {}),
+    ...('declaredBudgets' in intent ? { declaredBudgets: intent.declaredBudgets } : {}),
+
     ...timeout,
     ...(intent.concurrentRuns === undefined ? {} : { concurrentRuns: intent.concurrentRuns }),
     ...(intent.authority === undefined ? {} : { authority: intent.authority }),
