@@ -3,6 +3,8 @@ use super::*;
 use super::resource_membership::{Grant, LaneRequest};
 
 pub const PARENT_ENV: &str = "FRACTAL_RESOURCE_PARENT";
+/// Cancellation of an as-yet unaccepted request is retained for seven days.
+pub const REQUEST_TOMBSTONE_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -17,6 +19,8 @@ pub struct ParentContext {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Command {
     pub id: String,
+    #[serde(default, rename = "request_id", skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub lane: LaneRequest,
     pub argv: Vec<String>,
     pub cwd: String,
@@ -29,6 +33,7 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("Command")
             .field("id", &self.id).field("lane", &self.lane)
+            .field("request_id", &self.request_id)
             .field("argv", &self.argv).field("cwd", &self.cwd)
             .field("environment", &"<transient>")
             .field("timeout_ms", &self.timeout_ms).field("parent", &self.parent).finish()
@@ -72,9 +77,22 @@ pub struct Execution {
     pub learning_decision: Option<resource_profile_learner::RecordOutcome>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestCancellation {
+    pub request_id: String,
+    pub cancelled: bool,
+    pub tombstone: bool,
+    pub execution: Option<Execution>,
+}
+
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // Transitional debt: command/result bodies and indexed text keys have no byte-size proof.
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9574bb92e055 owner=fractal_store::store::shell_resources TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS shell_resource_request_cancellations_v1 (
+        id TEXT PRIMARY KEY CHECK(length(id)=36), cancelled_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS shell_resource_request_cancellation_time_v1
+        ON shell_resource_request_cancellations_v1(cancelled_at);")?;
     scrub_historical_environments(connection)?;
     resource_profile_learner::create_schema(connection)?;
     Ok(())
@@ -105,10 +123,68 @@ fn checkpoint_shell_scrub(connection: &Connection) -> Result<()> {
 fn submission_digest(command: &Command) -> Result<String> {
     use sha2::Digest as _;
     // Ambient environment values are transport-only, never replay identity or audit data.
-    let body = serde_json::to_vec(&("shell-resource-submission-v1", &command.id, &command.lane,
-        &command.argv, &command.cwd, command.timeout_ms, &command.parent))?;
+    let body = if let Some(request_id) = &command.request_id {
+        serde_json::to_vec(&("shell-resource-request-submission-v1", &command.id, &command.lane,
+            &command.argv, &command.cwd, command.timeout_ms, &command.parent, request_id))?
+    } else {
+        serde_json::to_vec(&("shell-resource-submission-v1", &command.id, &command.lane,
+            &command.argv, &command.cwd, command.timeout_ms, &command.parent))?
+    };
     Ok(format!("{:x}", sha2::Sha256::digest(body)))
 }
+/// Only the authenticated API constructs this scope; environment labels are never inputs.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RequestScope<'a> {
+    Local { person: Option<&'a str>, host: &'a str },
+    Run { run: &'a str, step: &'a str, attempt: u32 },
+    Agent { owner: &'a resource_membership::Owner },
+}
+
+impl RequestScope<'_> {
+    fn validate_execution(&self, execution: &Execution, request_id: uuid::Uuid) -> Result<()> {
+        let owner = &execution.command.lane.owner;
+        let owns = match self {
+            Self::Local { person, host } => execution.command.lane.host == *host && match person {
+                Some(person) => owner.run == *person,
+                None => owner.run.strip_prefix("local:") == Some(*host),
+            },
+            Self::Run { run, step, attempt } => owner.run == *run && owner.step == *step && owner.attempt == *attempt,
+            Self::Agent { owner: expected } => owner == *expected,
+        };
+        if !owns || execution.command.request_id.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok()) != Some(request_id) {
+            return Err(FractalError::new("resource-request-conflict",
+                "resource request identity is already bound to different execution intent").into());
+        }
+        Ok(())
+    }
+}
+
+fn expire_request_cancellations(connection: &Connection, now: u64) -> Result<()> {
+    if let Some(cutoff) = now.checked_sub(REQUEST_TOMBSTONE_RETENTION_MS) {
+        connection.execute("DELETE FROM shell_resource_request_cancellations_v1 WHERE cancelled_at<=?1", [cutoff])?;
+    }
+    Ok(())
+}
+
+fn cancel_command(connection: &Connection, id: &str) -> Result<()> {
+    // A scalar cancel flag still rewrites one potentially unbounded JSON body.
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hf463932112ca owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET body=json_set(body,'$.cancel',json('true')) WHERE id=?1", [id])?;
+    Ok(())
+}
+
+pub fn request_execution_id(scope: &RequestScope<'_>, request_id: uuid::Uuid) -> Result<String> {
+    use sha2::Digest as _;
+    let body = serde_json::to_vec(&("shell-resource-owner-request-v1", scope, request_id.as_bytes()))?;
+    let digest = sha2::Sha256::digest(body);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // UUIDv8 custom payload, with RFC variant bits; the domain owns hash semantics.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(uuid::Uuid::from_bytes(bytes).to_string())
+}
+
 
 
 impl Store {
@@ -129,15 +205,32 @@ impl Store {
             queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
             stdout: String::new(), stderr: String::new(), cancel: false, cancellation_started_at: None, timed_out: false, head_start: None, clean_start: None, result: None,
             root_exec_id, receipt_subject: None, submission_digest: Some(submission_digest.clone()), refusal_code: None, learning_decision: None };
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        expire_request_cancellations(&transaction, now)?;
+        let cancelled: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM shell_resource_request_cancellations_v1 WHERE id=?1)",
+            [&execution.command.id], |row| row.get(0))?;
+        if cancelled {
+            transaction.commit()?;
+            return Err(FractalError::new("resource-request-cancelled",
+                "resource request was cancelled before acceptance").into());
+        }
         // One row per command does not bound its serialized argv/result bytes.
-        let inserted = self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
+        let inserted = transaction.execute(/* sqlite-large-value: allow-for-now lv-h379f0157342b owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO NOTHING",
             rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
         if inserted == 0 {
-            let existing = self.shell_resource(&execution.command.id)?;
-            anyhow::ensure!(existing.submission_digest.as_deref() == Some(submission_digest.as_str()),
-                "shell execution identity conflicts with a different or historical submission");
+            let body: String = transaction.query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [&execution.command.id], |row| row.get(0))?;
+            let existing: Execution = serde_json::from_str(&body)?;
+            if existing.submission_digest.as_deref() != Some(submission_digest.as_str()) {
+                return Err(FractalError::new("resource-request-conflict",
+                    "resource request identity is already bound to different execution intent").into());
+            }
+            transaction.commit()?;
             return Ok(existing);
         }
+        transaction.commit()?;
+        drop(connection);
         environments.insert(execution.command.id.clone(), environment);
         drop(environments);
         self.resource_admission_elapsed(&format!("shell-wait:{}", execution.command.id), now, now);
@@ -151,6 +244,35 @@ impl Store {
     pub fn shell_resource(&self, id: &str) -> Result<Execution> {
         let body: String = self.readers.get().query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [id], |row| row.get(0))?;
         Ok(serde_json::from_str(&body)?)
+    }
+
+    pub fn shell_resource_by_request(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid) -> Result<Option<Execution>> {
+        let id = request_execution_id(scope, request_id)?;
+        let body: Option<String> = self.readers.get().query_row(
+            "SELECT body FROM shell_resources_v1 WHERE id=?1", [&id], |row| row.get(0)).optional()?;
+        let execution: Option<Execution> = body.map(|body| serde_json::from_str(&body).map_err(anyhow::Error::from)).transpose()?;
+        if let Some(execution) = &execution { scope.validate_execution(execution, request_id)?; }
+        Ok(execution)
+    }
+
+    pub fn cancel_shell_resource_by_request(&self, scope: &RequestScope<'_>, request_id: uuid::Uuid, now: u64) -> Result<Option<Execution>> {
+        let id = request_execution_id(scope, request_id)?;
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        expire_request_cancellations(&transaction, now)?;
+        let body: Option<String> = transaction.query_row(
+            "SELECT body FROM shell_resources_v1 WHERE id=?1", [&id], |row| row.get(0)).optional()?;
+        let mut execution: Option<Execution> = body.map(|body| serde_json::from_str(&body).map_err(anyhow::Error::from)).transpose()?;
+        if let Some(execution) = &mut execution {
+            scope.validate_execution(execution, request_id)?;
+            cancel_command(&transaction, &id)?;
+            execution.cancel = true;
+        } else {
+            transaction.execute("INSERT INTO shell_resource_request_cancellations_v1(id,cancelled_at)
+                VALUES(?1,?2) ON CONFLICT(id) DO NOTHING", rusqlite::params![id, now])?;
+        }
+        transaction.commit()?;
+        Ok(execution)
     }
 
     pub fn shell_resources(&self, host: &str, active_only: bool) -> Result<Vec<Execution>> {
@@ -203,9 +325,7 @@ impl Store {
     }
 
     pub fn cancel_shell_resource(&self, id: &str) -> Result<()> {
-        // A scalar cancel flag still rewrites one potentially unbounded JSON body.
-        self.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hf463932112ca owner=fractal_store::store::shell_resources TODO=bound-or-reference-values-and-reclamation */ "UPDATE shell_resources_v1 SET body=json_set(body,'$.cancel',json('true')) WHERE id=?1", [id])?;
-        Ok(())
+        cancel_command(&self.connection.write(), id)
     }
 
     pub fn shell_resource_queue_wait_ms(&self, execution: &Execution, now: u64) -> u64 {
@@ -278,7 +398,7 @@ mod tests {
     use crate::store::resource_membership::{Coverage, Owner, RequestClass};
 
     fn command(id: &str) -> Command {
-        Command { id: id.into(), lane: LaneRequest {
+        Command { id: id.into(), request_id: None, lane: LaneRequest {
             id: format!("shell:{id}"), name: "checks".into(), host: "host-a".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
             class: RequestClass::Check, disk: None, io: None, coverage: Coverage::Logical,
@@ -306,19 +426,34 @@ mod tests {
         let path = directory.path().join("store.db");
         let store = Store::open(&path, "host-a").unwrap();
         let mut request = command("secret");
+        request.environment = std::env::vars().collect();
         request.environment.insert("SECRET".into(), ENV_SENTINEL.into());
+        request.environment.insert("ST3_START_OPERATION".into(), ENV_SENTINEL.into());
         assert!(!format!("{request:?}").contains(ENV_SENTINEL));
         let mut execution = store.submit_shell_resource(request.clone(), 10).unwrap();
         assert!(execution.command.environment.is_empty());
         assert!(store.shell_resource("secret").unwrap().command.environment.is_empty());
         assert!(!serde_json::to_string(&store.shell_resources("host-a", false).unwrap()).unwrap().contains(ENV_SENTINEL));
         request.environment.insert("SECRET".into(), "replacement".into());
-        assert!(store.submit_shell_resource(request, 11).is_err());
+        assert_eq!(store.submit_shell_resource(request, 11).unwrap().queued_at, 10);
         let environment = store.take_shell_environment("secret").unwrap();
-        let status = std::process::Command::new("/bin/sh")
-            .args(["-c", "test \"$SECRET\" = shell-environment-security-regression-sentinel"])
-            .env_clear().envs(environment).status().unwrap();
-        assert!(status.success());
+        let runtime = fractal_runtime::ExecRuntime::new(directory.path().join("exec"), directory.path().join("logs"));
+        let generation = runtime.spawn_in_lane_checked("secret",
+            &fractal_runtime::Launch::Argv(vec!["/bin/sh".into(), "-c".into(),
+                "test \"$SECRET\" = shell-environment-security-regression-sentinel && test \"$ST3_START_OPERATION\" = \"$SECRET\"".into()]),
+            directory.path(), &environment,
+            &fractal_runtime::FiniteLane { name: "checks".into(), capacity: None, member_capacity: None, memory_high_bytes: None, require_enforced: false },
+            &|| Ok(())).unwrap();
+        assert!(generation.start_operation.is_none());
+        let exited = runtime.wait_for_exit("secret", &generation.generation_id).unwrap();
+        assert_eq!(exited.exit_code, Some(0));
+        for entry in std::fs::read_dir(directory.path().join("exec")).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                assert!(!bytes.windows(ENV_SENTINEL.len()).any(|value| value == ENV_SENTINEL.as_bytes()));
+            }
+        }
         assert!(store.take_shell_environment("secret").is_none());
         execution.state = "completed".into();
         execution.exit_code = Some(0);
@@ -344,6 +479,10 @@ mod tests {
             execution.started_at = Some(12);
             execution.ended_at = Some(20);
             execution.exit_code = Some(37);
+            execution.result = Some(PayloadResult {
+                head_start: None, head_end: None, clean_start: None, clean_end: None,
+                exit_code: Some(37), exit_signal: None, wall_duration_ms: 8, memory_peak_bytes: None,
+            });
             store.update_shell_resource(&execution).unwrap();
         }
         let legacy = Connection::open(&path).unwrap();
@@ -405,7 +544,7 @@ mod tests {
     #[test]
     fn stable_submission_id_never_relaunches_or_replaces_semantic_intent() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path().join("store.db")).unwrap();
+        let store = Store::open(directory.path().join("store.db"), "host-a").unwrap();
         let first = command("stable");
         let accepted = store.submit_shell_resource(first.clone(), 10).unwrap();
         let mut retry = first.clone();
@@ -416,6 +555,100 @@ mod tests {
         let mut conflicting = first;
         conflicting.argv = vec!["false".into()];
         assert!(store.submit_shell_resource(conflicting, 30).is_err());
+    }
+
+    #[test]
+    fn owner_scoped_request_identity_is_stable_and_separates_native_owners() {
+        let key = uuid::Uuid::parse_str("0192c8d8-97e7-7000-8000-000000000001").unwrap();
+        let local = RequestScope::Local { person: Some("person/operator"), host: "host-a" };
+        let id = request_execution_id(&local, key).unwrap();
+        assert_eq!(request_execution_id(&local, key).unwrap(), id);
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+        let owner = resource_membership::Owner { run: "invocation/one".into(), step: "agent/host-a/worker".into(),
+            attempt: 1, invocation: Some("invocation/one".into()) };
+        let mut next_owner = owner.clone();
+        next_owner.invocation = Some("invocation/two".into());
+        let scopes = [
+            RequestScope::Local { person: Some("person/other"), host: "host-a" },
+            RequestScope::Local { person: Some("person/operator"), host: "host-b" },
+            RequestScope::Run { run: "run", step: "step", attempt: 1 },
+            RequestScope::Run { run: "run", step: "step", attempt: 2 },
+            RequestScope::Run { run: "run", step: "other", attempt: 1 },
+            RequestScope::Agent { owner: &owner },
+            RequestScope::Agent { owner: &next_owner },
+        ];
+        let mut ids = std::collections::BTreeSet::from([id]);
+        for scope in scopes { assert!(ids.insert(request_execution_id(&scope, key).unwrap())); }
+    }
+
+    #[test]
+    fn request_retry_after_restart_preserves_acceptance_and_never_restores_lost_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        let key = uuid::Uuid::parse_str("0192c8d8-97e7-7000-8000-000000000001").unwrap();
+        let scope = RequestScope::Local { person: Some("person/operator"), host: "host-a" };
+        let id = request_execution_id(&scope, key).unwrap();
+        let mut request = command(&id);
+        request.lane.owner.run = "person/operator".into();
+        request.request_id = Some(key.to_string());
+        request.environment.insert("SECRET".into(), ENV_SENTINEL.into());
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            assert!(store.shell_resource_by_request(&scope, key).unwrap().is_none());
+            let accepted = store.submit_shell_resource(request.clone(), 10).unwrap();
+            let body = serde_json::to_value(&accepted.command).unwrap();
+            assert_eq!(body["request_id"], key.to_string());
+            assert!(body.get("requestId").is_none());
+            assert_eq!(store.shell_resource_by_request(&scope, key).unwrap().unwrap(), accepted);
+            let mut retry = request.clone();
+            retry.environment.insert("SECRET".into(), "rotated-not-identity".into());
+            assert_eq!(store.submit_shell_resource(retry, 20).unwrap(), accepted);
+            assert_eq!(store.take_shell_environment(&id).unwrap()["SECRET"], ENV_SENTINEL);
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        let accepted = store.shell_resource_by_request(&scope, key).unwrap().unwrap();
+        assert_eq!(accepted.state, "waiting");
+        assert_eq!(store.submit_shell_resource(request.clone(), 30).unwrap(), accepted);
+        assert!(store.take_shell_environment(&id).is_none(), "retry cannot resurrect a restart-lost launch envelope");
+        let mut running = accepted;
+        running.state = "running".into(); running.started_at = Some(40);
+        store.update_shell_resource(&running).unwrap();
+        assert_eq!(store.shell_resource_by_request(&scope, key).unwrap().unwrap().state, "running");
+        let mut terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();
+        terminal.state = "completed".into(); terminal.ended_at = Some(50); terminal.exit_code = Some(0);
+        store.update_shell_resource(&terminal).unwrap();
+        let terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();
+        assert_eq!(store.submit_shell_resource(request, 60).unwrap(), terminal);
+        assert_eq!(terminal.command.request_id.as_deref(), Some(key.to_string().as_str()));
+        assert_no_environment_bytes(&path);
+    }
+
+    #[test]
+    fn request_identity_conflicts_are_typed_for_every_semantic_intent_change() {
+        let store = Store::open_memory("host-a").unwrap();
+        let key = uuid::Uuid::parse_str("0192c8d8-97e7-7000-8000-000000000001").unwrap();
+        let scope = RequestScope::Local { person: Some("person/operator"), host: "host-a" };
+        let id = request_execution_id(&scope, key).unwrap();
+        let mut request = command(&id);
+        request.request_id = Some(key.to_string());
+        request.lane.owner.run = "person/operator".into();
+        store.submit_shell_resource(request.clone(), 10).unwrap();
+        for field in ["argv", "cwd", "lane", "class", "profile", "capacity", "timeout", "max-members"] {
+            let mut changed = request.clone();
+            match field {
+                "argv" => changed.argv = vec!["different".into()],
+                "cwd" => changed.cwd = "/other".into(),
+                "lane" => changed.lane.name = "other".into(),
+                "class" => changed.lane.class = RequestClass::Landing,
+                "profile" => changed.lane.profile = Some("check.other".into()),
+                "capacity" => changed.lane.capacity.as_mut().unwrap().memory += 1,
+                "timeout" => changed.timeout_ms = Some(1000),
+                "max-members" => changed.lane.max_members = 2,
+                _ => unreachable!(),
+            }
+            let error = store.submit_shell_resource(changed, 20).unwrap_err();
+            assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "resource-request-conflict", "{field}");
+        }
     }
 
     #[test]

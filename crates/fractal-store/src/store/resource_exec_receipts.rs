@@ -63,6 +63,7 @@ pub fn receipt_fields(execution: &Execution) -> serde_json::Map<String, Value> {
     // turns an unavailable cgroup peak into a measured zero.
     for (name, value) in [
         ("memory_bytes", request.capacity.as_ref().map(|capacity| json!(capacity.memory))),
+        ("request_id", execution.command.request_id.as_ref().map(|request_id| json!(request_id))),
         ("profile_key", request.profile.as_ref().map(|key| json!(key))),
         ("profile_estimate", request.profile_estimate.as_ref().map(|estimate| json!(estimate))),
         ("disk_path", request.disk.as_ref().map(|disk| json!(disk.path))),
@@ -100,7 +101,7 @@ mod tests {
     use super::super::shell_resources::{Command, PayloadResult};
 
     fn command(id: &str) -> Command {
-        Command { id: id.into(), lane: LaneRequest {
+        Command { id: id.into(), request_id: None, lane: LaneRequest {
             id: format!("shell:{id}"), name: "checks".into(), host: "host-a".into(), max_members: 1,
             capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1024 }),
             class: RequestClass::Check, disk: None, io: None, coverage: Coverage::Logical,

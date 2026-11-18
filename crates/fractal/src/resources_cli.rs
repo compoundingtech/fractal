@@ -13,13 +13,27 @@ pub(super) enum ResourcesCommand {
         #[arg(long)] host: Option<String>,
         #[arg(long, value_enum)] class: Option<Class>,
         #[arg(long)] head: Option<String>,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)] actor: Option<String>,
     },
     /// Inspect an execution, including admission blockers and the actual outcome.
-    Show { id: String },
+    Show {
+        #[arg(required_unless_present = "request_id", conflicts_with = "request_id")] id: Option<String>,
+        #[arg(long, conflicts_with = "id")] request_id: Option<uuid::Uuid>,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)] actor: Option<String>,
+    },
     /// Cancel an execution and await confirmed retirement or confirmed nonlaunch.
-    Cancel { id: String },
+    Cancel {
+        #[arg(required_unless_present = "request_id", conflicts_with = "request_id")] id: Option<String>,
+        #[arg(long, conflicts_with = "id")] request_id: Option<uuid::Uuid>,
+        /// Wait for confirmed retirement or a durable cancellation tombstone.
+        #[arg(long)] wait: bool,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)] actor: Option<String>,
+    },
     /// Inspect the exact live, enforced member cgroup for an authenticated execution.
-    MemberScope { #[arg(long)] exec_id: String },
+    MemberScope {
+        #[arg(long)] exec_id: String,
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)] actor: Option<String>,
+    },
     /// Inspect local kernel member placement offline; this grants no execution authority.
     InMember { #[arg(long)] owner_uid: u32 },
     /// Close native host admission without reserving capacity.
@@ -58,8 +72,9 @@ pub(super) struct ExecArgs {
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))] max_members: u32,
     /// Atomically publish the terminal execution outcome after confirmed retirement.
     #[arg(long)] receipt_file: Option<PathBuf>,
-    /// Stable submission identity for recovering an uncertain transport outcome.
-    #[arg(long)] exec_id: Option<uuid::Uuid>,
+    /// Owner-scoped submission identity for recovering an uncertain transport outcome.
+    #[arg(long)] request_id: Option<uuid::Uuid>,
+    #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)] actor: Option<String>,
     /// Refuse instead of creating a root when no inherited membership marker exists.
     #[arg(long)] require_parent: bool,
     /// Execute under the authenticated parent's frozen lane; implies --require-parent.
@@ -105,10 +120,21 @@ fn require_exec_platform() -> Result<()> {
     Ok(())
 }
 
+impl ResourcesCommand {
+    pub(super) fn actor(&self) -> Option<&str> {
+        match self {
+            Self::Exec(args) => args.actor.as_deref(),
+            Self::Ls { actor, .. } | Self::Show { actor, .. } | Self::Cancel { actor, .. }
+                | Self::MemberScope { actor, .. } | Self::Hold { actor, .. } | Self::Release { actor, .. } => actor.as_deref(),
+            Self::InMember { .. } => None,
+        }
+    }
+}
+
 pub(super) async fn run(client: &Client, person: Option<&str>, command: ResourcesCommand, json_output: bool) -> Result<()> {
     match command {
         ResourcesCommand::Exec(args) => execute(client, args).await,
-        ResourcesCommand::Ls { host, class, head } => {
+        ResourcesCommand::Ls { host, class, head, .. } => {
             let mut query = Vec::new();
             if let Some(host) = host { query.push(format!("host={}", urlencoding::encode(&host))); }
             if let Some(class) = class { query.push(format!("class={}", match class { Class::Recovery => "recovery", Class::Landing => "landing", Class::Check => "check", Class::Agent => "agent" })); }
@@ -135,11 +161,29 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
             print_value(&inventory["accountant"], false)?;
             Ok(())
         }
-        ResourcesCommand::Show { id } => {
-            let row: Value = client.get(&format!("/v1/internal/resources/{}", urlencoding::encode(&id))).await?;
+        ResourcesCommand::Show { id, request_id, .. } => {
+            let path = match (id, request_id) {
+                (Some(id), None) => format!("/v1/internal/resources/{}", urlencoding::encode(&id)),
+                (None, Some(request_id)) => format!("/v1/internal/resources/by-request/{request_id}"),
+                _ => unreachable!("show requires one execution ID or request ID"),
+            };
+            let row: Value = client.get(&path).await?;
             print_value(&row, json_output)
         }
-        ResourcesCommand::Cancel { id } => {
+        ResourcesCommand::Cancel { id, request_id, wait, .. } => {
+            if let Some(request_id) = request_id {
+                let mut response: shell_resources::RequestCancellation = client.post(
+                    &format!("/v1/internal/resources/by-request/{request_id}/cancel"), &json!({})).await?;
+                if wait {
+                    if let Some(execution) = &mut response.execution {
+                        while !matches!(execution.state.as_str(), "completed" | "refused" | "cancelled") {
+                            *execution = client.post(&format!("/v1/internal/resources/{}/wait?after={}", execution.command.id, execution.revision), &json!({})).await?;
+                        }
+                    }
+                }
+                return print_value(&serde_json::to_value(response)?, json_output);
+            }
+            let id = id.context("cancel requires an execution ID or request ID")?;
             let path = format!("/v1/internal/resources/{}", urlencoding::encode(&id));
             let _: Value = client.post(&format!("{path}/cancel"), &json!({})).await?;
             let mut row: Value = client.get(&path).await?;
@@ -150,7 +194,7 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
             print_value(&serde_json::to_value(execution)?, json_output)
         }
         ResourcesCommand::InMember { owner_uid } => in_member(owner_uid, json_output),
-        ResourcesCommand::MemberScope { exec_id } => {
+        ResourcesCommand::MemberScope { exec_id, .. } => {
             let scope: Value = client.get(&format!("/v1/internal/resources/{}/member-scope", urlencoding::encode(&exec_id))).await?;
             print_value(&scope, json_output)
         }
@@ -161,12 +205,17 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
     }
 }
 
+fn require_transient_environment_daemon(capabilities: &Value) -> Result<()> {
+    anyhow::ensure!(capabilities.pointer("/capabilities/shell_resource_exec").and_then(Value::as_u64).is_some_and(|version| version >= 2)
+        && capabilities.pointer("/capabilities/mission_resource_lane").and_then(Value::as_u64).is_some_and(|version| version >= 2),
+        "refused: daemon requires shell_resource_exec>=2 (transient environment) and mission_resource_lane>=2; upgrade the execution host before sending payload environment");
+    Ok(())
+}
+
 async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
     require_exec_platform()?;
     let capabilities: Value = client.get("/v1/health").await?;
-    anyhow::ensure!(capabilities.pointer("/capabilities/shell_resource_exec").and_then(Value::as_u64).is_some_and(|version| version >= 1)
-        && capabilities.pointer("/capabilities/mission_resource_lane").and_then(Value::as_u64).is_some_and(|version| version >= 2),
-        "refused: daemon requires shell_resource_exec>=1 and mission_resource_lane>=2; upgrade the execution host before requesting classified resources");
+    require_transient_environment_daemon(&capabilities)?;
     let parent = std::env::var(shell_resources::PARENT_ENV).ok().map(|value| serde_json::from_str::<shell_resources::ParentContext>(&value)).transpose()
         .context("invalid nested resource membership marker")?;
     validate_receipt_scope(&args, parent.is_some())?;
@@ -180,13 +229,13 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
             "refused: --inherit-parent cannot change the parent lane, profile or class");
     }
     if args.profile.is_some() || parent.as_ref().is_some_and(|parent| parent.request.profile.is_some())
-        || args.receipt_file.is_some() || args.exec_id.is_some() || args.max_members != 1 || args.inherit_parent || args.require_parent {
+        || args.receipt_file.is_some() || args.request_id.is_some() || args.max_members != 1 || args.inherit_parent || args.require_parent {
         anyhow::ensure!(capabilities.pointer("/capabilities/resource_profile_keys").and_then(Value::as_u64).is_some_and(|version| version >= 1),
             "refused: daemon requires resource_profile_keys>=1; upgrade the execution host before requesting keyed resources or receipt files");
     }
     let cwd = std::env::current_dir()?;
     let class = args.class.map(RequestClass::from).unwrap_or_else(|| parent.as_ref().map_or(RequestClass::Agent, |parent| parent.request.class));
-    let id = args.exec_id.unwrap_or_else(uuid::Uuid::now_v7).to_string();
+    let id = uuid::Uuid::now_v7().to_string();
     let capacity = match (args.cores, args.memory.as_deref()) {
         (None, None) => None,
         (cores, memory) => Some(fractal_runtime::Capacity::declared(cores, memory)?),
@@ -226,8 +275,10 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
         lane.profile_estimate = None;
     }
     let command = shell_resources::Command { id: id.clone(), lane, argv: args.argv, cwd: cwd.to_string_lossy().into_owned(),
+        request_id: args.request_id.map(|request_id| request_id.to_string()),
         environment: std::env::vars().collect(), timeout_ms: args.timeout, parent: parent.map(|parent| parent.grant) };
     let mut execution: Execution = client.post("/v1/internal/resources/exec", &command).await?;
+    let id = execution.command.id.clone();
     let mut announced_admission = false;
     loop {
         if execution.started_at.is_some() && !announced_admission {
@@ -343,6 +394,22 @@ pub(super) async fn payload(result_path: &Path, argv: Vec<String>) -> Result<()>
 mod tests {
     use super::*;
     #[test]
+    fn local_operator_selector_is_preserved_for_supervisor_commands() {
+        for arguments in [
+            vec!["exec", "--lane", "checks", "--as", "person/schickling", "--", "true"],
+            vec!["show", "execution-id", "--as", "person/schickling"],
+            vec!["cancel", "--request-id", "0192c8d8-97e7-7000-8000-000000000001", "--wait", "--as", "person/schickling"],
+            vec!["member-scope", "--exec-id", "execution-id", "--as", "person/schickling"],
+        ] {
+            let cli = Cli::try_parse_from(["fractal", "resources"].into_iter().chain(arguments)).unwrap();
+            let Command::Resources { command } = cli.command else { panic!("wrong command") };
+            assert_eq!(command.actor(), Some("person/schickling"));
+            let endpoint = Endpoint::Unix(PathBuf::from("/nonexistent/fractal.sock"));
+            assert!(execution_client(&endpoint, command.actor().unwrap().to_owned()).is_ok());
+        }
+    }
+
+    #[test]
     fn offline_membership_requires_explicit_owner_uid() {
         let cli = Cli::try_parse_from(["fractal", "--json", "resources", "in-member", "--owner-uid", "1000"]).unwrap();
         let Command::Resources { command: ResourcesCommand::InMember { owner_uid } } = cli.command else { panic!("wrong command") };
@@ -390,13 +457,13 @@ mod tests {
     #[test]
     fn cancel_selects_exact_execution_identity() {
         let cli = Cli::try_parse_from(["fractal", "resources", "cancel", "execution-id"]).unwrap();
-        let Command::Resources { command: ResourcesCommand::Cancel { id } } = cli.command else { panic!("wrong command") };
-        assert_eq!(id, "execution-id");
+        let Command::Resources { command: ResourcesCommand::Cancel { id, .. } } = cli.command else { panic!("wrong command") };
+        assert_eq!(id.as_deref(), Some("execution-id"));
     }
     #[test]
     fn member_scope_requires_exact_execution_selector() {
         let cli = Cli::try_parse_from(["fractal", "--json", "resources", "member-scope", "--exec-id", "execution-id"]).unwrap();
-        let Command::Resources { command: ResourcesCommand::MemberScope { exec_id } } = cli.command else { panic!("wrong command") };
+        let Command::Resources { command: ResourcesCommand::MemberScope { exec_id, .. } } = cli.command else { panic!("wrong command") };
         assert_eq!(exec_id, "execution-id");
         assert!(Cli::try_parse_from(["fractal", "resources", "member-scope"]).is_err());
     }
@@ -412,7 +479,7 @@ mod tests {
             coverage: Coverage::Enforced, admission_timeout_ms: None,
             owner: Owner { run: "shell:root".into(), step: "shell:root".into(), attempt: 1, invocation: None },
         };
-        let command = shell_resources::Command { id: "root".into(), lane, argv: vec!["tools/check".into(), "unit".into()],
+        let command = shell_resources::Command { id: "root".into(), request_id: None, lane, argv: vec!["tools/check".into(), "unit".into()],
             cwd: "/work".into(), environment: BTreeMap::from([("AUTH_TOKEN".into(), "sentinel-secret-never-persist".into())]),
             timeout_ms: None, parent: None };
         let root: Execution = serde_json::from_value(json!({
@@ -492,9 +559,10 @@ mod tests {
         let args = parse(vec!["fractal", "resources", "exec", "--lane", "checks", "--require-parent", "--receipt-file", "out.json", "--", "true"]);
         assert!(validate_receipt_scope(&args, false).is_err());
         let id = "0192c8d8-97e7-7000-8000-000000000001";
-        let args = parse(vec!["fractal", "resources", "exec", "--lane", "checks", "--exec-id", id, "--", "true"]);
-        assert_eq!(args.exec_id.unwrap().to_string(), id);
-        assert!(Cli::try_parse_from(["fractal", "resources", "exec", "--lane", "checks", "--exec-id", "not-a-uuid", "--", "true"]).is_err());
+        let args = parse(vec!["fractal", "resources", "exec", "--lane", "checks", "--request-id", id, "--", "true"]);
+        assert_eq!(args.request_id.unwrap().to_string(), id);
+        assert!(Cli::try_parse_from(["fractal", "resources", "exec", "--lane", "checks", "--request-id", "not-a-uuid", "--", "true"]).is_err());
+        assert!(Cli::try_parse_from(["fractal", "resources", "exec", "--lane", "checks", "--exec-id", id, "--", "true"]).is_err());
     }
     #[test]
     fn platform_refusal_precedes_daemon_contact_and_capacity_acquisition() {
@@ -506,6 +574,16 @@ mod tests {
             result.unwrap();
         }
     }
+    #[test]
+    fn v1_daemon_is_rejected_before_environment_transport() {
+        let old = serde_json::json!({"capabilities":{"shell_resource_exec":1,"mission_resource_lane":2}});
+        let error = require_transient_environment_daemon(&old).unwrap_err();
+        assert!(error.to_string().contains("shell_resource_exec>=2"));
+        let current = serde_json::json!({"capabilities":{"shell_resource_exec":2,"mission_resource_lane":2}});
+        require_transient_environment_daemon(&current).unwrap();
+        assert!(require_transient_environment_daemon(&serde_json::json!({})).is_err());
+    }
+
     #[tokio::test]
     async fn payload_exit_code_is_passed_through_and_result_is_durable() {
         let directory = tempfile::tempdir().unwrap();

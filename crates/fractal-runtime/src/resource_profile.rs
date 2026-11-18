@@ -67,7 +67,6 @@ impl ResourceProfileSeed {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.cores > 0, "invalid-profile: profile cores must be positive");
         ensure!(self.memory >= 256 << 20, "invalid-profile: profile memory must be at least 256M");
-        ensure!(self.disk != Some(0), "invalid-profile: declared disk growth must be positive");
         ensure!(self.memory_high.is_none_or(|high| high > 0 && high <= self.memory),
             "invalid-profile: memoryHigh must be positive and no larger than memory");
         ensure!(self.source.as_deref() != Some("declared-provisional")
@@ -125,6 +124,8 @@ mod tests {
             learning_coverage: ResourceLearningCoverage::ClientOnly, recovery_capable: false };
         assert!(seed.estimate().is_err());
         assert!(ResourceProfileSeed { cores: 1, memory: 1, ..seed.clone() }.estimate().is_err());
-        assert!(ResourceProfileSeed { cores: 1, disk: Some(0), ..seed }.estimate().is_err());
+        let zero_growth = ResourceProfileSeed { cores: 1, disk: Some(0), ..seed };
+        zero_growth.validate().unwrap();
+        assert!(zero_growth.estimate().is_ok(), "zero-byte reservations are valid for reclaim operations");
     }
 }

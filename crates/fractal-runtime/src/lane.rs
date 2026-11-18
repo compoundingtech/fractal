@@ -866,6 +866,53 @@ mod tests {
         )).is_none());
     }
 
+    #[test]
+    fn offline_member_grammar_refuses_namespace_root_and_relative_paths() {
+        for path in [
+            "/",
+            ".",
+            "",
+            "user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice",
+            "/app.slice/app-lanes.slice",
+        ] {
+            assert!(parse_member_cgroup(1000, path).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn offline_member_grammar_refuses_wrong_hash_lengths_and_inserted_components() {
+        let binding = crate::process::ResourceExecutionBinding {
+            membership_id: "member".into(), generation: "generation".into(), authority_epoch: "epoch".into(),
+        };
+        let unit = "st3-check-123-1.scope";
+        let (parent, member, generation) = finite_slices("checks", Some(&binding), unit);
+        let member = member.unwrap();
+        let root = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice";
+        let path = format!("{root}/{parent}/{member}/{generation}/{unit}");
+        let proof = parse_member_cgroup(1000, &path).unwrap();
+        for length in [0, 12, 63, 65] {
+            let wrong = path.replace(&proof.binding_hash, &"a".repeat(length));
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+            let wrong_generation = child_slice(&member, "a".repeat(length));
+            let wrong = path.replace(&generation, &wrong_generation);
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+        }
+        let parent_hash = parent.strip_suffix(".slice").unwrap().rsplit_once('_').unwrap().1;
+        for length in [0, 11, 13, 64] {
+            let wrong = path.replace(parent_hash, &"a".repeat(length));
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+        }
+        for wrong in [
+            format!("{root}/extra.slice/{parent}/{member}/{generation}/{unit}"),
+            format!("{root}/{parent}/extra.slice/{member}/{generation}/{unit}"),
+            format!("{root}/{parent}/{member}/extra.slice/{generation}/{unit}"),
+            format!("{root}/{parent}/{member}/{generation}/extra.scope/{unit}"),
+            format!("{root}/{parent}/{member}/{generation}/{unit}").trim_start_matches('/').to_owned(),
+        ] {
+            assert!(parse_member_cgroup(1000, &wrong).is_none(), "{wrong}");
+        }
+    }
+
 
     #[test]
     fn finite_generation_slices_share_only_the_aggregate_parent() {

@@ -9,6 +9,14 @@ pub(super) fn allows_bound_request(method: &axum::http::Method, path: &str) -> b
     match path.strip_prefix("/v1/internal/resources") {
         Some("") => *method == Method::GET,
         Some("/exec") => *method == Method::POST,
+        Some(rest) if rest.starts_with("/by-request/") => {
+            let mut segments = rest.strip_prefix("/by-request/").unwrap_or_default().split('/');
+            match (segments.next(), segments.next(), segments.next()) {
+                (Some(id), None, None) if !id.is_empty() => *method == Method::GET,
+                (Some(id), Some("cancel"), None) if !id.is_empty() => *method == Method::POST,
+                _ => false,
+            }
+        },
         Some(rest) => {
             let Some(rest) = rest.strip_prefix('/') else { return false; };
             let mut segments = rest.split('/');
@@ -68,7 +76,51 @@ fn authorize_execution(caller: Option<&CallerOwner>, execution: &Execution) -> R
             "shell execution belongs to another execution owner")));
     }
     Ok(())
+
 }
+fn request_scope<'a>(state: &'a AppState, caller: Option<&'a CallerOwner>) -> crate::store::shell_resources::RequestScope<'a> {
+    use crate::store::shell_resources::RequestScope;
+    match caller {
+        Some(caller) if caller.agent => RequestScope::Agent { owner: &caller.owner },
+        Some(caller) => RequestScope::Run { run: &caller.owner.run, step: &caller.owner.step, attempt: caller.owner.attempt },
+        None => RequestScope::Local { person: state.owning_person.as_deref(), host: &state.node },
+    }
+}
+
+pub(super) async fn show_request(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(request_id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
+    let request_id = uuid::Uuid::parse_str(&request_id).map_err(|_| ApiError::bad(FractalError::new("invalid-resource-request-id", "request-id must be a UUID")))?;
+    let execution = state.store.shell_resource_by_request(&request_scope(&state, caller.as_ref()), request_id).map_err(ApiError::internal)?;
+    if let Some(execution) = &execution { authorize_execution(caller.as_ref(), execution)?; }
+    Ok(Json(json!({ "execution": execution.map(present) })))
+}
+pub(super) async fn cancel_request(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(request_id): AxumPath<String>) -> Result<Json<crate::store::shell_resources::RequestCancellation>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
+    let request_id = uuid::Uuid::parse_str(&request_id).map_err(|_| ApiError::bad(FractalError::new("invalid-resource-request-id", "request-id must be a UUID")))?;
+    let execution = state.store.cancel_shell_resource_by_request(&request_scope(&state, caller.as_ref()), request_id,
+        u64::try_from(client_now_ms()).unwrap_or(u64::MAX)).map_err(ApiError::internal)?;
+    if let Some(execution) = &execution { authorize_execution(caller.as_ref(), execution)?; }
+    state.notify.notify_one();
+    state.event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+    Ok(Json(crate::store::shell_resources::RequestCancellation {
+        request_id: request_id.to_string(), cancelled: true, tombstone: execution.is_none(), execution: execution.map(present),
+    }))
+}
+
+
+#[derive(Serialize)]
+struct MemberScopeResponse<'a> {
+    #[serde(flatten)]
+    scope: fractal_runtime::MemberScope,
+    #[serde(rename = "rootExecId")]
+    root_exec_id: &'a str,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
+    lane: &'a str,
+    class: RequestClass,
+    profile: Option<&'a str>,
+}
+
 
 #[derive(Default, Deserialize)]
 pub(super) struct ListQuery {
@@ -93,16 +145,23 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
         Ok(())
     })().map_err(|error| ApiError::bad(FractalError::new("resource-exec-refused", error.to_string())))?;
     command.lane.host.clone_from(&state.node);
-    let local_operator = run.is_none() && !matches!(&bound, Some(BoundActor::Agent(_) | BoundActor::Run(_)));
-    let agent_caller = run.is_none() && matches!(&bound, Some(BoundActor::Agent(_)));
-    let owner = if let Some(Extension(BoundRun(binding))) = run {
-        crate::store::resource_membership::Owner { run: binding.run, step: binding.step_run, attempt: binding.attempt,
-            invocation: Some(format!("shell:{}", command.id)) }
-    } else if let Some(BoundActor::Agent(agent)) = bound {
-        state.store.shell_resource_agent_owner(&agent).map_err(|error|
-            ApiError::bad(FractalError::new("resource-exec-owner", error.to_string())))?
-    } else if matches!(bound, Some(BoundActor::Run(_))) {
-        return Err(ApiError::bad(FractalError::new("resource-exec-owner", "run caller has no verified attempt binding")));
+    let caller = CallerOwner::resolve(&state, bound, run)?;
+    let local_operator = caller.is_none();
+    let agent_caller = caller.as_ref().is_some_and(|caller| caller.agent);
+    if let Some(request_id) = command.request_id.as_deref() {
+        let request_id = uuid::Uuid::parse_str(request_id).map_err(|_| ApiError::bad(FractalError::new("invalid-resource-request-id", "request-id must be a UUID")))?;
+        command.id = crate::store::shell_resources::request_execution_id(&request_scope(&state, caller.as_ref()), request_id).map_err(ApiError::internal)?;
+        command.request_id = Some(request_id.to_string());
+        let id = format!("shell:{}", command.id);
+        command.lane.id.clone_from(&id);
+        command.lane.owner = crate::store::resource_membership::Owner {
+            run: id.clone(), step: id.clone(), attempt: 1, invocation: Some(id),
+        };
+    }
+    let owner = if let Some(caller) = caller {
+        let mut owner = caller.owner;
+        if !caller.agent { owner.invocation = Some(format!("shell:{}", command.id)); }
+        owner
     } else {
         crate::store::resource_membership::Owner {
             run: state.owning_person.clone().unwrap_or_else(|| format!("local:{}", state.node)),
@@ -228,7 +287,18 @@ pub(super) async fn member_scope(State(state): State<AppState>, bound: Option<Bo
         anyhow::ensure!(&scope.generation == generation, "runtime generation differs from host custody");
         Ok(scope)
     })().map_err(|error| ApiError::bad(FractalError::new("resource-member-scope-refused", error.to_string())))?;
-    Ok(Json(serde_json::to_value(scope).map_err(ApiError::internal)?))
+    let request_id = if execution.root_exec_id == execution.command.id {
+        execution.command.request_id.clone()
+    } else {
+        let root = state.store.shell_resource(&execution.root_exec_id).map_err(ApiError::internal)?;
+        authorize_execution(caller.as_ref(), &root)?;
+        root.command.request_id
+    };
+    Ok(Json(serde_json::to_value(MemberScopeResponse {
+        scope, root_exec_id: &execution.root_exec_id, request_id,
+        lane: &execution.command.lane.name, class: execution.command.lane.class,
+        profile: execution.command.lane.profile.as_deref(),
+    }).map_err(ApiError::internal)?))
 }
 
 pub(super) async fn cancel(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
@@ -243,6 +313,72 @@ pub(super) async fn cancel(State(state): State<AppState>, bound: Option<BoundAct
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_member_scope_keeps_current_generation_separate_from_verified_root() {
+        let scope = fractal_runtime::MemberScope { exec_id: "nested-id".into(), generation: "nested-generation".into(),
+            state: "running".into(), cgroup_path: "/user.slice/exact-child.scope".into() };
+        let value = serde_json::to_value(MemberScopeResponse { scope, root_exec_id: "outer-root-id",
+            request_id: Some("root-request-id".into()), lane: "checks", class: RequestClass::Check, profile: Some("check.unit") }).unwrap();
+        assert_eq!(value, json!({ "execId":"nested-id", "generation":"nested-generation", "state":"running",
+            "cgroupPath":"/user.slice/exact-child.scope", "rootExecId":"outer-root-id",
+            "requestId":"root-request-id", "lane":"checks", "class":"check", "profile":"check.unit" }));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn request_lookup_submit_retry_conflict_and_terminal_lookup_share_authenticated_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let Json(absent) = show_request(State(state.clone()), None, None, AxumPath(request_id.clone())).await.unwrap();
+        assert_eq!(absent, json!({"execution":null}));
+        let make = || {
+            let id = uuid::Uuid::now_v7().to_string();
+            let transport = format!("shell:{id}");
+            let mut lane = request(); lane.id.clone_from(&transport); lane.host.clone_from(&state.node);
+            lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport) };
+            Command { id, request_id: Some(request_id.clone()), lane, argv:vec!["true".into()],
+                cwd:"/work".into(), environment:BTreeMap::from([("SECRET".into(),"first-secret".into())]), timeout_ms:None, parent:None }
+        };
+        let first = make();
+        let transport_id = first.id.clone();
+        let Json(accepted) = submit(State(state.clone()), None, None, Json(first)).await.unwrap();
+        assert_ne!(accepted.command.id, transport_id);
+        assert_eq!(accepted.command.request_id.as_deref(), Some(request_id.as_str()));
+        let mut retry = make();
+        retry.environment.insert("SECRET".into(), "rotated".into());
+        let Json(repeated) = submit(State(state.clone()), None, None, Json(retry)).await.unwrap();
+        assert_eq!(repeated, accepted);
+        let mut changed = make(); changed.argv = vec!["false".into()];
+        let error = submit(State(state.clone()), None, None, Json(changed)).await.unwrap_err();
+        assert_eq!(error.code, "resource-request-conflict");
+        assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+        let Json(found) = show_request(State(state.clone()), None, None, AxumPath(request_id.clone())).await.unwrap();
+        assert_eq!(found["execution"]["command"]["id"], accepted.command.id);
+        assert!(!found.to_string().contains("first-secret"));
+        let mut other = state.clone(); other.owning_person = Some("person/other".into());
+        let Json(absent) = show_request(State(other), None, None, AxumPath(request_id.clone())).await.unwrap();
+        assert!(absent["execution"].is_null());
+        let mut terminal = accepted; terminal.state = "completed".into(); terminal.exit_code = Some(0);
+        state.store.update_shell_resource(&terminal).unwrap();
+        let Json(found) = show_request(State(state), None, None, AxumPath(request_id)).await.unwrap();
+        assert_eq!(found["execution"]["state"], "completed");
+        assert!(found["execution"]["receiptSubject"].is_string());
+    }
+
+    #[tokio::test]
+    async fn absent_request_cancel_returns_confirmed_owner_scoped_tombstone() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let Json(cancelled) = cancel_request(State(state.clone()), None, None, AxumPath(request_id.clone())).await.unwrap();
+        assert_eq!(serde_json::to_value(cancelled).unwrap(), json!({
+            "requestId":request_id, "cancelled":true, "tombstone":true, "execution":null
+        }));
+        let Json(found) = show_request(State(state), None, None, AxumPath(request_id)).await.unwrap();
+        assert!(found["execution"].is_null());
+    }
+
     use crate::store::resource_membership::{LaneRequest, Owner};
     fn request() -> LaneRequest {
         LaneRequest { id: "shell:parent".into(), name: "checks".into(), host: "host-a".into(), max_members: 1,
@@ -254,7 +390,7 @@ mod tests {
     #[test]
     fn nested_execution_inherits_only_live_matching_custody() {
         let parent = request();
-        let mut command = Command { id:"child".into(), lane:parent.clone(), argv:vec!["true".into()], cwd:"/work".into(), environment:BTreeMap::new(), timeout_ms:None, parent:None };
+        let mut command = Command { id:"child".into(), request_id: None, lane:parent.clone(), argv:vec!["true".into()], cwd:"/work".into(), environment:BTreeMap::new(), timeout_ms:None, parent:None };
         assert!(validate_parent(&command,&parent,"launched").is_ok());
         assert!(validate_parent(&command,&parent,"retired").is_err());
         command.lane.class = RequestClass::Landing;
@@ -278,6 +414,7 @@ mod tests {
         lane.capacity = None;
         lane.profile_estimate = None;
         let mut command = Command { id: "child".into(), lane, argv: vec!["true".into()],
+            request_id: None,
             cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None };
         assert!(validate_parent(&command, &parent, "launched").is_ok());
         command.lane.profile = Some("check.other".into());
@@ -299,6 +436,7 @@ mod tests {
             learning_coverage: fractal_runtime::ResourceLearningCoverage::ClientOnly,
         });
         let command = Command { id: uuid::Uuid::now_v7().to_string(), lane, argv: vec!["true".into()],
+            request_id: None,
             cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None };
         let error = submit(State(state.clone()), None, None, Json(command.clone())).await.unwrap_err();
         assert_eq!(error.code, "resource-exec-refused");
@@ -327,6 +465,7 @@ mod tests {
         let mut lane = parent.clone(); lane.id.clone_from(&owner);
         lane.owner = Owner { run:owner.clone(), step:owner.clone(), attempt:1, invocation:Some(owner) };
         let command = Command { id, lane, argv:vec!["true".into()], cwd:"/work".into(), environment:BTreeMap::new(),
+            request_id: None,
             timeout_ms:None, parent:Some(grant.clone()) };
         let mut other_owner = state.clone();
         other_owner.owning_person = Some("person/other".into());
@@ -376,6 +515,7 @@ mod tests {
         let mut lane = request();
         lane.host.clone_from(&state.node);
         let execution = state.store.submit_shell_resource(Command {
+            request_id: None,
             id:"waiter".into(), lane, argv:vec!["true".into()], cwd:"/work".into(),
             environment:BTreeMap::from([("EXAMPLE_TOKEN".into(),"private-test-value".into())]), timeout_ms:None, parent:None,
         }, 10).unwrap();
@@ -403,6 +543,7 @@ mod tests {
         let mut lane = request(); lane.id.clone_from(&transport); lane.host.clone_from(&state.node);
         lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport.clone()) };
         let command = Command { id:id.clone(), lane, argv:vec!["true".into()], cwd:"/work".into(),
+            request_id: None,
             environment:BTreeMap::from([("ST_MISSION_RUN".into(),"mission-run/spoofed".into())]), timeout_ms:None, parent:None };
         assert!(submit(State(state.clone()),Some(BoundActor::Agent("agent/missing".into())),None,Json(command.clone())).await.is_err());
         let Json(execution) = submit(State(state.clone()),None,None,Json(command)).await.unwrap();
@@ -517,6 +658,7 @@ mod tests {
             let id = format!("owned-{index}");
             let mut lane = request(); lane.id.clone_from(&id); lane.host.clone_from(&state.node); lane.owner = owner;
             let mut execution = state.store.submit_shell_resource(Command { id, lane:lane.clone(), argv:vec!["true".into()],
+                request_id: None,
                 cwd:"/work".into(), environment:BTreeMap::from([("SECRET".into(),"must-not-export".into())]),
                 timeout_ms:None, parent:None },10).unwrap();
             execution.state = "completed".into();
@@ -565,6 +707,7 @@ mod tests {
             let mut lane = request(); lane.id.clone_from(&transport); lane.host.clone_from(&state.node);
             lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport) };
             let command = Command { id:id.clone(), lane, argv:vec!["true".into()], cwd:"/work".into(),
+                request_id: None,
                 environment:BTreeMap::from([("ST_MISSION_RUN".into(),"spoofed".into())]), timeout_ms:None,parent:None };
             let (status, body) = bound_request(&state,bound_agent,run_credential,"POST","/v1/internal/resources/exec",serde_json::to_value(command).unwrap()).await;
             if cfg!(target_os = "macos") {

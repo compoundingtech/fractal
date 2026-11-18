@@ -6641,7 +6641,12 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
         Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
-        Command::Resources { command } => resources_cli::run(&client, config.person.as_deref(), command, cli.json).await,
+        Command::Resources { command } => {
+            let client = if let Some(actor) = command.actor() {
+                execution_client(&endpoint, actor.to_owned())?
+            } else { client };
+            resources_cli::run(&client, config.person.as_deref(), command, cli.json).await
+        },
         Command::ResourcePayload { .. } => unreachable!("resource payload is dispatched before daemon connection"),
         Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
         Command::Migrate { command: MigrateCommand::Host(args) } => {
@@ -6768,8 +6773,7 @@ fn guard_mutating_cli_actor(
         Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
             | hosts_cli::HostsCommand::Release { actor, .. }
             | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
-        Command::Resources { command: resources_cli::ResourcesCommand::Hold { actor, .. }
-            | resources_cli::ResourcesCommand::Release { actor, .. } } => actor.as_deref(),
+        Command::Resources { command } => command.actor(),
         Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
@@ -7948,7 +7952,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "mission_resource_lane": 2,
                     "resource_profile_keys": 1,
                     "per_run_missions": 1,
-                    "shell_resource_exec": 1,
+                    "shell_resource_exec": 2,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
