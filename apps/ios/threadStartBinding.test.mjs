@@ -348,8 +348,9 @@ test('golden definitive POST recipient-unassigned invalidates the old preview an
 });
 
 for (const key of ['stale-snapshot']) {
-  test(`POST ${key} without applied proof retains the unknown packet and never refreshes or retargets`, async () => {
-    const h = harness({ contexts: [context('agent/A')], outcomes: [wireRefusal(key)] });
+  test(`legacy POST ${key} without applied proof retains the unknown packet and never refreshes or retargets`, async () => {
+    const { applied: _applied, ...legacy } = goldenRefusals[key];
+    const h = harness({ contexts: [context('agent/A')], outcomes: [new ClientError({ ...legacy, details: {} }, 409)] });
     h.panel();
     await settle();
     field(h.composer(startOf(h.panel()))).onSend();
@@ -375,8 +376,9 @@ test('GET recipient-retired is a distinct terminal refusal with no Retry or send
   assert.deepEqual(h.signed, []);
 });
 
-test('409 recipient-retired independently refreshes to canonical B and requires a fresh explicit Send', async () => {
-  const h = harness({ contexts: [context('agent/A'), fallback('agent/B', 'agent/A')], outcomes: [wireRefusal('recipient-retired'), { how: 'sent' }] });
+for (const key of ['recipient-retired', 'stale-snapshot']) {
+test(`409 ${key} independently refreshes to canonical B and requires a fresh explicit Send`, async () => {
+  const h = harness({ contexts: [context('agent/A'), fallback('agent/B', 'agent/A')], outcomes: [wireRefusal(key), { how: 'sent' }] });
   h.panel();
   await settle();
   field(h.composer(startOf(h.panel()))).onSend();
@@ -391,6 +393,7 @@ test('409 recipient-retired independently refreshes to canonical B and requires 
     ['thread/uuid-1', 'agent/A'], ['thread/uuid-2', 'agent/B'],
   ]);
 });
+}
 
 test('A→B and B→C stale-recipient refusals reread and show the new recipient; only a fresh user send reaches it', async () => {
   const refused = { how: 'failed', error: 'The recipient changed.', refreshStartContext: true };

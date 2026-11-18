@@ -128,9 +128,10 @@ blocked retirement refusal. Both preserve the draft.
 A signed POST requires explicit `applied: none` under the shared application-certainty
 rules before a refusal can invalidate the recipient context and require a new Send.
 Absent proof remains unknown, even with `retryable: false`: retain the original signed
-packet, recipient and idempotency key, with no automatic or explicit resend, refresh or retarget. The golden
-`stale-fence` envelope still lacks that proof; `recipient-unassigned` and
-`recipient-retired` carry it. A definitive unassigned POST rereads context once,
+packet, recipient and idempotency key, with no automatic or explicit resend, refresh or retarget.
+The golden stale-snapshot `stale-fence`, `recipient-unassigned` and `recipient-retired`
+envelopes carry explicit proof in both the outer and legacy details locations.
+A definitive unassigned POST rereads context once,
 then the unavailable setup blocks further sends without Retry and keeps the draft.
 A later refusal cannot settle an earlier unknown send.
 Server message text is never parsed and `stale-fence` has no responsibility reason.

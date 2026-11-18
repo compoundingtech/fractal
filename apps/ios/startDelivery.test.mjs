@@ -16,11 +16,12 @@ test('exact canonical golden envelopes decode and round-trip without request ID 
 });
 
 for (const key of ['stale-snapshot']) {
-  test(`golden POST ${key} without applied proof keeps the original signed packet, even after a later definitive refusal`, async () => {
+  test(`legacy POST ${key} without applied proof keeps the original signed packet, even after a later definitive refusal`, async () => {
     const packet = Object.freeze({ fence: { snapshot_id: 'snapshot/original' }, id: 'action/original', idempotency_key: 'action/original', parameters: { target_id: 'thread/original', agent_id: 'agent/original', signature: 'original-signature', content: 'Original draft' } });
     let builds = 0;
     const sent = [];
-    const error = new ClientError(goldens[key], 409);
+    const { applied: _applied, ...legacy } = goldens[key];
+    const error = new ClientError({ ...legacy, details: {} }, 409);
     assert.equal(appliedAnswer(error), undefined, 'retryable=false is not nonapplication proof');
     const result = await sendStart('fixture', {
       build: async () => { builds++; return packet; },
@@ -41,7 +42,7 @@ for (const key of ['stale-snapshot']) {
   });
 }
 
-for (const key of ['recipient-unassigned', 'recipient-retired']) {
+for (const key of ['stale-snapshot', 'recipient-unassigned', 'recipient-retired']) {
 test(`golden POST ${key} proves applied:none and is a definitive failure`, async () => {
   const error = new ClientError(goldens[key], 409);
   assert.equal(appliedAnswer(error), 'none');
