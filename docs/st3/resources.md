@@ -130,6 +130,8 @@ identity. UUID syntax is validated before submission. The first accepted intent 
 identical semantic retries return the existing execution without relaunching or replacing its
 live environment; changed intent is refused. Environment values never enter the persisted
 submission-intent digest. Request IDs also work for inherited child executions.
+An identical inherited retry adopts its existing execution even after parent retirement;
+live parent custody is required only when accepting a new child, never for replay adoption.
 
 `show --request-id UUID` returns `{"execution":null}` when absent.
 `cancel --request-id UUID --wait` returns `{requestId,cancelled:true,tombstone,execution}` after
