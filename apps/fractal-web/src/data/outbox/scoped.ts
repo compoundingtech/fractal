@@ -23,8 +23,10 @@ export const scopeFromCapabilities = (response: EnvelopeOf<Capabilities>): Outbo
   decodedScope(Native.decodeUnknownSync(Native.Capabilities)(response.value), response.snapshot.host_id)
 
 export interface ScopedChatOutbox extends ChatOutbox {
-  readonly initialize: (response?: EnvelopeOf<Capabilities>) => Promise<void>
-  readonly observe: (response: EnvelopeOf<Capabilities>) => typeof Native.Capabilities.Type
+  readonly beginObservation: () => number
+  readonly initialize: (response?: EnvelopeOf<Capabilities>, sequence?: number) => Promise<void>
+  readonly observe: (response: EnvelopeOf<Capabilities>, sequence?: number) => typeof Native.Capabilities.Type
+  readonly isCurrentObservation: (response: EnvelopeOf<Capabilities>) => boolean
   readonly recovery: OutboxRecoveryPort
   readonly protection: () => 'durable' | 'unprotected'
   readonly close: () => void
@@ -35,8 +37,11 @@ export const createScopedChatOutbox = (
   client: FractalClient,
   options: Pick<OpenOutboxOptions, 'indexedDB' | 'storage' | 'databaseName'> = {},
 ): ScopedChatOutbox => {
-  type Identity = { readonly scope: OutboxScope | undefined; readonly response: EnvelopeOf<Capabilities> }
+  type Identity = { readonly scope: OutboxScope | undefined; readonly response: EnvelopeOf<Capabilities>; readonly sequence: number }
   let cached: Identity | undefined
+  let sequence = 0
+  const beginObservation = () => ++sequence
+  const observations = new WeakMap<EnvelopeOf<Capabilities>, number>()
   let discovering: Promise<Identity> | undefined
   let closed = false
   const listeners = new Set<() => void>()
@@ -77,18 +82,25 @@ export const createScopedChatOutbox = (
     }
     return catalog
   }
-  const observe = (response: EnvelopeOf<Capabilities>): typeof Native.Capabilities.Type => {
+  const observe: ScopedChatOutbox['observe'] = (response, started = observations.get(response) ?? beginObservation()) => {
     const capabilities = Native.decodeUnknownSync(Native.Capabilities)(response.value)
-    cached = { scope: decodedScope(capabilities, response.snapshot.host_id), response }
+    observations.set(response, started)
+    if (cached === undefined || started >= cached.sequence) {
+      cached = { scope: decodedScope(capabilities, response.snapshot.host_id), response, sequence: started }
+    }
     return capabilities
   }
+  const isCurrentObservation = (response: EnvelopeOf<Capabilities>) =>
+    cached !== undefined && observations.get(response) === cached.sequence
   const discover = async (): Promise<Identity> => {
     if (discovering !== undefined) return discovering
+    const started = beginObservation()
     discovering = (async () => {
       try {
         const response = await client.capabilities()
-        const capabilities = observe(response)
-        return { scope: decodedScope(capabilities, response.snapshot.host_id), response }
+        observe(response, started)
+        if (cached === undefined) throw new OutboxIdentityUnavailable()
+        return cached
       } catch { throw new OutboxIdentityUnavailable() }
       finally { discovering = undefined }
     })()
@@ -126,13 +138,14 @@ export const createScopedChatOutbox = (
     }
     return initialization
   }
-  const initialize: ScopedChatOutbox['initialize'] = async (response) => {
+  const initialize: ScopedChatOutbox['initialize'] = async (response, started) => {
     let identity: Identity
     if (response === undefined) identity = await discover()
     else {
       try {
-        const capabilities = observe(response)
-        identity = { scope: decodedScope(capabilities, response.snapshot.host_id), response }
+        observe(response, started)
+        if (cached === undefined || observations.get(response) !== cached.sequence) return
+        identity = cached
       } catch { throw new OutboxIdentityUnavailable() }
     }
     // A successful answer without an issuer explicitly opts out of durable protection.
@@ -156,7 +169,7 @@ export const createScopedChatOutbox = (
     return { repo, record }
   }
   return {
-    initialize, observe, repository,
+    beginObservation, initialize, observe, isCurrentObservation, repository,
     protection: () => cached?.scope === undefined ? 'unprotected' : 'durable',
     recovery: {
       ...createRecoveryCommands(client, locate),

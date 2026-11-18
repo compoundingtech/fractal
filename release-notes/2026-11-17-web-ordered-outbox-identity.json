@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep browser outbox identity observations ordered by read start",
+  "replay": {"status": "none", "detail": "No replay behavior changes; unknown attempts remain non-retryable."},
+  "schema": {"status": "none", "detail": "No browser or server storage schema changes; ordering metadata is in memory only."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Startup, grants and scoped discovery reserve monotonic observation sequences before reading capabilities. Older responses cannot replace a newer scope or initialize an obsolete repository. Grants recheck observation freshness after initialization."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "A delayed protected startup response cannot move an already initialized protected or explicitly unprotected browser identity backward. Persisted scope tuples are unchanged."}
+}

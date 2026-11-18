@@ -206,6 +206,9 @@ export const liveSource = ({
     fetchImpl: fetch,
     socket: options.socket ?? browserSocket,
   })
+  const outbox = createScopedChatOutbox(client)
+  // Reserve the initial SDK channel observation before any later web identity read.
+  const startupSequence = outbox.beginObservation()
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
   const networkLoss = Atom.keepAlive(Atom.make<FeedSyncObservation | undefined>(undefined))
@@ -855,7 +858,6 @@ export const liveSource = ({
         )
       }),
     )
-  const outbox = createScopedChatOutbox(client)
   const submitMessage = gatewayMessageSend(client, messageSnapshot, outbox)
 
   // Atom.family is weakly memoized. Keep the 24 recent snapshot controllers explicitly.
@@ -1219,15 +1221,17 @@ export const liveSource = ({
       deniedReaders.add(deny)
       const fiber = runtime.runFork(
         Effect.gen(function* () {
+          const sequence = outbox.beginObservation()
           const response = yield* Effect.tryPromise({
             try: () => client.capabilities(),
             catch: (cause) => cause,
           })
-          const discovered = outbox.observe(response)
+          const discovered = outbox.observe(response, sequence)
           const startup = yield* Effect.tryPromise({
-            try: () => outbox.initialize(response),
+            try: () => outbox.initialize(response, sequence),
             catch: (cause) => cause,
           }).pipe(Effect.result)
+          if (!outbox.isCurrentObservation(response)) return
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1261,7 +1265,7 @@ export const liveSource = ({
       sdk = yield* Fractal
       if (!online) yield* sdk.setNetworkOnline(false)
       // Rendering may proceed read-only when identity/storage is unavailable; send grants await the same barrier.
-      yield* Effect.tryPromise({ try: async () => outbox.initialize(await startupIdentity.promise), catch: (cause) => cause }).pipe(Effect.catch(() => Effect.void))
+      yield* Effect.tryPromise({ try: async () => outbox.initialize(await startupIdentity.promise, startupSequence), catch: (cause) => cause }).pipe(Effect.catch(() => Effect.void))
     })).catch(cause => { if (!disposed) throw cause }),
     suspendSockets: () => sdk?.suspendSockets(),
     resumeSockets: () => {

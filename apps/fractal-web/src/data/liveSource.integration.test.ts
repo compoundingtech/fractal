@@ -502,6 +502,45 @@ describe('outbox startup admission', () => {
     }), { issuerPair })
   })
 
+  it.live('does not let delayed startup A replace composer B after B grants initialize', () => Effect.gen(function* () {
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    const gateway = new Gateway()
+    gateway.issuerPair = issuerPair
+    const captured = Promise.withResolvers<void>()
+    const releaseProbe = Promise.withResolvers<void>()
+    let first = true
+    const live = yield* Effect.acquireRelease(Effect.sync(() => liveSource({ options: {
+      baseUrl: 'http://gateway.test', maxFollows: 2, socket: gateway.factory,
+      fetch: async (input, init) => {
+        const response = await gateway.fetch(input, init)
+        if (first && new URL(String(input)).pathname === '/v1/client/capabilities') {
+          first = false
+          captured.resolve()
+          await releaseProbe.promise
+        }
+        return response
+      },
+    } })), live => Effect.promise(() => live.dispose()))
+    try {
+      yield* Effect.promise(() => captured.promise)
+      gateway.issuerPair = undefined // B explicitly opts out of protected storage.
+      const release = live.registry.mount(live.source.grants)
+      try {
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'unprotected' })
+        releaseProbe.resolve()
+        yield* Effect.promise(() => live.ready)
+        expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'granted', sendProtection: 'unprotected' })
+        // A cached protected repository here would refuse B's unprotected send.
+        yield* Effect.promise(() => live.source.attachments!.send({
+          _tag: 'Send', api_version: 'st3.client.v0', type: 'message.send', id: 'action/late-startup',
+          parameters: { to: agent.id, content: 'Fresh B message', tags: [], attachments: [] },
+        }))
+        expect(gateway.messageActions).toHaveLength(1)
+      } finally { release() }
+    } finally { releaseProbe.resolve() }
+  }).pipe(Effect.scoped))
+
   for (const observation of ['reconnect probe', 'recovery discovery'] as const) {
   it.live(`uses the new identity when the first composer mounts after ${observation}`, () => Effect.gen(function* () {
     const factory = new IDBFactory()

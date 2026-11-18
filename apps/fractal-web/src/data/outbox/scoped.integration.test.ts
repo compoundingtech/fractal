@@ -270,6 +270,25 @@ describe('verified browser outbox scope', () => {
     await expect(owner.recovery.list()).rejects.toMatchObject({ _tag: 'OutboxStorageError', code: 'disabled' })
   })
 
+  it.each(['only A', 'A then B', 'B then delayed A', 'unprotected B then delayed A'])('keeps scope observations ordered by read start: %s', async order => {
+    const { owner, respond } = setup()
+    const a = owner.beginObservation()
+    if (order === 'only A' || order === 'A then B') await owner.initialize(base, a)
+    let expected: EnvelopeOf<Capabilities> = base
+    if (order !== 'only A') {
+      const b = owner.beginObservation()
+      const { issuer: _issuer, issuer_key: _key, ...withoutIssuer } = base.value
+      expected = { ...base, value: order.startsWith('unprotected') ? withoutIssuer : { ...base.value, issuer_key: 'issuer-key/b' } }
+      respond(expected)
+      await owner.initialize(expected, b)
+      if (order.includes('delayed A')) await owner.initialize(base, a)
+      expect(owner.isCurrentObservation(base)).toBe(false)
+    }
+    expect(owner.isCurrentObservation(expected)).toBe(true)
+    expect(owner.protection()).toBe(order.startsWith('unprotected') ? 'unprotected' : 'durable')
+    expect((await owner.repository())?.scope).toEqual(scopeFromCapabilities(expected))
+  })
+
   it('uses the cached generated issuer pair without another discovery and persists a protected record', async () => {
     const { owner, calls } = setup()
     owner.observe(base)

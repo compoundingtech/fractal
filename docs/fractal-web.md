@@ -669,6 +669,10 @@ Live-source startup recovery reuses the SDK channel's initial capabilities probe
 so startup without a composer needs only one identity read. Send grants always read capabilities
 fresh, including the first composer mount, and initialize the outbox from that response.
 Recovery discovery or reconnect cannot make a late composer restore an old startup scope.
+Identity reads are ordered by a monotonic sequence reserved when they start, not when responses
+arrive. A late older startup response cannot replace a newer protected or unprotected scope,
+open its old repository, or recover its old records. Grants recheck that their observation is
+still current after awaiting initialization.
 Never-dispatched preparing and ready records remain pending without automatic submission.
 Restored Start and reply packets require explicit original-target revalidation before
 their one-shot dispatch permit can be consumed. Failed startup leaves sending unavailable
