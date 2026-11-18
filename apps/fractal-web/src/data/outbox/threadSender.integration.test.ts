@@ -330,7 +330,7 @@ describe('durable thread delivery', () => {
     const { client } = transport(value => { body = value; started.resolve(); return held.promise })
     const pending = bind(client, repo).send(reply)
     await started.promise
-    await repo.dismiss(reply.key)
+    await repo.dismiss(reply.key, (await repo.read(reply.key))?.revision)
     const writes = vi.spyOn(repo, 'compareAndSwapWritable')
     const reads = vi.spyOn(repo, 'read')
     held.resolve(Response.json(receipt(body)))
@@ -547,11 +547,11 @@ it.each(['before retry', 'during retry acceptance'] as const)('does not accept a
   const { client, calls } = transport(() => Response.json(refusals['recipient-retired'], { status: 409 }))
   const sender = bind(client, repo)
   expect(await sender.send(start)).toMatchObject({ how: 'not-applied' })
-  if (mode === 'before retry') await repo.dismiss(start.key)
+  if (mode === 'before retry') await repo.dismiss(start.key, (await repo.read(start.key))?.revision)
   else {
     const accept = repo.accept
     vi.spyOn(repo, 'accept').mockImplementation(async (record, spool, bytes, predecessor) => {
-      if (predecessor !== undefined) await repo.dismiss(predecessor.id)
+      if (predecessor !== undefined) await repo.dismiss(predecessor.id, predecessor.revision)
       return accept(record, spool, bytes, predecessor)
     })
   }

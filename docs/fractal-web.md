@@ -689,6 +689,14 @@ Readable damaged entries and foreign-identity entries remain discard-only. Unava
 storage displays a notice without actions. Cross-tab notifications only wake a persisted
 re-read; they never authorize sending or supply authoritative delivery state.
 
+Every recovery command carries the revision actually shown to the person. Discard
+compares that revision inside its IndexedDB write transaction before changing local
+retention metadata or deleting unreadable content. A changed revision refuses the
+command without mutation, refreshes the entry, and requires another explicit confirmation
+with the current delivery consequence. In particular, a confirmation opened before
+another tab dispatches cannot discard the now-dispatched attempt using a promise that
+it will not be sent. Discard never cancels an action already sent.
+
 Cleanup never expires unresolved attempts. Terminal content/spool lasts seven days (delivered
 content additionally waits for exact timeline observation), then minimal identity/evidence
 tombstones last another thirty days. Explicit dismissal preserves uncertainty in a tombstone;

@@ -123,8 +123,8 @@ it.each(['/', '/w/inbox', '/w/thread/example'])('offers ordinary pairing from %s
 
 it.each(['/', '/w/agent/example', '/w/thread/example'])('shows the one outbox recovery list from %s, including thread attempts', async path => {
   const list = vi.fn(async () => [
-    { id: 'outbox/thread-start', kind: 'unknown' as const, subject: 'thread' as const, status: 'delivery unconfirmed', actions: ['copy', 'discard'] as const },
-    { id: 'outbox/reply', kind: 'pending' as const, subject: 'message' as const, status: 'waiting to send', actions: ['send', 'discard'] as const },
+    { id: 'outbox/thread-start', revision: 2, kind: 'unknown' as const, subject: 'thread' as const, status: 'delivery unconfirmed', actions: ['copy', 'discard'] as const },
+    { id: 'outbox/reply', revision: 1, kind: 'pending' as const, subject: 'message' as const, status: 'waiting to send', actions: ['send', 'discard'] as const },
   ])
   source = { ...source, outboxRecovery: { list, discard: vi.fn(async () => {}), send: vi.fn(async () => {}), copy: vi.fn(async () => ({ copyKey: 'outbox/copy/1', text: '', images: [] })), sendCopy: vi.fn(async () => ({ _tag: 'Recorded' as const })) } }
   window.history.replaceState(null, '', path)

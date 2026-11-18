@@ -10,7 +10,8 @@ import type { OutboxRecoveryCopy, OutboxRecoveryItem, OutboxRecoveryPort } from 
 import { OutboxRecovery, RECOVERY_TITLE, RECOVERY_UNAVAILABLE } from './OutboxRecovery.tsx'
 
 type State = 'unknown' | 'not-applied' | 'pending' | 'corrupt' | 'identity-mismatch' | 'unavailable'
-type Args = { readonly scheme: 'dark' | 'light'; readonly state: State }
+/** `dispatchedElsewhere`: another tab takes the first pending attempt's dispatch permit just before this tab's Discard lands, before any wakeup arrives. */
+type Args = { readonly scheme: 'dark' | 'light'; readonly state: State; readonly dispatchedElsewhere?: boolean }
 const states: readonly State[] = ['unknown', 'not-applied', 'pending', 'corrupt', 'identity-mismatch', 'unavailable']
 const stateLabel: Readonly<Record<State, string>> = {
   unknown: 'Unconfirmed', 'not-applied': 'Not applied', pending: 'Pending', corrupt: 'Damaged', 'identity-mismatch': 'Other identity', unavailable: 'Storage unavailable',
@@ -20,46 +21,65 @@ const stateLabel: Readonly<Record<State, string>> = {
 const longReference = 'https://example.test/releases/2026-11/notes/0123456789abcdef0123456789abcdef0123456789abcdef'
 const fixtures: Readonly<Record<Exclude<State, 'unavailable'>, readonly OutboxRecoveryItem[]>> = {
   unknown: [
-    { id: 'outbox/attempt/unknown-reply', kind: 'unknown', subject: 'message', status: 'delivery unconfirmed', actions: ['copy', 'discard'], text: `Ship the release notes from ${longReference}` },
-    { id: 'outbox/attempt/unknown-start', kind: 'unknown', subject: 'thread', status: 'delivery unconfirmed', actions: ['copy', 'discard'], text: 'Release checklist for 4.2' },
+    { id: 'outbox/attempt/unknown-reply', revision: 3, kind: 'unknown', subject: 'message', status: 'delivery unconfirmed', actions: ['copy', 'discard'], text: `Ship the release notes from ${longReference}` },
+    { id: 'outbox/attempt/unknown-start', revision: 2, kind: 'unknown', subject: 'thread', status: 'delivery unconfirmed', actions: ['copy', 'discard'], text: 'Release checklist for 4.2' },
   ],
   'not-applied': [
-    { id: 'outbox/attempt/not-applied', kind: 'not-applied', subject: 'message', status: 'Fractal refused it: the conversation was closed.', actions: ['retry', 'discard'], text: 'Please rerun the migration check.' },
+    { id: 'outbox/attempt/not-applied', revision: 3, kind: 'not-applied', subject: 'message', status: 'Fractal refused it: the conversation was closed.', actions: ['retry', 'discard'], text: 'Please rerun the migration check.' },
   ],
   pending: [
-    { id: 'outbox/attempt/pending-start', kind: 'pending', subject: 'thread', status: 'Saved before sending; not yet submitted.', actions: ['send', 'discard'], text: 'Weekly release review' },
-    { id: 'outbox/attempt/pending-reply', kind: 'pending', subject: 'message', status: 'Saved before sending; not yet submitted.', actions: ['send', 'discard'], text: 'Approved; go ahead with def.' },
+    { id: 'outbox/attempt/pending-start', revision: 1, kind: 'pending', subject: 'thread', status: 'Saved before sending; not yet submitted.', actions: ['send', 'discard'], text: 'Weekly release review' },
+    { id: 'outbox/attempt/pending-reply', revision: 1, kind: 'pending', subject: 'message', status: 'Saved before sending; not yet submitted.', actions: ['send', 'discard'], text: 'Approved; go ahead with def.' },
   ],
+  // A damaged entry may have no readable revision.
   corrupt: [
-    { id: 'outbox/attempt/corrupt', kind: 'corrupt', subject: 'message', status: `storage damaged; delivery unknown (${longReference})`, actions: ['discard'] },
+    { id: 'outbox/attempt/corrupt', revision: undefined, kind: 'corrupt', subject: 'message', status: `storage damaged; delivery unknown (${longReference})`, actions: ['discard'] },
   ],
   'identity-mismatch': [
-    { id: 'outbox/attempt/foreign', kind: 'identity-mismatch', subject: 'message', status: 'Saved for issuer host/build-2, not this connection.', actions: ['discard'] },
+    { id: 'outbox/attempt/foreign', revision: 1, kind: 'identity-mismatch', subject: 'message', status: 'Saved for issuer host/build-2, not this connection.', actions: ['discard'] },
   ],
 }
 const copied: Omit<OutboxRecoveryCopy, 'copyKey'> = { text: `Ship the release notes from ${longReference}`, images: [{ name: 'release-diagram-with-a-long-descriptive-file-name.png', mediaType: 'image/png', bytes: 48_213 }] }
 const refusal = 'The recipient could not be verified.'
+const at = (revision: number | undefined) => `@${revision ?? 'unreadable'}`
 
 /**
- * An in-memory port: every command is recorded in the visible receipt log and changes the list exactly as the outbox
- * would. Each copy gets its own key; the first send of a copy is refused (nothing saved) and later sends record it.
+ * An in-memory port: every command is recorded in the visible receipt log with the revision it was bound to, and
+ * changes the list exactly as the outbox would. A command whose revision no longer matches the stored attempt is
+ * refused with the outbox's typed conflict and changes nothing. Each copy gets its own key; the first send of a copy
+ * is refused (nothing saved) and later sends record it.
  */
-const createFixturePort = (state: State, record: (receipt: string) => void): OutboxRecoveryPort => {
-  let items = state === 'unavailable' ? [] : fixtures[state]
+const createFixturePort = ({ state, dispatchedElsewhere = false }: Pick<Args, 'state' | 'dispatchedElsewhere'>, record: (receipt: string) => void): OutboxRecoveryPort => {
+  let items: readonly OutboxRecoveryItem[] = state === 'unavailable' ? [] : fixtures[state]
   const listeners = new Set<() => void>()
   let copies = 0
+  let raced = !dispatchedElsewhere
   const refused = new Set<string>()
-  const remove = (id: string) => {
+  const take = (operation: string, id: string, expectedRevision: number | undefined) => {
+    const item = items.find(entry => entry.id === id)
+    if (item !== undefined && item.revision === expectedRevision) { record(`${operation} ${id} ${at(expectedRevision)}`); return }
+    record(`${operation} ${id} ${at(expectedRevision)} refused: now ${item === undefined ? 'gone' : at(item.revision)}`)
+    throw Object.assign(new Error('The outbox attempt changed.'), { _tag: 'OutboxConflict' as const, localAttemptId: id, expectedRevision, ...(item?.revision === undefined ? {} : { actualRevision: item.revision }) })
+  }
+  const remove = (operation: string, id: string, expectedRevision: number | undefined) => {
+    if (!raced) {
+      // The other tab's permit moves the pending attempt to unknown at the next revision; its wakeup has not arrived.
+      raced = true
+      items = items.map((item): OutboxRecoveryItem => item.id === id && item.kind === 'pending' && item.revision !== undefined
+        ? { ...item, kind: 'unknown', revision: item.revision + 1, status: 'delivery unconfirmed', actions: ['copy', 'discard'] }
+        : item)
+    }
+    take(operation, id, expectedRevision)
     items = items.filter(item => item.id !== id)
     for (const listener of listeners) listener()
   }
   return {
     list: async () => { if (state === 'unavailable') throw new Error('IndexedDB unavailable'); return items },
-    discard: async id => { record(`discard ${id}`); remove(id) },
+    discard: async (id, expectedRevision) => remove('discard', id, expectedRevision),
     subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    retry: async id => { record(`retry ${id}`); remove(id) },
-    send: async id => { record(`send ${id}`); remove(id) },
-    copy: async id => { record(`copy ${id}`); return { ...copied, copyKey: `outbox/copy/${++copies}` } },
+    retry: async (id, expectedRevision) => remove('retry', id, expectedRevision),
+    send: async (id, expectedRevision) => remove('send', id, expectedRevision),
+    copy: async (id, expectedRevision) => { take('copy', id, expectedRevision); return { ...copied, copyKey: `outbox/copy/${++copies}` } },
     sendCopy: async (id, copyKey, text) => {
       record(`sendCopy ${id} as ${copyKey}: ${text}`)
       if (refused.has(copyKey)) return { _tag: 'Recorded' }
@@ -69,9 +89,9 @@ const createFixturePort = (state: State, record: (receipt: string) => void): Out
   }
 }
 
-function RecoveryStory({ scheme, state }: Args) {
+function RecoveryStory({ scheme, state, dispatchedElsewhere }: Args) {
   const [receipts, record] = React.useReducer((previous: readonly string[], receipt: string) => [...previous, receipt], [])
-  const [port] = React.useState(() => createFixturePort(state, record))
+  const [port] = React.useState(() => createFixturePort({ state, dispatchedElsewhere }, record))
   return <div data-scheme={scheme} data-outbox-story={state} {...stylex.props(styles.canvas, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
     <OutboxRecovery port={port} />
     <div role="log" aria-label="Fixture outbox commands" {...stylex.props(styles.log)}>{receipts.map((receipt, index) => <p key={index} {...stylex.props(styles.receipt)}>{receipt}</p>)}</div>
@@ -82,17 +102,18 @@ const meta = {
   excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/Outbox recovery',
   component: RecoveryStory,
-  args: { scheme: 'dark', state: 'unknown' },
+  args: { scheme: 'dark', state: 'unknown', dispatchedElsewhere: false },
   argTypes: {
     scheme: { options: ['dark', 'light'], control: 'inline-radio' },
     state: { options: states, control: 'select' },
+    dispatchedElsewhere: { control: 'boolean' },
   },
   parameters: {
     layout: 'fullscreen',
     scenario: { _tag: 'contract-fixture', reason: 'Browser outbox attempts in each recovery state over an in-memory port with recorded commands; no world slice models this device’s outbox and nothing is sent.' },
-    docs: { description: { component: 'Attempts this browser holds but cannot send by itself. An unconfirmed original may have arrived: it is only copied into a separate new attempt, never retried. Not-applied attempts retry as a fresh attempt; pending ones revalidate before sending; damaged or foreign entries can only be discarded, and Discard always asks first. Unreadable storage is a notice without actions.' } },
+    docs: { description: { component: 'Attempts this browser holds but cannot send by itself. An unconfirmed original may have arrived: it is only copied into a separate new attempt, never retried. Not-applied attempts retry as a fresh attempt; pending ones revalidate before sending; damaged or foreign entries can only be discarded, and Discard always asks first. Every command is bound to the revision the row showed: if another tab moved the attempt on, nothing happens and the confirmation asks again with the current state. Unreadable storage is a notice without actions.' } },
   },
-  render: args => <main><RecoveryStory key={`${args.state}:${args.scheme}`} {...args} /></main>,
+  render: args => <main><RecoveryStory key={`${args.state}:${args.scheme}:${args.dispatchedElsewhere === true}`} {...args} /></main>,
 } satisfies Meta<Args>
 export default meta
 type Story = StoryObj<Args>
@@ -104,6 +125,7 @@ export const scenarioExemptions: readonly string[] = [
   'IdentityMismatch:contract-fixture',
   'NotApplied:contract-fixture',
   'Pending:contract-fixture',
+  'PendingDispatchedElsewhere:contract-fixture',
   'Unavailable:contract-fixture',
   'Unknown:contract-fixture',
 ]
@@ -171,7 +193,7 @@ const unknownPlay: Story['play'] = async ({ canvasElement }) => {
   await userEvent.click(within(composer).getByRole('button', { name: 'Send copy' }))
   await waitFor(() => expect(within(canvasElement).queryByRole('dialog')).toBeNull())
   const sent = `sendCopy outbox/attempt/unknown-reply as outbox/copy/1: ${copied.text} (copy)`
-  await expect(receipts(canvasElement)).toEqual(['copy outbox/attempt/unknown-reply', sent, sent])
+  await expect(receipts(canvasElement)).toEqual(['copy outbox/attempt/unknown-reply @3', sent, sent])
   // Recorded: the composer closes and says where the copy's outcome lives, without claiming delivery.
   await expect(list.querySelector('[data-outbox-copy-notice]')).toHaveTextContent('The copy is saved as its own new message. If Fractal does not confirm it, it is listed here. Do not send it again.')
   await expect(list.querySelector('[data-outbox-copy-notice]')).toHaveAttribute('role', 'status')
@@ -187,7 +209,7 @@ const notAppliedPlay: Story['play'] = async ({ canvasElement }) => {
   await keepThroughConfirmation(canvasElement, 'outbox/attempt/not-applied', 'This removes the message from this device. It will not be sent.')
   await userEvent.click(within(attempt).getByRole('button', { name: /^Retry/ }))
   await waitFor(() => expect(within(canvasElement).queryByRole('region', { name: RECOVERY_TITLE })).toBeNull())
-  await expect(receipts(canvasElement)).toEqual(['retry outbox/attempt/not-applied'])
+  await expect(receipts(canvasElement)).toEqual(['retry outbox/attempt/not-applied @3'])
 }
 
 const pendingPlay: Story['play'] = async ({ canvasElement }) => {
@@ -198,7 +220,7 @@ const pendingPlay: Story['play'] = async ({ canvasElement }) => {
   await expectFits(canvasElement, list)
   await userEvent.click(within(start).getByRole('button', { name: /^Revalidate and send/ }))
   await waitFor(() => expect(canvasElement.querySelector('[data-outbox-item="outbox/attempt/pending-start"]')).toBeNull())
-  await expect(receipts(canvasElement)).toEqual(['send outbox/attempt/pending-start'])
+  await expect(receipts(canvasElement)).toEqual(['send outbox/attempt/pending-start @1'])
   await expect(row(canvasElement, 'outbox/attempt/pending-reply')).toBeVisible()
 }
 
@@ -213,7 +235,37 @@ const corruptPlay: Story['play'] = async ({ canvasElement }) => {
   await expect(dialog).toHaveAccessibleDescription('This removes the entry from this device. It does not cancel anything Fractal may already have received.')
   await userEvent.click(within(dialog).getByRole('button', { name: 'Discard' }))
   await waitFor(() => expect(within(canvasElement).queryByRole('region', { name: RECOVERY_TITLE })).toBeNull())
-  await expect(receipts(canvasElement)).toEqual(['discard outbox/attempt/corrupt'])
+  await expect(receipts(canvasElement)).toEqual(['discard outbox/attempt/corrupt @unreadable'])
+}
+
+const mayHaveArrived = 'This removes the copy on this device only. It does not cancel the original, which may already have arrived.'
+
+/**
+ * Two tabs, one outbox: this tab confirms Discard for the pending thread it read while the other tab has just taken its
+ * dispatch permit. The outbox refuses the old revision and removes nothing; the dialog stays open on the attempt's
+ * current unknown state with its may-have-arrived consequence, and only a second, deliberate Discard removes it.
+ */
+const pendingDispatchedElsewherePlay: Story['play'] = async ({ canvasElement }) => {
+  await region(canvasElement)
+  const start = row(canvasElement, 'outbox/attempt/pending-start')
+  await userEvent.click(within(start).getByRole('button', { name: /^Discard/ }))
+  const dialog = await within(canvasElement).findByRole('alertdialog', { name: 'Discard from this device?' })
+  await expect(dialog).toHaveAccessibleDescription('This removes the thread from this device. It will not be sent.')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Discard' }))
+  const changed = 'This thread changed in another tab or window. Nothing was discarded. Fractal has not confirmed this thread. Do not send it again.'
+  await expect(await within(dialog).findByRole('alert')).toHaveTextContent(changed)
+  await expect(dialog).toHaveAccessibleDescription(`${changed} ${mayHaveArrived}`)
+  await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Keep' })).toHaveFocus())
+  await expectFits(canvasElement, dialog)
+  // Nothing was removed and nothing retried: the row now shows the unconfirmed attempt, which is only copied, never retried.
+  await expect(receipts(canvasElement)).toEqual(['discard outbox/attempt/pending-start @1 refused: now @2'])
+  await expect(row(canvasElement, 'outbox/attempt/pending-start')).toHaveAttribute('data-outbox-kind', 'unknown')
+  await expect(rowActions(row(canvasElement, 'outbox/attempt/pending-start'))).toEqual(['Copy', 'Discard'])
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Discard' }))
+  await waitFor(() => expect(within(canvasElement).queryByRole('alertdialog')).toBeNull())
+  await expect(receipts(canvasElement)).toEqual(['discard outbox/attempt/pending-start @1 refused: now @2', 'discard outbox/attempt/pending-start @2'])
+  await expect(canvasElement.querySelector('[data-outbox-item="outbox/attempt/pending-start"]')).toBeNull()
+  await expect(row(canvasElement, 'outbox/attempt/pending-reply')).toBeVisible()
 }
 
 const identityMismatchPlay: Story['play'] = async ({ canvasElement }) => {
@@ -235,6 +287,7 @@ const unavailablePlay: Story['play'] = async ({ canvasElement }) => {
 export const Unknown: Story = { tags: ['critical'], play: unknownPlay }
 export const NotApplied: Story = { args: { state: 'not-applied' }, play: notAppliedPlay }
 export const Pending: Story = { args: { state: 'pending' }, play: pendingPlay }
+export const PendingDispatchedElsewhere: Story = { tags: ['critical'], args: { state: 'pending', dispatchedElsewhere: true }, play: pendingDispatchedElsewherePlay }
 export const Corrupt: Story = { args: { state: 'corrupt' }, play: corruptPlay }
 export const IdentityMismatch: Story = { args: { state: 'identity-mismatch' }, play: identityMismatchPlay }
 export const Unavailable: Story = { args: { state: 'unavailable' }, play: unavailablePlay }

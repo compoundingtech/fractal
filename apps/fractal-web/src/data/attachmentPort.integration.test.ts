@@ -85,7 +85,7 @@ describe('chat durable gateway delivery', () => {
     await started.promise
     const discarder = mode === 'same tab' ? repo : await open(factory)
     if (mode !== 'same tab') expect(await discarder.read(key)).toMatchObject({ state: 'unknown' })
-    await discarder.dismiss(key)
+    await discarder.dismiss(key, (await discarder.read(key))?.revision)
     const before = await discarder.read(key)
     const reads = vi.spyOn(repo, 'read')
     const writes = vi.spyOn(repo, 'compareAndSwapWritable')

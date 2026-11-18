@@ -95,7 +95,7 @@ it('cross-checks a cached identity before first recovery without changing foreig
   await expect(reopened.owner.repository()).rejects.toMatchObject({ _tag: 'OutboxIdentityUnavailable' })
   expect(await repo.read(intent.id)).toEqual(dispatched)
   expect(await reopened.owner.recovery.list()).toContainEqual({
-    id: intent.id, kind: 'identity-mismatch', subject: 'message', status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'],
+    id: intent.id, revision: dispatched.revision, kind: 'identity-mismatch', subject: 'message', status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'],
   })
   expect(await repo.read(intent.id)).toEqual(dispatched)
   expect(reopened.calls.every(path => path === '/v1/client/capabilities')).toBe(true)
@@ -205,7 +205,7 @@ describe('verified browser outbox scope', () => {
     const reloaded = setup(factory)
     await reloaded.owner.initialize(base)
     expect(await reloaded.owner.recovery.list()).toEqual([
-      { id: 'attempt/corrupt-startup', kind: 'corrupt', subject: 'message', status: 'storage damaged; delivery unknown', actions: ['discard'] },
+      { id: 'attempt/corrupt-startup', revision: undefined, kind: 'corrupt', subject: 'message', status: 'storage damaged; delivery unknown', actions: ['discard'] },
     ])
     expect(await storedRows(factory)).toEqual(before)
     await expect((await reloaded.owner.repository())?.read('attempt/corrupt-startup')).rejects.toMatchObject({ code: 'quarantined' })
@@ -344,7 +344,7 @@ describe('verified browser outbox scope', () => {
     const changed = { ...base, value: { ...value, ...(kind === 'different' ? { issuer: 'person/other', issuer_key: base.value.issuer_key } : kind === 'partial' ? { issuer: base.value.issuer } : {}) } }
     respond(changed)
     const items = await owner.recovery.list()
-    expect(items).toContainEqual({ id: initial.id, kind: 'identity-mismatch', subject: 'message', status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] })
+    expect(items).toContainEqual({ id: initial.id, revision: dispatched.revision, kind: 'identity-mismatch', subject: 'message', status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] })
     expect(await repo.read(initial.id)).toEqual(dispatched)
     let snapshots = 0
     const send = gatewayMessageSend(client, async () => { snapshots++; throw new Error('No snapshot on mismatch') }, { repository: async () => repo })
@@ -381,7 +381,7 @@ describe('verified browser outbox scope', () => {
     const changed = { ...base, value: { ...value, ...(kind === 'different' ? { issuer: 'person/other', issuer_key: 'issuer-key/b' } : {}) } }
     reloaded.respond(changed)
     reloaded.owner.observe(changed)
-    const expected = [{ id: initial.id, kind: 'identity-mismatch', subject: 'message', status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] }]
+    const expected = [{ id: initial.id, revision: saved.revision, kind: 'identity-mismatch', subject: 'message', status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] }]
     expect(await reloaded.owner.recovery.list()).toEqual(expected)
     expect(await reloaded.owner.recovery.list()).toEqual(expected)
     const current = await reloaded.owner.repository()
@@ -401,7 +401,7 @@ describe('verified browser outbox scope', () => {
     const discarder = setup(factory)
     discarder.respond(changed)
     discarder.owner.observe(changed)
-    await discarder.owner.recovery.discard(initial.id)
+    await discarder.owner.recovery.discard(initial.id, saved?.revision)
     expect(await discarder.owner.recovery.list()).toEqual([])
     discarder.respond(base)
     discarder.owner.observe(base)
@@ -437,10 +437,10 @@ describe('verified browser outbox scope', () => {
     const items = await reloaded.owner.recovery.list()
     expect(items).toHaveLength(2)
     for (const id of ['attempt/damaged-scoped', 'attempt/damaged-unscoped']) {
-      expect(items).toContainEqual({ id, kind: 'corrupt', subject: 'message', status: 'storage damaged; delivery unknown', actions: ['discard'] })
+      expect(items).toContainEqual({ id, revision: id.endsWith('unscoped') ? 2 : 4, kind: 'corrupt', subject: 'message', status: 'storage damaged; delivery unknown', actions: ['discard'] })
     }
     expect(await storedRows(factory)).toEqual(before)
-    for (const item of items) await reloaded.owner.recovery.discard(item.id)
+    for (const item of items) await reloaded.owner.recovery.discard(item.id, item.revision)
     expect(await reloaded.owner.recovery.list()).toEqual([])
     expect(await storedRows(factory)).toEqual([])
     expect(await storedRows(factory, spoolStore)).toEqual([])

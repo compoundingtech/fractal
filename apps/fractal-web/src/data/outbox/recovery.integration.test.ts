@@ -20,7 +20,7 @@ const request: AttachmentSendRequest = { _tag: 'Send', api_version: 'st3.client.
   parameters: { to: fixture.cases.agent.ref, content: 'Original café', tags: ['original'], attachments: [], title: 'Original title' } }
 const owners: ScopedChatOutbox[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) owner.close() })
-const setup = (indexedDB = new IDBFactory()) => {
+const setup = (indexedDB = new IDBFactory(), recipientRead?: () => Promise<void>) => {
   let identity = base
   let offline = false
   let recipientValid = true
@@ -32,8 +32,11 @@ const setup = (indexedDB = new IDBFactory()) => {
     calls.push({ path, ...(body === undefined ? {} : { body }) })
     if (offline) throw new TypeError('Offline')
     if (path.endsWith('/capabilities')) return Response.json(identity)
-    if (path.includes('/agents/')) return recipientValid ? Response.json(fixture.cases.agent.payload)
-      : Response.json({ ...fixture.cases.agent.payload, value: { ...fixture.cases.agent.payload.value, id: 'agent/different' } })
+    if (path.includes('/agents/')) {
+      await recipientRead?.()
+      return recipientValid ? Response.json(fixture.cases.agent.payload)
+        : Response.json({ ...fixture.cases.agent.payload, value: { ...fixture.cases.agent.payload.value, id: 'agent/different' } })
+    }
     if (path.includes('/start-context')) return Response.json({ ...base, value: { kind: 'thread-start-context', source_id: 'source/recovery',
       episode: 'episode/original', start_recipient: { agent_id: recipientValid ? request.parameters.to : 'agent/different', basis: { _tag: 'original' } } } })
     if (path.includes('/threads/')) return Response.json({ ...base, value: { id: 'thread/original', agent_id: request.parameters.to,
@@ -90,8 +93,8 @@ describe('protected recovery API', () => {
     const before = await repo.read(key)
     expect(await owner.recovery.list()).toEqual([expect.objectContaining({ id: key, kind: 'unknown', subject: 'message',
       status: 'Fractal has not confirmed this message/thread. Do not send it again.', actions: ['copy', 'discard'] })])
-    await expect(owner.recovery.send!(key)).rejects.toThrow('cannot be sent again')
-    await expect(owner.recovery.retry!(key)).rejects.toThrow('cannot be sent again')
+    await expect(owner.recovery.send!(key, before?.revision)).rejects.toThrow('cannot be sent again')
+    await expect(owner.recovery.retry!(key, before?.revision)).rejects.toThrow('cannot be sent again')
     expect(actions(calls)).toHaveLength(0)
     expect(await repo.read(key)).toEqual(before)
     expect(await repo.readIntentBytes(key)).toEqual(bytes)
@@ -102,7 +105,7 @@ describe('protected recovery API', () => {
     const { repo, key } = await seed(owner)
     const before = await repo.read(key)
     invalidateRecipient()
-    await expect(owner.recovery.send!(key)).rejects.toThrow('original recipient')
+    await expect(owner.recovery.send!(key, before?.revision)).rejects.toThrow('original recipient')
     expect(calls.some(call => call.path === `/v1/client/agents/${encodeURIComponent(fixture.cases.agent.ref)}`)).toBe(true)
     expect(actions(calls)).toHaveLength(0)
     expect(await repo.read(key)).toEqual(before)
@@ -111,12 +114,13 @@ describe('protected recovery API', () => {
   it('uses the pending original attempt once across concurrent explicit sends', async () => {
     const { owner, calls } = setup()
     const { repo, key } = await seed(owner)
-    const results = await Promise.allSettled([owner.recovery.send!(key), owner.recovery.send!(key)])
+    const revision = (await repo.read(key))?.revision
+    const results = await Promise.allSettled([owner.recovery.send!(key, revision), owner.recovery.send!(key, revision)])
     expect(results.some(result => result.status === 'fulfilled')).toBe(true)
     expect(actions(calls)).toHaveLength(1)
     expect(await repo.read(key)).toMatchObject({ state: 'delivered' })
     expect(await owner.recovery.list()).toEqual([])
-    await expect(owner.recovery.send!(key)).rejects.toThrow('no longer available')
+    await expect(owner.recovery.send!(key, revision)).rejects.toMatchObject({ _tag: 'OutboxConflict', expectedRevision: revision })
     expect(actions(calls)).toHaveLength(1)
   })
 
@@ -125,7 +129,7 @@ describe('protected recovery API', () => {
     const { repo, key } = await seed(owner, 'not-applied')
     const before = await repo.read(key)
     expect(await owner.recovery.list()).toEqual([expect.objectContaining({ id: key, kind: 'not-applied', actions: ['retry', 'discard'] })])
-    await owner.recovery.retry!(key)
+    await owner.recovery.retry!(key, before?.revision)
     expect(await repo.read(key)).toEqual(before)
     expect(await repo.read(`${key}/retry`)).toMatchObject({ state: 'delivered' })
     const posted = JSON.parse(actions(calls)[0]!.body!)
@@ -133,7 +137,7 @@ describe('protected recovery API', () => {
     expect(posted.idempotency_key).toBe(`${key}/retry`)
     expect(posted.parameters.content).toBe(request.parameters.content)
     expect(await owner.recovery.list()).toEqual([])
-    await expect(owner.recovery.retry!(key)).rejects.toThrow('newer attempt')
+    await expect(owner.recovery.retry!(key, before?.revision)).rejects.toThrow('newer attempt')
     expect(actions(calls)).toHaveLength(1)
   })
 
@@ -141,7 +145,7 @@ describe('protected recovery API', () => {
     const { owner, calls } = setup()
     const { repo, key, bytes } = await seed(owner, 'unknown', true)
     const before = await repo.read(key)
-    const copy = await owner.recovery.copy!(key)
+    const copy = await owner.recovery.copy!(key, before?.revision)
     expect(copy).toEqual({ copyKey: expect.any(String), text: 'Original café', images: [{ name: 'Original.png', mediaType: 'image/png', bytes: 3 }] })
     expect(await owner.recovery.sendCopy!(key, copy.copyKey, 'Edited independent message')).toEqual({ _tag: 'Recorded' })
     expect(await owner.recovery.sendCopy!(key, copy.copyKey, 'Must not create a second message')).toEqual({ _tag: 'Recorded' })
@@ -162,8 +166,8 @@ describe('protected recovery API', () => {
     if (repo === undefined) throw new Error('Expected repository')
     await repo.commit(createOutboxRecord('attempt/unreadable', { text: 'Not a recoverable intent', attachments: [] }))
     expect(await owner.recovery.list()).toEqual([expect.objectContaining({ id: 'attempt/unreadable', kind: 'corrupt', actions: ['discard'] })])
-    await expect(owner.recovery.send!('attempt/unreadable')).rejects.toThrow('unavailable')
-    await owner.recovery.discard('attempt/unreadable')
+    await expect(owner.recovery.send!('attempt/unreadable', 0)).rejects.toThrow('unavailable')
+    await owner.recovery.discard('attempt/unreadable', 0)
     expect(await owner.recovery.list()).toEqual([])
     setOffline()
     await expect(owner.recovery.list()).rejects.toMatchObject({ _tag: 'OutboxIdentityUnavailable' })
@@ -178,8 +182,8 @@ describe('protected recovery API', () => {
     const items = await owner.recovery.list()
     expect(items).toEqual([expect.objectContaining({ id: key, kind: 'identity-mismatch', actions: ['discard'] })])
     expect(items[0]).not.toHaveProperty('text')
-    await expect(owner.recovery.copy!(key)).rejects.toThrow()
-    await expect(owner.recovery.retry!(key)).rejects.toThrow()
+    await expect(owner.recovery.copy!(key, before?.revision)).rejects.toThrow()
+    await expect(owner.recovery.retry!(key, before?.revision)).rejects.toThrow()
     expect(await repo.read(key)).toEqual(before)
     expect(actions(calls)).toHaveLength(0)
   })
@@ -192,7 +196,7 @@ describe('protected recovery API', () => {
     await second.owner.initialize()
     const wake = Promise.withResolvers<void>()
     const stop = second.owner.recovery.subscribe!(() => { wake.resolve() })
-    const { key } = await seed(first.owner)
+    const { repo, key } = await seed(first.owner)
     await wake.promise
     expect(await second.owner.recovery.list()).toEqual([expect.objectContaining({ id: key, kind: 'pending' })])
     const forged = Promise.withResolvers<void>()
@@ -204,7 +208,8 @@ describe('protected recovery API', () => {
       await forged.promise
       expect(await second.owner.recovery.list()).toEqual([expect.objectContaining({ id: key, kind: 'pending', actions: ['send', 'discard'] })])
       expect(actions([...first.calls, ...second.calls])).toHaveLength(0)
-      await Promise.allSettled([first.owner.recovery.send!(key), second.owner.recovery.send!(key)])
+      const revision = (await repo.read(key))?.revision
+      await Promise.allSettled([first.owner.recovery.send!(key, revision), second.owner.recovery.send!(key, revision)])
       expect(actions([...first.calls, ...second.calls])).toHaveLength(1)
     } finally { stopForged(); channel.close() }
   })
@@ -213,7 +218,7 @@ describe('protected recovery API', () => {
     const { owner, calls, setPostOutcome } = setup()
     const { repo, key } = await seed(owner, 'unknown')
     const before = await repo.read(key)
-    const copy = await owner.recovery.copy!(key)
+    const copy = await owner.recovery.copy!(key, before?.revision)
     setPostOutcome(outcome)
     const first = owner.recovery.sendCopy!(key, copy.copyKey, 'Independent first content')
     const concurrent = owner.recovery.sendCopy!(key, copy.copyKey, 'Changed concurrent content')
@@ -234,7 +239,7 @@ describe('protected recovery API', () => {
     vi.spyOn(repo, 'readIntentBytes').mockRejectedValueOnce(failure)
     await expect(owner.recovery.list()).rejects.toBe(failure)
     vi.spyOn(repo, 'readSpool').mockResolvedValueOnce(undefined)
-    await expect(owner.recovery.copy!(key)).rejects.toThrow('saved image is unavailable')
+    await expect(owner.recovery.copy!(key, (await repo.read(key))?.revision)).rejects.toThrow('saved image is unavailable')
     expect(actions(calls)).toHaveLength(0)
     expect(await repo.read(key)).toMatchObject({ state: 'unknown' })
   })
@@ -248,7 +253,7 @@ describe('protected recovery API', () => {
     await repo.accept(initial, [], new TextEncoder().encode(JSON.stringify({ api_version: 'st3.client.v0', type: 'message.send',
       id: 'action/invalid-session', parameters: { ...request.parameters, session_id: 42 } })))
     expect(await owner.recovery.list()).toEqual([expect.objectContaining({ id: key, kind: 'corrupt', actions: ['discard'] })])
-    await expect(owner.recovery.send!(key)).rejects.toThrow('damaged')
+    await expect(owner.recovery.send!(key, initial.revision)).rejects.toThrow('damaged')
     expect(actions(calls)).toHaveLength(0)
   })
 
@@ -265,7 +270,7 @@ describe('protected recovery API', () => {
     await repo.accept(record, [], new TextEncoder().encode(JSON.stringify(input)))
     expect(await owner.recovery.list()).toEqual([expect.objectContaining({ id: input.key, subject: 'thread', kind: 'pending', actions: ['send', 'discard'] })])
     invalidateRecipient()
-    await expect(owner.recovery.send!(input.key)).rejects.toThrow()
+    await expect(owner.recovery.send!(input.key, record.revision)).rejects.toThrow()
     expect(actions(calls)).toHaveLength(0)
     expect(await repo.read(input.key)).toEqual(record)
   })
@@ -275,7 +280,7 @@ describe('protected recovery API', () => {
     const repo = await owner.repository()
     if (repo === undefined) throw new Error('Expected repository')
     await repo.accept(createOutboxRecord(input.key, { text: input.parameters.content, attachments: [] }), [], new TextEncoder().encode(JSON.stringify(input)))
-    await owner.recovery.send!(input.key)
+    await owner.recovery.send!(input.key, (await repo.read(input.key))?.revision)
     expect(await repo.read(input.key)).toMatchObject({ state: 'delivered' })
     expect(actions(calls)).toHaveLength(1)
     expect(JSON.parse(actions(calls)[0]!.body!).parameters).toEqual(input.parameters)
@@ -288,7 +293,7 @@ describe('protected recovery API', () => {
     const { repo } = await seed(owner, 'unknown', false, `${key}/retry`)
     const child = await repo.read(`${key}/retry`)
     expect(await owner.recovery.list()).toEqual([expect.objectContaining({ id: `${key}/retry`, kind: 'unknown', actions: ['copy', 'discard'] })])
-    await expect(owner.recovery.retry!(key)).rejects.toThrow('newer attempt')
+    await expect(owner.recovery.retry!(key, (await repo.read(key))?.revision)).rejects.toThrow('newer attempt')
     expect(await repo.read(`${key}/retry`)).toEqual(child)
     expect(actions(calls)).toHaveLength(0)
   })
@@ -297,19 +302,19 @@ describe('protected recovery API', () => {
     const { owner, calls } = setup()
     const { key } = await seed(owner, 'not-applied')
     const { repo } = await seed(owner, 'unknown', false, `${key}/retry`)
-    await repo.dismiss(`${key}/retry`)
+    await repo.dismiss(`${key}/retry`, (await repo.read(`${key}/retry`))?.revision)
     await repo.cleanupTerminal()
     expect(await repo.read(`${key}/retry`)).toBeUndefined()
     expect(await repo.hasAttempt(`${key}/retry`)).toBe(true)
     expect(await owner.recovery.list()).toEqual([])
-    await expect(owner.recovery.retry!(key)).rejects.toThrow('newer attempt')
+    await expect(owner.recovery.retry!(key, (await repo.read(key))?.revision)).rejects.toThrow('newer attempt')
     expect(actions(calls)).toHaveLength(0)
   })
 
   it('shares copy refusals before acceptance and retains a single key for a later explicit send', async () => {
     const { owner, calls, invalidateRecipient, validateRecipient } = setup()
     const { repo, key } = await seed(owner, 'unknown')
-    const copy = await owner.recovery.copy!(key)
+    const copy = await owner.recovery.copy!(key, (await repo.read(key))?.revision)
     invalidateRecipient()
     const first = owner.recovery.sendCopy!(key, copy.copyKey, 'Initial edit')
     expect(owner.recovery.sendCopy!(key, copy.copyKey, 'Concurrent edit')).toBe(first)
@@ -320,5 +325,86 @@ describe('protected recovery API', () => {
     expect(await owner.recovery.sendCopy!(key, copy.copyKey, 'Accepted edit')).toEqual({ _tag: 'Recorded' })
     expect(await repo.read(copy.copyKey)).toMatchObject({ state: 'delivered', intent: { text: 'Accepted edit' } })
     expect(actions(calls)).toHaveLength(1)
+  })
+
+  it('preserves a dispatched attempt when another tab confirms a pending revision, then requires fresh confirmation', async () => {
+    const factory = new IDBFactory()
+    const first = setup(factory)
+    const second = setup(factory)
+    await first.owner.initialize()
+    await second.owner.initialize()
+    const { repo, key } = await seed(first.owner)
+    const [observed] = await first.owner.recovery.list()
+    expect(observed).toMatchObject({ id: key, kind: 'pending', revision: 0 })
+    const other = await second.owner.repository()
+    if (other === undefined || observed === undefined) throw new Error('Expected both protected repositories')
+    expect(other).not.toBe(repo)
+    const initial = await other.read(key)
+    if (initial === undefined) throw new Error('Expected saved attempt')
+    const { _tag: _, ...intent } = request
+    const ready = prepareOutboxRecord<PreparedPacket>(initial, prepareMessageSendPacket({ ...intent,
+      parameters: { ...intent.parameters, tags: [...intent.parameters.tags],
+        attachments: intent.parameters.attachments.map(image => ({ ...image, name: image.name ?? undefined })) },
+      idempotency_key: key, fence: { snapshot_id: base.snapshot.id, subject_revisions: {} } }))
+    if (ready === undefined) throw new Error('Expected prepared attempt')
+    expect(await other.compareAndSwap(initial.revision, ready)).toBe(true)
+    const dispatched = await other.acquireDispatchPermit(key, ready.revision)
+
+    await expect(first.owner.recovery.discard(key, observed.revision)).rejects.toMatchObject({
+      _tag: 'OutboxConflict', expectedRevision: observed.revision, actualRevision: dispatched.revision,
+    })
+    expect(await other.read(key)).toEqual(dispatched)
+    expect(await other.list()).toContainEqual({ _tag: 'record', record: dispatched })
+    const [refreshed] = await first.owner.recovery.list()
+    expect(refreshed).toMatchObject({ id: key, kind: 'unknown', revision: dispatched.revision })
+    expect(actions([...first.calls, ...second.calls])).toHaveLength(0)
+
+    if (refreshed === undefined) throw new Error('Expected refreshed recovery entry')
+    await first.owner.recovery.discard(key, refreshed.revision)
+    expect(await first.owner.recovery.list()).toEqual([])
+  })
+
+  it.each([
+    ['send', 'pending'], ['retry', 'not-applied'], ['copy', 'unknown'],
+  ] as const)('refuses %s against an unobserved revision before any recipient or send work', async (command, state) => {
+    const { owner, calls } = setup()
+    const { repo, key } = await seed(owner, state)
+    const record = await repo.read(key)
+    if (record === undefined) throw new Error('Expected saved attempt')
+    await expect(owner.recovery[command]!(key, record.revision + 1)).rejects.toMatchObject({
+      _tag: 'OutboxConflict', expectedRevision: record.revision + 1, actualRevision: record.revision,
+    })
+    expect(await repo.read(key)).toEqual(record)
+    expect(calls.some(call => call.path.includes('/agents/') || call.path.endsWith('/actions'))).toBe(false)
+  })
+
+  it('checks the original copy revision atomically when accepting the independent attempt', async () => {
+    const factory = new IDBFactory()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const first = setup(factory, async () => { entered.resolve(); await release.promise })
+    const second = setup(factory)
+    await first.owner.initialize()
+    await second.owner.initialize()
+    const { repo, key } = await seed(first.owner, 'unknown')
+    const record = await repo.read(key)
+    if (record === undefined || record.state !== 'unknown') throw new Error('Expected unconfirmed original')
+    const copy = await first.owner.recovery.copy!(key, record.revision)
+    const sending = first.owner.recovery.sendCopy!(key, copy.copyKey, 'Separate copy')
+    await entered.promise
+    const other = await second.owner.repository()
+    if (other === undefined) throw new Error('Expected original identity')
+    const delivered = observeOutbox(record, { kind: 'delivered', receipt: {
+      kind: 'action-result', status: 'completed', action_id: record.packet.id,
+      operation_id: 'operation/original-delivered', snapshot_id: base.snapshot.id, affected_ids: [],
+    } })
+    expect(await other.compareAndSwap(record.revision, delivered)).toBe(true)
+    release.resolve()
+    await expect(sending).rejects.toMatchObject({
+      _tag: 'OutboxConflict', expectedRevision: record.revision, actualRevision: delivered.revision,
+    })
+    expect(await repo.read(copy.copyKey)).toBeUndefined()
+    expect(await repo.read(key)).toEqual(delivered)
+    expect(actions(first.calls)).toHaveLength(0)
   })
 })

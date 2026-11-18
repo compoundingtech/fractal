@@ -5,7 +5,7 @@ import { Effect } from 'effect'
 import type { ChatOutbox } from '../attachmentPort.ts'
 import type { OutboxRecoveryItem, OutboxRecoveryPort } from '../source.ts'
 import { openIndexedDbOutbox, openIndexedDbOutboxScopes, type IndexedDbOutbox, type IndexedDbOutboxScopes, type OpenOutboxOptions } from './indexedDb.ts'
-import { OutboxIdentityUnavailable, sameScope } from './repository.ts'
+import { OutboxConflict, OutboxIdentityUnavailable, sameScope } from './repository.ts'
 import { CorruptRecoveryIntent, createRecoveryCommands, readRecoveryIntent } from './recovery.ts'
 
 /** One canonical identity formula shared by wire extraction and cached observation. */
@@ -146,13 +146,13 @@ export const createScopedChatOutbox = (
     if (needsDiscovery) onDiscovery?.(identity.response)
     return repo
   }
-  const locate = async (id: string) => {
+  const locate = async (id: string, expectedRevision: number | undefined) => {
     const current = await discover()
     if (current.scope === undefined) throw new OutboxIdentityUnavailable()
     const repo = await initializeConnection(current.scope, current)
     const entry = (await repo.list()).find(entry => entry._tag === 'record' && entry.record.id === id)
     const record = entry?._tag === 'record' ? entry.record : undefined
-    if (record === undefined || record.state === 'delivered') throw new Error('This saved attempt is no longer available.')
+    if (record === undefined) throw new OutboxConflict({ localAttemptId: id, expectedRevision })
     return { repo, record }
   }
   return {
@@ -179,13 +179,15 @@ export const createScopedChatOutbox = (
         const current = initial ?? await discover()
         const items = new Map<string, OutboxRecoveryItem>()
         for (const entry of restoreOutboxEntries(persisted.unscoped)) {
-          if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, kind: 'corrupt', subject: 'message', status: entry.status, actions: ['discard'] })
+          if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, revision: entry.revision, kind: 'corrupt', subject: 'message', status: entry.status, actions: ['discard'] })
         }
         for (const scope of persisted.scopes) {
           const matches = current.scope !== undefined && sameScope(scope, current.scope)
           const repo = await (matches ? initializeConnection(scope, current) : connectionFor(scope))
-          for (const entry of restoreOutboxEntries(await repo.list())) {
-            if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, kind: 'corrupt', subject: 'message', status: entry.status, actions: ['discard'] })
+          // UI certainty may be unknown for a dispatch-marked pending row, but command
+          // authority must retain the persisted revision, not a synthetic restoration.
+          for (const entry of await repo.list()) {
+            if (entry._tag === 'corrupt') items.set(entry.id, { id: entry.id, revision: entry.revision, kind: 'corrupt', subject: 'message', status: 'storage damaged; delivery unknown', actions: ['discard'] })
             else {
               const record = entry.record
               if (record.state === 'delivered') continue
@@ -193,21 +195,21 @@ export const createScopedChatOutbox = (
               if (record.state === 'not-applied' && await repo.hasAttempt(`${record.id}/retry`)) continue
               const subject = 'packet' in record && record.packet.type !== 'message.send' ? 'thread' : 'message'
               if (!matches) {
-                items.set(record.id, { id: record.id, kind: 'identity-mismatch', subject,
+                items.set(record.id, { id: record.id, revision: record.revision, kind: 'identity-mismatch', subject,
                   status: 'Identity changed; delivery unknown. Return to the original account and deployment.', actions: ['discard'] })
                 continue
               }
               try {
                 const intent = await readRecoveryIntent({ repo, record })
                 const kind = record.state === 'not-applied' ? 'not-applied' : record.state === 'pending' && !record.mayHaveDispatched ? 'pending' : 'unknown'
-                items.set(record.id, { id: record.id, kind, subject: intent.type === 'message.send' ? 'message' : 'thread', text: intent.parameters.content,
+                items.set(record.id, { id: record.id, revision: record.revision, kind, subject: intent.type === 'message.send' ? 'message' : 'thread', text: intent.parameters.content,
                   status: kind === 'unknown' ? 'Fractal has not confirmed this message/thread. Do not send it again.'
                     : kind === 'pending' ? 'This saved message has not been sent. Revalidate the original recipient before sending.'
                     : 'Fractal confirmed this attempt was not applied. Retry creates a fresh attempt.',
                   actions: kind === 'unknown' ? ['copy', 'discard'] : kind === 'pending' ? ['send', 'discard'] : ['retry', 'discard'] })
               } catch (cause) {
                 if (!(cause instanceof CorruptRecoveryIntent)) throw cause
-                items.set(record.id, { id: record.id, kind: 'corrupt', subject,
+                items.set(record.id, { id: record.id, revision: record.revision, kind: 'corrupt', subject,
                   status: 'This saved message cannot be read safely. It can only be discarded.', actions: ['discard'] })
               }
             }
@@ -215,14 +217,14 @@ export const createScopedChatOutbox = (
         }
         return [...items.values()]
       },
-      discard: async (id) => {
+      discard: async (id, expectedRevision) => {
         const scopes = await persistedScopes()
         const persisted = await scopes.list()
-        await scopes.discardUnscoped(id)
+        await scopes.discardUnscoped(id, expectedRevision)
         for (const scope of persisted.scopes) {
           const repo = await connectionFor(scope)
           const entries = await repo.list()
-          if (entries.some((entry) => (entry._tag === 'record' ? entry.record.id : entry.id) === id)) await repo.dismiss(id)
+          if (entries.some((entry) => (entry._tag === 'record' ? entry.record.id : entry.id) === id)) await repo.dismiss(id, expectedRevision)
         }
         written()
       },

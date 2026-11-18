@@ -7,30 +7,48 @@ import type { OutboxCopyOutcome, OutboxRecoveryCopy, OutboxRecoveryItem, OutboxR
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 import { OutboxRecovery, RECOVERY_UNAVAILABLE } from './OutboxRecovery.tsx'
-import { createRecoveryStore } from './outboxRecoveryState.ts'
+import { createRecoveryStore, isOutboxConflict } from './outboxRecoveryState.ts'
 
 const DAMAGED = 'storage damaged; delivery unknown'
-const damaged = (id: string): OutboxRecoveryItem => ({ id, kind: 'corrupt', subject: 'message', status: DAMAGED, actions: ['discard'] })
-const unknown = (id: string, subject: OutboxRecoveryItem['subject'] = 'message'): OutboxRecoveryItem =>
-  ({ id, kind: 'unknown', subject, status: 'delivery unconfirmed', actions: ['copy', 'discard'], text: 'Ship the release notes' })
-const notApplied = (id: string): OutboxRecoveryItem => ({ id, kind: 'not-applied', subject: 'message', status: 'Fractal did not apply it', actions: ['retry', 'discard'] })
-const pending = (id: string): OutboxRecoveryItem => ({ id, kind: 'pending', subject: 'thread', status: 'waiting to send', actions: ['send', 'discard'] })
+// A damaged entry may have no readable revision; every other state carries the revision the list read.
+const damaged = (id: string): OutboxRecoveryItem => ({ id, revision: undefined, kind: 'corrupt', subject: 'message', status: DAMAGED, actions: ['discard'] })
+const unknown = (id: string, subject: OutboxRecoveryItem['subject'] = 'message', revision = 1): OutboxRecoveryItem =>
+  ({ id, revision, kind: 'unknown', subject, status: 'delivery unconfirmed', actions: ['copy', 'discard'], text: 'Ship the release notes' })
+const notApplied = (id: string, revision = 1): OutboxRecoveryItem => ({ id, revision, kind: 'not-applied', subject: 'message', status: 'Fractal did not apply it', actions: ['retry', 'discard'] })
+const pending = (id: string, revision = 1): OutboxRecoveryItem => ({ id, revision, kind: 'pending', subject: 'thread', status: 'waiting to send', actions: ['send', 'discard'] })
 const UNCONFIRMED_MESSAGE = 'Fractal has not confirmed this message. Do not send it again.'
 const UNCONFIRMED_THREAD = 'Fractal has not confirmed this thread. Do not send it again.'
+const MAY_HAVE_ARRIVED = 'This removes the copy on this device only. It does not cancel the original, which may already have arrived.'
 
-/** A full production-shaped port over an in-memory list; `fail` makes lists reject as unavailable storage. */
+/** The outbox's typed refusal, shaped as the data layer rejects it: a tagged error, recognized by tag alone. */
+const conflict = (localAttemptId: string, expectedRevision: number | undefined, actualRevision?: number) =>
+  Object.assign(new Error('The outbox attempt changed.'), { _tag: 'OutboxConflict' as const, localAttemptId, expectedRevision, ...(actualRevision === undefined ? {} : { actualRevision }) })
+
+/**
+ * A full production-shaped port over an in-memory list; `fail` makes lists reject as unavailable storage. Every command
+ * compares the observed revision with the stored one atomically and refuses a mismatch with the typed conflict.
+ */
 const memoryPort = (initial: readonly OutboxRecoveryItem[], copied: Omit<OutboxRecoveryCopy, 'copyKey'> = { text: 'Ship the release notes', images: [] }) => {
   let items = initial
   let copies = 0
   const state = { fail: false }
   const wake = new Set<() => void>()
+  const take = (id: string, expectedRevision: number | undefined) => {
+    const item = items.find(entry => entry.id === id)
+    if (item === undefined || item.revision !== expectedRevision) throw conflict(id, expectedRevision, item?.revision)
+    return item
+  }
+  const remove = (id: string, expectedRevision: number | undefined) => {
+    take(id, expectedRevision)
+    items = items.filter(item => item.id !== id)
+  }
   const port = {
     list: vi.fn(async () => { if (state.fail) throw new Error('storage unavailable'); return items }),
-    discard: vi.fn(async (id: string) => { items = items.filter(item => item.id !== id) }),
+    discard: vi.fn(async (id: string, expectedRevision: number | undefined) => remove(id, expectedRevision)),
     subscribe: vi.fn((listener: () => void) => { wake.add(listener); return () => { wake.delete(listener) } }),
-    retry: vi.fn(async (id: string) => { items = items.filter(item => item.id !== id) }),
-    send: vi.fn(async (id: string) => { items = items.filter(item => item.id !== id) }),
-    copy: vi.fn(async (_id: string): Promise<OutboxRecoveryCopy> => ({ ...copied, copyKey: `outbox/copy/${++copies}` })),
+    retry: vi.fn(async (id: string, expectedRevision: number | undefined) => remove(id, expectedRevision)),
+    send: vi.fn(async (id: string, expectedRevision: number | undefined) => remove(id, expectedRevision)),
+    copy: vi.fn(async (id: string, expectedRevision: number | undefined): Promise<OutboxRecoveryCopy> => { take(id, expectedRevision); return { ...copied, copyKey: `outbox/copy/${++copies}` } }),
     sendCopy: vi.fn(async (_id: string, _copyKey: string, _text: string): Promise<OutboxCopyOutcome> => ({ _tag: 'Recorded' })),
   } satisfies OutboxRecoveryPort
   const replace = (next: readonly OutboxRecoveryItem[]) => { items = next }
@@ -100,7 +118,7 @@ describe('OutboxRecovery', () => {
     await mount(port)
     expect(rowButtons('outbox/one')).toEqual(['Retry', 'Discard'])
     await pressRow('outbox/one', 'Retry')
-    expect(port.retry).toHaveBeenCalledExactlyOnceWith('outbox/one')
+    expect(port.retry).toHaveBeenCalledExactlyOnceWith('outbox/one', 1)
     expect(port.send).not.toHaveBeenCalled()
     expect(port.list).toHaveBeenCalledTimes(2)
     expect(rowIds()).toEqual([])
@@ -111,7 +129,7 @@ describe('OutboxRecovery', () => {
     await mount(port)
     expect(rowButtons('outbox/one')).toEqual(['Revalidate and send', 'Discard'])
     await pressRow('outbox/one', 'Revalidate and send')
-    expect(port.send).toHaveBeenCalledExactlyOnceWith('outbox/one')
+    expect(port.send).toHaveBeenCalledExactlyOnceWith('outbox/one', 1)
     expect(port.retry).not.toHaveBeenCalled()
     expect(port.list).toHaveBeenCalledTimes(2)
   })
@@ -138,7 +156,7 @@ describe('OutboxRecovery', () => {
     expect(host.querySelector('[data-outbox-item="outbox/one"] [data-outbox-state]')).toBe(live)
     expect(live.textContent).toBe(before)
     // A wakeup that moves the attempt to unknown updates that same live node.
-    replace([{ ...unknown('outbox/one'), subject: 'thread' }])
+    replace([unknown('outbox/one', 'thread', 2)])
     await notify()
     expect(host.querySelector('[data-outbox-item="outbox/one"] [data-outbox-state]')).toBe(live)
     expect(live.textContent).toBe(UNCONFIRMED_THREAD)
@@ -158,9 +176,78 @@ describe('OutboxRecovery', () => {
 
     await pressRow('outbox/one', 'Discard')
     await pressIn(confirmation()!, 'Discard')
-    expect(port.discard).toHaveBeenCalledExactlyOnceWith('outbox/one')
+    expect(port.discard).toHaveBeenCalledExactlyOnceWith('outbox/one', 1)
     expect(port.list).toHaveBeenCalledTimes(2)
     expect(rowIds()).toEqual(['outbox/two'])
+  })
+
+  it('refuses a Discard whose pending attempt another tab dispatched, then asks again with its current unknown state', async () => {
+    const { port, replace } = memoryPort([pending('outbox/one')])
+    await mount(port)
+    await pressRow('outbox/one', 'Discard')
+    expect(document.getElementById(confirmation()!.getAttribute('aria-describedby')!)?.textContent).toBe('This removes the thread from this device. It will not be sent.')
+    // Tab B takes the dispatch permit: the persisted attempt is now unknown at revision 2, and no wakeup has arrived yet.
+    replace([unknown('outbox/one', 'thread', 2)])
+    await pressIn(confirmation()!, 'Discard')
+    // Bound to the revision shown: the outbox refused atomically and removed nothing.
+    expect(port.discard).toHaveBeenCalledExactlyOnceWith('outbox/one', 1)
+    expect(rowIds()).toEqual(['outbox/one'])
+    expect(host.querySelector('[data-outbox-item="outbox/one"]')?.getAttribute('data-outbox-kind')).toBe('unknown')
+    // The dialog stays open on the current state and consequence, and Keep takes focus back.
+    const dialog = confirmation()!
+    const notice = dialog.querySelector('[data-outbox-discard-changed-notice]')!
+    expect(notice.getAttribute('role')).toBe('alert')
+    expect(notice.textContent).toBe(`This thread changed in another tab or window. Nothing was discarded. ${UNCONFIRMED_THREAD}`)
+    expect(dialog.querySelector('[data-outbox-discard-consequence]')?.textContent).toBe(MAY_HAVE_ARRIVED)
+    expect(dialog.getAttribute('aria-describedby')!.split(' ').map(id => document.getElementById(id)?.textContent)).toEqual([notice.textContent, MAY_HAVE_ARRIVED])
+    expect(document.activeElement?.textContent).toBe('Keep')
+    // Never retried automatically: only a second, deliberate Discard acts, and it names the current revision.
+    expect(port.discard).toHaveBeenCalledOnce()
+    await pressIn(confirmation()!, 'Discard')
+    expect(port.discard.mock.calls).toEqual([['outbox/one', 1], ['outbox/one', 2]])
+    expect(confirmation()).toBeNull()
+    expect(rowIds()).toEqual([])
+  })
+
+  it('Keep after a stale Discard leaves the attempt and says nothing was discarded', async () => {
+    const { port, replace } = memoryPort([pending('outbox/one')])
+    await mount(port)
+    await pressRow('outbox/one', 'Discard')
+    replace([unknown('outbox/one', 'thread', 2)])
+    await pressIn(confirmation()!, 'Discard')
+    await pressIn(confirmation()!, 'Keep')
+    expect(confirmation()).toBeNull()
+    expect(port.discard).toHaveBeenCalledExactlyOnceWith('outbox/one', 1)
+    const failure = host.querySelector('[data-outbox-item="outbox/one"] [data-outbox-failure]')!
+    expect(failure.getAttribute('data-outbox-failure-cause')).toBe('stale')
+    expect(failure.textContent).toBe('Not discarded: this entry changed in another tab or window. It shows its current state.')
+    // An unknown original is only copied, never retried or re-sent.
+    expect(rowButtons('outbox/one')).toEqual(['Copy', 'Discard'])
+  })
+
+  it('updates an open confirmation when a wakeup re-reads the attempt at another revision, before anything is discarded', async () => {
+    const { port, replace, notify } = memoryPort([pending('outbox/one')])
+    await mount(port)
+    await pressRow('outbox/one', 'Discard')
+    replace([unknown('outbox/one', 'thread', 2)])
+    await notify()
+    expect(port.discard).not.toHaveBeenCalled()
+    expect(confirmation()?.querySelector('[data-outbox-discard-changed-notice]')?.textContent).toBe(`This thread changed in another tab or window. Nothing was discarded. ${UNCONFIRMED_THREAD}`)
+    expect(confirmation()?.querySelector('[data-outbox-discard-consequence]')?.textContent).toBe(MAY_HAVE_ARRIVED)
+    expect(document.activeElement?.textContent).toBe('Keep')
+    await pressIn(confirmation()!, 'Discard')
+    expect(port.discard).toHaveBeenCalledExactlyOnceWith('outbox/one', 2)
+  })
+
+  it('refuses a send whose attempt changed in another tab and shows its current state without Retry', async () => {
+    const { port, replace } = memoryPort([pending('outbox/one')])
+    await mount(port)
+    replace([unknown('outbox/one', 'thread', 2)])
+    await pressRow('outbox/one', 'Revalidate and send')
+    expect(port.send).toHaveBeenCalledExactlyOnceWith('outbox/one', 1)
+    expect(host.querySelector('[data-outbox-item="outbox/one"] [data-outbox-headline]')?.textContent).toBe(UNCONFIRMED_THREAD)
+    expect(host.querySelector('[data-outbox-item="outbox/one"] [data-outbox-failure]')?.textContent).toBe('Not sent: this entry changed in another tab or window. It shows its current state.')
+    expect(rowButtons('outbox/one')).toEqual(['Copy', 'Discard'])
   })
 
   it('keeps the row and says why when Discard is refused', async () => {
@@ -169,6 +256,7 @@ describe('OutboxRecovery', () => {
     port.discard.mockRejectedValueOnce(new Error('storage unavailable'))
     await pressRow('outbox/one', 'Discard')
     await pressIn(confirmation()!, 'Discard')
+    expect(port.discard).toHaveBeenCalledExactlyOnceWith('outbox/one', undefined)
     expect(port.list).toHaveBeenCalledTimes(2)
     expect(host.querySelector('[data-outbox-item="outbox/one"] [data-outbox-failure]')?.textContent).toBe('Discard did not finish: outbox unavailable; retry later.')
   })
@@ -181,7 +269,7 @@ describe('OutboxRecovery', () => {
       const { port } = memoryPort([unknown('outbox/one')], { text: 'Ship the release notes', images: [{ name: 'diagram.png', mediaType: 'image/png', bytes: 2048 }] })
       await mount(port)
       await pressRow('outbox/one', 'Copy')
-      expect(port.copy).toHaveBeenCalledExactlyOnceWith('outbox/one')
+      expect(port.copy).toHaveBeenCalledExactlyOnceWith('outbox/one', 1)
       const dialog = composer()!
       expect(dialog.querySelector('[data-outbox-copy-warning]')?.textContent).toContain('The original may have arrived.')
       expect(document.getElementById(dialog.getAttribute('aria-describedby')!)).toBe(dialog.querySelector('[data-outbox-copy-warning]'))
@@ -239,6 +327,23 @@ describe('OutboxRecovery', () => {
     expect(port.sendCopy).toHaveBeenCalledExactlyOnceWith('outbox/one', 'outbox/copy/2', 'Ship the release notes')
   })
 
+  it('saves nothing and offers no second send when the original changed since the copy opened', async () => {
+    const { port } = memoryPort([unknown('outbox/one')])
+    port.sendCopy.mockRejectedValueOnce(conflict('outbox/one', 1, 2))
+    await mount(port)
+    await pressRow('outbox/one', 'Copy')
+    await pressIn(composer()!, 'Send copy')
+    const alert = composer()!.querySelector('[data-outbox-copy-stale]')!
+    expect(alert.getAttribute('role')).toBe('alert')
+    expect(alert.textContent).toBe('The original changed in another tab or window, so nothing new was saved. Your text is still here; close to see its current state.')
+    expect(composer()!.querySelector('textarea')!.value).toBe('Ship the release notes')
+    const send = [...composer()!.querySelectorAll('button')].find(button => button.textContent === 'Send copy')!
+    expect(send.disabled).toBe(true)
+    await pressIn(composer()!, 'Close')
+    expect(port.sendCopy).toHaveBeenCalledOnce()
+    expect(host.querySelector('[data-outbox-copy-notice]')?.textContent).toBe('')
+  })
+
   it('renders nothing for an empty outbox', async () => {
     const { port } = memoryPort([])
     await mount(port)
@@ -290,7 +395,7 @@ describe('recovery store', () => {
     release()
   })
 
-  it('refuses a command the latest list no longer allows: a pending send whose attempt became unknown', async () => {
+  it('refuses every command bound to a revision the latest list has moved past, without calling the port', async () => {
     let items: readonly OutboxRecoveryItem[] = [pending('outbox/one')]
     const listeners = new Set<() => void>()
     const port = {
@@ -300,14 +405,47 @@ describe('recovery store', () => {
     const store = createRecoveryStore(port)
     const release = store.acquire()
     await vi.waitFor(() => expect(store.snapshot().list._tag).toBe('Listed'))
-    items = [{ ...unknown('outbox/one'), subject: 'thread' }]
-    // Another tab's wakeup lists again; the stale pending row no longer authorizes a send.
+    items = [unknown('outbox/one', 'thread', 2)]
+    // Another tab's wakeup lists again; the pending row the person saw no longer authorizes anything.
     for (const listener of listeners) listener()
     await vi.waitFor(() => expect(store.snapshot().list).toEqual({ _tag: 'Listed', items }))
-    await store.send('outbox/one')
-    await store.retry('outbox/one')
-    expect(port.send).not.toHaveBeenCalled()
-    expect(port.retry).not.toHaveBeenCalled()
+    expect(await store.send('outbox/one', 1)).toEqual({ _tag: 'Stale' })
+    expect(await store.retry('outbox/one', 1)).toEqual({ _tag: 'Stale' })
+    expect(await store.discard('outbox/one', 1)).toEqual({ _tag: 'Stale' })
+    for (const command of [port.send, port.retry, port.discard]) expect(command).not.toHaveBeenCalled()
+    expect(store.snapshot().failed.get('outbox/one')).toEqual({ operation: 'discard', cause: 'stale' })
     release()
+  })
+
+  it.each([
+    ['retry', notApplied('outbox/retry'), notApplied('outbox/retry', 2)],
+    ['send', pending('outbox/send'), unknown('outbox/send', 'thread', 2)],
+    ['copy', unknown('outbox/copy'), unknown('outbox/copy', 'message', 2)],
+    ['discard', pending('outbox/discard'), unknown('outbox/discard', 'thread', 2)],
+  ] as const)('answers the typed conflict as Stale for %s, removes nothing, and lists the current state', async (command, initial, current) => {
+    const { port, replace } = memoryPort([initial])
+    const store = createRecoveryStore(port)
+    const release = store.acquire()
+    await vi.waitFor(() => expect(store.snapshot().list._tag).toBe('Listed'))
+    replace([current])
+    expect(await store[command](initial.id, initial.revision)).toEqual({ _tag: 'Stale' })
+    expect(port[command]).toHaveBeenCalledExactlyOnceWith(initial.id, initial.revision)
+    expect(store.snapshot().list).toEqual({ _tag: 'Listed', items: [current] })
+    expect(store.snapshot().failed.get(initial.id)).toEqual({ operation: command, cause: 'stale' })
+    release()
+  })
+
+  it('tells a stale copy from an unclear one: only the typed conflict saved nothing', async () => {
+    const { port } = memoryPort([unknown('outbox/one')])
+    const store = createRecoveryStore(port)
+    port.sendCopy.mockRejectedValueOnce(conflict('outbox/one', 1, 2)).mockRejectedValueOnce(new Error('connection lost'))
+    expect(await store.sendCopy('outbox/one', 'outbox/copy/1', 'text')).toEqual({ _tag: 'Stale' })
+    expect(await store.sendCopy('outbox/one', 'outbox/copy/1', 'text')).toEqual({ _tag: 'Recorded' })
+  })
+
+  it('recognizes the outbox conflict by its tag alone', () => {
+    expect(isOutboxConflict(conflict('outbox/one', undefined))).toBe(true)
+    expect(isOutboxConflict({ _tag: 'OutboxConflict', localAttemptId: 'outbox/one', expectedRevision: 1 })).toBe(true)
+    for (const other of [new Error('OutboxConflict'), { _tag: 'OutboxStorageError' }, 'OutboxConflict', null, undefined]) expect(isOutboxConflict(other)).toBe(false)
   })
 })

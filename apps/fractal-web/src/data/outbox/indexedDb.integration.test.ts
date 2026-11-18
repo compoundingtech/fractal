@@ -246,7 +246,11 @@ describe('durable core IndexedDB outbox', () => {
     await expect(reopened.acquireDispatchPermit('future', 0)).rejects.toMatchObject({ code: 'quarantined' })
     await reopened.cleanupTerminal()
     expect(await raw(factory)).toHaveLength(3)
-    await reopened.dismiss('corrupt')
+    await expect(reopened.dismiss('corrupt', 4)).rejects.toMatchObject({
+      _tag: 'OutboxConflict', expectedRevision: 4, actualRevision: 5,
+    })
+    expect(await raw(factory)).toHaveLength(3)
+    await reopened.dismiss('corrupt', 5)
     expect(await reopened.list()).toEqual([{ _tag: 'corrupt', id: 'future' }, { _tag: 'corrupt', id: 'legacy' }])
     expect(await raw(factory)).toHaveLength(2)
   })
@@ -301,7 +305,7 @@ describe('durable core IndexedDB outbox', () => {
       expect(await other.listQuarantined()).toEqual([{ key: 'unknown-owner', reason: 'corrupt-or-unsupported' }])
       expect(await other.compareAndSwap(1, observeOutbox(ready(record), { kind: 'observed', identity: 'message/a', source: 'timeline' }))).toBe(false)
       await expect(other.acquireDispatchPermit(record.id, 1)).rejects.toBeInstanceOf(OutboxConflict)
-      await other.dismiss(record.id)
+      await other.dismiss(record.id, 1)
       await other.cleanupTerminal()
     }
     expect(await owner.readSpool(record.id, image.hash)).toEqual(image.bytes)
@@ -346,7 +350,7 @@ describe('durable core IndexedDB outbox', () => {
     const factory = new IDBFactory()
     const repo = await open(factory)
     const unknown = await unknownAttempt(repo)
-    await repo.dismiss(unknown.id)
+    await repo.dismiss(unknown.id, unknown.revision)
     await expect(repo.acquireDispatchPermit(unknown.id, unknown.revision)).rejects.toBeInstanceOf(OutboxConflict)
     await repo.cleanupTerminal()
     expect(await repo.read(unknown.id)).toBeUndefined()

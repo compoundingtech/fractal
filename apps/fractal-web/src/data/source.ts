@@ -363,6 +363,7 @@ export type OutboxRecoveryKind = 'unknown' | 'not-applied' | 'pending' | 'corrup
 export type OutboxRecoveryAction = 'discard' | 'copy' | 'retry' | 'send'
 export interface OutboxRecoveryItem {
   readonly id: string
+  readonly revision: number | undefined
   readonly kind: OutboxRecoveryKind
   readonly subject: 'message' | 'thread'
   readonly status: string
@@ -377,14 +378,14 @@ export interface OutboxRecoveryCopy {
 }
 export type OutboxCopyOutcome = { readonly _tag: 'Recorded' } | { readonly _tag: 'Refused'; readonly detail: string }
 
-/** Notifications only request a fresh list; every command re-reads persisted identity and intent. */
+/** Notifications request a fresh list; commands pin its observed revision and recheck persisted identity. */
 export interface OutboxRecoveryPort {
   readonly list: () => Promise<readonly OutboxRecoveryItem[]>
-  readonly discard: (id: string) => Promise<void>
+  readonly discard: (id: string, expectedRevision: number | undefined) => Promise<void>
   readonly subscribe?: (listener: () => void) => () => void
-  readonly retry?: (id: string) => Promise<void>
-  readonly send?: (id: string) => Promise<void>
-  readonly copy?: (id: string) => Promise<OutboxRecoveryCopy>
+  readonly retry?: (id: string, expectedRevision: number | undefined) => Promise<void>
+  readonly send?: (id: string, expectedRevision: number | undefined) => Promise<void>
+  readonly copy?: (id: string, expectedRevision: number | undefined) => Promise<OutboxRecoveryCopy>
   readonly sendCopy?: (id: string, copyKey: string, text: string) => Promise<OutboxCopyOutcome>
 }
 

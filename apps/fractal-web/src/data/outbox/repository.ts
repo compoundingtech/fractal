@@ -16,8 +16,8 @@ export class OutboxStorageError extends Schema.TaggedError<OutboxStorageError>()
 export class OutboxIdentityUnavailable extends Schema.TaggedError<OutboxIdentityUnavailable>()('OutboxIdentityUnavailable', {}) {}
 export class OutboxConflict extends Schema.TaggedError<OutboxConflict>()('OutboxConflict', {
   localAttemptId: Schema.String,
-  expectedRevision: Schema.Int,
-  actualRevision: Schema.optionalKey(Count),
+  expectedRevision: Schema.Union([Count, Schema.Undefined]),
+  actualRevision: Schema.optional(Count),
 }) {}
 export type OutboxError = OutboxStorageError | OutboxConflict
 export interface SpoolInput { readonly hash: string; readonly bytes: Uint8Array }

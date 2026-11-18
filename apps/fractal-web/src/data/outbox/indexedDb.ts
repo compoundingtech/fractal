@@ -25,11 +25,13 @@ const rawScope = (raw: unknown): OutboxScope | undefined => {
   if (typeof raw !== 'object' || raw === null || !('scope' in raw)) return undefined
   try { return Schema.decodeUnknownSync(ScopeSchema)(raw.scope) } catch { return undefined }
 }
-const corruptEntry = (id: string, raw: unknown): OutboxEntry<PreparedPacket> => {
-  const revision = typeof raw === 'object' && raw !== null && 'record' in raw
+const rawRevision = (raw: unknown): number | undefined =>
+  typeof raw === 'object' && raw !== null && 'record' in raw
     && typeof raw.record === 'object' && raw.record !== null && 'revision' in raw.record
     && typeof raw.record.revision === 'number' && Number.isSafeInteger(raw.record.revision) && raw.record.revision >= 0
     ? raw.record.revision : undefined
+const corruptEntry = (id: string, raw: unknown): OutboxEntry<PreparedPacket> => {
+  const revision = rawRevision(raw)
   return { _tag: 'corrupt', id, ...(revision === undefined ? {} : { revision }) }
 }
 
@@ -46,7 +48,7 @@ export type OutboxWriteResult =
 export interface IndexedDbOutbox extends OutboxRepository<PreparedPacket> {
   readonly persistence: 'granted' | 'denied' | 'unsupported'
   /** A retry child is accepted only while its predecessor is undismissed and proven not-applied. */
-  readonly accept: (record: OutboxPreparingRecord, spool?: readonly SpoolInput[], intentBytes?: Uint8Array, predecessor?: { readonly id: string; readonly revision: number }) => Promise<boolean>
+  readonly accept: (record: OutboxPreparingRecord, spool?: readonly SpoolInput[], intentBytes?: Uint8Array, predecessor?: { readonly id: string; readonly revision: number }, copySource?: { readonly id: string; readonly revision: number }) => Promise<boolean>
   readonly acquireDispatchPermit: (id: string, revision: number) => Promise<OutboxRecord<PreparedPacket>>
   readonly compareAndSwapWritable: (revision: number, record: OutboxRecord<PreparedPacket>) => Promise<OutboxWriteResult>
   readonly readSpool: (id: string, hash: string) => Promise<Uint8Array | undefined>
@@ -57,7 +59,7 @@ export interface IndexedDbOutbox extends OutboxRepository<PreparedPacket> {
   readonly listQuarantined: () => Promise<readonly QuarantinedAttempt[]>
   readonly cleanupTerminal: () => Promise<void>
   readonly recover: () => Promise<void>
-  readonly dismiss: (id: string) => Promise<void>
+  readonly dismiss: (id: string, expectedRevision: number | undefined) => Promise<void>
   readonly close: () => void
 }
 export interface OpenOutboxOptions {
@@ -107,7 +109,7 @@ const openDatabase = Effect.fn('Outbox.openDatabase')(function* (options: Pick<O
 
 export interface IndexedDbOutboxScopes {
   readonly list: () => Promise<{ readonly scopes: readonly OutboxScope[]; readonly unscoped: readonly OutboxEntry<PreparedPacket>[] }>
-  readonly discardUnscoped: (id: string) => Promise<void>
+  readonly discardUnscoped: (id: string, expectedRevision: number | undefined) => Promise<void>
   readonly close: () => void
 }
 
@@ -131,12 +133,14 @@ export const openIndexedDbOutboxScopes = Effect.fn('Outbox.openScopes')(function
         } catch (cause) { fail(cause) }
       }
     }),
-    discardUnscoped: (id) => transaction(db, 'readwrite', 'discardUnscoped', (tx, done, fail) => {
+    discardUnscoped: (id, expectedRevision) => transaction(db, 'readwrite', 'discardUnscoped', (tx, done, fail) => {
       const store = tx.objectStore(attemptsStore)
       const request = store.get(id)
       request.onsuccess = () => {
         try {
           // Recheck ownership under the write transaction; scoped rows use their fixed repository.
+          const actualRevision = rawRevision(request.result)
+          if (request.result !== undefined && actualRevision !== expectedRevision) throw new OutboxConflict({ localAttemptId: id, expectedRevision, actualRevision })
           if (request.result !== undefined && rawScope(request.result) === undefined) {
             store.delete(id)
             const spool = tx.objectStore(spoolStore).openCursor(IDBKeyRange.bound([id], [id, []]))
@@ -225,11 +229,12 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
     const encoded = await Effect.runPromise(spoolAttachment(encodeBytes(record.packet)))
     return { packetBytes: Array.from(encoded.bytes), fingerprint: { version: 1, sha256: encoded.hash } }
   }
-  const accept: IndexedDbOutbox['accept'] = async (record, spool = [], intentBytes, predecessor) => {
+  const accept: IndexedDbOutbox['accept'] = async (record, spool = [], intentBytes, predecessor, copySource) => {
     // Capture caller-owned inputs before the first asynchronous hashing operation.
     const accepted = decodeRecord(Schema.decodeUnknownSync(json)(encodeJson(record)))
     const ownedIntentBytes = intentBytes === undefined ? undefined : Array.from(intentBytes)
     const previous = predecessor === undefined ? undefined : { ...predecessor }
+    const source = copySource === undefined ? undefined : { ...copySource }
     if (previous !== undefined && accepted.id !== `${previous.id}/retry`) throw invalid('Retry child must use its predecessor identity.')
     const inputs = spool.map((item) => ({ hash: item.hash, bytes: new Uint8Array(item.bytes) }))
     if (accepted.state !== 'pending' || accepted.phase !== 'preparing' || accepted.revision !== 0 || accepted.mayHaveDispatched || accepted.ambiguous) throw invalid('New attempts must be pristine preparing records.')
@@ -255,11 +260,25 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
           } catch (cause) { fail(cause) }
         }
       }
-      if (previous === undefined) { insert(); return }
-      get(tx, previous.id, (parent) => {
-        if (parent?.dismissed !== undefined || parent?.record?.state !== 'not-applied'
-          || parent.record.revision !== previous.revision) { done(false); return }
-        insert()
+      const checkPredecessor = () => {
+        if (previous === undefined) { insert(); return }
+        get(tx, previous.id, (parent) => {
+          if (parent?.dismissed !== undefined || parent?.record === undefined) { done(false); return }
+          if (parent.record.revision !== previous.revision) {
+            fail(new OutboxConflict({ localAttemptId: previous.id, expectedRevision: previous.revision, actualRevision: parent.record.revision }))
+            return
+          }
+          if (parent.record.state !== 'not-applied') { done(false); return }
+          insert()
+        }, fail)
+      }
+      if (source === undefined) { checkPredecessor(); return }
+      get(tx, source.id, (parent) => {
+        if (parent?.dismissed !== undefined || parent?.record?.revision !== source.revision) {
+          fail(new OutboxConflict({ localAttemptId: source.id, expectedRevision: source.revision, actualRevision: parent?.record?.revision }))
+          return
+        }
+        checkPredecessor()
       }, fail)
     })
   }
@@ -375,7 +394,7 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
         cursor.continue()
       }
     }),
-    dismiss: (id) => run('readwrite', 'dismiss', (tx, done, fail) => {
+    dismiss: (id, expectedRevision) => run('readwrite', 'dismiss', (tx, done, fail) => {
       const store = tx.objectStore(attemptsStore)
       const request = store.get(id)
       request.onsuccess = () => {
@@ -383,6 +402,8 @@ export const openIndexedDbOutbox = Effect.fn('Outbox.open')(function* (options: 
           const raw: unknown = request.result
           const owner = rawScope(raw)
           if (raw === undefined || owner !== undefined && !sameScope(owner, scope)) { done(undefined); return }
+          const actualRevision = rawRevision(raw)
+          if (actualRevision !== expectedRevision) throw new OutboxConflict({ localAttemptId: id, expectedRevision, actualRevision })
           const envelope = inspect(raw)
           if (envelope === undefined) {
             // Explicit discard alone may remove damaged content; never claim nonapplication.
