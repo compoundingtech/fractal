@@ -11694,8 +11694,9 @@ async fn finish_claim_publication(
     Ok(Json(response))
 }
 
-/// Every objective and budget as one list: see `objectives`.
-pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
+/// Every native, source-backed and declared objective and budget as one list.
+/// Domain rows precede declaration evaluation so native bindings see their real source rows.
+pub fn slo_rows(store: &crate::store::Store, domain_rows: Vec<Value>) -> anyhow::Result<Vec<Value>> {
     let limits = store.account_limits()?;
     let fresh_ms = crate::config::reload_daemon_limits()
         .and_then(|reloaded| reloaded.ok())
@@ -11715,6 +11716,8 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
         rows.insert(budgets, crate::objectives::divergence(open));
     }
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, domain_rows));
     let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
     let declared = crate::declared_objectives::rows(store, now, &rows)?;
     drop(rows.splice(budgets..budgets, declared));

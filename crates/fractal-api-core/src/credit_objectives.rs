@@ -506,7 +506,7 @@ mod tests {
         // Reconfiguring the local writer set activates the original claim, with no reappend.
         store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
         store.wait_for_usage_credit_backfill().unwrap();
-        let rows = crate::api::slo_rows(&store).unwrap();
+        let rows = crate::api::slo_rows(&store, Vec::new()).unwrap();
         for objective in ["CAM-R01/anthropic", "CAM-R02/anthropic"] {
             let row = rows.iter().find(|row| row["id"] == objective).unwrap();
             assert_eq!(row["status"], "met");
