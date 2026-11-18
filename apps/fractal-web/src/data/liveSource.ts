@@ -228,15 +228,19 @@ export const liveSource = ({
   const followInterests = new Map<string, () => boolean>()
   const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const startupIdentity = Promise.withResolvers<EnvelopeOf<Capabilities>>()
+  let startupIdentityCurrent = true
+  let identityObservations = 0
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
       fetch,
       onCapabilities: response => {
+        if (++identityObservations > 1) startupIdentityCurrent = false
         startupIdentity.resolve(response)
         options.onCapabilities?.(response)
       },
       onProbeFailure: () => {
+        startupIdentityCurrent = false
         startupIdentity.reject(new Error('Initial gateway identity unavailable'))
         options.onProbeFailure?.()
       },
@@ -249,6 +253,7 @@ export const liveSource = ({
               registry.set(network, { _tag: 'Online' })
             }
             if (event.state._tag === 'Reconnecting') {
+              startupIdentityCurrent = false
               const status: SyncStatus = {
                 _tag: 'Stale',
                 reason: event.state.nextAt === undefined ? { _tag: 'Unknown' } : {
@@ -1211,7 +1216,11 @@ export const liveSource = ({
   let observedGrants: Grants | undefined
   // Startup recovery and the first grants observation share one identity read.
   // Later transport refreshes still fetch current capabilities.
-  const startupCapabilities = () => startupIdentity.promise
+  const startupCapabilities = async () => {
+    if (!startupIdentityCurrent) return client.capabilities()
+    const response = await startupIdentity.promise
+    return startupIdentityCurrent ? response : client.capabilities()
+  }
   let grantsRequested = false
   const grantsCapabilities = () => {
     if (grantsRequested) return client.capabilities()

@@ -502,6 +502,44 @@ describe('outbox startup admission', () => {
     }), { issuerPair })
   })
 
+  it.live('uses the new identity when the first composer mounts after a reconnect probe', () => Effect.gen(function* () {
+    const factory = new IDBFactory()
+    vi.stubGlobal('indexedDB', factory)
+    const nextIssuer = { issuer: 'person/other', issuer_key: 'issuer-key/next' }
+    const nextScope = { principalId: 'person/operator', deploymentId: outboxDeploymentId(nextIssuer.issuer, nextIssuer.issuer_key), memberId: snapshot.host_id }
+    const saved = yield* openIndexedDbOutbox({ indexedDB: factory, scope: nextScope })
+    const intent = createOutboxRecord('attempt/next-identity', { text: 'Saved for the next identity', attachments: [] })
+    const packet = prepareMessageSendPacket({ id: 'action/next-identity', idempotency_key: intent.id,
+      fence: { snapshot_id: snapshot.id, subject_revisions: {} },
+      parameters: { to: agent.id, content: intent.intent.text, tags: [], attachments: [] } })
+    const ready = prepareOutboxRecord(intent, packet)
+    if (ready === undefined) throw new TypeError('Expected ready packet')
+    yield* Effect.promise(() => saved.commit(intent))
+    yield* Effect.promise(() => saved.compareAndSwap(intent.revision, ready))
+    const dispatched = yield* Effect.promise(() => saved.acquireDispatchPermit(intent.id, ready.revision))
+    try {
+      yield* withGateway((live, gateway) => Effect.gen(function* () {
+        yield* Effect.promise(() => live.ready)
+        expect(gateway.capabilityReads).toBe(1)
+        expect(yield* Effect.promise(() => saved.read(intent.id))).toEqual(dispatched)
+        gateway.issuerPair = nextIssuer
+        gateway.messageGrant = 'ungranted'
+        live.source.reconnect?.()
+        yield* settle
+        expect(gateway.capabilityReads).toBe(2)
+        const release = live.registry.mount(live.source.grants)
+        try {
+          yield* settle
+          expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'ungranted', sendProtection: 'durable' })
+          expect(gateway.capabilityReads).toBe(3)
+          // Recovering B's dispatch marker proves startup did not reinitialize A's scope.
+          expect(yield* Effect.promise(() => saved.read(intent.id))).toMatchObject({ state: 'unknown', mayHaveDispatched: true })
+          expect(gateway.messageActions).toEqual([])
+        } finally { release() }
+      }), { issuerPair })
+    } finally { saved.close() }
+  }))
+
   it.live('keeps protected startup storage unavailable without granting sends or inventing corrupt entries', () => {
     vi.stubGlobal('indexedDB', { open: () => { throw new DOMException('Storage disabled', 'SecurityError') } })
     return withGateway((live, gateway) => Effect.gen(function* () {
