@@ -284,7 +284,7 @@ fn declares_profile_key(mission: &MissionSpec) -> bool {
             || step.nested_mission.as_deref().is_some_and(declares_profile_key)
             || step.loop_spec.as_ref().is_some_and(|spec| {
                 [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
-                    .into_iter().flatten().any(declares_profile_key)
+                    .into_iter().flatten().any(|branch| declares_profile_key(branch))
             })
     })
 }
