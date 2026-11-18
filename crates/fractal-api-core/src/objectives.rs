@@ -840,7 +840,10 @@ mod tests {
     fn transaction_write_below_one_percent_keeps_the_max_miss_diagnostic() {
         // A representative 0.45% slow mix, under complete retained coverage. The max is
         // still a miss; neither the diagnostic miss nor its magnitude empties the ratio.
-        let mut write = windows(210097, 19074.382, 944);
+        let mut write = windows(210097, 139.263, 944);
+        for name in WINDOWS {
+            write[name]["max_ms"] = json!(19074.382);
+        }
         write["budget"] = retained_budget(210097, 944);
         let report = json!({"targets": [{"name": "transaction", "about": "Transactions", "max_ms": 300,
             "read": windows(0, 0.0, 0), "write": write, "writer_hold": windows(0, 0.0, 0)}]});
