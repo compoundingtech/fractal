@@ -61,21 +61,23 @@ the daemon was built with.
 
 | Indicator | Measures | Targets | Rows | Windows |
 |---|---|---|---|---|
-| `latency` | Each `path`: a daemon route (`GET /v1/client/agents`), a stream's first snapshot (`stream agents`), a refresher's publication (`publish missions`) or a paired phone's report (`client/ios/connect`) | `p99 within=`; again with `scope="remote"` for the same reads served from another member | `NAME`, `NAME/remote` | 1m, 5m, 1h; budget over 1h |
+| `latency` | Each `path`: a daemon route (`GET /v1/client/agents`), a stream's first snapshot (`stream agents`), a refresher's publication (`publish missions`) or a paired phone's report (`client/ios/connect`) | `p99 within=`; again with `scope="remote"` for the same reads served from another member | `NAME`, `NAME/remote` | 1m, 5m, 1h diagnostics; declared operational budget over 30d |
 | `share` | A phone's live foreground time over its foreground time, at `path` | `live-share min-percent=` | `NAME` | 1m, 5m, 1h |
 | `statement` | One SQL statement | `p99 within=`, `max within=` | `NAME` (the p99) | 1m, 5m, 1h |
-| `transaction` | Read and write transactions and writer holds | `max within=` | `NAME/read`, `NAME/write`, `NAME/writer_hold` | 1m, 5m, 1h |
+| `transaction` | Read and write transactions and writer holds, with independent slow-event ratios | `max within=` diagnostic; declared operational allowance | `NAME/read`, `NAME/write`, `NAME/writer_hold` | 1m, 5m, 1h diagnostics; operational budget over 30d |
 | `writer-hold` | Each writer hold and long read, by holder | `max within=` | `NAME` | 1m, 5m, 1h |
 | `cpu` | The daemon and its replication workers over closed UTC minutes; children `idle-min-minutes` and `load-max-cores` | `cores max=`, `idle-cores max=` | `NAME`, `NAME/idle` | the hour |
-| `database` | The store's pages in use and their daily growth | `live-gb max=`, `growth-mb-per-day max=` | `NAME` | the newest hourly measurement |
+| `database` | Covered time over either live-size or daily-growth bound | `live-gb max=`, `growth-mb-per-day max=`; declared operational allowance | `NAME` | hourly measurements; covered-time budget over 30d |
 | `divergence` | Open projection divergence faults | `open max=` | `NAME`, once a divergence check has run | now |
 
 The statement, transaction, writer-hold, CPU, database and divergence objectives are one each,
 named as the table's rows say (`sql-statement`, `transaction`, `writer-hold`, `cpu`, `database`,
 `projection-divergence`): `fractal doctor` and the OTLP export read them by these names.
 
-These keep the meanings they had as built-in targets: a p99 is missed in a window when more than
-1% of its samples are over, and a max when any one is.
+Diagnostic aspirations retain their strict meanings: a p99 is missed in a window when more than
+1% of its samples are over, and a max when any one is. An operational budget row's status instead
+uses its slow-event or bad-covered-time allowance, retained coverage and paired burns. A `met`
+operational row does not claim that its diagnostic p99 or max aspiration was met.
 
 ### Source-backed GitHub measurements
 
@@ -207,6 +209,25 @@ declared rate, with enough evidence; fast and slow are alternative breach condit
 has 30 days of evidence. Coverage and unknown time remain visible. Shipped allowances are 5% for
 latency, 1% for transactions and 5% for database capacity. Existing max and p99 diagnostics stay
 visible and independent rather than becoming a substitute denominator.
+
+| Native rows | Slow / bad condition | Operational allowance | Diagnostic aspiration |
+|---|---|---|---|
+| `person-read`, `person-read/remote`, `write-ack` | completed work strictly over 300ms | 5% of eligible events | p99 ≤300ms |
+| `projection-fresh` | eligible publication strictly over 1500ms | 5% of eligible publications | p99 ≤1500ms |
+| `transaction/read`, `transaction/write`, `transaction/writer_hold` | transaction or hold strictly over 300ms | 1% of that row's eligible events | max ≤300ms |
+| `database` | live size >8GB **or** growth >300MB/day | 5% of covered capacity-hours | both capacity bounds |
+
+These rows account over 30d with fast 14.4× and slow 6× paired burns. Ratio pairs are
+1h+5m and 6h+30m; database expands them to its actual hourly cadence as described below.
+The transaction family keeps three separate populations; request completion, publication and
+capacity time are never averaged together. The `writer-hold` holder-attribution row is a separate
+diagnostic, not a second operational transaction budget.
+
+For example, a 0.45% transaction/write slow share is below its 1% allowance even if one long
+transaction misses the max aspiration. A 35.24% person-read slow share burns at 7.05× its 5%
+allowance: it cannot establish a 14.4× fast burn. It establishes a slow burn only if **both**
+6h and 30m have eligible evidence above 30% slow. An hour's distribution cannot stand in for
+either missing window or for 30d remaining budget.
 
 Native telemetry persists independent closed UTC-minute receipts for 30 days in
 `state_dir/slo-budgets.sqlite3`. The durable ledger preserves closed evidence across restarts;

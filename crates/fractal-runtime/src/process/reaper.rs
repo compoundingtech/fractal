@@ -357,7 +357,9 @@ impl Poller {
         };
         let mut ready_count = 0;
         for event in &events[..count] {
-            anyhow::ensure!(event.flags & libc::EV_ERROR == 0, "owned child kqueue error: {}", event.data);
+            // kevent is packed on macOS; formatting must borrow an aligned local.
+            let data = event.data;
+            anyhow::ensure!(event.flags & libc::EV_ERROR == 0, "owned child kqueue error: {data}");
             if event.filter == libc::EVFILT_PROC && event.fflags & libc::NOTE_EXIT != 0 {
                 ready[ready_count] = event.udata as usize as u64;
                 ready_count += 1;

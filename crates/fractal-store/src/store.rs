@@ -20,6 +20,7 @@ pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
+pub mod launch_freeze;
 pub mod resource_membership;
 pub mod shell_resources;
 pub mod resource_exec_receipts;
@@ -258,6 +259,7 @@ pub mod declared_objectives;
 mod github_capture_config;
 pub mod objective_series;
 pub mod runtime_starts;
+pub mod runtime_cleanup;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
 pub mod turn_invocations;
@@ -2431,6 +2433,7 @@ pub struct Store {
     usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
+    launch_admission: Arc<launch_freeze::Admission>,
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
@@ -2928,9 +2931,11 @@ impl Store {
     fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2943,6 +2948,7 @@ impl Store {
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2960,9 +2966,11 @@ impl Store {
         let graph = GraphStore::open(path, origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2974,6 +2982,7 @@ impl Store {
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -2997,15 +3006,18 @@ impl Store {
         let graph = GraphStore::open_shared_memory(origin, fractal.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
+        launch_freeze::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         shell_resources::create_schema(&graph.connection.write())?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        runtime_cleanup::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             membership_lifetime: uuid::Uuid::new_v4(),
             resource_observations: Default::default(),
+            launch_admission: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
@@ -17859,6 +17871,12 @@ fn rebuild_base_aggregate_tx(
     }
     if let Aggregate::Desired(subject) = aggregate {
         retirements::project_subject(transaction, subject)?;
+        let retained: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM desired WHERE subject=?1)", [subject], |row| row.get(0),
+        ).map_err(internal)?;
+        if !retained {
+            runtime_cleanup::forget_subject(transaction, subject).map_err(internal)?;
+        }
     }
     Ok(())
 }
