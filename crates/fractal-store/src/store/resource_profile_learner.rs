@@ -64,7 +64,7 @@ pub struct RetirementSample {
     /// Changes when operation, parallelism, compiler profile or measurement coverage changes.
     pub semantic_revision: String,
     pub execution: String,
-    pub generation: u64,
+    pub generation: String,
     pub retirement_confirmed: bool,
     pub pre_retirement_populated: Option<bool>,
     pub end_reason: EndReason,
@@ -136,7 +136,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
             profile_key TEXT NOT NULL CHECK(length(profile_key) BETWEEN 1 AND 256),
             semantic_revision TEXT NOT NULL CHECK(length(semantic_revision) BETWEEN 1 AND 128),
             execution TEXT NOT NULL CHECK(length(execution) BETWEEN 1 AND 256),
-            generation TEXT NOT NULL CHECK(length(generation) BETWEEN 1 AND 20),
+            generation TEXT NOT NULL CHECK(length(generation) BETWEEN 1 AND 256),
             memory_peak TEXT NOT NULL CHECK(length(memory_peak) BETWEEN 1 AND 20),
             disk_growth TEXT CHECK(length(disk_growth) BETWEEN 1 AND 20),
             UNIQUE(host, execution, generation)
@@ -162,6 +162,8 @@ pub fn record_retirement_tx(
     validate_identity(&sample.host, &sample.key, &sample.semantic_revision)?;
     ensure!(!sample.execution.is_empty() && sample.execution.len() <= 256,
         "invalid learner execution identity");
+    ensure!(!sample.generation.is_empty() && sample.generation.len() <= 256,
+        "invalid learner execution generation");
     if let Some(reason) = sample.rejection() {
         return Ok(RecordOutcome::Rejected(reason));
     }
@@ -172,7 +174,7 @@ pub fn record_retirement_tx(
          VALUES (?1,?2,?3,?4,?5,?6,?7)
          ON CONFLICT(host,execution,generation) DO NOTHING",
         params![sample.host, sample.key, sample.semantic_revision, sample.execution,
-            sample.generation.to_string(), peak.to_string(),
+            sample.generation, peak.to_string(),
             sample.disk_growth_bytes.map(|bytes| bytes.to_string())],
     )?;
     if inserted != 0 {
@@ -182,7 +184,7 @@ pub fn record_retirement_tx(
         "SELECT profile_key=?4 AND semantic_revision=?5 AND memory_peak=?6
             AND disk_growth IS ?7 FROM resource_profile_samples_v1
          WHERE host=?1 AND execution=?2 AND generation=?3",
-        params![sample.host, sample.execution, sample.generation.to_string(), sample.key,
+        params![sample.host, sample.execution, sample.generation, sample.key,
             sample.semantic_revision, peak.to_string(),
             sample.disk_growth_bytes.map(|bytes| bytes.to_string())],
         |row| row.get::<_, bool>(0),

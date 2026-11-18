@@ -7,7 +7,7 @@ fn ready() -> HostReadiness {
 fn sample(id: u64, peak: u64) -> RetirementSample {
     RetirementSample {
         host: "host".into(), key: "repo/install".into(), semantic_revision: "scope-v1".into(),
-        execution: format!("execution-{id}"), generation: 1, retirement_confirmed: true,
+        execution: format!("execution-{id}"), generation: "generation-1".into(), retirement_confirmed: true,
         pre_retirement_populated: Some(false),
         end_reason: EndReason::Natural, coverage: Coverage::Full, memory_peak_bytes: Some(peak),
         memory_events: Some(MemoryEvents { max: 0, high: 0, oom: 0, oom_kill: 0, oom_group_kill: 0 }),
@@ -157,7 +157,7 @@ fn host_key_semantic_revision_and_generation_partition_history() {
     changed.semantic_revision = "scope-v2".into();
     record(&mut connection, &changed);
     changed = original.clone();
-    changed.generation = 2;
+    changed.generation = "generation-2".into();
     record(&mut connection, &changed);
     assert_eq!(reading(&connection, ready()).memory_samples, 2);
     let before = reading(&connection, ready());

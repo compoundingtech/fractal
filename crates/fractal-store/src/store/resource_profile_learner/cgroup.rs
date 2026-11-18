@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn dev4_io_devices_preserve_byte_traffic_not_allocated_growth() {
+    fn device_counters_preserve_byte_traffic_not_allocated_growth() {
         let input = "8:0 rbytes=11624448 wbytes=95952896 rios=2838 wios=23426 dbytes=0 dios=0\n8:16 rbytes=33652553842688 wbytes=3539582767104 rios=762369947 wios=254211128 dbytes=0 dios=0\n";
         let devices = parse_io_stat(input).unwrap();
         assert_eq!(devices.len(), 2);
