@@ -85,32 +85,37 @@ describe('graph lowering golden parity', () => {
   it.effect('runs independent siblings concurrently and journals original worker ids', () => Effect.gen(function* () {
     const entered: string[] = []
     const release = Promise.withResolvers<void>()
+    const journal: Array<readonly [string, ProgramExit]> = []
     const host = fakeHost({ payload: {}, child: async ({ key }) => {
       entered.push(key)
       if (key === 'code') await release.promise
       if (key === 'docs') release.resolve()
-      return completed(key)
+      const exit = completed(key)
+      journal.push([key, exit])
+      return exit
     } })
     const compiled = lower(diamond(), bindings)
     expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
     expect(entered).toEqual(['inspect', 'code', 'docs', 'finish'])
-    expect(host.recorded.map((entry) => entry.key).sort()).toEqual(['code', 'docs', 'finish', 'inspect'])
-    const replay = fakeHost({ payload: {}, journal: journalOf(host.recorded) })
+    expect(journal.map(([key]) => key).sort()).toEqual(['code', 'docs', 'finish', 'inspect'])
+    const replay = fakeHost({ payload: {}, journal })
     expect(yield* start(compiled, replay)).toEqual({ _tag: 'Success', value: null })
     expect(replay.recorded).toEqual([])
   }))
 
   it.effect('requires the declared human approval before starting its dependent worker', () => Effect.gen(function* () {
     const events: string[] = []
+    const resolutions: Record<string, ProgramExit> = {}
     const host = fakeHost({ payload: {}, ask: async (request) => {
       events.push(request.key)
       expect(request.for).toBe('person/owner')
       expect(request.request).toMatchObject({ version: 1, type: 'decision', answers: [ { id: 'approve', outcome: 'accept' }, { id: 'reject', outcome: 'decline' } ] })
-      return { _tag: 'Success', value: { resolved_by: 'person/owner', answer: { type: 'decision', outcome: 'accept', id: 'approve' } } }
-    }, child: async ({ key }) => { events.push(key); return completed(key) } })
+      return resolutions[request.key] = { _tag: 'Success', value: { resolved_by: 'person/owner', answer: { type: 'decision', outcome: 'accept', id: 'approve' } } }
+    }, child: async ({ key }) => { events.push(key); return resolutions[key] = completed(key) } })
     expect(yield* start(lower(renewal(), bindings), host)).toEqual({ _tag: 'Success', value: null })
     expect(events).toEqual(['approve', 'renew'])
-    expect(host.recorded.map((entry) => entry.key)).toEqual(['approve', 'renew'])
+    expect(Object.keys(resolutions)).toEqual(['approve', 'renew'])
+    expect(yield* start(lower(renewal(), bindings), fakeHost({ payload: {}, journal: Object.entries(resolutions) }))).toEqual({ _tag: 'Success', value: null })
     for (const answer of [
       { resolved_by: 'person/owner', answer: { type: 'decision', outcome: 'decline', id: 'reject' } },
       { resolved_by: 'person/other', answer: { type: 'decision', outcome: 'accept', id: 'approve' } },
@@ -123,24 +128,28 @@ describe('graph lowering golden parity', () => {
 
   it.effect('decodes multiple full resource subjects, checks fields and replays without children', () => Effect.gen(function* () {
     const compiled = lower(review(), bindings)
+    const childJournal: Array<readonly [string, ProgramExit]> = []
     const host = fakeHost({ payload: { head: 'abc' }, child: async ({ key, mission, input }) => {
       expect({ key, mission, input }).toEqual({ key: 'review', mission: 'example/seat-turn', input: { head: 'abc', goal: 'Review abc.' } })
-      return { _tag: 'Success', value: { run: 'mission-run/child', status: 'completed', products: {
+      const exit: ProgramExit = { _tag: 'Success', value: { run: 'mission-run/child', status: 'completed', products: {
         'resource/mission-run/child/review/abc/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'GO' },
         'resource/mission-run/child/review/evidence': { kind: 'custom.example.evidence', present: true },
       } } }
+      childJournal.push([key, exit])
+      return exit
     } })
     expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
-    expect(host.recorded.map((entry) => entry.key)).toEqual(['review', 'review/product', 'check'])
-    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded) }))).toEqual({ _tag: 'Success', value: null })
-    const noGo = journalOf(host.recorded.slice(0, 1)).map(([key, exit]) => [key, exit._tag === 'Success' ? { ...exit, value: { ...(exit.value as object), products: {
+    const journal = [...childJournal, ...journalOf(host.recorded)]
+    expect(journal.map(([key]) => key)).toEqual(['review', 'review/product', 'check'])
+    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal }))).toEqual({ _tag: 'Success', value: null })
+    const noGo = journal.slice(0, 1).map(([key, exit]) => [key, exit._tag === 'Success' ? { ...exit, value: { ...(exit.value as object), products: {
       'resource/mission-run/child/review/abc/verdict': { kind: 'custom.example.verdict', head: 'abc', verdict: 'NO-GO' },
       'resource/mission-run/child/review/evidence': { kind: 'custom.example.evidence', present: true },
     } } } : exit] as const)
     const rejected = fakeHost({ payload: { head: 'abc' }, journal: noGo })
     expect(yield* start(compiled, rejected)).toMatchObject({ _tag: 'Failure', error: { _tag: 'GraphGateFailed', step: 'check', gate: 'verdict-go' } })
     for (const [path, value] of [['missing', 'GO'], ['constructor.name', 'Object']] as const) {
-      const absent = fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded.slice(0, 1)) })
+      const absent = fakeHost({ payload: { head: 'abc' }, journal: journal.slice(0, 1) })
       expect(yield* start(lower(review(path, value), bindings), absent)).toMatchObject({ _tag: 'Failure', error: { _tag: 'GraphGateFailed', step: 'check', gate: 'verdict-go' } })
     }
   }))
@@ -154,8 +163,9 @@ describe('graph lowering golden parity', () => {
     } })
     expect(yield* start(compiled, host)).toEqual({ _tag: 'Success', value: null })
     expect(commands).toEqual([{ argv: ['sh', '-c', 'test "$HEAD" = "abc"'], options: { cwd: '/work', env: { HEAD: 'abc' } } }])
-    expect(host.recorded.map((entry) => entry.key)).toEqual(['verify', 'verify/gate/0'])
-    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal: journalOf(host.recorded), spawn: async () => { throw new Error('must not replay command') } }))).toEqual({ _tag: 'Success', value: null })
+    const journal = [['verify', completed('verify')] as const, ...journalOf(host.recorded)]
+    expect(journal.map(([key]) => key)).toEqual(['verify', 'verify/gate/0'])
+    expect(yield* start(compiled, fakeHost({ payload: { head: 'abc' }, journal, spawn: async () => { throw new Error('must not replay command') } }))).toEqual({ _tag: 'Success', value: null })
     const failed = fakeHost({ payload: { head: 'abc' }, child: async ({ key }) => completed(key), spawn: async () => ({ code: 1, signal: null, stdout: '', stderr: '' }) })
     expect(yield* start(compiled, failed)).toMatchObject({ _tag: 'Failure', error: { _tag: 'GraphGateFailed', step: 'verify', gate: 'exact-head' } })
     expect(failed.recorded.at(-1)).toMatchObject({ key: 'verify/gate/0', status: 'failed' })
@@ -164,9 +174,9 @@ describe('graph lowering golden parity', () => {
 
 describe('typed compile refusals', () => {
   it.each([
-    ['waitFor', { waitFor: {} }], ['watch', { watch: {} }], ['observer', { observer: {} }],
+    ['waitFor', { waitFor: Fractal.pinMission({ subject: diamond(), revision: 'a'.repeat(64) }) }], ['watch', { watch: {} }], ['observer', { observer: {} }],
     ['Timing', { timing: { _tag: 'Calendar', at: '09:00', timezone: 'UTC' } }],
-    ['Review', { review: { _tag: 'Subject', subject: 'resource/example' } }],
+    ['Review', { review: [{ _tag: 'Subject', subject: 'resource/example' }] }],
     ['waitUntil', { waitUntil: '2030-01-01T00:00:00Z' }],
   ] as const)('names %s and its graph step', (construct, fields) => {
     const graph = Fractal.defineMission({ meta, intent: { ...base, steps: [{ id: 'blocked', agentless: true, ...fields }] } })

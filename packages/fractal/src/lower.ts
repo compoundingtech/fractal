@@ -66,7 +66,7 @@ export const lower = (
   inspect(intent, options.id)
   const wire = missionWire({ ...intent, id: options.id } as MissionInput<string>, (value, step) => {
     if (typeof value !== 'object' || value === null || !('_tag' in value) || value._tag !== 'SubjectRef') return value
-    if (options.resolveAgent === undefined) refuse(step, 'agent binding', 'Imported agent references need the authoring tree resolver')
+    if (options.resolveAgent === undefined) return refuse(step, 'agent binding', 'Imported agent references need the authoring tree resolver')
     return options.resolveAgent(value)
   })
   const mission = Schema.decodeUnknownSync(MissionSchema)(wire)
