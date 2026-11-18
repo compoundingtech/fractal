@@ -620,6 +620,10 @@ mod tests {
         assert_eq!(store.shell_resource_by_request(&scope, key).unwrap().unwrap().state, "running");
         let mut terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();
         terminal.state = "completed".into(); terminal.ended_at = Some(50); terminal.exit_code = Some(0);
+        terminal.result = Some(PayloadResult {
+            head_start: None, head_end: None, clean_start: None, clean_end: None,
+            exit_code: Some(0), exit_signal: None, wall_duration_ms: 10, memory_peak_bytes: None,
+        });
         store.update_shell_resource(&terminal).unwrap();
         let terminal = store.shell_resource_by_request(&scope, key).unwrap().unwrap();
         assert_eq!(store.submit_shell_resource(request, 60).unwrap(), terminal);
