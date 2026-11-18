@@ -285,8 +285,11 @@ URL. Whoever updates that source remote-tracking ref owns freshness; delivery
 does not refresh it from the network. Each `source_snapshot` outcome records
 the SHA, ref and commit time. The trusted-ancestry check still refuses backward
 or divergent snapshots. Under the delivery lock, abandoned Git transfer packs
-are removed before fetching; failed transfers are killed and reaped before
-their temporary pack/index files are removed. Newer files are preserved.
+older than one hour are considered for removal before fetching. Failed
+transfers are killed and reaped before considering newly appearing temporary
+pack/index files. Every deletion requires `lsof` to prove the file has no live
+open users; unavailable `lsof`, warnings and errors preserve the file. Recent
+pre-existing files and files changed during the liveness check are preserved.
 One root `pnpm install --frozen-lockfile` installs the workspace. Delivery follows
 the app's recursive `workspace:` and `file:` runtime dependencies (currently
 `clients/typescript/fractal-views` and `clients/typescript/fractal-client`). Changes under

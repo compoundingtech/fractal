@@ -22,12 +22,35 @@ def fetch_local(repo, source, commit, *, timeout=60):
     if not pack.is_absolute():
         pack = repo / pack
     started = time.time_ns()
+    existing = {path for pattern in ("tmp_pack_*", "tmp_idx_*") for path in pack.glob(pattern)}
+    lsof = shutil.which("lsof")
+    if not lsof and sys.platform == "darwin":
+        lsof = "/usr/sbin/lsof"
 
-    def clean_before(cutoff):
+    def clean_before(cutoff, *, failed=False):
+        if not lsof:
+            return  # No liveness proof: retain the file.
         for pattern in ("tmp_pack_*", "tmp_idx_*"):
             for path in pack.glob(pattern):
-                if path.is_file() and path.stat().st_mtime_ns < cutoff:
-                    path.unlink()
+                try:
+                    before = path.stat()
+                    if not path.is_file() or before.st_mtime_ns >= cutoff:
+                        continue
+                    if path in existing or not failed:
+                        if before.st_mtime_ns >= started - 3600 * 1_000_000_000:
+                            continue
+                    owners = subprocess.run([lsof, "-t", "--", str(path)],
+                        capture_output=True, text=True, timeout=5)
+                    # lsof returns 1 with no output for a file with no open users.
+                    # Errors, warnings, unavailable lsof and live users fail closed.
+                    if owners.returncode != 1 or owners.stdout or owners.stderr:
+                        continue
+                    after = path.stat()
+                    if (before.st_dev, before.st_ino, before.st_mtime_ns) == (
+                            after.st_dev, after.st_ino, after.st_mtime_ns):
+                        path.unlink()
+                except (OSError, subprocess.SubprocessError):
+                    continue
 
     clean_before(started)
     # Kill and reap the transfer group before removing files it could still use.
@@ -53,7 +76,7 @@ def fetch_local(repo, source, commit, *, timeout=60):
             pass
         process.communicate()
         # Include the just-failed transfer, not just earlier abandoned packs.
-        clean_before(time.time_ns())
+        clean_before(time.time_ns(), failed=True)
         raise
     finally:
         signal.signal(signal.SIGTERM, previous_term)

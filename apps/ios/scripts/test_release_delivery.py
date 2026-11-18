@@ -459,39 +459,64 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.git("update-ref", "-d", "refs/remotes/origin/main")
 
     def test_killed_local_fetch_cleans_transfer_and_stale_pack_files(self):
+        if not shutil.which("lsof") and not Path("/usr/sbin/lsof").exists():
+            self.skipTest("lsof is required to prove temporary packs are unused")
         target = self.root / "interrupted.git"
         self.git("init", "--bare", str(target), cwd=self.root)
         pack = target / "objects/pack"
-        for name in ("tmp_pack_old", "tmp_idx_old"):
-            (pack / name).write_text("abandoned")
         hook = self.root / "pack-hook"
         hook.write_text("#!/bin/sh\n"
                         'echo partial > "$FETCH_PACK/tmp_pack_interrupted"\n'
                         'echo partial > "$FETCH_PACK/tmp_idx_interrupted"\n'
                         'echo started > "$FETCH_STARTED"\n'
+                        'if [ "$FETCH_MODE" = term ]; then kill -TERM "$FETCH_WORKER_PID"; fi\n'
                         "exec /bin/sleep 30\n")
         hook.chmod(0o755)
         started = self.root / "fetch-started"
         config = self.root / "fetch.gitconfig"
         config.write_text(f"[uploadpack]\n\tpackObjectsHook = {hook}\n")
-        result = subprocess.run([
-            sys.executable, "-c",
-            "import fcntl, pathlib, subprocess, sys; "
-            "from release_delivery import fetch_local; "
-            "lock = open(sys.argv[1] + '/delivery.lock', 'a'); "
-            "fcntl.flock(lock, fcntl.LOCK_EX); "
-            "fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), "
-            "sys.argv[3], timeout=2)",
-            str(target), str(self.origin), self.initial_commit],
-            cwd=SCRIPT.parent, env={**self.env,
-                "GIT_CONFIG_GLOBAL": str(config),
-                "FETCH_PACK": str(pack), "FETCH_STARTED": str(started)},
-            capture_output=True, text=True, timeout=10)
-        self.assertTrue(started.exists(), result.stdout + result.stderr)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("TimeoutExpired", result.stderr)
-        self.assertEqual(list(pack.glob("tmp_pack_*")), [])
-        self.assertEqual(list(pack.glob("tmp_idx_*")), [])
+        for mode in ("timeout", "term"):
+            with self.subTest(mode=mode):
+                for name in ("tmp_pack_old", "tmp_idx_old", "tmp_pack_busy"):
+                    candidate = pack / name
+                    candidate.write_text("abandoned or live")
+                    os.utime(candidate, (time.time() - 7200, time.time() - 7200))
+                recent = pack / "tmp_pack_recent"
+                recent.write_text("another recent transfer")
+                started.unlink(missing_ok=True)
+                # A second process owns an old temporary pack throughout both sweeps.
+                holder = subprocess.Popen([
+                    sys.executable, "-c",
+                    "import sys; f=open(sys.argv[1], 'rb'); "
+                    "print('open', flush=True); sys.stdin.read()",
+                    str(pack / "tmp_pack_busy")],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(holder.stdout.readline().strip(), "open")
+                    result = subprocess.run([
+                        sys.executable, "-c",
+                        "import fcntl, os, pathlib, sys; "
+                        "from release_delivery import fetch_local; "
+                        "os.environ['FETCH_WORKER_PID'] = str(os.getpid()); "
+                        "lock = open(sys.argv[1] + '/delivery.lock', 'a'); "
+                        "fcntl.flock(lock, fcntl.LOCK_EX); "
+                        "fetch_local(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), "
+                        "sys.argv[3], timeout=2)",
+                        str(target), str(self.origin), self.initial_commit],
+                        cwd=SCRIPT.parent, env={**self.env,
+                            "GIT_CONFIG_GLOBAL": str(config), "FETCH_MODE": mode,
+                            "FETCH_PACK": str(pack), "FETCH_STARTED": str(started)},
+                        capture_output=True, text=True, timeout=30)
+                    self.assertTrue(started.exists(), result.stdout + result.stderr)
+                    if mode == "timeout":
+                        self.assertIn("TimeoutExpired", result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 143, result.stderr)
+                    self.assertEqual(sorted(path.name for path in pack.glob("tmp_pack_*")),
+                                     ["tmp_pack_busy", "tmp_pack_recent"])
+                    self.assertEqual(list(pack.glob("tmp_idx_*")), [])
+                finally:
+                    holder.communicate(timeout=5)
 
     def test_local_snapshot_delivers_without_network_origin_and_logs_identity(self):
         self.origin.rename(self.root / "offline-origin.git")
