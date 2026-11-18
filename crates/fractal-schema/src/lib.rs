@@ -4309,6 +4309,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "runtime.action.requested" => &[
             ("action", string()),
+            ("cause", string()),
             ("host", string()),
             ("source_host", string()),
             ("rollout", object()),
@@ -4327,6 +4328,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         | "runtime.action.failed"
         | "runtime.action.deadline-reached" => &[
             ("action", string()),
+            ("cause", string()),
+            ("mode", string()),
+            ("request_key", string()),
+            ("operation_id", string()),
             ("source_host", string()),
             ("rollout", object()),
             ("operation", string()),
@@ -5523,6 +5528,12 @@ mod tests {
         current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
         current.claims.get_mut("runtime.action.requested").unwrap()
             .fields.remove("from_stale_handoff").unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap().fields.remove("cause").unwrap();
+        for kind in ["runtime.action.succeeded", "runtime.action.failed", "runtime.action.deadline-reached"] {
+            for field in ["cause", "mode", "request_key", "operation_id"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
         current.claims.get_mut("runtime.observed").unwrap()
             .fields.remove("exit_evidence").unwrap();
         for field in ["host", "dispatch"] {
