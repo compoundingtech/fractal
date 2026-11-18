@@ -428,6 +428,17 @@ describe('objective subject trees', () => {
     }),
   )
 
+  it.effect('loads GitHub measurements from the same module and KDL declaration tree', () =>
+    Effect.gen(function* () {
+      const root = fixture({
+        'delivery/merged/objective.ts': `${header}export default Fractal.objective({ about: 'All-author merges', indicator: Fractal.indicator.githubMergedCount({ source: 'github-source/example', roster: 'github-scope/example', timezone: 'UTC', cut: 'now', measurement: 'targeted' }), targets: [{ stat: 'per-hour', min: 7 }] })`,
+        'delivery/ready/objective.kdl': 'version 2\nobjective "delivery/ready" {\n about "Measured final-ready latency"\n indicator "github-ready-to-merged" {\n source "github-source/example"\n roster "github-scope/example"\n timezone "UTC"\n cut "watermark"\n measurement "only"\n }\n}\n',
+      })
+      const subjects = (yield* load(root)).filter(({ kind }) => kind === 'objective')
+      expect(subjects.map(({ id }) => id)).toEqual(['delivery/merged', 'delivery/ready'])
+    }),
+  )
+
   it.effect('declare objective/<path> from objective.ts and objective.kdl', () =>
     Effect.gen(function* () {
       const kdl = render({ ...rollout, name: 'ops/kdl' })
@@ -494,7 +505,7 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
       files: {
         'ops/x/objective.ts': `${header}export default Fractal.objective({ about: 'a', indicator: Fractal.indicator.statement(), targets: [{ stat: 'p99', within: '10ms' }, { stat: 'max', within: '100ms' }] })`,
       },
-      message: 'A declared objective is an interval, count, ratio, gauge or native binding named NAMESPACE/NAME; objective/ops/x is not',
+      message: 'A declared objective is an interval, count, ratio, gauge, GitHub measurement or native binding named NAMESPACE/NAME; objective/ops/x is not',
     },
     {
       name: 'a one-segment name',
@@ -545,6 +556,90 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
       expect(`${error.message}${cause}`).toContain(message)
     }),
   )
+})
+
+describe('native source-backed GitHub objectives', () => {
+  const native = {
+    source: 'github-source/test',
+    roster: 'github-scope/test',
+    timezone: 'America/New_York',
+    cut: 'watermark',
+    measurement: 'only',
+  } as const
+
+  it('lowers the exact measured-only fixture accepted by the native reader', () => {
+    expect(render({
+      name: 'delivery/ready-to-merged',
+      about: 'Final ready to merge, measured without a target',
+      indicator: Fractal.indicator.githubReadyToMerged(native),
+      targets: [],
+    })).toBe(`version 2
+objective "delivery/ready-to-merged" {
+  about "Final ready to merge, measured without a target"
+  indicator "github-ready-to-merged" {
+    source "github-source/test"
+    roster "github-scope/test"
+    timezone "America/New_York"
+    cut "watermark"
+    measurement "only"
+  }
+}
+`)
+  })
+
+  it('keeps merged-count target values policy-owned and omits author filters', () => {
+    const text = render({
+      name: 'delivery/merged',
+      about: 'All-author merged PRs',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, cut: 'now', measurement: 'targeted' }),
+      targets: [{ stat: 'per-hour', min: 7 }],
+    })
+    expect(text).toContain('indicator "github-merged-count"')
+    expect(text).toContain('target "per-hour" min=7')
+    expect(text).not.toContain('only "author"')
+  })
+
+  it('rejects remote scope for GitHub targets just like the native reader', () => {
+    expect(() => render({
+      name: 'delivery/merged',
+      about: 'All-author merged PRs',
+      indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }),
+      targets: [{ stat: 'per-hour', min: 7, scope: 'remote' }],
+    })).toThrow('only a latency target has a remote scope')
+  })
+
+  it('rejects claim budgets on measured-only and targeted GitHub declarations', () => {
+    const budget = {
+      allowance: 0.05, horizon: '30d', minCoverage: 0.9, minSamples: 1,
+      fast: { burnRate: 14.4, long: '1h', short: '5m' },
+      slow: { burnRate: 6, long: '6h', short: '30m' },
+    } as const
+    for (const measurement of ['only', 'targeted'] as const) {
+      expect(() => render({
+        name: 'delivery/merged', about: 'Merge count',
+        indicator: Fractal.indicator.githubMergedCount({ ...native, measurement }),
+        targets: measurement === 'targeted' ? [{ stat: 'per-hour', min: 7 }] : [], budget,
+      })).toThrow('GitHub measurements do not take claim budgets')
+    }
+    expect(() => render({
+      name: 'delivery/ready', about: 'Final-ready latency',
+      indicator: Fractal.indicator.githubReadyToMerged(native), targets: [], budget,
+    })).toThrow('GitHub measurements do not take claim budgets')
+  })
+
+  it('rejects a hidden default target, a latency target and an implicit cut', () => {
+    const base = { name: 'delivery/merged', about: 'Merged', targets: [] } as const
+    expect(() => render({ ...base, indicator: Fractal.indicator.githubMergedCount({ ...native, measurement: 'targeted' }) })).toThrow('needs one per-hour minimum')
+    expect(() => render({
+      ...base,
+      indicator: Fractal.indicator.githubReadyToMerged(native),
+      targets: [{ stat: 'p95', within: '5m' }],
+    })).toThrow('neither targets')
+    expect(() => Fractal.objective({
+      ...base,
+      indicator: { ...Fractal.indicator.githubMergedCount(native), cut: undefined },
+    } as unknown as ObjectiveInput)).toThrow('cut must be')
+  })
 })
 
 describe('native numeric budgets', () => {
