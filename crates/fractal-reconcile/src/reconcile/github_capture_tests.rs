@@ -18,7 +18,7 @@ fn hold(connection: &Connection, id: &str, kind: &str, origin: &str, record: &im
     let record = serde_json::to_value(record)?;
     let source: Source = serde_json::from_value(record["source"].clone())?;
     let sequence = record.get("sequence").and_then(Value::as_u64);
-    connection.execute("INSERT INTO capture_v1_claims VALUES(?1,?2,?3,?4,?5,?6)", params![id,kind,origin,source_key(&source)?,sequence,serde_json::to_string(&record)?])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h4237074c7d77 owner=fractal_reconcile::reconcile::github_capture_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO capture_v1_claims VALUES(?1,?2,?3,?4,?5,?6)", params![id,kind,origin,source_key(&source)?,sequence,serde_json::to_string(&record)?])?;
     Ok(())
 }
 
@@ -105,7 +105,7 @@ fn admitted_forks_fail_before_and_after_application() -> Result<()> {
     assert!(advance(&mut db, &definition())?);
     hold(&db, "fork", COMMIT_KIND, "member-one", &commit(1, None))?;
     let key = projection_key(&definition())?;
-    db.execute("INSERT INTO capture_v1_conflicts VALUES(?1,'fork')", [&key])?;
+    db.execute(/* sqlite-large-value: allow-for-now lv-h5478e08a3895 owner=fractal_reconcile::reconcile::github_capture_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO capture_v1_conflicts VALUES(?1,'fork')", [&key])?;
     assert!(advance(&mut db, &definition()).is_err());
     // The conflict persists: an existing cached snapshot cannot become trusted next time.
     assert!(advance(&mut db, &definition()).is_err());
@@ -227,7 +227,7 @@ fn pinned_wal_read_survives_correction_between_pages() -> Result<()> {
         apply_fact(&db, "source", 1, "first", &fact, &fact.digest()?)?;
     }
     let reader = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    reader.execute_batch("BEGIN DEFERRED")?;
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-hc21aef8d0305 owner=fractal_reconcile::reconcile::github_capture_tests TODO=trace-statement-and-value-representation */ "BEGIN DEFERRED")?;
     let mut snapshot = builder();
     assert!(!snapshot.advance(&reader, "source", 0, 200)?);
     let original = merge(&format!("pr-{:05}", SNAPSHOT_PAGE), 100, None);

@@ -330,7 +330,7 @@ fn text<'a>(node: &'a Value, key: &str) -> Result<&'a str> {
 }
 fn millis(node: &Value, key: &str) -> Result<u64> {
     let at = chrono::DateTime::parse_from_rfc3339(text(node, key)?)?.timestamp_millis();
-    Ok(u64::try_from(at).context("GitHub timestamp precedes epoch")?)
+    u64::try_from(at).context("GitHub timestamp precedes epoch")
 }
 fn optional_millis(node: &Value, key: &str) -> Result<Option<u64>> {
     ensure!(node.get(key).is_some(), "GitHub omitted {key}");

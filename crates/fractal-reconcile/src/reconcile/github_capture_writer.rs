@@ -75,14 +75,21 @@ fn append_record(store: &Store, subject: String, kind: &str, record: &impl Seria
         evidence:Vec::new(),expected_subject:None,idempotency_key:Some(key) })?)
 }
 
+#[derive(Default)]
+struct CommitContent {
+    facts: Vec<FactReference>,
+    checkpoint: Option<ScanCheckpoint>,
+    coverage: Vec<Coverage>,
+}
+
 fn commit(store: &Store, connection: &mut Connection, definition: &SourceDefinition, grant: &AuthorityGrant,
-    facts: Vec<FactReference>, checkpoint: Option<ScanCheckpoint>, coverage: Vec<Coverage>, now: u64) -> Result<()> {
+    content: CommitContent, now: u64) -> Result<()> {
     let source = projection_key(definition)?;
     let (sequence, predecessor) = current_head(connection,&source)?;
     let capture = CaptureCommit { version:VERSION,source:definition.source.clone(),epoch:grant.epoch,
         authority_grant:selected_authority(definition)?.to_owned(),
         sequence:sequence.checked_add(1).context("source sequence overflow")?,predecessor,
-        facts,checkpoint,coverage,observed_at_ms:now };
+        facts:content.facts,checkpoint:content.checkpoint,coverage:content.coverage,observed_at_ms:now };
     let digest = capture.digest()?;
     let record = append_record(store,capture.subject()?,COMMIT_KIND,&capture,format!("github-capture:{digest}"))?;
     // The claim is the authority. Local publication can be replayed after any cache failure.
@@ -125,7 +132,7 @@ fn publish_coverage(store:&Store, connection:&mut Connection, definition:&Source
         let prior:Option<String>=connection.query_row("SELECT record FROM capture_v1_coverage WHERE source=?1 AND repository_id=?2 AND family=?3",
             params![projection_key(definition)?,coverage.repository_id,family(coverage.family)],|row|row.get(0)).optional()?;
         if prior.map(|row|serde_json::from_str::<Coverage>(&row)).transpose()?.as_ref()==Some(coverage) {continue;}
-        commit(store,connection,definition,grant,Vec::new(),None,vec![coverage.clone()],now)?;
+        commit(store,connection,definition,grant,CommitContent { coverage:vec![coverage.clone()],..Default::default() },now)?;
     }
     Ok(())
 }
@@ -149,10 +156,10 @@ fn publish(store: &Store, connection: &mut Connection, definition: &SourceDefini
         let written = append_record(store,fact.subject()?,FACT_KIND,&fact,format!("github-fact:{digest}"))?;
         references.push(FactReference { claim_id:written.id,digest });
         if references.len() == MAX_REFERENCES {
-            commit(store,connection,definition,grant,std::mem::take(&mut references),None,Vec::new(),now)?;
+            commit(store,connection,definition,grant,CommitContent { facts:std::mem::take(&mut references),..Default::default() },now)?;
         }
     }
-    if !references.is_empty() { commit(store,connection,definition,grant,references,None,Vec::new(),now)?; }
+    if !references.is_empty() { commit(store,connection,definition,grant,CommitContent { facts:references,..Default::default() },now)?; }
     let receipt = page.receipt.as_ref();
     // Bind the authored scope member to the resolved node, not its mutable upstream name.
     // This travels in the committed checkpoint, so cache rebuilds retain rename identity.
@@ -166,7 +173,7 @@ fn publish(store: &Store, connection: &mut Connection, definition: &SourceDefini
     if page.status == AcquisitionStatus::Complete {
         publish_coverage(store,connection,definition,grant,&page.coverage,now)?;
     }
-    commit(store,connection,definition,grant,Vec::new(),Some(checkpoint),Vec::new(),now)?;
+    commit(store,connection,definition,grant,CommitContent { checkpoint:Some(checkpoint),..Default::default() },now)?;
     Ok(())
 }
 
