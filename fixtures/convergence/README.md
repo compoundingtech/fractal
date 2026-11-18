@@ -471,3 +471,24 @@ In [hosted run 44158892426](https://github.com/compoundingtech/fractal/actions/r
 seed 2 converged and trimmed an initial checkpoint with this corpus, so v34's non-trimming
 expectation for seed 2 no longer applies. The v35 never-trim set is `[179]`; exact per-seed
 equality, continuation after excusing the old build, and majority trim coverage remain enforced.
+
+`claims-v36.json` adds `github.fact.observed`, `github.capture.committed`,
+`github.capture.authority`, and `github.capture.fenced` from the complete native registry.
+Versions 1 through 35 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v36.json`;
+do not hand-edit the snapshot. The simulation, diagnostics, and audit reports select v36.
+Native capture draws encode typed records: public repository observations have content-derived
+subjects, commits reference admitted authority and fact claim IDs and fact digests, and subsequent
+commits link the preceding commit and increment its sequence. Coverage and completed scan
+checkpoints identify the observed repository. A fencing receipt names the stopped writer's grant
+and final commit; that writer generates no further commits. Dependency-free authority and fact
+draws seed these inputs through ordinary schedule writes rather than hidden fixture appends.
+The focused `the_corpus_generates_valid_native_capture_inputs` regression validates and admits
+all four kinds, checks the commit chain and stopped frontier, and replicates them to the oracle.
+The admission check also verifies the stored `/fields/record` envelope. Capture dependency
+lookups use that same path as the production projection, not the flat body of native missions.
+The full registry-kind coverage assertion remains intact.
+
+Adding kinds changes the shared seeded schedule. The v35 observations above are historical,
+not a measured v36 characterization. Exact per-seed trim equality, old-build-excusal continuation,
+the three-seed cap, and majority trim coverage remain enforced.
