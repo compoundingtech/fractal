@@ -206,6 +206,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "read_positions",
         // Host-authoritative admission state is local, not a replicated projection.
         "local_host_holds",
+        // The connected host's expiring launch barrier is never replicated.
+        "local_launch_freeze",
         // Host-local execution authority, immutable lane policies and membership custody;
         // these are authoritative local records, not replicated claim projections.
         "resource_authorities_v1",
