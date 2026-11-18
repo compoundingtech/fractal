@@ -55,7 +55,7 @@ fn declares_escalation(value: &Value) -> bool {
                 || (key == "declarations_kdl" && value.as_str().is_some_and(|source| {
                     fn contains(document: &kdl::KdlDocument) -> bool {
                         document.nodes().iter().any(|node| node.name().value() == "escalation"
-                            || node.children().as_ref().is_some_and(contains))
+                            || node.children().is_some_and(contains))
                     }
                     source.parse::<kdl::KdlDocument>().is_ok_and(|document| contains(&document))
                 }))

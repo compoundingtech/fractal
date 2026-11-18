@@ -12,7 +12,7 @@ impl Store {
         progress: bool) -> Result<EscalationEpisode> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        let mut query = connection.prepare_cached(&canonical_sql(
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h02fa9eecf619 owner=fractal_store::store::escalation TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT claims.id, claims.kind, json_extract(claims.body,'$.fields.status'), claims.accepted_at_unix_ms
              FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.subject=?1
              AND (json_type(claims.body,'$.fields.status')='text' OR claims.kind='work.progress')
@@ -47,9 +47,9 @@ impl Store {
     pub fn retain_escalation_run(&self, run: &str, origin: &str, keep: bool) -> Result<()> {
         let connection = self.connection.write();
         if keep {
-            connection.execute("INSERT OR IGNORE INTO local_escalation_runs_v1(run_id,origin) VALUES (?1,?2)", params![run, origin])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h0003f1ad06a3 owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_escalation_runs_v1(run_id,origin) VALUES (?1,?2)", params![run, origin])?;
         } else {
-            connection.execute("DELETE FROM local_escalation_runs_v1 WHERE run_id=?1", [run])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-ha65878244411 owner=fractal_store::store::escalation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_escalation_runs_v1 WHERE run_id=?1", [run])?;
         }
         Ok(())
     }

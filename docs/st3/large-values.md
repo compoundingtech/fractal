@@ -888,3 +888,16 @@ TEXT stay inline with the surrounding run-state projection. Representation and
 reclamation review must preserve the evidence-backed hold and terminal-tree
 invariants; no growing receipt body is synthesized by this update.
 
+
+### Escalation restart scheduling
+
+`fractal_store::store::escalation` owns `lv-h0003f1ad06a3`,
+`lv-h02fa9eecf619`, and `lv-ha65878244411`. The restart index stores only
+existing run and origin identifiers, never policy text, messages, or ask bodies.
+Its key is removed when the terminal ladder has no remaining deadline.
+The clock reader selects canonical claim identity, kind, status, and timestamp
+metadata from the existing log without copying claim bodies. Identifiers remain
+inline, so their byte representation and history-read cost remain explicit debt,
+not a size proof. A reference representation must preserve canonical episode
+identity and terminal scheduling across restarts. The parent schema site becomes
+`lv-h99ce7c69aa49`; its only declaration addition is this restart index.
