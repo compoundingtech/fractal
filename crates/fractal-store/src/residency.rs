@@ -334,7 +334,7 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
-    const SEAT: &str = "agent/garden";
+    const SEAT: &str = "agent/node.garden";
 
     fn append(store: &Store, subject: &str, kind: &str, fields: Value) -> ClaimRecord {
         store.append_claim(&ClaimInput {
@@ -349,7 +349,7 @@ mod tests {
         let intent = crate::parse_intent(&format!(
             "version 2\nagent \"garden\" {{ workspace \".\"; command \"true\"; idle-suspend \"{policy}\" }}"
         ), "node").unwrap();
-        store.apply(&intent, &BTreeMap::new(), "fixture").unwrap();
+        store.apply(&intent, &BTreeMap::from([(SEAT.into(), Vec::new())]), "fixture").unwrap();
         append(&store, SEAT, "runtime.observed", json!({"status":"running","incarnation_id":"one"}));
         append(&store, SEAT, "harness.session-file", json!({
             "harness":"omp","session_id":"native-one","incarnation_id":"one","agent":SEAT
